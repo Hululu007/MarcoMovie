@@ -70,11 +70,7 @@ class _MacTestClient extends CmsClient {
   }
 
   @override
-  Future<CmsVideo> fetchDetail(
-    CmsSite site,
-    CmsVideo fallback, {
-    bool forceRefresh = false,
-  }) async {
+  Future<CmsVideo> fetchDetail(CmsSite site, CmsVideo fallback) async {
     for (final v in videos) {
       if (v.id == fallback.id) return v;
     }
@@ -85,10 +81,9 @@ class _MacTestClient extends CmsClient {
   Future<(CmsSite, CmsVideo)> playableDetail(
     CmsSite source,
     CmsVideo item,
-    Iterable<CmsSite> candidates, {
-    bool forceRefresh = false,
-  }) async {
-    return (source, await fetchDetail(source, item, forceRefresh: forceRefresh));
+    Iterable<CmsSite> candidates,
+  ) async {
+    return (source, await fetchDetail(source, item));
   }
 }
 

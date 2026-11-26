@@ -53,7 +53,6 @@ import 'ios_search_page.dart';
 import 'ios_settings.dart';
 import 'ios_update_sheet.dart';
 import 'live_station_badge.dart';
-import 'macos_official_notice.dart';
 import 'macos_update_sheet.dart';
 import 'media_folder_browser_page.dart';
 import 'motion/aurora_background.dart';
@@ -585,8 +584,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   ModalRoute<dynamic>? _officialCommunityOriginRoute;
   int? _officialCommunityOriginTabIndex;
   bool _startupOnboardingChecked = false;
-  bool _startupOfficialNoticeChecked = false;
-  bool _officialNoticeDialogOpen = false;
   bool get _isMacOS =>
       !kIsWeb &&
       defaultTargetPlatform == TargetPlatform.macOS &&
@@ -990,38 +987,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }
 
   Future<void> _runStartupPrompts() async {
-    if (_isMacOS) {
-      await _maybeShowMacosFirstLaunchOfficialNotice();
-    }
     if (!mounted) return;
     await _runFirstLaunchPrompts();
-  }
-
-  Future<void> _maybeShowMacosFirstLaunchOfficialNotice() async {
-    if (_startupOfficialNoticeChecked || !_isMacOS || !mounted) return;
-    _startupOfficialNoticeChecked = true;
-    final prefs = await MacosOfficialNoticePrefs.load();
-    if (!mounted || !prefs.shouldShow(isMacosOverride: _isMacOS)) return;
-    final ready = Completer<void>();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!ready.isCompleted) ready.complete();
-    });
-    WidgetsBinding.instance.ensureVisualUpdate();
-    await ready.future;
-    if (!mounted || _officialNoticeDialogOpen) return;
-    _officialNoticeDialogOpen = true;
-    try {
-      final confirmed = await showMacosFirstLaunchOfficialNoticeDialog(
-        context,
-        onOpenUrl: widget.onOpenExternalUrlForTest,
-        onCopyText: widget.onCopyTextForTest,
-      );
-      if (confirmed == true) {
-        await prefs.markAcknowledged();
-      }
-    } finally {
-      _officialNoticeDialogOpen = false;
-    }
   }
 
   Future<void> _runFirstLaunchPrompts() async {
@@ -1052,7 +1019,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final isFreshInstall = prefs.doneVersion < OnboardingPrefs.currentVersion;
     if (isFreshInstall &&
         !OhosRuntime.isOhos &&
-        !_isMacOS &&
         prefs.shouldShowOfficialChannelNotice() &&
         !_officialNoticeOpen) {
       final frameReady = Completer<void>();
@@ -12053,113 +12019,51 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     ),
                 ],
               ),
-              if (_isMacOS) ...[
-                const SizedBox(height: 22),
-                AppleGroupedSection(
-                  key: const ValueKey('macos-settings-contact-section'),
-                  header: '联系与反馈作者',
-                  footer: MacosOfficialInfo.securityWarning,
-                  children: [
-                    _buildSettingsQuickActionRow(
-                      key: const ValueKey('macos-settings-contact-author'),
-                      icon: CupertinoIcons.bubble_left_bubble_right_fill,
+              const SizedBox(height: 22),
+              AppleGroupedSection(
+                header: '联系反馈与官方交流',
+                footer: OfficialChannelInfo.antiTamperWarning,
+                children: [
+                  Builder(
+                    builder: (rowCtx) => _buildSettingsQuickActionRow(
+                      key: const ValueKey('settings-author-socials'),
+                      icon: CupertinoIcons.person_crop_circle_badge_checkmark,
                       iconBgColor: AppleColors.systemPink,
-                      title: '联系反馈作者 · ${MacosOfficialInfo.authorSocialName}',
-                      subtitle:
-                          '${MacosOfficialInfo.socialPlatformsSummary}（全平台同名）',
-                      trailingText: '查看 / 复制',
-                      onTap: _showMacosAuthorContactSheet,
+                      title: '联系反馈作者（各社媒账号名）',
+                      subtitle: OfficialChannelInfo.authorSocialSummary,
+                      trailingText: '复制',
+                      onTap: () =>
+                          _copyAuthorSocialName(originContext: rowCtx),
                     ),
-                    _buildSettingsQuickActionRow(
-                      key: const ValueKey('macos-settings-official-group'),
-                      icon: CupertinoIcons.globe,
-                      iconBgColor: AppleColors.systemBlue,
-                      title: '官网交流群链接',
-                      subtitle:
-                          'Marco 官网：${MacosOfficialInfo.officialWebsiteDisplay}',
+                  ),
+                  Builder(
+                    builder: (rowCtx) => _buildSettingsQuickActionRow(
+                      key: const ValueKey('settings-official-community'),
+                      icon: CupertinoIcons.chat_bubble_2_fill,
+                      iconBgColor: AppleColors.systemGreen,
+                      title: '官网交流群',
+                      subtitle: OfficialChannelInfo.officialCommunityUrl,
                       trailingText: '打开官网',
-                      onTap: _openMacosOfficialWebsiteFromSettings,
+                      onTap: () =>
+                          _openOfficialCommunityLink(originContext: rowCtx),
                     ),
-                  ],
-                ),
-              ] else ...[
-                const SizedBox(height: 22),
-                AppleGroupedSection(
-                  header: '联系反馈与官方交流',
-                  footer: OfficialChannelInfo.antiTamperWarning,
-                  children: [
-                    Builder(
-                      builder: (rowCtx) => _buildSettingsQuickActionRow(
-                        key: const ValueKey('settings-author-socials'),
-                        icon: CupertinoIcons.person_crop_circle_badge_checkmark,
-                        iconBgColor: AppleColors.systemPink,
-                        title: '联系反馈作者（各社媒账号名）',
-                        subtitle: OfficialChannelInfo.authorSocialSummary,
-                        trailingText: '复制',
-                        onTap: () =>
-                            _copyAuthorSocialName(originContext: rowCtx),
-                      ),
-                    ),
-                    Builder(
-                      builder: (rowCtx) => _buildSettingsQuickActionRow(
-                        key: const ValueKey('settings-official-community'),
-                        icon: CupertinoIcons.chat_bubble_2_fill,
-                        iconBgColor: AppleColors.systemGreen,
-                        title: '官网交流群',
-                        subtitle: OfficialChannelInfo.officialCommunityUrl,
-                        trailingText: '打开官网',
-                        onTap: () =>
-                            _openOfficialCommunityLink(originContext: rowCtx),
-                      ),
-                    ),
-                    _buildSettingsQuickActionRow(
-                      key: const ValueKey('settings-official-notice'),
-                      icon: CupertinoIcons.shield_lefthalf_fill,
-                      iconBgColor: AppleColors.systemOrange,
-                      title: '官方渠道安全声明',
-                      subtitle:
-                          '认准 Marco 官网 ${OfficialChannelInfo.officialWebsiteDisplay}',
-                      trailingText: '查看',
-                      onTap: _openOfficialNoticeDialogFromSettings,
-                    ),
-                  ],
-                ),
-              ],
+                  ),
+                  _buildSettingsQuickActionRow(
+                    key: const ValueKey('settings-official-notice'),
+                    icon: CupertinoIcons.shield_lefthalf_fill,
+                    iconBgColor: AppleColors.systemOrange,
+                    title: '官方渠道安全声明',
+                    subtitle:
+                        '认准 Marco 官网 ${OfficialChannelInfo.officialWebsiteDisplay}',
+                    trailingText: '查看',
+                    onTap: _openOfficialNoticeDialogFromSettings,
+                  ),
+                ],
+              ),
             ],
           ),
         ),
       ),
-    );
-  }
-
-  void _showMacosAuthorContactSheet() {
-    showAppleModalSheet<void>(
-      context: context,
-      title: '联系与反馈作者',
-      builder: (_) => MacosAuthorContactSheet(
-        onOpenUrl: widget.onOpenExternalUrlForTest,
-        onCopyText: widget.onCopyTextForTest,
-      ),
-    );
-  }
-
-  Future<void> _openMacosOfficialWebsiteFromSettings() async {
-    final opened = await openMacosOfficialUrl(
-      MacosOfficialInfo.officialWebsiteUrl,
-      onOpenUrl: widget.onOpenExternalUrlForTest,
-    );
-    if (opened || !mounted) return;
-    if (widget.onCopyTextForTest != null) {
-      await widget.onCopyTextForTest!(MacosOfficialInfo.officialWebsiteUrl);
-    } else {
-      await Clipboard.setData(
-        const ClipboardData(text: MacosOfficialInfo.officialWebsiteUrl),
-      );
-    }
-    if (!mounted) return;
-    _showAppleNotice(
-      '已复制官网地址',
-      '请在浏览器中打开：${MacosOfficialInfo.officialWebsiteUrl}',
     );
   }
 

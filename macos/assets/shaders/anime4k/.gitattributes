@@ -1,0 +1,5 @@
+# Preserve exact byte-for-byte upstream bloc97/Anime4K v4.0.1 release files
+# so SHA-256 digests remain identical across Windows, macOS, and Linux checkouts.
+*.glsl -text
+ANIME4K-LICENSE.txt -text
+manifest.json text eol=lf

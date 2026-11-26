@@ -1,0 +1,458 @@
+{
+  "schemaVersion": 1,
+  "project": "Marco Movie",
+  "license": "GPL-3.0-only",
+  "caseInsensitive": true,
+  "textOnlyBadges": true,
+  "evaluationContract": {
+    "normalization": [
+      "1. If input is null, treat as empty string and return [].",
+      "2. Percent-decode valid %XX UTF-8 byte sequences ONLY (never convert literal '+' into space, so 'HDR10+' and 'DD+' stay intact; leave malformed '%' untouched; decode invalid UTF-8 bytes to U+FFFD using Charset.forName(\"UTF-8\") CodingErrorAction.REPLACE in Java for API 14 compatibility — never StandardCharsets — and utf8.decode(bytes, allowMalformed: true) in Dart).",
+      "3. Collapse all ASCII controls/space, C1 controls/NEL/NBSP, Unicode line/paragraph separators, ideographic space, and BOM — code units matching (ch <= 0x0020 || (ch >= 0x007F && ch <= 0x00A0) || ch == 0x2028 || ch == 0x2029 || ch == 0x3000 || ch == 0xFEFF) — into a single ASCII space ' ' (0x0020).",
+      "4. Strip leading and trailing ASCII space (ch == 0x0020) explicitly without calling platform String.trim() (avoiding Java <=0x20 vs Dart Unicode trim divergence).",
+      "5. If length > 1024 UTF-16 code units, truncate to 1024; if code unit at index 1023 is a high surrogate (0xD800..0xDBFF), back off to 1023 so surrogate pairs are never split, then strip trailing 0x0020 if present. If empty, return []."
+    ],
+    "matchingAndComboPass": [
+      "1. Precompile every rule.pattern with Pattern.compile(pattern, Pattern.CASE_INSENSITIVE) in Java and RegExp(pattern, caseSensitive: false) in Dart (all line terminators \\r, \\n, \\u0085, \\u2028, \\u2029 were already normalized to 0x0020 in Step 3).",
+      "2. Evaluate all base rules against the normalized string via pattern.matcher(norm).find() in Java and regExp.hasMatch(norm) in Dart; record matched rule IDs in set M.",
+      "3. Iterate comboRules in ascending (priority ASC, id ASC) order: a comboRule triggers iff ALL rule IDs in comboRule.requires are currently present in M. When triggered, remove all rule IDs in comboRule.consumes from M and emit the comboRule badge.",
+      "4. Collect all remaining unconsumed base rules in M plus all triggered comboRules, and sort deterministically by (priority ASC, id ASC)."
+    ],
+    "regexSubsetGuarantee": "Patterns use ONLY anchors (^, $), '.', '*', '+', '?', '{m,n}', character classes '[...]', non-capturing groups '(?:...)', alternation '|', positive lookahead '(?=...)', and negative lookahead '(?!...)'. Zero inline flags '(?i)', zero lookbehinds '(?<=...)'/'(?<!...)', zero atomic groups '(?>...)', zero possessive quantifiers, zero '\\K', and zero '\\b'/'\\B' (explicit ASCII boundaries '[^a-z0-9]' ensure identical CJK/underscore behavior across Android API 14 ICU, JDK 17, and Dart 3.10.8 ECMA-262)."
+  },
+  "groups": [
+    {
+      "id": "resolution",
+      "title": "分辨率",
+      "order": 1,
+      "exclusivityNote": "Strictly mutually exclusive via lookaheads: explicit downscale tags (1080p/720p/SD) override upstream master tags (e.g. '4K.Remastered.1080p' -> '1080p'), and 1080p > 720p > SD."
+    },
+    {
+      "id": "dynamic_range",
+      "title": "动态范围与杜比组合",
+      "order": 2,
+      "exclusivityNote": "Cascading HDR10+ > HDR10 > HLG/HDR lookaheads; HDR10 excludes standalone '10bit'/'Hi10p' without HDR; DV combines with ATMOS/TrueHD/DD+ via comboRules while allowing base-layer HDR10/HDR10+ to co-display."
+    },
+    {
+      "id": "source_quality",
+      "title": "片源介质",
+      "order": 3,
+      "exclusivityNote": "REMUX suppresses BluRay via negative lookahead; WEB-DL suppresses WEBRip."
+    },
+    {
+      "id": "audio_codec",
+      "title": "音频编码",
+      "order": 4,
+      "exclusivityNote": "Cascading DTS:X > DTS-HD MA > DTS-HD > DTS and DD+ > DD mutual exclusion via negative lookaheads."
+    },
+    {
+      "id": "audio_channels",
+      "title": "声道布局",
+      "order": 5,
+      "exclusivityNote": "Highest surround layout wins (7.1 > 5.1 > 2.0) via negative lookaheads; rejects file sizes (e.g. 5.1GB, 2.0 GB) and version tags (e.g. v2.0, v1.5.1)."
+    },
+    {
+      "id": "video_codec",
+      "title": "视频编码",
+      "order": 6,
+      "exclusivityNote": "Matches scene tags (x265/H.265, x264/H.264, AV1, VP9) and player track codec fourccs (hvc1/hev1, avc1, av01, vp09)."
+    },
+    {
+      "id": "release_platform",
+      "title": "发行平台缩写",
+      "order": 7,
+      "exclusivityNote": "Strictly text-only neutral abbreviations (NF, AMZN, ATVP, DSNP, MAX, HULU, PCOK, PMTP, BILI, CR); zero logos."
+    }
+  ],
+  "rules": [
+    {
+      "id": "res_8k",
+      "group": "resolution",
+      "label": "8K",
+      "pattern": "^(?!(?:^|.*[^a-z0-9])(?:2160[pi]|4k|uhd|ultra[ ._-]?hd|1440[pi]|2k|qhd|wqhd|1080[pi]|fhd|full[ ._-]?hd|720[pi]|hd720|(?:480|576)[pi]|(?:3840|4096|2560|1920|1280)[ ]*[x×][ ]*[0-9]{3,4}[pi]?|(?:720|640)[ ]*[x×][ ]*(?:480|576)[pi]?)(?![a-z0-9]))(?!.*(?:(?:蓝光|超清|高清|极速|高码)[ ]*1080(?![a-z0-9])|(?:^|[^a-z0-9])1080[ ]*(?:高码|蓝光|超清)|标清))(?!(?:^|.*[^a-z0-9/])sd(?![a-z0-9/])(?![ ._-]?cards?(?![a-z0-9])))(?:^|.*[^a-z0-9])(?:4320[pi]|8k|fuhd|7680[ ]*[x×][ ]*4320[pi]?)(?![a-z0-9])",
+      "priority": 100,
+      "style": "uhdGold"
+    },
+    {
+      "id": "res_4k",
+      "group": "resolution",
+      "label": "4K",
+      "pattern": "^(?!(?:^|.*[^a-z0-9])(?:1080[pi]|fhd|full[ ._-]?hd|720[pi]|hd720|(?:480|576)[pi]|(?:1920|1280)[ ]*[x×][ ]*[0-9]{3,4}[pi]?|(?:720|640)[ ]*[x×][ ]*(?:480|576)[pi]?)(?![a-z0-9]))(?!.*(?:(?:蓝光|超清|高清|极速|高码)[ ]*1080(?![a-z0-9])|(?:^|[^a-z0-9])1080[ ]*(?:高码|蓝光|超清)|标清))(?!(?:^|.*[^a-z0-9/])sd(?![a-z0-9/])(?![ ._-]?cards?(?![a-z0-9])))(?:^|.*[^a-z0-9])(?:2160[pi]|4k|uhd|ultra[ ._-]?hd|(?:3840|4096)[ ]*[x×][ ]*[0-9]{3,4}[pi]?)(?![a-z0-9])",
+      "priority": 110,
+      "style": "uhdGold"
+    },
+    {
+      "id": "res_2k",
+      "group": "resolution",
+      "label": "2K",
+      "pattern": "^(?!(?:^|.*[^a-z0-9])(?:2160[pi]|4k|uhd|ultra[ ._-]?hd|1080[pi]|fhd|full[ ._-]?hd|720[pi]|hd720|(?:480|576)[pi]|(?:3840|4096|1920|1280)[ ]*[x×][ ]*[0-9]{3,4}[pi]?|(?:720|640)[ ]*[x×][ ]*(?:480|576)[pi]?)(?![a-z0-9]))(?!.*(?:(?:蓝光|超清|高清|极速|高码)[ ]*1080(?![a-z0-9])|(?:^|[^a-z0-9])1080[ ]*(?:高码|蓝光|超清)|标清))(?!(?:^|.*[^a-z0-9/])sd(?![a-z0-9/])(?![ ._-]?cards?(?![a-z0-9])))(?:^|.*[^a-z0-9])(?:1440[pi]|2k|qhd|wqhd|2560[ ]*[x×][ ]*[0-9]{3,4}[pi]?)(?![a-z0-9])",
+      "priority": 120,
+      "style": "hdCyan"
+    },
+    {
+      "id": "res_1080p",
+      "group": "resolution",
+      "label": "1080p",
+      "pattern": "^(?:(?:^|.*[^a-z0-9])(?:1080[pi]|fhd|full[ ._-]?hd|1920[ ]*[x×][ ]*[0-9]{3,4}[pi]?)(?![a-z0-9])|.*(?:蓝光|超清|高清|极速|高码)[ ]*1080(?![a-z0-9])|(?:^|.*[^a-z0-9])1080[ ]*(?:高码|蓝光|超清))",
+      "priority": 130,
+      "style": "hdCyan"
+    },
+    {
+      "id": "res_720p",
+      "group": "resolution",
+      "label": "720p",
+      "pattern": "^(?!(?:^|.*[^a-z0-9])(?:1080[pi]|fhd|full[ ._-]?hd|1920[ ]*[x×][ ]*[0-9]{3,4}[pi]?)(?![a-z0-9]))(?!.*(?:(?:蓝光|超清|高清|极速|高码)[ ]*1080(?![a-z0-9])|(?:^|[^a-z0-9])1080[ ]*(?:高码|蓝光|超清)))(?:^|.*[^a-z0-9])(?:720[pi]|hd720|1280[ ]*[x×][ ]*[0-9]{3,4}[pi]?)(?![a-z0-9])",
+      "priority": 140,
+      "style": "sdNeutral"
+    },
+    {
+      "id": "res_sd",
+      "group": "resolution",
+      "label": "SD",
+      "pattern": "^(?!(?:^|.*[^a-z0-9])(?:1080[pi]|fhd|full[ ._-]?hd|1920[ ]*[x×][ ]*[0-9]{3,4}[pi]?|720[pi]|hd720|1280[ ]*[x×][ ]*[0-9]{3,4}[pi]?)(?![a-z0-9]))(?!.*(?:(?:蓝光|超清|高清|极速|高码)[ ]*1080(?![a-z0-9])|(?:^|[^a-z0-9])1080[ ]*(?:高码|蓝光|超清)))(?:(?:^|.*[^a-z0-9])(?:(?:480|576)[pi]|(?:720|640)[ ]*[x×][ ]*(?:480|576)[pi]?)(?![a-z0-9])|.*标清|(?:^|.*[^a-z0-9/])sd(?![a-z0-9/])(?![ ._-]?cards?(?![a-z0-9])))",
+      "priority": 150,
+      "style": "sdNeutral"
+    },
+    {
+      "id": "dr_dv",
+      "group": "dynamic_range",
+      "label": "DV",
+      "pattern": "^(?:(?:^|.*[^a-z0-9])(?:dv|dovi|dolby[ ._-]?vision|(?:dvh[e1]|dav1)(?:\\.[0-9]{2}(?:\\.[0-9]{2})?)?)(?![a-z0-9])|.*杜比视界)",
+      "priority": 210,
+      "style": "visionPurple"
+    },
+    {
+      "id": "dr_hdr10plus",
+      "group": "dynamic_range",
+      "label": "HDR10+",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:hdr10\\+(?![0-9])|hdr10[ ._-]?plus(?![a-z0-9]))",
+      "priority": 220,
+      "style": "visionPurple"
+    },
+    {
+      "id": "dr_hdr10",
+      "group": "dynamic_range",
+      "label": "HDR10",
+      "pattern": "^(?!(?:^|.*[^a-z0-9])(?:hdr10\\+(?![0-9])|hdr10[ ._-]?plus(?![a-z0-9])))(?:^|.*[^a-z0-9])(?:hdr10(?![a-z0-9+])(?![ ._-]?bits?(?![a-z0-9]))|hdr[ ._-]10(?![a-z0-9+])(?![ ._-]?bits?(?![a-z0-9]))|smpte[ ._-]?2084(?![a-z0-9]))",
+      "priority": 230,
+      "style": "hdrBlue"
+    },
+    {
+      "id": "dr_hlg",
+      "group": "dynamic_range",
+      "label": "HLG",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:hlg|arib[ ._-]?std[ ._-]?b67)(?![a-z0-9])",
+      "priority": 240,
+      "style": "hdrBlue"
+    },
+    {
+      "id": "dr_hdr",
+      "group": "dynamic_range",
+      "label": "HDR",
+      "pattern": "^(?!(?:^|.*[^a-z0-9])(?:hdr10\\+(?![0-9])|hdr10[ ._-]?plus(?![a-z0-9])|hdr10(?![a-z0-9+])(?![ ._-]?bits?(?![a-z0-9]))|hdr[ ._-]10(?![a-z0-9+])(?![ ._-]?bits?(?![a-z0-9]))|smpte[ ._-]?2084(?![a-z0-9])|hlg(?![a-z0-9])|arib[ ._-]?std[ ._-]?b67(?![a-z0-9])|(?:non|no)[ ._-]?hdr(?![a-z0-9])))(?:(?:^|.*[^a-z0-9])(?:hdr(?:[ ._-]?vivid)?(?![a-z0-9])|hdr10[ ._-]?bits?(?![a-z0-9]))|(?=(?:^|.*[^a-z0-9])bt\\.?2020(?![a-z0-9]))(?=(?:^|.*[^a-z0-9])pq(?![a-z0-9])).*|.*臻彩)",
+      "priority": 250,
+      "style": "hdrBlue"
+    },
+    {
+      "id": "src_remux",
+      "group": "source_quality",
+      "label": "REMUX",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:(?:bd|uhd)[ ._-]?)?remux(?![a-z0-9])",
+      "priority": 310,
+      "style": "discEmerald"
+    },
+    {
+      "id": "src_bluray",
+      "group": "source_quality",
+      "label": "BluRay",
+      "pattern": "^(?!(?:^|.*[^a-z0-9])(?:(?:bd|uhd)[ ._-]?)?remux(?![a-z0-9]))(?:(?:^|.*[^a-z0-9])(?:(?:blu[ ._-]?ray|bdrip|brrip|bdmv|bdiso|uhdbd|bd(?:25|50|66|100))(?![a-z0-9])|bd(?![a-z0-9])(?!://))|.*(?:蓝光原盘|原盘))",
+      "priority": 320,
+      "style": "discEmerald"
+    },
+    {
+      "id": "src_webdl",
+      "group": "source_quality",
+      "label": "WEB-DL",
+      "pattern": "^(?:^|.*[^a-z0-9])web[ ._-]?dl(?![a-z0-9])",
+      "priority": 330,
+      "style": "streamTeal"
+    },
+    {
+      "id": "src_webrip",
+      "group": "source_quality",
+      "label": "WEBRip",
+      "pattern": "^(?!(?:^|.*[^a-z0-9])web[ ._-]?dl(?![a-z0-9]))(?:^|.*[^a-z0-9])web[ ._-]?rip(?![a-z0-9])",
+      "priority": 340,
+      "style": "streamTeal"
+    },
+    {
+      "id": "src_hdtv",
+      "group": "source_quality",
+      "label": "HDTV",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:hdtv(?:rip)?|pdtv|dsr)(?![a-z0-9])",
+      "priority": 350,
+      "style": "streamTeal"
+    },
+    {
+      "id": "aud_atmos",
+      "group": "audio_codec",
+      "label": "ATMOS",
+      "pattern": "^(?:(?:^|.*[^a-z0-9])(?:atmos(?![a-z0-9])|e[ ._-]?ac[ ._-]?3[ ._-]?joc(?![a-z0-9])|ec\\+3(?:(?![a-z0-9])|(?=[125678]\\.[01](?![0-9]))))|.*(?:杜比)?全景声)",
+      "priority": 410,
+      "style": "spatialAudio"
+    },
+    {
+      "id": "aud_dtsx",
+      "group": "audio_codec",
+      "label": "DTS:X",
+      "pattern": "^(?:^|.*[^a-z0-9])dts[ ._:+-]?x(?:(?![a-z0-9])|(?=[125678]\\.[01](?![0-9])))",
+      "priority": 420,
+      "style": "spatialAudio"
+    },
+    {
+      "id": "aud_truehd",
+      "group": "audio_codec",
+      "label": "TrueHD",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:true[ ._-]?hd|mlp)(?:(?![a-z0-9])|(?=[125678]\\.[01](?![0-9])))",
+      "priority": 430,
+      "style": "spatialAudio"
+    },
+    {
+      "id": "aud_dtshd_ma",
+      "group": "audio_codec",
+      "label": "DTS-HD MA",
+      "pattern": "^(?!(?:^|.*[^a-z0-9])dts[ ._:+-]?x(?:(?![a-z0-9])|(?=[125678]\\.[01](?![0-9]))))(?:^|.*[^a-z0-9])(?:dts[ ._-]?hd[ ._-]?ma|dts[ ._-]?ma|dts[ ._-]?xll)(?:(?![a-z0-9])|(?=[125678]\\.[01](?![0-9])))",
+      "priority": 440,
+      "style": "spatialAudio"
+    },
+    {
+      "id": "aud_dtshd",
+      "group": "audio_codec",
+      "label": "DTS-HD",
+      "pattern": "^(?!(?:^|.*[^a-z0-9])(?:dts[ ._:+-]?x|dts[ ._-]?hd[ ._-]?ma|dts[ ._-]?ma|dts[ ._-]?xll)(?:(?![a-z0-9])|(?=[125678]\\.[01](?![0-9]))))(?:^|.*[^a-z0-9])(?:dts[ ._-]?hd(?:[ ._-]?(?:hr|hra))?|dts[ ._-]?(?:hr|hra))(?:(?![a-z0-9])|(?=[125678]\\.[01](?![0-9])))",
+      "priority": 450,
+      "style": "standardAudio"
+    },
+    {
+      "id": "aud_dts",
+      "group": "audio_codec",
+      "label": "DTS",
+      "pattern": "^(?!(?:^|.*[^a-z0-9])(?:dts[ ._:+-]?x|dts[ ._-]?hd(?:[ ._-]?(?:ma|hr|hra))?|dts[ ._-]?(?:ma|xll|hr|hra))(?:(?![a-z0-9])|(?=[125678]\\.[01](?![0-9]))))(?:^|.*[^a-z0-9])dts(?:[ ._-]?es)?(?:(?![a-z0-9])|(?=[125678]\\.[01](?![0-9])))",
+      "priority": 460,
+      "style": "standardAudio"
+    },
+    {
+      "id": "aud_ddp",
+      "group": "audio_codec",
+      "label": "DD+",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:dd\\+|(?:ddp|e[ ._-]?ac[ ._-]?3|ec[ ._-]?3|ec\\+3|dolby[ ._-]?digital[ ._-]?plus)(?:(?![a-z0-9])|(?=[125678]\\.[01](?![0-9]))))",
+      "priority": 470,
+      "style": "standardAudio"
+    },
+    {
+      "id": "aud_dd",
+      "group": "audio_codec",
+      "label": "DD",
+      "pattern": "^(?!(?:^|.*[^a-z0-9])(?:dd\\+|(?:ddp|e[ ._-]?ac[ ._-]?3|ec[ ._-]?3|ec\\+3|dolby[ ._-]?digital[ ._-]?plus)(?:(?![a-z0-9])|(?=[125678]\\.[01](?![0-9])))))(?:(?:^|.*[^a-z0-9])(?:ac[ ._-]?3|dolby[ ._-]?(?:digital|audio))(?:(?![a-z0-9])|(?=[125678]\\.[01](?![0-9])))|(?:^|.*[^a-z0-9])dd[ ._-]?[125678]\\.[01](?![0-9])|(?:^|.*[^a-z0-9/])dd(?![a-z0-9+/]))",
+      "priority": 480,
+      "style": "standardAudio"
+    },
+    {
+      "id": "aud_lpcm",
+      "group": "audio_codec",
+      "label": "LPCM",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:lpcm|pcm)(?:(?![a-z0-9])|(?=[125678]\\.[01](?![0-9])))",
+      "priority": 485,
+      "style": "standardAudio"
+    },
+    {
+      "id": "aud_flac",
+      "group": "audio_codec",
+      "label": "FLAC",
+      "pattern": "^(?:^|.*[^a-z0-9])flac(?:(?![a-z0-9])|(?=[125678]\\.[01](?![0-9])))",
+      "priority": 490,
+      "style": "standardAudio"
+    },
+    {
+      "id": "aud_opus",
+      "group": "audio_codec",
+      "label": "OPUS",
+      "pattern": "^(?:^|.*[^a-z0-9])opus(?:(?![a-z0-9])|(?=[125678]\\.[01](?![0-9])))",
+      "priority": 492,
+      "style": "standardAudio"
+    },
+    {
+      "id": "aud_aac",
+      "group": "audio_codec",
+      "label": "AAC",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:(?:he[ ._-]?)?aac(?:[ ._-]?lc)?(?:(?![a-z0-9])|(?=[125678]\\.[01](?![0-9])))|mp4a(?:\\.40\\.[0-9]+)?(?![a-z0-9]))",
+      "priority": 495,
+      "style": "standardAudio"
+    },
+    {
+      "id": "ch_7_1",
+      "group": "audio_channels",
+      "label": "7.1",
+      "pattern": "^(?:(?:^|.*[^a-z0-9.]|.*(?:[a-z]|(?:19|20)[0-9]{2}|e?ac[ ._-]?3|ec[ ._+-]?3|[hx][ ._-]?26[45]|av0?1|vp0?9)\\.|.*(?:ddp|dd|aac|dts|truehd|flac|lpcm|pcm|opus))7\\.1(?:\\.[24])?(?:[ ]?ch(?:annels?)?)?(?![a-z0-9])(?![ ]*(?:gb|mb|kb|tb|gib|mib|fps|hz|khz|mhz)(?![a-z0-9]))|(?:^|.*[^a-z0-9])8[ ]*ch(?:annels?)?(?![a-z0-9]))",
+      "priority": 510,
+      "style": "standardAudio"
+    },
+    {
+      "id": "ch_5_1",
+      "group": "audio_channels",
+      "label": "5.1",
+      "pattern": "^(?!(?:^|.*[^a-z0-9.]|.*(?:[a-z]|(?:19|20)[0-9]{2}|e?ac[ ._-]?3|ec[ ._+-]?3|[hx][ ._-]?26[45]|av0?1|vp0?9)\\.|.*(?:ddp|dd|aac|dts|truehd|flac|lpcm|pcm|opus))7\\.1(?:\\.[24])?(?:[ ]?ch(?:annels?)?)?(?![a-z0-9])(?![ ]*(?:gb|mb|kb|tb|gib|mib|fps|hz|khz|mhz)(?![a-z0-9])))(?!(?:^|.*[^a-z0-9])8[ ]*ch(?:annels?)?(?![a-z0-9]))(?:(?:^|.*[^a-z0-9.]|.*(?:[a-z]|(?:19|20)[0-9]{2}|e?ac[ ._-]?3|ec[ ._+-]?3|[hx][ ._-]?26[45]|av0?1|vp0?9)\\.|.*(?:ddp|dd|aac|dts|truehd|flac|lpcm|pcm|opus))5\\.1(?:\\.[24])?(?:[ ]?ch(?:annels?)?)?(?![a-z0-9])(?![ ]*(?:gb|mb|kb|tb|gib|mib|fps|hz|khz|mhz)(?![a-z0-9]))|(?:^|.*[^a-z0-9])6[ ]*ch(?:annels?)?(?![a-z0-9]))",
+      "priority": 520,
+      "style": "standardAudio"
+    },
+    {
+      "id": "ch_2_0",
+      "group": "audio_channels",
+      "label": "2.0",
+      "pattern": "^(?!(?:^|.*[^a-z0-9.]|.*(?:[a-z]|(?:19|20)[0-9]{2}|e?ac[ ._-]?3|ec[ ._+-]?3|[hx][ ._-]?26[45]|av0?1|vp0?9)\\.|.*(?:ddp|dd|aac|dts|truehd|flac|lpcm|pcm|opus))[57]\\.1(?:\\.[24])?(?:[ ]?ch(?:annels?)?)?(?![a-z0-9])(?![ ]*(?:gb|mb|kb|tb|gib|mib|fps|hz|khz|mhz)(?![a-z0-9])))(?!(?:^|.*[^a-z0-9])[68][ ]*ch(?:annels?)?(?![a-z0-9]))(?:(?:^|.*[^a-z0-9.]|.*(?:[a-z]|(?:19|20)[0-9]{2}|e?ac[ ._-]?3|ec[ ._+-]?3|[hx][ ._-]?26[45]|av0?1|vp0?9)\\.|.*(?:ddp|dd|aac|dts|truehd|flac|lpcm|pcm|opus))2\\.0(?:[ ]?ch(?:annels?)?)?(?![a-z0-9])(?![ ]*(?:gb|mb|kb|tb|gib|mib|fps|hz|khz|mhz)(?![a-z0-9]))|(?:^|.*[^a-z0-9])(?:2[ ]*ch(?:annels?)?|stereo)(?![a-z0-9])|.*(?:立体声|双声道))",
+      "priority": 530,
+      "style": "standardAudio"
+    },
+    {
+      "id": "vid_av1",
+      "group": "video_codec",
+      "label": "AV1",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:(?:svt[ ._-]?)?av1|(?:av01|dav1)(?:\\.[0-9a-z.]+)?)(?![a-z0-9])",
+      "priority": 610,
+      "style": "codecSlate"
+    },
+    {
+      "id": "vid_hevc",
+      "group": "video_codec",
+      "label": "HEVC",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:hevc|[hx][ ._-]?265|h(?:ev|vc)1(?:\\.[0-9a-z.]+)?)(?![a-z0-9])",
+      "priority": 620,
+      "style": "codecSlate"
+    },
+    {
+      "id": "vid_vp9",
+      "group": "video_codec",
+      "label": "VP9",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:vp9|vp09(?:\\.[0-9a-z.]+)?)(?![a-z0-9])",
+      "priority": 630,
+      "style": "codecSlate"
+    },
+    {
+      "id": "vid_avc",
+      "group": "video_codec",
+      "label": "AVC",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:avc|[hx][ ._-]?264|avc1(?:\\.[0-9a-z]+)?)(?![a-z0-9])",
+      "priority": 640,
+      "style": "codecSlate"
+    },
+    {
+      "id": "plt_nf",
+      "group": "release_platform",
+      "label": "NF",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:netflix|nflx|nf)(?![a-z0-9])",
+      "priority": 710,
+      "style": "platformTag"
+    },
+    {
+      "id": "plt_amzn",
+      "group": "release_platform",
+      "label": "AMZN",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:amzn|amazon|prime[ ._-]?video)(?![a-z0-9])",
+      "priority": 715,
+      "style": "platformTag"
+    },
+    {
+      "id": "plt_atvp",
+      "group": "release_platform",
+      "label": "ATVP",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:(?:atvp|aptv)(?![a-z0-9])|apple[ ._-]?tv\\+(?![a-z0-9])|apple[ ._-]?tv(?![a-z0-9+]))",
+      "priority": 720,
+      "style": "platformTag"
+    },
+    {
+      "id": "plt_dsnp",
+      "group": "release_platform",
+      "label": "DSNP",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:(?:dsnp|dsny)(?![a-z0-9])|disney\\+(?![a-z0-9])|disney[ ._-]?plus(?![a-z0-9]))",
+      "priority": 725,
+      "style": "platformTag"
+    },
+    {
+      "id": "plt_max",
+      "group": "release_platform",
+      "label": "MAX",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:hmax(?![a-z0-9])|hbo[ ._-]?max(?![a-z0-9])|max(?=[ ._-]+(?:2160[pi]|1080[pi]|720[pi]|4k|web[ ._-]?(?:dl|rip))(?![a-z0-9])))",
+      "priority": 730,
+      "style": "platformTag"
+    },
+    {
+      "id": "plt_hulu",
+      "group": "release_platform",
+      "label": "HULU",
+      "pattern": "^(?:^|.*[^a-z0-9])hulu(?![a-z0-9])",
+      "priority": 735,
+      "style": "platformTag"
+    },
+    {
+      "id": "plt_pcok",
+      "group": "release_platform",
+      "label": "PCOK",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:pcok|peacock)(?![a-z0-9])",
+      "priority": 740,
+      "style": "platformTag"
+    },
+    {
+      "id": "plt_pmtp",
+      "group": "release_platform",
+      "label": "PMTP",
+      "pattern": "^(?:^|.*[^a-z0-9])(?:(?:pmtp|pamp)(?![a-z0-9])|paramount\\+(?![a-z0-9])|paramount[ ._-]?plus(?![a-z0-9]))",
+      "priority": 745,
+      "style": "platformTag"
+    },
+    {
+      "id": "plt_bili",
+      "group": "release_platform",
+      "label": "BILI",
+      "pattern": "^(?:(?:^|.*[^a-z0-9])(?:bili(?:bili)?|b[ ._-]?global)(?![a-z0-9])|(?:^|.*[^a-z0-9])b站(?!点))",
+      "priority": 750,
+      "style": "platformTag"
+    },
+    {
+      "id": "plt_cr",
+      "group": "release_platform",
+      "label": "CR",
+      "pattern": "^(?:(?:^|.*[^a-z0-9])crunchyroll(?![a-z0-9])|.*\\[cr\\]|(?:^|.*[^a-z0-9])cr(?=[ ._-]+(?:1080[pi]|720[pi]|web[ ._-]?(?:dl|rip))(?![a-z0-9])))",
+      "priority": 755,
+      "style": "platformTag"
+    }
+  ],
+  "comboRules": [
+    {
+      "id": "combo_dv_atmos",
+      "group": "dynamic_range",
+      "label": "DV · ATMOS",
+      "requires": ["dr_dv", "aud_atmos"],
+      "consumes": ["dr_dv", "aud_atmos"],
+      "priority": 205,
+      "style": "premiumCombo"
+    },
+    {
+      "id": "combo_dv_truehd",
+      "group": "dynamic_range",
+      "label": "DV · TrueHD",
+      "requires": ["dr_dv", "aud_truehd"],
+      "consumes": ["dr_dv", "aud_truehd"],
+      "priority": 206,
+      "style": "premiumCombo"
+    },
+    {
+      "id": "combo_dv_ddp",
+      "group": "dynamic_range",
+      "label": "DV · DD+",
+      "requires": ["dr_dv", "aud_ddp"],
+      "consumes": ["dr_dv", "aud_ddp"],
+      "priority": 207,
+      "style": "premiumCombo"
+    }
+  ]
+}

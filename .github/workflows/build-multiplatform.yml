@@ -26,6 +26,7 @@ on:
       - "android-mobile/**"
       - "lite/**"
       - "flutter/**"
+      - "macos/**"
       - "tvos/**"
       - "shared/**"
       - "scripts/**"
@@ -122,6 +123,9 @@ jobs:
       - name: Run tvOS runner regression checks
         if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'appletv'
         run: python -m unittest discover -s tvos -p "test_*.py"
+      - name: Run standalone macOS runner regression checks
+        if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'desktop' || inputs.target == 'macos'
+        run: python -m unittest discover -s macos -p "test_*.py"
       - name: Run cross-platform script & runner regression checks
         run: |
           python -m unittest discover -s flutter -p "test_*.py"
@@ -343,7 +347,7 @@ jobs:
           channel: "stable"
           flutter-version: "3.38.9"
       - name: Generate platform runner & build macOS release
-        working-directory: flutter
+        working-directory: macos
         run: |
           set -eo pipefail
           python3 prepare_platform.py
@@ -370,7 +374,7 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$APP"
           mkdir -p dist
           ZIP_NAME="MarcoMovie-$VERSION-macos.zip"
-          (cd build/macos/Build/Products/Release && ditto -c -k --sequesterRsrc --keepParent *.app "$GITHUB_WORKSPACE/flutter/dist/$ZIP_NAME")
+          (cd build/macos/Build/Products/Release && ditto -c -k --sequesterRsrc --keepParent *.app "$GITHUB_WORKSPACE/macos/dist/$ZIP_NAME")
           (cd dist && shasum -a 256 "$ZIP_NAME" > "$ZIP_NAME.sha256")
           python3 ../scripts/platform_package_names.py --folder dist --platform macos --version "$VERSION"
           # Verify the FINAL unzipped .app from the canonical -macos-desktop.zip artifact
@@ -537,10 +541,10 @@ jobs:
         with:
           name: MarcoMovie-macOS-App
           path: |
-            flutter/dist/*.zip
-            flutter/dist/*.sha256
-            flutter/dist/macos-verification-report.txt
-            flutter/dist/macos-verification-artifacts/**
+            macos/dist/*.zip
+            macos/dist/*.sha256
+            macos/dist/macos-verification-report.txt
+            macos/dist/macos-verification-artifacts/**
 
   build-ios:
     if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'ios'

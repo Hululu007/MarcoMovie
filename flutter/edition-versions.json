@@ -3,10 +3,6 @@
     "versionName": "0.7.1",
     "buildNumber": 78
   },
-  "macos": {
-    "versionName": "0.6.1",
-    "buildNumber": 73
-  },
   "ios": {
     "versionName": "0.7.7",
     "buildNumber": 100
