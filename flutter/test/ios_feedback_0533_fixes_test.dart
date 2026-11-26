@@ -388,6 +388,12 @@ void main() {
       final shape = clipper.shape as RoundedSuperellipseBorder;
       expect(shape.borderRadius, BorderRadius.circular(22));
 
+      // Scroll to the end of the (grouped) root: the last row clears the Dock.
+      await tester.drag(
+        find.byKey(const ValueKey('ios-settings-root')),
+        const Offset(0, -3000),
+      );
+      await tester.pumpAndSettle();
       final aboutRect = tester.getRect(
         find.byKey(const ValueKey('settings-category-about')),
       );

@@ -12480,6 +12480,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
   }
 
+  /// iOS Settings information architecture (0.7.9 IA).
+  ///
+  /// Root groups, in order: 内容与来源 → 播放 → 外观与主页 → 数据与存储 → 通用.
+  /// Every function / page inside Settings has exactly ONE canonical entry;
+  /// the in-settings search index ([SettingsPane.keywords]) resolves each term
+  /// to that single entry. Home 配置中心 and the Dock long-press menu remain
+  /// shortcuts outside of Settings.
   List<SettingsPane> _iosSettingsPages(VoidCallback refresh) {
     final storage = widget.storage;
     Widget choices<T>(
@@ -12523,7 +12530,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: children,
         );
+    const systemGray = Color(0xFF8E8E93);
+    final isIosNative = !kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        !OhosRuntime.isOhos;
     final sites = _config?.publicSupportedSites ?? const [];
+    final hasCatPaw = sites.any((site) => site.isCatPaw);
     final publicSubs = storage
         .getSubscriptions()
         .where((s) => !s.isEffectivelyPrivate)
@@ -12535,14 +12547,343 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         ? '${storage.playSpeed.toInt()}×'
         : '${storage.playSpeed}×';
     return [
+      // ───────────────────────── 内容与来源 ─────────────────────────
+      SettingsPane(
+        'sources',
+        '资源库与订阅',
+        '添加资源库，管理点播 / 直播订阅源与分组',
+        CupertinoIcons.square_stack_3d_up_fill,
+        AppleColors.systemGreen,
+        sectionGroup: 'ia-content',
+        trailingText: '${publicSubs.length} 个订阅',
+        keywords: const [
+          '添加资源库',
+          '订阅与分组管理',
+          '管理订阅',
+          '订阅源',
+          '订阅管理',
+          '直播源',
+          '点播',
+          'M3U',
+          'TXT',
+          'JSON',
+          'MacCMS',
+          '多仓',
+          '分组',
+          'Emby',
+          'Jellyfin',
+          'Plex',
+          'AList',
+          'SMB',
+        ],
+        content: stack([
+          IosSettingsGroup(
+            header: '资源库与订阅',
+            footer:
+                '支持 JSON 单仓 / 多仓、MacCMS 接口、Emby / Jellyfin / WebDAV 等资源库，以及 M3U / TXT 直播源批量导入与分组。跨设备同步订阅请前往「多端同步」。',
+            children: [
+              IosSettingsRow(
+                key: const ValueKey('ios-open-import-subscription'),
+                icon: CupertinoIcons.plus_app_fill,
+                iconColor: AppleColors.systemGreen,
+                title: '添加资源库',
+                showChevron: true,
+                onTap: () async {
+                  await _showImportConfigDialog(iosBackLabel: '资源库与订阅');
+                  refresh();
+                },
+              ),
+              IosSettingsRow(
+                key: const ValueKey('ios-open-subscriptions'),
+                icon: CupertinoIcons.folder_fill,
+                iconColor: AppleColors.systemBlue,
+                title: '订阅与分组管理',
+                trailingText: '${publicSubs.length} 个',
+                showChevron: true,
+                onTap: () async {
+                  await _showSubscriptionManagerSheet(
+                    iosBackLabel: '资源库与订阅',
+                    showAddEntries: false,
+                  );
+                  refresh();
+                },
+              ),
+            ],
+          ),
+        ]),
+      ),
+      SettingsPane(
+        'netdisk',
+        '配置中心',
+        '夸克 / UC / 百度 / 阿里网盘扫码登录与多源配置同步',
+        CupertinoIcons.qrcode,
+        AppleColors.systemBlue,
+        sectionGroup: 'ia-content',
+        trailingText:
+            loggedDriveCount > 0 ? '已登录 $loggedDriveCount 个' : '未登录',
+        keywords: const [
+          '网盘',
+          '网盘账号',
+          '扫码',
+          '夸克',
+          'UC',
+          '百度',
+          '阿里',
+          '4K 原画',
+          'Token',
+          'Cookie',
+          '切换盘序',
+        ],
+        // Canonical 配置中心 entry inside Settings. Add-library / subscription
+        // management / CatPaw live in their own single entries, so they are
+        // intentionally not wired into this instance of the page.
+        onOpen: () => showNetdiskAccountSheet(
+          context,
+          storage,
+          iosBackLabel: '设置',
+          sites: sites,
+          activeGroup: _activeSite?.group ?? '',
+          onChanged: refresh,
+        ),
+      ),
+      SettingsPane(
+        'extensions',
+        '蜘蛛扩展与网关',
+        '热插拔脚本扩展包、CatPaw 本机配置与自建局域网网关兜底（适配 .so 线路）',
+        CupertinoIcons.cube_box_fill,
+        AppleColors.systemIndigo,
+        sectionGroup: 'ia-content',
+        trailingText: SpiderPluginRegistry.instance.gatewayConfig.isActive
+            ? '网关已开启'
+            : (SpiderPluginRegistry.instance.enabledPackCount > 0
+                ? '${SpiderPluginRegistry.instance.enabledPackCount} 扩展包'
+                : '本机模式'),
+        keywords: const [
+          '蜘蛛',
+          'Spider',
+          '扩展包',
+          '导入脚本扩展包',
+          '自建蜘蛛网关',
+          '使用教程与常见疑问',
+          '脚本',
+          'CatPaw 本机配置',
+          '.so',
+        ],
+        content: stack([
+          if (hasCatPaw) ...[
+            IosSettingsGroup(
+              header: 'CatPaw',
+              children: [
+                IosSettingsRow(
+                  key: const ValueKey('ios-open-catpaw-settings'),
+                  icon: CupertinoIcons.slider_horizontal_3,
+                  iconColor: AppleColors.systemOrange,
+                  title: 'CatPaw 本机配置',
+                  showChevron: true,
+                  onTap: _showCatPawSettings,
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+          ],
+          SpiderExtensionsPanel(
+            storage: storage,
+            client: widget.client,
+            sites: sites,
+            onChanged: () {
+              _reloadSavedConfig();
+              refresh();
+            },
+            onNotice: _showAppleNotice,
+          ),
+        ]),
+      ),
+      // ───────────────────────────── 播放 ─────────────────────────────
+      SettingsPane(
+        'picture',
+        '播放器与画质',
+        '播放内核（AVPlayer / MPV）、画质线路、HDR、人声增强与超分',
+        CupertinoIcons.tv_fill,
+        AppleColors.systemPurple,
+        sectionGroup: 'ia-playback',
+        trailingText:
+            '${IosPlaybackEngineMode.fromId(storage.iosPlaybackEngineMode).shortLabel} · $_defaultAspectLabel',
+        keywords: const [
+          'AVPlayer',
+          'MPV',
+          '播放内核偏好',
+          '自动识别本机最佳配置',
+          '内核',
+          '解码偏好',
+          '硬件',
+          'HDR 色调映射',
+          '杜比',
+          '人声响度增强',
+          'Anime4K',
+          '超分',
+          '大容量预读缓冲',
+          '画面比例',
+          '画质与线路',
+          '4K',
+          '1080P',
+        ],
+        content: stack([
+          IosPlaybackEngineSettingsSection(
+            storage: storage,
+            onChanged: refresh,
+          ),
+          const SizedBox(height: 20),
+          choices(
+            '画质与线路',
+            storage.preferredQuality,
+            const [
+              ('4k_netdisk', '4K 原画优先'),
+              ('1080p_direct', '1080P 直连'),
+              ('fast_hls', '极速流媒体'),
+              ('default', '站点默认'),
+            ],
+            (v) async {
+              await storage.setAutoHardwareQualityEnabled(false);
+              await storage.setPreferredQuality(v);
+            },
+          ),
+          choices(
+            '画面比例',
+            storage.defaultAspectMode,
+            const [
+              ('contain', '适应屏幕'),
+              ('cover', '铺满裁剪'),
+              ('fill', '拉伸全屏'),
+            ],
+            storage.setDefaultAspectMode,
+          ),
+          choices(
+            '解码偏好',
+            storage.playerKernel,
+            const [
+              ('ijk', '自动解码'),
+              ('exo', 'Apple 硬件优先'),
+            ],
+            (v) async {
+              await storage.setAutoHardwareQualityEnabled(false);
+              await storage.setPlayerKernel(v);
+            },
+          ),
+        ]),
+      ),
+      SettingsPane(
+        'episodes',
+        '倍速与连播',
+        isIosNative ? '起播倍速、连播与时钟显示' : '起播倍速、剧集排序、连播与时钟显示',
+        CupertinoIcons.speedometer,
+        AppleColors.systemOrange,
+        sectionGroup: 'ia-playback',
+        trailingText: speedLabel,
+        keywords: const ['倍速', '自动播放下一集', '连播', '播放页常显时间', '时钟', '剧集排序'],
+        content: stack([
+          choices(
+            '起播倍速',
+            storage.playSpeed,
+            const [
+              (0.75, '0.75×'),
+              (1.0, '1×'),
+              (1.25, '1.25×'),
+              (1.5, '1.5×'),
+              (2.0, '2×'),
+            ],
+            storage.setPlaySpeed,
+          ),
+          if (!isIosNative)
+            choices(
+              '剧集排序',
+              storage.episodesDescending,
+              const [(false, '正序'), (true, '倒序')],
+              storage.setEpisodesDescending,
+            ),
+          IosSettingsGroup(
+            header: '连续播放与时钟',
+            children: [
+              toggleRow(
+                '自动播放下一集',
+                CupertinoIcons.forward_end_fill,
+                AppleColors.systemGreen,
+                storage.autoNext,
+                storage.setAutoNext,
+              ),
+              toggleRow(
+                '播放页常显时间',
+                CupertinoIcons.clock_fill,
+                AppleColors.systemTeal,
+                storage.playerAlwaysShowClock,
+                storage.setPlayerAlwaysShowClock,
+              ),
+            ],
+          ),
+        ]),
+      ),
+      SettingsPane(
+        'skip',
+        '片头与片尾',
+        '设置点播剧集自动跳过片头片尾秒数',
+        CupertinoIcons.forward_fill,
+        AppleColors.systemIndigo,
+        sectionGroup: 'ia-playback',
+        trailingText: _skipIntroOutroSummary,
+        keywords: const ['自动跳过时长', '跳过片头', '跳过片尾'],
+        content: IosSettingsGroup(
+          header: '自动跳过时长',
+          footer: '仅对点播剧集生效，电视直播频道将自动保持实时播放。',
+          dividerIndent: 18,
+          children: [
+            _buildSkipIntroOutroDrawerBody(onStateChanged: refresh),
+          ],
+        ),
+      ),
+      if (!OhosRuntime.isOhos)
+        SettingsPane(
+          'danmu',
+          '弹幕',
+          '分片弹幕开关、显示类型、兼容服务源与屏蔽词',
+          CupertinoIcons.chat_bubble_text_fill,
+          AppleColors.systemTeal,
+          sectionGroup: 'ia-playback',
+          keywords: const [
+            '默认开启弹幕',
+            '弹幕样式、服务地址与屏蔽词',
+            '滚动弹幕',
+            '顶部固定弹幕',
+            '底部固定弹幕',
+          ],
+          content: IosDanmuSettingsSection(onChanged: refresh),
+        ),
+      if (!OhosRuntime.isOhos)
+        SettingsPane(
+          'hud',
+          '播放界面与手势',
+          '起播规格提示、细进度条、跳过倒计时与双击手势',
+          CupertinoIcons.hand_draw_fill,
+          AppleColors.systemBlue,
+          sectionGroup: 'ia-playback',
+          keywords: const [
+            '两侧双击手势',
+            '长按倍速松手恢复',
+            '隐藏控制栏时显示细进度条',
+            'HUD',
+            '起播规格提示',
+            '跳过片头/片尾 3 秒倒计时',
+          ],
+          content: IosPlayerHudSettingsSection(onChanged: refresh),
+        ),
+      // ─────────────────────────── 外观与主页 ───────────────────────────
       SettingsPane(
         'appearance',
         '外观',
         '浅色白底与深色夜间，自动跟随系统切换',
         CupertinoIcons.circle_lefthalf_fill,
         AppleColors.systemPurple,
-        sectionGroup: 'core',
+        sectionGroup: 'ia-display',
         trailingText: AppleTheme.labelFor(storage.appThemeMode),
+        keywords: const ['主题模式', '深色夜间', '浅色', '简约白底', '跟随系统'],
         content: stack([
           Builder(
             builder: (ctx) {
@@ -12592,312 +12933,96 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         ]),
       ),
       SettingsPane(
-        'browsing',
-        '浏览',
-        '海报网格密度、副标题与主页模块',
-        CupertinoIcons.square_grid_2x2_fill,
+        'cards',
+        '海报与卡片',
+        '设置单行海报尺寸密度与副标题信息',
+        CupertinoIcons.rectangle_grid_2x2_fill,
         AppleColors.systemBlue,
-        sectionGroup: 'core',
+        sectionGroup: 'ia-display',
         trailingText: _gridDensityLabel,
-        children: [
-          SettingsPane(
-            'cards',
-            '海报与卡片',
-            '设置单行海报尺寸密度与副标题信息',
-            CupertinoIcons.rectangle_grid_2x2_fill,
-            AppleColors.systemBlue,
-            trailingText: _gridDensityLabel,
-            content: stack([
-              choices(
-                '海报密度',
-                storage.gridDensity,
-                const [
-                  ('comfortable', '舒展'),
-                  ('standard', '标准'),
-                  ('compact', '紧凑'),
-                ],
-                storage.setGridDensity,
-              ),
-              choices(
-                '卡片副标题',
-                storage.cardSubtitleMode,
-                const [
-                  ('remarks', '更新与备注'),
-                  ('year_area', '年份与地区'),
-                  ('site', '所属片源'),
-                  ('none', '隐藏'),
-                ],
-                storage.setCardSubtitleMode,
-              ),
-            ]),
-          ),
-          SettingsPane(
-            'home',
-            '首页板块与排序',
-            '单独开关首页各板块并自定义展示顺序',
-            CupertinoIcons.house_fill,
-            AppleColors.systemOrange,
-            content: _buildIosHomeSectionsSettingsBody(refresh),
-          ),
-        ],
-      ),
-      SettingsPane(
-        'playback',
-        '播放',
-        '默认优选画质、倍速与片头片尾跳过',
-        CupertinoIcons.play_circle_fill,
-        AppleColors.systemOrange,
-        sectionGroup: 'core',
-        trailingText: speedLabel,
-        children: [
-          SettingsPane(
-            'picture',
-            '画质与画面',
-            '播放内核（AVPlayer/MPV）、HDR 色调映射、人声响度与超分',
-            CupertinoIcons.tv_fill,
-            AppleColors.systemPurple,
-            trailingText:
-                '${IosPlaybackEngineMode.fromId(storage.iosPlaybackEngineMode).shortLabel} · $_defaultAspectLabel',
-            content: stack([
-              IosPlaybackEngineSettingsSection(
-                storage: storage,
-                onChanged: refresh,
-              ),
-              const SizedBox(height: 20),
-              choices(
-                '画质与线路',
-                storage.preferredQuality,
-                const [
-                  ('4k_netdisk', '4K 原画优先'),
-                  ('1080p_direct', '1080P 直连'),
-                  ('fast_hls', '极速流媒体'),
-                  ('default', '站点默认'),
-                ],
-                (v) async {
-                  await storage.setAutoHardwareQualityEnabled(false);
-                  await storage.setPreferredQuality(v);
-                },
-              ),
-              choices(
-                '画面比例',
-                storage.defaultAspectMode,
-                const [
-                  ('contain', '适应屏幕'),
-                  ('cover', '铺满裁剪'),
-                  ('fill', '拉伸全屏'),
-                ],
-                storage.setDefaultAspectMode,
-              ),
-              choices(
-                '解码偏好',
-                storage.playerKernel,
-                const [
-                  ('ijk', '自动解码'),
-                  ('exo', 'Apple 硬件优先'),
-                ],
-                (v) async {
-                  await storage.setAutoHardwareQualityEnabled(false);
-                  await storage.setPlayerKernel(v);
-                },
-              ),
-            ]),
-          ),
-          SettingsPane(
-            'episodes',
-            '倍速与选集',
-            (!kIsWeb &&
-                    defaultTargetPlatform == TargetPlatform.iOS &&
-                    !OhosRuntime.isOhos)
-                ? '起播倍速、连播与时钟显示'
-                : '起播倍速、剧集排序、连播与时钟显示',
-            CupertinoIcons.speedometer,
-            AppleColors.systemOrange,
-            trailingText: speedLabel,
-            content: stack([
-              choices(
-                '起播倍速',
-                storage.playSpeed,
-                const [
-                  (0.75, '0.75×'),
-                  (1.0, '1×'),
-                  (1.25, '1.25×'),
-                  (1.5, '1.5×'),
-                  (2.0, '2×'),
-                ],
-                storage.setPlaySpeed,
-              ),
-              if (kIsWeb ||
-                  defaultTargetPlatform != TargetPlatform.iOS ||
-                  OhosRuntime.isOhos)
-                choices(
-                  '剧集排序',
-                  storage.episodesDescending,
-                  const [(false, '正序'), (true, '倒序')],
-                  storage.setEpisodesDescending,
-                ),
-              IosSettingsGroup(
-                header: '连续播放与时钟',
-                children: [
-                  toggleRow(
-                    '自动播放下一集',
-                    CupertinoIcons.forward_end_fill,
-                    AppleColors.systemGreen,
-                    storage.autoNext,
-                    storage.setAutoNext,
-                  ),
-                  toggleRow(
-                    '播放页常显时间',
-                    CupertinoIcons.clock_fill,
-                    AppleColors.systemTeal,
-                    storage.playerAlwaysShowClock,
-                    storage.setPlayerAlwaysShowClock,
-                  ),
-                ],
-              ),
-            ]),
-          ),
-          SettingsPane(
-            'skip',
-            '片头与片尾',
-            '设置点播剧集自动跳过片头片尾秒数',
-            CupertinoIcons.forward_fill,
-            AppleColors.systemIndigo,
-            trailingText: _skipIntroOutroSummary,
-            content: IosSettingsGroup(
-              header: '自动跳过时长',
-              footer: '仅对点播剧集生效，电视直播频道将自动保持实时播放。',
-              dividerIndent: 18,
-              children: [
-                _buildSkipIntroOutroDrawerBody(onStateChanged: refresh),
-              ],
-            ),
-          ),
-          if (!OhosRuntime.isOhos)
-            SettingsPane(
-              'danmu',
-              '弹幕设置',
-              '分片弹幕开关、显示类型、兼容服务源与屏蔽词',
-              CupertinoIcons.chat_bubble_text_fill,
-              AppleColors.systemTeal,
-              content: IosDanmuSettingsSection(onChanged: refresh),
-            ),
-          if (!OhosRuntime.isOhos)
-            SettingsPane(
-              'hud',
-              '播放界面与手势',
-              '起播规格提示、细进度条、跳过倒计时与双击手势',
-              CupertinoIcons.hand_draw_fill,
-              AppleColors.systemBlue,
-              content: IosPlayerHudSettingsSection(onChanged: refresh),
-            ),
-        ],
-      ),
-      SettingsPane(
-        'sources',
-        '订阅与账号',
-        '点播直播源管理与 4K 网盘扫码授权',
-        CupertinoIcons.layers_alt_fill,
-        AppleColors.systemGreen,
-        sectionGroup: 'account',
-        trailingText: '${publicSubs.length} 订阅',
+        keywords: const ['海报密度', '网格', '列数', '卡片副标题', '紧凑', '标准', '舒展'],
         content: stack([
-          IosSettingsGroup(
-            header: '片源与订阅管理',
-            footer: '支持 JSON 单仓/多仓、MacCMS 接口以及 M3U/TXT 直播源批量导入与分组。',
-            children: [
-              IosSettingsRow(
-                key: const ValueKey('ios-open-subscriptions'),
-                icon: CupertinoIcons.folder_fill,
-                iconColor: AppleColors.systemBlue,
-                title: '订阅源与分组管理',
-                trailingText: '${publicSubs.length} 个',
-                showChevron: true,
-                onTap: () async {
-                  await _showSubscriptionManagerSheet(
-                    iosBackLabel: '订阅与账号',
-                  );
-                  refresh();
-                },
-              ),
-              IosSettingsRow(
-                key: const ValueKey('ios-open-import-subscription'),
-                icon: CupertinoIcons.plus_app_fill,
-                iconColor: AppleColors.systemGreen,
-                title: '添加资源库',
-                showChevron: true,
-                onTap: () async {
-                  await _showImportConfigDialog(iosBackLabel: '订阅与账号');
-                  refresh();
-                },
-              ),
-              IosSettingsRow(
-                key: const ValueKey('ios-open-cloud-sync-shortcut'),
-                icon: CupertinoIcons.cloud_fill,
-                iconColor: AppleColors.systemTeal,
-                title: '多端网络同步（含订阅源同步）',
-                trailingText: storage.isWebdavConfigured ? '已配置' : '设置',
-                showChevron: true,
-                onTap: () async {
-                  await _openCloudSyncCenter(iosBackLabel: '订阅与账号');
-                  refresh();
-                },
-              ),
+          choices(
+            '海报密度',
+            storage.gridDensity,
+            const [
+              ('comfortable', '舒展'),
+              ('standard', '标准'),
+              ('compact', '紧凑'),
             ],
+            storage.setGridDensity,
           ),
-          const SizedBox(height: 24),
-          IosSettingsGroup(
-            header: '云盘账号与扩展',
-            footer: '绑定夸克、UC、百度或阿里云盘后，自动解锁对应 4K 原画直连线路。',
-            children: [
-              IosSettingsRow(
-                key: const ValueKey('ios-open-netdisk'),
-                icon: CupertinoIcons.qrcode,
-                iconColor: AppleColors.systemIndigo,
-                title: '配置中心',
-                trailingText:
-                    loggedDriveCount > 0 ? '已登录 $loggedDriveCount 个' : '未登录',
-                showChevron: true,
-                onTap: () => showNetdiskAccountSheet(
-                  context,
-                  storage,
-                  iosBackLabel: '订阅与账号',
-                  sites: sites,
-                  activeGroup: _activeSite?.group ?? '',
-                  onOpenCatPawSettings: sites.any((site) => site.isCatPaw)
-                      ? _showCatPawSettings
-                      : null,
-                  onChanged: refresh,
-                ),
-              ),
-              if (sites.any((site) => site.isCatPaw))
-                IosSettingsRow(
-                  icon: CupertinoIcons.slider_horizontal_3,
-                  iconColor: AppleColors.systemOrange,
-                  title: 'CatPaw 本机配置',
-                  showChevron: true,
-                  onTap: _showCatPawSettings,
-                ),
+          choices(
+            '卡片副标题',
+            storage.cardSubtitleMode,
+            const [
+              ('remarks', '更新与备注'),
+              ('year_area', '年份与地区'),
+              ('site', '所属片源'),
+              ('none', '隐藏'),
             ],
+            storage.setCardSubtitleMode,
           ),
         ]),
       ),
       SettingsPane(
-        'extensions',
-        '蜘蛛扩展与网关',
-        '热插拔脚本扩展包与自建局域网网关兜底（适配 .so 线路）',
-        CupertinoIcons.cube_box_fill,
-        AppleColors.systemIndigo,
-        sectionGroup: 'account',
-        trailingText: SpiderPluginRegistry.instance.gatewayConfig.isActive
-            ? '网关已开启'
-            : (SpiderPluginRegistry.instance.enabledPackCount > 0
-                ? '${SpiderPluginRegistry.instance.enabledPackCount} 扩展包'
-                : '本机模式'),
-        content: SpiderExtensionsPanel(
+        'home',
+        '首页板块',
+        '单独开关首页各板块并自定义展示顺序',
+        CupertinoIcons.house_fill,
+        AppleColors.systemOrange,
+        sectionGroup: 'ia-display',
+        keywords: const ['首页板块开关与顺序', '排序', '模块', '沉浸首推海报', '海报横幅'],
+        content: _buildIosHomeSectionsSettingsBody(refresh),
+      ),
+      // ─────────────────────────── 数据与存储 ───────────────────────────
+      SettingsPane(
+        'sync',
+        '多端同步',
+        storage.syncStatusSummary,
+        CupertinoIcons.cloud_fill,
+        AppleColors.systemBlue,
+        sectionGroup: 'ia-data',
+        trailingText: storage.isWebdavConfigured ? '已配置' : '未开启',
+        keywords: const [
+          'WebDAV',
+          '多端网络同步',
+          '局域网接收码',
+          '自动云同步',
+          '坚果云',
+          'NAS',
+          'Nextcloud',
+          '同步订阅',
+        ],
+        content: CloudSyncSettingsPanel(
           storage: storage,
-          client: widget.client,
-          sites: sites,
-          onChanged: () {
+          embeddedInList: true,
+          onSynced: ({required subscriptionsChanged}) {
+            if (subscriptionsChanged) {
+              _reloadSavedConfig();
+            }
+            refresh();
+          },
+          onNotice: _showAppleNotice,
+        ),
+      ),
+      SettingsPane(
+        'backup',
+        '备份与恢复',
+        '导入或导出跨平台 JSON 备份文件',
+        CupertinoIcons.arrow_2_circlepath,
+        AppleColors.systemGreen,
+        sectionGroup: 'ia-data',
+        keywords: const [
+          '复制当前备份 JSON',
+          '从剪贴板粘贴备份文本',
+          '从此备份文本恢复',
+          '导出',
+          '导入',
+        ],
+        content: _IosBackupRestorePanel(
+          storage: storage,
+          onRestored: () {
             _reloadSavedConfig();
             refresh();
           },
@@ -12905,124 +13030,101 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         ),
       ),
       SettingsPane(
-        'data',
-        '数据',
-        'WebDAV 云同步、备份恢复与缓存清理',
-        CupertinoIcons.tray_fill,
-        AppleColors.systemTeal,
-        sectionGroup: 'account',
-        trailingText: storage.isWebdavConfigured ? '云同步已开启' : null,
-        children: [
-          SettingsPane(
-            'sync',
-            '多端网络同步',
-            storage.syncStatusSummary,
-            CupertinoIcons.cloud_fill,
-            AppleColors.systemBlue,
-            trailingText: storage.isWebdavConfigured ? '已配置' : '设置',
-            content: CloudSyncSettingsPanel(
-              storage: storage,
-              embeddedInList: true,
-              onSynced: ({required subscriptionsChanged}) {
-                if (subscriptionsChanged) {
-                  _reloadSavedConfig();
-                }
-                refresh();
-              },
-              onNotice: _showAppleNotice,
-            ),
-          ),
-          SettingsPane(
-            'backup',
-            '备份与恢复',
-            '导入或导出跨平台 JSON 备份文件',
-            CupertinoIcons.arrow_2_circlepath,
-            AppleColors.systemGreen,
-            content: _IosBackupRestorePanel(
-              storage: storage,
-              onRestored: () {
-                _reloadSavedConfig();
-                refresh();
-              },
-              onNotice: _showAppleNotice,
-            ),
-          ),
-          SettingsPane(
-            'cache',
-            '缓存与搜索记录',
-            '媒体分块落盘缓存、HLS 点播去广告与海报搜索清理',
-            CupertinoIcons.trash_fill,
-            AppleColors.systemRed,
-            trailingText: PosterLoader.memoryCacheSizeLabel,
-            content: stack([
-              if (!OhosRuntime.isOhos) ...[
-                IosMediaCacheAndAdSection(
-                  storage: storage,
-                  onChanged: refresh,
-                ),
-                const SizedBox(height: 24),
-              ],
-              IosSettingsGroup(
-                header: '存储概览',
-                footer: '清理海报缓存和当前空间的搜索历史，不会删除收藏和观看记录。',
-                children: [
-                  IosSettingsRow(
-                    icon: CupertinoIcons.photo_on_rectangle,
-                    iconColor: AppleColors.systemBlue,
-                    title: '海报内存缓存',
-                    trailingText: PosterLoader.memoryCacheSizeLabel,
-                  ),
-                  IosSettingsRow(
-                    icon: CupertinoIcons.search,
-                    iconColor: AppleColors.systemTeal,
-                    title: '搜索记录',
-                    trailingText:
-                        '${storage.getSearchHistory(forPrivate: _privateSessionUnlocked).length} 条',
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24),
-              IosSettingsGroup(
-                dividerIndent: 18,
-                children: [
-                  IosSettingsRow(
-                    key: const ValueKey('ios-clear-cache-row'),
-                    title: '清理缓存与搜索记录',
-                    titleColor: AppleColors.systemRed,
-                    onTap: () async {
-                      await PosterLoader.clearCache();
-                      await storage.clearSearchHistory(
-                        forPrivate: _privateSessionUnlocked,
-                      );
-                      refresh();
-                      if (!mounted) return;
-                      await showAppleNativeAlert(
-                        context,
-                        title: '缓存已清理',
-                        message: '已清空海报缓存与搜索记录。',
-                        actions: const [
-                          AppleNativeAlertAction(
-                            id: 'ok',
-                            title: '好的',
-                            isDefault: true,
-                          ),
-                        ],
-                      );
-                    },
-                  ),
-                ],
-              ),
-            ]),
-          ),
+        'cache',
+        '缓存与存储',
+        '媒体分块落盘缓存、HLS 点播去广告与海报搜索清理',
+        CupertinoIcons.tray_full_fill,
+        systemGray,
+        sectionGroup: 'ia-data',
+        trailingText: PosterLoader.memoryCacheSizeLabel,
+        keywords: const [
+          '清理缓存与搜索记录',
+          'HLS 点播自动去广告',
+          '本地媒体落盘缓存上限',
+          '一键清理媒体落盘缓存',
+          '海报内存缓存',
+          '存储概览',
         ],
+        content: stack([
+          if (!OhosRuntime.isOhos) ...[
+            IosMediaCacheAndAdSection(
+              storage: storage,
+              onChanged: refresh,
+            ),
+            const SizedBox(height: 24),
+          ],
+          IosSettingsGroup(
+            header: '存储概览',
+            footer: '清理海报缓存和当前空间的搜索历史，不会删除收藏和观看记录。',
+            children: [
+              IosSettingsRow(
+                icon: CupertinoIcons.photo_on_rectangle,
+                iconColor: AppleColors.systemBlue,
+                title: '海报内存缓存',
+                trailingText: PosterLoader.memoryCacheSizeLabel,
+              ),
+              IosSettingsRow(
+                icon: CupertinoIcons.search,
+                iconColor: AppleColors.systemTeal,
+                title: '搜索记录',
+                trailingText:
+                    '${storage.getSearchHistory(forPrivate: _privateSessionUnlocked).length} 条',
+              ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          IosSettingsGroup(
+            dividerIndent: 18,
+            children: [
+              IosSettingsRow(
+                key: const ValueKey('ios-clear-cache-row'),
+                title: '清理缓存与搜索记录',
+                titleColor: AppleColors.systemRed,
+                onTap: () async {
+                  await PosterLoader.clearCache();
+                  await storage.clearSearchHistory(
+                    forPrivate: _privateSessionUnlocked,
+                  );
+                  refresh();
+                  if (!mounted) return;
+                  await showAppleNativeAlert(
+                    context,
+                    title: '缓存已清理',
+                    message: '已清空海报缓存与搜索记录。',
+                    actions: const [
+                      AppleNativeAlertAction(
+                        id: 'ok',
+                        title: '好的',
+                        isDefault: true,
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ],
+          ),
+        ]),
       ),
+      // ────────────────────────────── 通用 ──────────────────────────────
       SettingsPane(
         'about',
         '关于与更新',
-        '版本信息、联系反馈（${OfficialChannelInfo.authorSocialName}）、官网交流群与更新检查',
+        '版本与软件更新、新手引导、诊断日志、联系反馈（${OfficialChannelInfo.authorSocialName}）与官网交流群',
         CupertinoIcons.info_circle_fill,
-        AppleColors.systemIndigo,
-        sectionGroup: 'about',
+        systemGray,
+        sectionGroup: 'ia-general',
+        keywords: const [
+          '检查更新',
+          '检查版本更新',
+          '软件更新',
+          '打开官方下载站',
+          '重新查看新手引导',
+          '导出诊断日志包',
+          '联系反馈作者',
+          '联系与反馈作者',
+          '官网交流群',
+          '官方渠道安全声明',
+        ],
         content: stack([
           const Padding(
             padding: EdgeInsets.only(top: 8, bottom: 24),
@@ -13043,10 +13145,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 title: '版本',
                 trailingText: _currentAppVersion,
               ),
-              IosSettingsRow(
-                title: '导出诊断日志包',
-                onTap: () => _exportDiagnosticsBundle(context),
-              ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          IosUpdateSheet(
+            installedVersion: _currentAppVersion,
+            embedded: true,
+            autoCheck: false,
+          ),
+          const SizedBox(height: 24),
+          IosSettingsGroup(
+            header: '帮助与诊断',
+            children: [
               if (!OhosRuntime.isOhos)
                 IosSettingsRow(
                   key: const ValueKey('ios-replay-onboarding'),
@@ -13056,6 +13166,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   showChevron: true,
                   onTap: () => _openOnboardingRoute(isReplay: true),
                 ),
+              IosSettingsRow(
+                key: const ValueKey('ios-export-diagnostics'),
+                icon: CupertinoIcons.doc_plaintext,
+                iconColor: AppleColors.systemOrange,
+                title: '导出诊断日志包',
+                showChevron: true,
+                onTap: () => _exportDiagnosticsBundle(context),
+              ),
             ],
           ),
           const SizedBox(height: 24),
@@ -13099,12 +13217,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 onTap: _openOfficialNoticeDialogFromSettings,
               ),
             ],
-          ),
-          const SizedBox(height: 24),
-          IosUpdateSheet(
-            installedVersion: _currentAppVersion,
-            embedded: true,
-            autoCheck: false,
           ),
         ]),
       ),
@@ -15099,27 +15211,35 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       ),
     );
   }
+  /// [showAddEntries] hides the iOS 「添加」 nav button / 「添加订阅」 row when
+  /// the caller already exposes the canonical 「添加资源库」 entry (Settings ›
+  /// 资源库与订阅), so the same page is never reachable twice from Settings.
   Future<void> _showSubscriptionManagerSheet({
     String iosBackLabel = '返回',
+    bool showAddEntries = true,
   }) async {
     final isIos = defaultTargetPlatform == TargetPlatform.iOS;
+    final iosAddEntries = isIos && showAddEntries;
     StateSetter? refreshSubPage;
     await _openIosOrModalPage<void>(
       title: isIos ? '订阅管理' : '订阅源与分组管理中心',
       backLabel: iosBackLabel,
       trailingAction: isIos
-          ? CupertinoButton(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              minimumSize: const Size(36, 36),
-              onPressed: () async {
-                await _showImportConfigDialog(iosBackLabel: '订阅管理');
-                refreshSubPage?.call(() {});
-              },
-              child: const Text(
-                '添加',
-                style: TextStyle(color: AppleColors.systemBlue, fontSize: 16),
-              ),
-            )
+          ? (iosAddEntries
+              ? CupertinoButton(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: const Size(36, 36),
+                  onPressed: () async {
+                    await _showImportConfigDialog(iosBackLabel: '订阅管理');
+                    refreshSubPage?.call(() {});
+                  },
+                  child: const Text(
+                    '添加',
+                    style:
+                        TextStyle(color: AppleColors.systemBlue, fontSize: 16),
+                  ),
+                )
+              : null)
           : Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -15186,7 +15306,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   SizedBox(height: 6),
                   Text(
                     isIos
-                        ? '支持同时导入多个 VOD / M3U / JSON 订阅地址，并按分组归类管理。'
+                        ? (iosAddEntries
+                            ? '支持同时导入多个 VOD / M3U / JSON 订阅地址，并按分组归类管理。'
+                            : '返回上一页点按「添加资源库」，即可导入 VOD / M3U / JSON 订阅并按分组归类管理。')
                         : '支持同时导入多个 VOD / M3U / JSON 订阅地址，或一键从剪贴板读取并按分组归类管理。',
                     textAlign: TextAlign.center,
                     style: TextStyle(
@@ -15194,6 +15316,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       fontSize: 13,
                     ),
                   ),
+                  if (!isIos || iosAddEntries) ...[
                   const SizedBox(height: 18),
                   Wrap(
                     spacing: 10,
@@ -15229,6 +15352,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         ),
                     ],
                   ),
+                  ],
                 ],
               ),
             );
@@ -15241,7 +15365,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             shrinkWrap: true,
             padding: const EdgeInsets.all(16),
             children: [
-              if (isIos) ...[
+              if (iosAddEntries) ...[
                 IosSettingsGroup(
                   header: '添加订阅',
                   children: [
