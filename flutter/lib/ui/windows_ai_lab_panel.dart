@@ -985,9 +985,13 @@ class _WindowsAiLabPanelState extends State<WindowsAiLabPanel> {
     final cfg = _service.config;
     final usage = _service.monthlyUsage;
     final payload = _passcodeStore.activePayload;
-    final unlockTag = payload != null && payload.id.isNotEmpty
-        ? 'Ed25519 离线口令已解锁 · ${payload.id}'
-        : 'Ed25519 离线口令已解锁';
+    final tagParts = <String>[
+      'Ed25519 离线口令已解锁',
+      if (payload != null && payload.tag.isNotEmpty) payload.tag,
+      if (payload?.shared == true) '频道通用',
+      if (payload?.experimentalOAuth == true) '实验 OAuth 权限',
+    ];
+    final unlockTag = tagParts.join(' · ');
     final isLocalEndpoint = _editingAuthMode == AiAuthMode.localNoAuth ||
         isLoopbackAiBaseUrl(_baseUrlCtrl.text);
 

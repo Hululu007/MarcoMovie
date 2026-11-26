@@ -34,6 +34,15 @@ const _wrongPlatformPasscode =
     'MMAILAB1.eyJleHAiOjAsImlhdCI6MTc5NTcwMDAwMCwicGxhdCI6ImlvcyIsInRhZyI6IklPUy1PTkxZIiwidiI6MX0.ODzlLVjgZPiYJaRfSgpWGCe5mN2jc9KA7nZk1xiCqi_l6bpONK3zaWMbkUPrBYidmxzNZ6qpZpLOW2cbwl_ADg';
 const _wrongVersionPasscode =
     'MMAILAB1.eyJleHAiOjAsImlhdCI6MTc5NTcwMDAwMCwidGFnIjoiQkFELVZFUiIsInYiOjJ9.m0BRSjFwgD8YPAdpwyHbw7JXLqmeiAWDSL3BqJOZku46HC2TkwT-Oe215ua5DWQQ_GpBMjFsq0cXTVxNIvEzDQ';
+const _iosAndroidPasscode =
+    'MMAILAB1.eyJleHAiOjAsImlhdCI6MTc5NTcwMDAwMCwibiI6ImExYjJjMyIsInBsYXQiOiJpb3MsYW5kcm9pZCIsInRhZyI6Ik1PQklMRS1PTkxZIiwidiI6MX0.4YyDryyW07AbxTfjZHbissPvmpaGG0Cpww01_XvFG4vcb47_7f8X4uaCWBK25ANdPWLoJDWF7Bw7MYs0Am0aCg';
+const _androidWindowsPasscode =
+    'MMAILAB1.eyJleHAiOjAsImlhdCI6MTc5NTcwMDAwMCwibiI6ImQ0ZTVmNiIsInBsYXQiOiJhbmRyb2lkLHdpbmRvd3MiLCJzaGFyZWQiOnRydWUsInRhZyI6IkRVQUwtQVciLCJ2IjoxfQ.GRH6R_8DCdSNpe2csAYBfO71fo_lbJE-fsDRPl2fs-3qM9s5j2P2pPORP4GbNg8Of5ENVMHw9uMKvXz3c_vuDw';
+const _semicolonExpOAuthPasscode =
+    'MMAILAB1.eyJleHAiOjAsImV4cF9vYXV0aCI6dHJ1ZSwiaWF0IjoxNzk1NzAwMDAwLCJtaW5fdmMiOjgwLCJuIjoiMTEyMjMzIiwicGxhdCI6ImlwaG9uZTtwYyIsInNoYXJlZCI6dHJ1ZSwidGFnIjoiRVhQLUFETUlOIiwidiI6MX0.iJMOUXrCZaLsw3o8pzhtisBRbV0Fp_IA6AwUS0_rspsnf57L-UNFyuGdTOdXesBL3JyQraTj0PIPfMr-Mt6xBg';
+// Production-signed 3-platform universal passcode (verified against built-in defaultPublicKeyHex)
+const _realSignedUniversalPasscode =
+    'MMAILAB1.eyJleHAiOjE3OTgzMDI5NDAsImlhdCI6MTc5NTcxMDk0MCwibiI6IjllNjAwYyIsInBsYXQiOiJhbGwiLCJzaGFyZWQiOnRydWUsInRhZyI6ImNoYW5uZWwtMDEiLCJ2IjoxfQ.i-wBNpbuTEmMaCnJYvCoeBttxHWKrM5JQCGhmxO9nsGf1KbnkrvuWvDvoY5xlAMrC7570oMIXC_IHlboqFQZBQ';
 
 class _InMemorySecureStorage implements SecureStorageBackend {
   final Map<String, String> values = <String, String>{};
@@ -165,6 +174,128 @@ void main() {
       );
       await forged.ensureLoaded();
       expect(forged.isUnlocked, isFalse);
+    });
+
+    test('verifies real 3-platform signed token, multi-platform lists/aliases, exp_oauth, min_vc, and dynamic platform detection',
+        () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      // 1. Verify production-signed 3-platform universal token with built-in pubkey (NO override!)
+      AiLabPasscodeVerifier.debugPublicKeyHexOverride = null;
+      final checkTime = DateTime.utc(2026, 11, 27);
+      for (final plat in <String>['windows', 'ios', 'android']) {
+        final res = AiLabPasscodeVerifier.verify(
+          _realSignedUniversalPasscode,
+          targetPlatform: plat,
+          now: checkTime,
+        );
+        expect(res.isValid, isTrue, reason: 'Failed on $plat: ${res.messageZh}');
+        expect(res.payload?.tag, 'channel-01');
+        expect(res.payload?.platform, 'all');
+        expect(res.payload?.shared, isTrue);
+        expect(res.payload?.experimentalOAuth, isFalse);
+        expect(res.payload?.minVersionCode, 0);
+        expect(res.payload?.nonce, '9e600c');
+      }
+
+      // 2. Multi-platform combos, aliases, exp_oauth, and min_vc (using test keypair)
+      AiLabPasscodeVerifier.debugPublicKeyHexOverride = _testEd25519PubKeyHex;
+
+      // plat="ios,android" MUST reject on Windows and accept on iOS/Android aliases
+      final mobileOnlyOnWin = AiLabPasscodeVerifier.verify(
+        _iosAndroidPasscode,
+        targetPlatform: 'windows',
+      );
+      expect(mobileOnlyOnWin.isValid, isFalse);
+      expect(mobileOnlyOnWin.status, AiLabPasscodeStatus.wrongPlatform);
+      for (final p in <String>[
+        'ios',
+        'iphone',
+        'ipad',
+        'android',
+        'android-mobile',
+        'mobile',
+      ]) {
+        expect(
+          AiLabPasscodeVerifier.verify(_iosAndroidPasscode, targetPlatform: p)
+              .isValid,
+          isTrue,
+          reason: 'Expected ios,android passcode to accept $p',
+        );
+      }
+
+      // plat="android,windows" MUST accept on Windows/Android aliases and reject on iOS
+      for (final p in <String>['windows', 'win', 'pc', 'android', 'mobile']) {
+        final r = AiLabPasscodeVerifier.verify(
+          _androidWindowsPasscode,
+          targetPlatform: p,
+        );
+        expect(r.isValid, isTrue, reason: 'Expected android,windows to accept $p');
+        expect(r.payload?.shared, isTrue);
+      }
+      expect(
+        AiLabPasscodeVerifier.verify(
+          _androidWindowsPasscode,
+          targetPlatform: 'ios',
+        ).status,
+        AiLabPasscodeStatus.wrongPlatform,
+      );
+
+      // plat="iphone;pc" + exp_oauth=true + min_vc=80
+      final expOk = AiLabPasscodeVerifier.verify(
+        _semicolonExpOAuthPasscode,
+        targetPlatform: 'windows',
+        currentVersionCode: 80,
+      );
+      expect(expOk.isValid, isTrue);
+      expect(expOk.payload?.experimentalOAuth, isTrue);
+      expect(expOk.payload?.shared, isTrue);
+      expect(expOk.payload?.minVersionCode, 80);
+      expect(
+        AiLabPasscodeVerifier.verify(
+          _semicolonExpOAuthPasscode,
+          targetPlatform: 'ios',
+        ).isValid,
+        isTrue,
+      );
+      expect(
+        AiLabPasscodeVerifier.verify(
+          _semicolonExpOAuthPasscode,
+          targetPlatform: 'android',
+        ).status,
+        AiLabPasscodeStatus.wrongPlatform,
+      );
+      expect(
+        AiLabPasscodeVerifier.verify(
+          _semicolonExpOAuthPasscode,
+          targetPlatform: 'windows',
+          currentVersionCode: 79,
+        ).status,
+        AiLabPasscodeStatus.versionTooOld,
+      );
+
+      // 3. AiLabPasscodeStore auto-detects runtime platform (NOT hardcoded 'windows')
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      final winStore = AiLabPasscodeStore(
+        publicKeyHexOverride: _testEd25519PubKeyHex,
+        clock: () => checkTime,
+      );
+      expect(winStore.effectiveTargetPlatform, 'windows');
+      expect(
+        (await winStore.unlockWithPasscode(_iosAndroidPasscode)).status,
+        AiLabPasscodeStatus.wrongPlatform,
+      );
+
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final iosStore = AiLabPasscodeStore(
+        publicKeyHexOverride: _testEd25519PubKeyHex,
+        clock: () => checkTime,
+      );
+      expect(iosStore.effectiveTargetPlatform, 'ios');
+      expect(
+        (await iosStore.unlockWithPasscode(_iosAndroidPasscode)).isValid,
+        isTrue,
+      );
+      debugDefaultTargetPlatformOverride = null;
     });
   });
 

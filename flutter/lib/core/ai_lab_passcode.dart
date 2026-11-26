@@ -1,13 +1,14 @@
 // Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
 import 'dart:convert';
+import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'ed25519.dart';
 
-/// Parsed, cryptographically verified claims of an offline Ed25519 AI Lab
-/// unlock passcode (`MMAILAB1.<payload_b64url>.<sig_b64url>`).
+/// Parsed, cryptographically verified claims of a unified cross-platform
+/// offline Ed25519 AI Lab unlock passcode (`MMAILAB1.<payload_b64url>.<sig_b64url>`).
 @immutable
 class AiLabPasscodePayload {
   final int version;
@@ -15,6 +16,10 @@ class AiLabPasscodePayload {
   final int issuedAtEpochSec;
   final int expiresAtEpochSec;
   final String platform;
+  final bool shared;
+  final bool experimentalOAuth;
+  final int minVersionCode;
+  final String nonce;
 
   const AiLabPasscodePayload({
     required this.version,
@@ -22,6 +27,10 @@ class AiLabPasscodePayload {
     this.issuedAtEpochSec = 0,
     this.expiresAtEpochSec = 0,
     this.platform = 'all',
+    this.shared = false,
+    this.experimentalOAuth = false,
+    this.minVersionCode = 0,
+    this.nonce = '',
   });
 
   /// Alias for display compatibility.
@@ -42,10 +51,51 @@ class AiLabPasscodePayload {
     return nowSec > expiresAtEpochSec;
   }
 
+  /// Normalizes platform names and aliases across Windows / iOS / Android / macOS.
+  static String normalizePlatformName(String raw) {
+    final p = raw.trim().toLowerCase();
+    return switch (p) {
+      'android-mobile' || 'mobile' => 'android',
+      'win' || 'pc' => 'windows',
+      'iphone' || 'ipad' => 'ios',
+      'mac' || 'osx' => 'macos',
+      _ => p,
+    };
+  }
+
+  /// Returns `true` when this passcode permits [targetPlatform].
+  ///
+  /// Supports `all`, `*`, empty string, single platform (`windows`, `ios`,
+  /// `android`, `macos`), comma/semicolon/slash/whitespace-separated lists
+  /// (e.g. `windows,ios`, `android;windows`), and common aliases
+  /// (`android-mobile`/`mobile` -> `android`, `win`/`pc` -> `windows`,
+  /// `iphone`/`ipad` -> `ios`).
   bool matchesPlatform(String targetPlatform) {
-    final p = platform.trim().toLowerCase();
-    if (p.isEmpty || p == 'all') return true;
-    return p == targetPlatform.trim().toLowerCase();
+    final rawPlat = platform.trim().toLowerCase();
+    if (rawPlat.isEmpty || rawPlat == 'all' || rawPlat == '*') {
+      return true;
+    }
+    final normalizedTarget = normalizePlatformName(targetPlatform);
+    if (normalizedTarget.isEmpty ||
+        normalizedTarget == 'all' ||
+        normalizedTarget == '*') {
+      return true;
+    }
+    final parts = rawPlat
+        .split(RegExp(r'[,;/\s]+'))
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty)
+        .toList(growable: false);
+    if (parts.isEmpty) {
+      return true;
+    }
+    for (final part in parts) {
+      if (part == 'all' || part == '*') return true;
+      if (normalizePlatformName(part) == normalizedTarget) {
+        return true;
+      }
+    }
+    return false;
   }
 }
 
@@ -56,6 +106,7 @@ enum AiLabPasscodeStatus {
   invalidSignature,
   unsupportedVersion,
   wrongPlatform,
+  versionTooOld,
   expired,
   missingPublicKey,
 }
@@ -79,8 +130,8 @@ class AiLabPasscodeVerifyResult {
 
 /// Pure offline RFC 8032 Ed25519 verifier for Marco Movie AI Lab passcodes.
 ///
-/// Unified cross-platform format (`scripts/sign_manifest.py issue-ai-lab-token`):
-/// `MMAILAB1.<payload_b64url>.<sig_b64url>`
+/// Unified cross-platform format (`Windows` / `iOS` / `Android Mobile`):
+/// `MMAILAB1.<payload_b64url_nopad>.<sig_b64url_nopad>`
 ///
 /// The Ed25519 signature covers:
 /// `utf8("marco-ai-lab-v1:") + decoded_payload_bytes`
@@ -108,6 +159,30 @@ abstract final class AiLabPasscodeVerifier {
 
   static String effectivePublicKeyHex([String? overrideHex]) =>
       (overrideHex ?? debugPublicKeyHexOverride ?? defaultPublicKeyHex).trim();
+
+  /// Auto-detects the current host platform identifier (`windows` / `ios` /
+  /// `macos` / `android` / `linux` / `web`) so passcodes work seamlessly across
+  /// all Flutter editions without hardcoding `'windows'`.
+  static String detectCurrentPlatform() {
+    if (kIsWeb) return 'web';
+    final override = debugDefaultTargetPlatformOverride;
+    if (override != null) {
+      return switch (override) {
+        TargetPlatform.windows => 'windows',
+        TargetPlatform.iOS => 'ios',
+        TargetPlatform.macOS => 'macos',
+        TargetPlatform.android => 'android',
+        TargetPlatform.linux => 'linux',
+        TargetPlatform.fuchsia => 'fuchsia',
+      };
+    }
+    if (Platform.isWindows) return 'windows';
+    if (Platform.isIOS) return 'ios';
+    if (Platform.isMacOS) return 'macos';
+    if (Platform.isAndroid) return 'android';
+    if (Platform.isLinux) return 'linux';
+    return 'unknown';
+  }
 
   static Uint8List? _decodeHex32(String hex) {
     final cleaned = hex.trim();
@@ -151,7 +226,8 @@ abstract final class AiLabPasscodeVerifier {
   static AiLabPasscodeVerifyResult verify(
     String rawPasscode, {
     String? publicKeyHex,
-    String targetPlatform = 'windows',
+    String? targetPlatform,
+    int? currentVersionCode,
     DateTime? now,
   }) {
     final cleaned = extractToken(rawPasscode);
@@ -192,8 +268,11 @@ abstract final class AiLabPasscodeVerifier {
     final domainBytes = utf8.encode(signingDomainPrefix);
     final messageBytes = Uint8List(domainBytes.length + payloadBytes.length)
       ..setRange(0, domainBytes.length, domainBytes)
-      ..setRange(domainBytes.length, domainBytes.length + payloadBytes.length,
-          payloadBytes);
+      ..setRange(
+        domainBytes.length,
+        domainBytes.length + payloadBytes.length,
+        payloadBytes,
+      );
 
     final sigOk = Ed25519.verify(
       publicKey: pubBytes,
@@ -235,6 +314,10 @@ abstract final class AiLabPasscodeVerifier {
     final iat = (decoded['iat'] as num?)?.toInt() ?? 0;
     final exp = (decoded['exp'] as num?)?.toInt() ?? 0;
     final platform = (decoded['plat'] ?? 'all').toString().trim();
+    final shared = decoded['shared'] == true;
+    final expOAuth = decoded['exp_oauth'] == true;
+    final minVc = (decoded['min_vc'] as num?)?.toInt() ?? 0;
+    final nonce = (decoded['n'] ?? '').toString().trim();
 
     final payload = AiLabPasscodePayload(
       version: version,
@@ -242,13 +325,31 @@ abstract final class AiLabPasscodeVerifier {
       issuedAtEpochSec: iat < 0 ? 0 : iat,
       expiresAtEpochSec: exp < 0 ? 0 : exp,
       platform: platform.isEmpty ? 'all' : platform,
+      shared: shared,
+      experimentalOAuth: expOAuth,
+      minVersionCode: minVc < 0 ? 0 : minVc,
+      nonce: nonce,
     );
 
-    if (!payload.matchesPlatform(targetPlatform)) {
+    final effectivePlatform = (targetPlatform ?? '').trim().isNotEmpty
+        ? targetPlatform!.trim()
+        : detectCurrentPlatform();
+    if (!payload.matchesPlatform(effectivePlatform)) {
       return AiLabPasscodeVerifyResult(
         status: AiLabPasscodeStatus.wrongPlatform,
         payload: payload,
-        messageZh: '该口令仅适用于 ${payload.platform} 平台，无法在当前端解锁',
+        messageZh: '该口令仅适用于 ${payload.platform} 平台，无法在当前端（$effectivePlatform）解锁',
+      );
+    }
+
+    if (payload.minVersionCode > 0 &&
+        currentVersionCode != null &&
+        currentVersionCode < payload.minVersionCode) {
+      return AiLabPasscodeVerifyResult(
+        status: AiLabPasscodeStatus.versionTooOld,
+        payload: payload,
+        messageZh:
+            '该口令要求更高版本客户端（最低构建号 ${payload.minVersionCode}），请先更新应用',
       );
     }
 
@@ -283,7 +384,7 @@ class AiLabPasscodeStore extends ChangeNotifier {
 
   DateTime Function() _clock;
   String? _publicKeyHexOverride;
-  String _targetPlatform;
+  String? _targetPlatformOverride;
 
   bool _loaded = false;
   Future<void>? _loadFuture;
@@ -293,12 +394,18 @@ class AiLabPasscodeStore extends ChangeNotifier {
   AiLabPasscodeStore({
     DateTime Function()? clock,
     String? publicKeyHexOverride,
-    String targetPlatform = 'windows',
+    String? targetPlatform,
   })  : _clock = clock ?? DateTime.now,
         _publicKeyHexOverride = publicKeyHexOverride,
-        _targetPlatform = targetPlatform;
+        _targetPlatformOverride = targetPlatform;
 
   bool get isLoaded => _loaded;
+
+  String get effectiveTargetPlatform =>
+      (_targetPlatformOverride != null &&
+              _targetPlatformOverride!.trim().isNotEmpty)
+          ? _targetPlatformOverride!.trim()
+          : AiLabPasscodeVerifier.detectCurrentPlatform();
 
   /// True ONLY when a cryptographically verified, non-expired Ed25519 passcode
   /// is currently active.
@@ -322,7 +429,7 @@ class AiLabPasscodeStore extends ChangeNotifier {
     if (publicKeyHexOverride != null) {
       _publicKeyHexOverride = publicKeyHexOverride;
     }
-    if (targetPlatform != null) _targetPlatform = targetPlatform;
+    if (targetPlatform != null) _targetPlatformOverride = targetPlatform;
     if (resetState) {
       _loaded = false;
       _loadFuture = null;
@@ -336,7 +443,7 @@ class AiLabPasscodeStore extends ChangeNotifier {
   void resetForTest() {
     _clock = DateTime.now;
     _publicKeyHexOverride = null;
-    _targetPlatform = 'windows';
+    _targetPlatformOverride = null;
     _loaded = false;
     _loadFuture = null;
     _storedToken = '';
@@ -363,7 +470,7 @@ class AiLabPasscodeStore extends ChangeNotifier {
         final verified = AiLabPasscodeVerifier.verify(
           saved,
           publicKeyHex: _publicKeyHexOverride,
-          targetPlatform: _targetPlatform,
+          targetPlatform: effectiveTargetPlatform,
           now: _clock(),
         );
         if (verified.isValid) {
@@ -394,7 +501,7 @@ class AiLabPasscodeStore extends ChangeNotifier {
     final result = AiLabPasscodeVerifier.verify(
       rawPasscode,
       publicKeyHex: _publicKeyHexOverride,
-      targetPlatform: _targetPlatform,
+      targetPlatform: effectiveTargetPlatform,
       now: _clock(),
     );
     if (!result.isValid) {
