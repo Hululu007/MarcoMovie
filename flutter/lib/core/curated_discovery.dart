@@ -1,7 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data' show BytesBuilder;
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
+import 'package:path_provider/path_provider.dart';
+import '../ui/poster_image.dart';
 import 'models.dart';
 import 'series_scraper.dart';
 
@@ -60,17 +64,295 @@ class CuratedDiscoveryService {
   static const String _mobileUa =
       'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
 
-  static final HttpClient _client = HttpClient()
-    ..connectionTimeout = const Duration(seconds: 4)
-    ..idleTimeout = const Duration(seconds: 20)
-    ..autoUncompress = true;
-
   static final Map<String, ({DateTime fetchedAt, List<CmsVideo> items})> _cache =
       {};
   static final Map<String, Future<List<CmsVideo>>> _inflight = {};
   static final Map<String, String> _backdropById = {};
   static final Map<String, String> _genreById = {};
   static const Duration _cacheTtl = Duration(minutes: 30);
+  static Future<bool>? _diskWarmFuture;
+  static bool _diskWarmed = false;
+  static bool _diskWarmInFlight = false;
+  static Timer? _diskSaveDebounce;
+  static bool _initialBatchRefreshInFlight = false;
+  static final ValueNotifier<int> warmupRevision = ValueNotifier<int>(0);
+
+  @visibleForTesting
+  static Future<List<CmsVideo>?> Function(CuratedModuleSpec spec)?
+      debugLiveFetcherOverride;
+
+  /// `true` once disk snapshot warmup has completed or any shelf is populated.
+  static bool get isInitialized => _diskWarmed || _cache.isNotEmpty;
+
+  /// `true` while cold-start disk snapshot hydration is in progress.
+  static bool get isDiskWarmupInFlight => _diskWarmInFlight;
+
+  /// `true` while disk snapshot restoration or initial wave-1 live refresh is
+  /// still populating real Douban poster URLs so posterless fallback seeds
+  /// defer multi-site title scraping instead of competing with first-frame
+  /// direct poster loads.
+  static bool get shouldDeferPosterlessSeedScrape =>
+      _diskWarmInFlight || _initialBatchRefreshInFlight;
+
+  static Map<String, Object?> _videoToJson(CmsVideo v) => <String, Object?>{
+        'id': v.id,
+        'title': v.title,
+        if (v.poster.isNotEmpty) 'poster': v.poster,
+        if (v.remarks.isNotEmpty) 'remarks': v.remarks,
+        if (v.year.isNotEmpty) 'year': v.year,
+        if (v.area.isNotEmpty) 'area': v.area,
+        if (v.actor.isNotEmpty) 'actor': v.actor,
+        if (v.description.isNotEmpty) 'description': v.description,
+        if (v.tag.isNotEmpty) 'tag': v.tag,
+        if (v.doubanScore != null) 'doubanScore': v.doubanScore,
+        if (v.rtScore != null) 'rtScore': v.rtScore,
+      };
+
+  static CmsVideo _videoFromJson(Map<String, dynamic> m) => CmsVideo(
+        id: (m['id'] ?? '').toString().trim(),
+        title: (m['title'] ?? '').toString().trim(),
+        poster: (m['poster'] ?? '').toString().trim(),
+        remarks: (m['remarks'] ?? '').toString().trim(),
+        year: (m['year'] ?? '').toString().trim(),
+        area: (m['area'] ?? '').toString().trim(),
+        actor: (m['actor'] ?? '').toString().trim(),
+        description: (m['description'] ?? '').toString().trim(),
+        tag: (m['tag'] ?? '').toString().trim(),
+        doubanScore: (m['doubanScore'] as num?)?.toDouble(),
+        rtScore: (m['rtScore'] as num?)?.toInt(),
+      );
+
+  /// `true` while the initial cold-launch parallel refresh of curated shelves
+  /// is actively resolving direct Douban CDN poster URLs, so seed items with
+  /// empty `poster` URLs wait briefly instead of firing 60 individual HTML
+  /// title-search scrapes.
+  static bool get isInitialBatchRefreshInFlight => _initialBatchRefreshInFlight;
+
+  @visibleForTesting
+  static void resetCacheForTest() {
+    _cache.clear();
+    _inflight.clear();
+    _backdropById.clear();
+    _genreById.clear();
+    _diskWarmFuture = null;
+    _diskWarmed = false;
+    _diskWarmInFlight = false;
+    _diskSaveDebounce?.cancel();
+    _diskSaveDebounce = null;
+    _initialBatchRefreshInFlight = false;
+    debugLiveFetcherOverride = null;
+    debugLiveUriOverride = null;
+    debugLiveModuleTotalTimeout = const Duration(seconds: 6);
+  }
+
+  static Future<File?> _snapshotFile({Directory? overrideDir}) async {
+    try {
+      if (overrideDir != null) {
+        if (!await overrideDir.exists()) {
+          await overrideDir.create(recursive: true);
+        }
+        return File(
+          '${overrideDir.path}${Platform.pathSeparator}marco_curated_discovery_v1.json',
+        );
+      }
+      if (kIsWeb || Platform.environment.containsKey('FLUTTER_TEST')) {
+        return null;
+      }
+      final support = await getApplicationSupportDirectory().timeout(
+        const Duration(milliseconds: 1200),
+      );
+      if (!await support.exists()) {
+        await support.create(recursive: true);
+      }
+      return File(
+        '${support.path}${Platform.pathSeparator}marco_curated_discovery_v1.json',
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Warms in-memory module caches from the last persisted disk snapshot so
+  /// cold launches immediately render real Douban CDN poster URLs on Frame 1.
+  static Future<bool> warmFromDisk({Directory? overrideDirForTest}) {
+    if (overrideDirForTest == null && _diskWarmed) {
+      return Future<bool>.value(_cache.isNotEmpty);
+    }
+    Future<bool> loadImpl() async {
+      _diskWarmInFlight = true;
+      try {
+        final file = await _snapshotFile(overrideDir: overrideDirForTest);
+        if (file == null || !await file.exists()) {
+          if (overrideDirForTest == null) _diskWarmed = true;
+          return false;
+        }
+        final rawText = await file.readAsString();
+        final decoded = jsonDecode(rawText);
+        if (decoded is! Map) {
+          if (overrideDirForTest == null) _diskWarmed = true;
+          return false;
+        }
+        final backdrops = decoded['backdrops'];
+        if (backdrops is Map) {
+          backdrops.forEach((k, v) {
+            final key = k.toString();
+            final val = (v ?? '').toString().trim();
+            if (key.isNotEmpty && val.isNotEmpty) {
+              _backdropById.putIfAbsent(key, () => val);
+            }
+          });
+        }
+        final genres = decoded['genres'];
+        if (genres is Map) {
+          genres.forEach((k, v) {
+            final key = k.toString();
+            final val = (v ?? '').toString().trim();
+            if (key.isNotEmpty && val.isNotEmpty) {
+              _genreById.putIfAbsent(key, () => val);
+            }
+          });
+        }
+        final modulesMap = decoded['modules'];
+        var restoredAny = false;
+        if (modulesMap is Map) {
+          for (final spec in modules) {
+            if (_cache.containsKey(spec.id)) continue;
+            final entry = modulesMap[spec.id];
+            if (entry is! Map) continue;
+            final rawItems = entry['items'];
+            if (rawItems is! List) continue;
+            final items = <CmsVideo>[];
+            for (final m in rawItems.whereType<Map>()) {
+              final v = _videoFromJson(Map<String, dynamic>.from(m));
+              if (v.title.isNotEmpty) items.add(v);
+            }
+            if (items.isNotEmpty) {
+              final savedMs = (entry['savedAtMs'] is num)
+                  ? (entry['savedAtMs'] as num).toInt()
+                  : 0;
+              final fetchedAt = savedMs > 0
+                  ? DateTime.fromMillisecondsSinceEpoch(savedMs)
+                  : DateTime.fromMillisecondsSinceEpoch(0);
+              _cache[spec.id] = (fetchedAt: fetchedAt, items: items);
+              restoredAny = true;
+            }
+          }
+        }
+        if (overrideDirForTest == null) _diskWarmed = true;
+        return restoredAny;
+      } catch (_) {
+        if (overrideDirForTest == null) _diskWarmed = true;
+        return false;
+      } finally {
+        _diskWarmInFlight = false;
+        warmupRevision.value++;
+      }
+    }
+
+    if (overrideDirForTest != null) {
+      return loadImpl();
+    }
+    return _diskWarmFuture ??= loadImpl();
+  }
+
+  @visibleForTesting
+  static Future<void> saveToDiskNow({Directory? overrideDirForTest}) async {
+    try {
+      final file = await _snapshotFile(overrideDir: overrideDirForTest);
+      if (file == null) return;
+      final modulesPayload = <String, Object>{};
+      for (final entry in _cache.entries) {
+        if (entry.value.items.isEmpty) continue;
+        modulesPayload[entry.key] = <String, Object>{
+          'savedAtMs': entry.value.fetchedAt.millisecondsSinceEpoch,
+          'items': [
+            for (final v in entry.value.items) _videoToJson(v),
+          ],
+        };
+      }
+      if (modulesPayload.isEmpty) return;
+      final payload = jsonEncode(<String, Object>{
+        'v': 1,
+        'modules': modulesPayload,
+        'backdrops': _backdropById,
+        'genres': _genreById,
+      });
+      final tmp = File('${file.path}.tmp');
+      await tmp.writeAsString(payload, flush: true);
+      await tmp.rename(file.path);
+    } catch (_) {}
+  }
+
+  static void _scheduleSaveToDisk() {
+    if (kIsWeb || Platform.environment.containsKey('FLUTTER_TEST')) return;
+    _diskSaveDebounce?.cancel();
+    _diskSaveDebounce = Timer(const Duration(milliseconds: 600), () {
+      unawaited(saveToDiskNow());
+    });
+  }
+
+  /// Refreshes all discovery modules in two fast parallel waves (top visible
+  /// shelves first, remaining shelves second) and prefetches visible direct
+  /// poster URLs into [PosterLoader].
+  static Future<void> refreshAllModules({
+    VoidCallback? onModuleUpdated,
+  }) async {
+    final hadAnyCachedUrls = _cache.values.any(
+      (entry) => entry.items.any((v) => v.poster.trim().isNotEmpty),
+    );
+    if (!hadAnyCachedUrls) {
+      _initialBatchRefreshInFlight = true;
+    }
+    try {
+      final warmed = await warmFromDisk();
+      if (warmed) {
+        onModuleUpdated?.call();
+        _initialBatchRefreshInFlight = false;
+      }
+      // Wave 1: Top-of-Home shelves (`weekly_trending`, `cn_hot`, `douban_top`, `rotten_tomatoes`)
+      const wave1Ids = <String>{
+        'weekly_trending',
+        'cn_hot',
+        'douban_top',
+        'rotten_tomatoes',
+      };
+      final wave1 = modules.where((m) => wave1Ids.contains(m.id)).toList();
+      final wave2 = modules.where((m) => !wave1Ids.contains(m.id)).toList();
+
+      await Future.wait(
+        wave1.map((spec) async {
+          final items = await fetchModule(spec);
+          onModuleUpdated?.call();
+          if (!Platform.environment.containsKey('FLUTTER_TEST')) {
+            PosterLoader.prefetchUrls(
+              items.take(8).map((v) => v.poster),
+              limit: 8,
+            );
+          }
+        }),
+      );
+      _initialBatchRefreshInFlight = false;
+      warmupRevision.value++;
+      onModuleUpdated?.call();
+
+      await Future.wait(
+        wave2.map((spec) async {
+          final items = await fetchModule(spec);
+          onModuleUpdated?.call();
+          if (!Platform.environment.containsKey('FLUTTER_TEST')) {
+            PosterLoader.prefetchUrls(
+              items.take(6).map((v) => v.poster),
+              limit: 6,
+            );
+          }
+        }),
+      );
+    } finally {
+      _initialBatchRefreshInFlight = false;
+      warmupRevision.value++;
+      onModuleUpdated?.call();
+    }
+  }
 
   /// Returns a dedicated 16:9 landscape still URL for [video] when available
   /// from Douban's `photos` array, falling back to [video.poster].
@@ -304,35 +586,118 @@ class CuratedDiscoveryService {
     final existing = _inflight[spec.id];
     if (existing != null) return existing;
 
-    final future = _fetchLiveModule(spec);
-    _inflight[spec.id] = future;
-    try {
-      final items = await future;
-      if (items.isNotEmpty) {
-        _cache[spec.id] = (fetchedAt: DateTime.now(), items: items);
-        return items;
+    final future = () async {
+      final liveItems = await _fetchLiveModule(spec);
+      if (liveItems != null && liveItems.isNotEmpty) {
+        _cache[spec.id] = (fetchedAt: DateTime.now(), items: liveItems);
+        if (liveItems.any((v) => v.poster.trim().isNotEmpty)) {
+          _scheduleSaveToDisk();
+        }
+        return liveItems;
+      }
+      // Preserve last known good disk/memory snapshot on live refresh failure
+      // instead of overwriting real posters with posterless seeds!
+      final preserved = _cache[spec.id];
+      if (preserved != null && preserved.items.isNotEmpty) {
+        return preserved.items;
       }
       return spec.seedItems;
+    }();
+    _inflight[spec.id] = future;
+    try {
+      return await future;
     } finally {
       _inflight.remove(spec.id);
     }
   }
 
-  static Future<List<CmsVideo>> _fetchLiveModule(CuratedModuleSpec spec) async {
-    final uri = spec.liveUri;
-    if (uri == null) return spec.seedItems;
+  @visibleForTesting
+  static Duration debugLiveModuleTotalTimeout = const Duration(seconds: 6);
+
+  @visibleForTesting
+  static Uri? Function(CuratedModuleSpec spec)? debugLiveUriOverride;
+
+  static Future<List<CmsVideo>?> _fetchLiveModule(CuratedModuleSpec spec) async {
+    if (debugLiveFetcherOverride != null) {
+      try {
+        return await debugLiveFetcherOverride!(spec);
+      } catch (_) {
+        return null;
+      }
+    }
+    final uri = debugLiveUriOverride?.call(spec) ?? spec.liveUri;
+    if (uri == null) return null;
+    final totalBudget = debugLiveModuleTotalTimeout;
+    final sw = Stopwatch()..start();
+    Duration remainingBudget() {
+      final remMs = totalBudget.inMilliseconds - sw.elapsedMilliseconds;
+      return Duration(milliseconds: remMs < 1 ? 1 : remMs);
+    }
+
+    final client = HttpClient()
+      ..connectionTimeout = remainingBudget()
+      ..idleTimeout = const Duration(seconds: 8);
+    HttpClientRequest? req;
+    StreamSubscription<List<int>>? bodySub;
+    var abortedOrFailed = false;
     try {
-      final req = await _client.getUrl(uri);
+      req = await client.getUrl(uri).timeout(remainingBudget());
       req.headers.set(HttpHeaders.userAgentHeader, _mobileUa);
       req.headers.set(HttpHeaders.refererHeader, spec.referer);
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
-      final resp = await req.close().timeout(const Duration(seconds: 4));
-      if (resp.statusCode != 200) return spec.seedItems;
-      final body = await utf8.decoder.bind(resp).join();
+      final resp = await req.close().timeout(remainingBudget());
+      if (resp.statusCode != 200) {
+        abortedOrFailed = true;
+        try {
+          final drainBudget = remainingBudget() < const Duration(milliseconds: 250)
+              ? remainingBudget()
+              : const Duration(milliseconds: 250);
+          await resp.drain<void>().timeout(drainBudget);
+        } catch (_) {}
+        return null;
+      }
+      final chunks = BytesBuilder(copy: false);
+      final done = Completer<void>();
+      bodySub = resp.listen(
+        chunks.add,
+        onDone: () {
+          if (!done.isCompleted) done.complete();
+        },
+        onError: (Object error, StackTrace stackTrace) {
+          if (!done.isCompleted) done.completeError(error, stackTrace);
+        },
+        cancelOnError: true,
+      );
+      await done.future.timeout(remainingBudget());
+      final body = utf8.decode(chunks.takeBytes(), allowMalformed: true);
       final parsed = parseDoubanDiscoveryJson(body, moduleId: spec.id);
       if (parsed.isNotEmpty) return parsed;
-    } catch (_) {}
-    return spec.seedItems;
+    } catch (_) {
+      abortedOrFailed = true;
+      try {
+        req?.abort();
+      } catch (_) {}
+    } finally {
+      if (abortedOrFailed) {
+        // Destroy the dedicated socket immediately on timeout/failure so the
+        // remote/local peer observes disconnect right away and bodySub.cancel()
+        // cannot block waiting for a hanging response stream.
+        try {
+          client.close(force: true);
+        } catch (_) {}
+      }
+      if (bodySub != null) {
+        try {
+          await bodySub.cancel().timeout(const Duration(milliseconds: 80));
+        } catch (_) {}
+      }
+      if (!abortedOrFailed) {
+        try {
+          client.close(force: false);
+        } catch (_) {}
+      }
+    }
+    return null;
   }
 
   /// Parses both Douban Rexxar `subject_collection_items` and

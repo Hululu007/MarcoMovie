@@ -200,7 +200,7 @@ class LiveCatalogParser {
           decoded.startsWith('{') ||
           decoded.startsWith('[') ||
           RegExp(
-            r'(?:^|\n)[^\r\n,]+,\s*(?:https?|rtmps?|rtsp)://',
+            r'(?:^|\n)[^\r\n,]+,\s*(?:https?|rtmps?|rtsps?|rtp|udp|mmsh?|mmst)://',
             caseSensitive: false,
           ).hasMatch(decoded)) {
         return decoded;
@@ -260,14 +260,26 @@ class LiveCatalogParser {
           !value.startsWith('./') &&
           !value.startsWith('../') &&
           !RegExp(
-            r'^[^\s?#]+\.(?:m3u8?|mp4|mkv|ts|flv|mp3|aac)(?:[?#]|$)',
+            r'^[^\s?#]+\.(?:m3u8?|mp4|mkv|ts|flv|smil|mp3|aac)(?:[?#]|$)',
             caseSensitive: false,
           ).hasMatch(value))
         return;
       final url = absolute(value);
       final uri = Uri.tryParse(url);
       if (uri == null ||
-          !['http', 'https', 'rtmp', 'rtsp'].contains(uri.scheme) ||
+          !const [
+            'http',
+            'https',
+            'rtmp',
+            'rtmps',
+            'rtsp',
+            'rtsps',
+            'rtp',
+            'udp',
+            'mms',
+            'mmsh',
+            'mmst',
+          ].contains(uri.scheme.toLowerCase()) ||
           uri.host.isEmpty)
         return;
       final g = group.trim().isEmpty ? '默认频道' : group.trim();
@@ -298,7 +310,10 @@ class LiveCatalogParser {
     }
 
     List<String> splitUrls(String value) => value.split(
-      RegExp(r'#(?=(?:https?|rtmps?|rtsp)://)', caseSensitive: false),
+      RegExp(
+        r'#(?=(?:https?|rtmps?|rtsps?|rtp|udp|mmsh?|mmst)://)',
+        caseSensitive: false,
+      ),
     );
     void jsonItem(
       dynamic item,

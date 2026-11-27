@@ -13,7 +13,7 @@ ALLOWED_HOSTS={'nodejs.org','api.github.com','release-assets.githubusercontent.c
  'pub.dev','www.6huo.com','api.bgm.tv','bgm.tv','lain.bgm.tv','baike.baidu.com','baike.so.com','v.qq.com','pd.qq.com','weibo.com',
  'cj.ffzyapi.com','tyyszy.com','bfzyapi.com','caiji.dyttzyapi.com','cj.lziapi.com','suoniapi.com','cj.rycjapi.com','hhzyapi.com','jszyapi.com','ikunzyapi.com','subocaiji.com','api.xinlangapi.com','www.hongniuzy2.com','caiji.moduapi.cc','360zy.com','zuidazy.me',
  'uop.quark.cn','pan.quark.cn','drive.quark.cn','drive-pc.quark.cn','drive-social-api.quark.cn','su.quark.cn','www.wogg.net','api.open.uc.cn','drive.uc.cn','su.uc.cn','passport.baidu.com','pan.baidu.com','wappass.baidu.com','passport.aliyundrive.com','www.aliyundrive.com','www.alipan.com','api.qrserver.com','www.mdzypic.com','dav.jianguoyun.com',
- 'api.themoviedb.org','image.tmdb.org','api.theintrodb.org','api.trakt.tv','api.mdblist.com','api.assrt.net','api.opensubtitles.com','api.dandanplay.net','api.deepseek.com','dashscope.aliyuncs.com','api.siliconflow.cn','api.moonshot.cn','open.bigmodel.cn','api.openai.com','auth.openai.com','api.anthropic.com','generativelanguage.googleapis.com','openrouter.ai','auth.kimi.com','api.kimi.com'}
+ 'api.themoviedb.org','image.tmdb.org','api.theintrodb.org','api.trakt.tv','api.mdblist.com','api.assrt.net','api.opensubtitles.com','api.dandanplay.net','api.deepseek.com','dashscope.aliyuncs.com','api.siliconflow.cn','api.moonshot.cn','open.bigmodel.cn','api.openai.com','auth.openai.com','api.anthropic.com','generativelanguage.googleapis.com','openrouter.ai','auth.kimi.com','api.kimi.com','api.githubcopilot.com'}
 
 # Permit documentation/example URLs only in the pinned upstream text files. A changed
 # file goes through normal host review again. Private-value scanning remains active.
@@ -39,12 +39,31 @@ TEST_AUTHORITIES = {
     'flutter/test/quark_media_proxy_test.dart': {'media.quark.cn', 'next.quark.cn', 'media.quark.cn:444', 'user@media.quark.cn', 'media.uc.cn'},
     'flutter/test/native_cloud_playback_test.dart': {'media.quark.cn'},
     'flutter/test/netdisk_4k_ios_optimization_test.dart': {'cdn.aliyundrive.net', 'dl.quark.cn'},
+    'flutter/test/ios_077_connectors_and_netdisk_test.dart': {'d.pcs.baidu.com', 'dl.quark.cn', 'dl.uc.cn'},
+    'flutter/test/ios_077_gpt_review_regressions_test.dart': {'d.pcs.baidu.com', 'dl.uc.cn', 'example.com'},
+    'flutter/test/ios_077_ux_motion_audit_test.dart': {'user:pass@cdn.example'},
     'flutter/test/wogg_client_test.dart': {'media.uc.cn'},
     'flutter/test/wogg_source_test.dart': {'user:password@catalogue.invalid', 'alipan.com', 'aliyundrive.com', 'fast.uc.cn'},
+    'macos/test/drpy_cancellation_test.dart': {'user:pass@fixture.invalid'},
+    'macos/test/drpy_host_test.dart': {'user:secret@fixture.invalid'},
+    'macos/test/guard_bootstrap_host_test.dart': {'user:secret@fixture.invalid'},
+    'macos/test/subscription_redirect_test.dart': {'injected:secret@127.0.0.1:${origin.port}'},
+    'macos/test/ali_share_test.dart': {'user@www.alipan.com'},
+    'macos/test/cloud_share_test.dart': {'x@drive.uc.cn', 'fast.uc.cn', 'video.uc.cn', 'd.pcs.baidu.com', 'qdall01.baidupcs.com'},
+    'macos/test/desktop_cloud_media_test.dart': {'media.uc.cn'},
+    'macos/test/cloud_media_proxy_test.dart': {'video.uc.cn', 'video.uc.cn:444', 'd.pcs.baidu.com', 'qdall01.baidupcs.com'},
+    'macos/test/quark_drive_test.dart': {'media.quark.cn'},
+    'macos/test/quark_media_proxy_test.dart': {'media.quark.cn', 'next.quark.cn', 'media.quark.cn:444', 'user@media.quark.cn', 'media.uc.cn'},
+    'macos/test/native_cloud_playback_test.dart': {'media.quark.cn'},
+    'macos/test/netdisk_4k_ios_optimization_test.dart': {'cdn.aliyundrive.net', 'dl.quark.cn'},
+    'macos/test/wogg_client_test.dart': {'media.uc.cn'},
+    'macos/test/wogg_source_test.dart': {'user:password@catalogue.invalid', 'alipan.com', 'aliyundrive.com', 'fast.uc.cn'},
     'android-tv/tests/JsHttpChecks.java': {'new:secret@', 'us%40er:pa%2Bss@'},
     'android-mobile/tests/JsHttpChecks.java': {'new:secret@', 'us%40er:pa%2Bss@'},
     'flutter/test/python_host_compat_test.dart': {'user:pass@[::1]:8443'},
     'flutter/test/python_source_channel_test.dart': {'user:password@source.invalid'},
+    'macos/test/python_host_compat_test.dart': {'user:pass@[::1]:8443'},
+    'macos/test/python_source_channel_test.dart': {'user:password@source.invalid'},
     'scripts/test_python_host.js': {'user:pass@[::1]:8443', '127.0.0.2', '127.0.0.2:'},
     'scripts/test_python_proxy.js': {'0.0.0.0:18345'},
     'scripts/test_t4_adapter.cjs': {'name:secret@127.0.0.1'},
@@ -54,11 +73,15 @@ TEST_AUTHORITIES = {
     'scripts/ios_cpython_transport/dart/fixture_http_transport_test.dart': {'user@127.0.0.1:${server.port}'},
     'flutter/lib/core/app_log.dart': {'user:password@host'},
     'flutter/test/app_log_test.dart': {'user:super_secret_pw@dav.jianguoyun.com', 'user:[REDACTED]@dav.jianguoyun.com'},
+    'macos/lib/core/app_log.dart': {'user:password@host'},
+    'macos/test/app_log_test.dart': {'user:super_secret_pw@dav.jianguoyun.com', 'user:[REDACTED]@dav.jianguoyun.com'},
     'android-tv/tests/LaneEChecks.java': {'user:secret@127.0.0.1:'},
     'android-tv/tests/LiveNetworkChecks.java': {'127.0.0.2', '127.0.0.2:'},
+    'android-tv/tests/TvPlaybackMultiSourceChecks.java': {'api.example.com', 'cdn.example.com', 'valid-', 'big-', '...'},
     'android-mobile/tests/LaneEChecks.java': {'user:secret@127.0.0.1:'},
     'android-mobile/tests/LiveNetworkChecks.java': {'127.0.0.2', '127.0.0.2:'},
     'flutter/test/security_hardening_test.dart': {'192.168.1.10:5005'},
+    'macos/test/security_hardening_test.dart': {'192.168.1.10:5005'},
     'shared/conformance/case_01_bom/meta.json': {'example.com'},
     'shared/conformance/case_01_bom/expected.json': {'api.example.com'},
     'shared/conformance/case_02_utf16/meta.json': {'example.com'},
@@ -101,6 +124,8 @@ CONFORMANCE_INPUT_SHA256 = {
 LAN_IP_TEST_FILES = {
     'flutter/test/adversarial_f8_test.dart',
     'flutter/test/security_hardening_test.dart',
+    'macos/test/adversarial_f8_test.dart',
+    'macos/test/security_hardening_test.dart',
     'lite/tests/AdversarialConfigServerTest.java',
     'lite/tests/LiteJvmChecks.java',
 }
@@ -134,9 +159,27 @@ CLOUD_SHARE_HOSTS = {
     'android-mobile/src/main/java/com/pilipala/marcomovie/NetdiskAuthService.java': {'auth.aliyundrive.com'},
     'android-mobile/src/main/java/com/pilipala/marcomovie/PersonalNetdiskLibrary.java': {'pc-api.uc.cn', 'd.pcs.baidu.com', 'api.aliyundrive.com', 'auth.aliyundrive.com', 'bj29.api.aliyunpds.com'},
     'flutter/lib/core/ali_share.dart': {'api.aliyundrive.com', 'auth.aliyundrive.com', 'bj29.api.aliyunpds.com'},
+    'flutter/lib/core/ai_service.dart': {
+        'auth.openai.com',
+        'chatgpt.com',
+        'api.openai.com',
+        'api.anthropic.com',
+        'generativelanguage.googleapis.com',
+    },
+    'flutter/lib/ui/ios_ai_settings_page.dart': {
+        'api.openai.com',
+        'api.anthropic.com',
+        'generativelanguage.googleapis.com',
+    },
+    'flutter/lib/core/personal_netdisk_library.dart': {'api.aliyundrive.com', 'auth.aliyundrive.com', 'bj29.api.aliyunpds.com'},
     'flutter/lib/core/netdisk_service.dart': {'auth.aliyundrive.com'},
     'flutter/lib/core/cloud_share.dart': {'fast.uc.cn'},
     'flutter/lib/core/doh_resolver.dart': {'dns.alidns.com', 'cloudflare-dns.com', 'dns.google'},
+    'macos/lib/core/ali_share.dart': {'api.aliyundrive.com', 'auth.aliyundrive.com', 'bj29.api.aliyunpds.com'},
+    'macos/lib/core/personal_netdisk_library.dart': {'api.aliyundrive.com', 'auth.aliyundrive.com', 'bj29.api.aliyunpds.com'},
+    'macos/lib/core/netdisk_service.dart': {'auth.aliyundrive.com'},
+    'macos/lib/core/cloud_share.dart': {'fast.uc.cn'},
+    'macos/lib/core/doh_resolver.dart': {'dns.alidns.com', 'cloudflare-dns.com', 'dns.google'},
     'shared/catpaw/drpy-http.cjs': {'223.5.5.5', '1.12.12.12', 'dns.alidns.com', 'cloudflare-dns.com'},
 }
 
@@ -163,7 +206,7 @@ for p in files:
     relative=p.relative_to(ROOT)
     # Generated blue frames and a sine tone for native HEVC/HTTP regression.
     # Permit only the reviewed bytes, not arbitrary recorded media in tests.
-    if relative.as_posix()=='flutter/test/fixtures/cloud-playback.mkv':
+    if relative.as_posix() in {'flutter/test/fixtures/cloud-playback.mkv', 'macos/test/fixtures/cloud-playback.mkv'}:
         if hashlib.sha256(p.read_bytes()).hexdigest()!='158d193f2fc0b9096c77cf2fb8402e347a5761b3503e4612e25d42c6d4a93347':issues.append(f'{relative}: unreviewed playback fixture')
         continue
     if relative.as_posix() in CONFORMANCE_INPUT_SHA256:
@@ -184,6 +227,8 @@ for p in files:
         'flutter/lib/',
         'flutter/packages/quickjs_engine/lib/',
         'flutter/packages/ohos_platform_shims/lib/',
+        'macos/lib/',
+        'macos/packages/quickjs_engine/lib/',
     )) and p.suffix == '.dart'
     allow_lib = vendor_dart or relative.as_posix().startswith(('android-tv/tests/lib/aosp-json/', 'android-mobile/tests/lib/aosp-json/'))
     if any(part in (EXCLUDED - {'lib'} if allow_lib else EXCLUDED) for part in relative.parts) or p.suffix in {'.apk','.aab','.p12','.jks','.keystore','.rar','.zip','.bin','.mp4'}:
@@ -213,7 +258,7 @@ for p in files:
             host=authority.split(':')[0].lower().rstrip('.,;')
         if host in EXPERIMENT_HOSTS.get(relative.as_posix(), set()):continue
         if host in CLOUD_SHARE_HOSTS.get(relative.as_posix(), set()):continue
-        if relative.as_posix() == 'flutter/pubspec.lock' and host in {'pub.dev','dart.dev'}:continue
+        if relative.as_posix() in {'flutter/pubspec.lock', 'macos/pubspec.lock'} and host in {'pub.dev','dart.dev'}:continue
         if relative.as_posix() == 'docs/python-json-compatibility.md' and host == 'docs.python.org':continue
         if host not in ALLOWED_HOSTS and not host.endswith(('.test','.example','.invalid')):
             issues.append(f'{relative}: review network domain {host}')

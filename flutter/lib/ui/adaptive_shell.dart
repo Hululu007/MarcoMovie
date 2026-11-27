@@ -13,14 +13,20 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:media_kit/media_kit.dart' show Player;
 import '../core/cms_client.dart';
 import '../core/catpaw_host.dart';
 import 'package:url_launcher/url_launcher.dart';
-import '../core/emby_library.dart';
+import 'add_resource_library_sheet.dart';
 import '../core/cms_parser.dart';
+import '../core/config_center_bridge.dart';
+import '../core/ai_lab_passcode.dart';
+import '../core/ai_service.dart';
 import '../core/app_update.dart';
 import '../core/csp_bridge.dart';
 import '../core/curated_discovery.dart';
+import '../core/launch_diagnostics.dart';
+import '../core/device_quality_profiler.dart';
 import '../core/desktop_webview_js_bridge.dart';
 import '../core/download_service.dart';
 import '../core/ios_avplayer_controller.dart';
@@ -37,25 +43,40 @@ import '../core/app_log.dart';
 import '../core/search_source_notice.dart';
 import '../core/windows_tray_service.dart';
 import '../core/windows_video_quality.dart';
+import '../core/windows_window_bounds.dart';
 import '../core/wogg_source.dart';
+import '../core/work_aggregation.dart';
 import 'apple_theme.dart';
+import 'ios_ai_lab_sheets.dart';
+import 'ios_launch_splash.dart';
 import 'cloud_sync_panel.dart';
 import 'curated_discovery_section.dart';
 import 'detail_screen.dart';
+import 'ios_filter_sheet.dart';
 import 'ios_glass_popover.dart' show activeIosGlassPopoverCount;
+import 'ios_ai_settings_page.dart';
+import 'ios_download_groups_view.dart';
+import 'ios_drive_priority_sheet.dart';
+import 'ios_history_poster_wall.dart';
 import 'ios_liquid_glass.dart';
+import 'ios_press_slide_menu.dart';
 import 'ios_search_page.dart';
 import 'ios_settings.dart';
 import 'ios_update_sheet.dart';
+import 'windows_ai_lab_panel.dart';
+import 'windows_update_notice.dart';
+import 'windows_update_sheet.dart';
 import 'live_station_badge.dart';
-import 'macos_official_notice.dart';
 import 'macos_update_sheet.dart';
+import 'media_folder_browser_page.dart';
 import 'motion/aurora_background.dart';
 import 'motion/ios27_springs.dart';
 import 'motion/player_enter_transition.dart';
 import 'netdisk_sheet.dart';
+import 'official_channel_notice.dart';
 import 'onboarding/onboarding_prefs.dart';
 import 'onboarding/onboarding_screen.dart';
+import 'player/ios_player_toolbar_sheet.dart';
 import 'player_screen.dart';
 import 'poster_expand_route.dart';
 import 'poster_image.dart';
@@ -64,6 +85,379 @@ import 'source_verification_dialog.dart';
 import 'spider_extensions_panel.dart';
 import 'windows_appearance.dart';
 part 'windows_shell.dart';
+/// Immutable per-task privacy & grouping identity resolved once per refresh by
+/// [OfflineDownloadsResolver].
+class OfflineTaskResolution {
+  final CmsSite playbackSite;
+  final CmsSite? canonicalSite;
+  final bool isIntrinsicPrivate;
+  final String groupDomainKey;
+
+  const OfflineTaskResolution({
+    required this.playbackSite,
+    required this.canonicalSite,
+    required this.isIntrinsicPrivate,
+    required this.groupDomainKey,
+  });
+}
+
+/// Shared per-refresh source index and per-task resolution cache for offline
+/// downloads filtering, grouping, cover privacy checks, and playback queues.
+///
+/// Builds key/subscription indices in a single pass (`O(sites)`) and caches
+/// each [DownloadTask]'s [OfflineTaskResolution] for the duration of the
+/// refresh so filtering + grouping + row rendering never rescans all sites per
+/// task (`O(sites + tasks)` instead of `O(tasks * sites)`).
+class OfflineDownloadsResolver {
+  final bool privacySessionUnlocked;
+  final Map<String, List<SubscriptionEntry>> _subsById;
+  final Map<String, List<CmsSite>> _sitesByKey;
+  final Set<String> _subIdsWithSites;
+  final Map<DownloadTask, OfflineTaskResolution> _cache =
+      Map<DownloadTask, OfflineTaskResolution>.identity();
+  int _siteReadCount;
+
+  OfflineDownloadsResolver._({
+    required this.privacySessionUnlocked,
+    required Map<String, List<SubscriptionEntry>> subsById,
+    required Map<String, List<CmsSite>> sitesByKey,
+    required Set<String> subIdsWithSites,
+    required int initialSiteReads,
+  })  : _subsById = subsById,
+        _sitesByKey = sitesByKey,
+        _subIdsWithSites = subIdsWithSites,
+        _siteReadCount = initialSiteReads;
+
+  /// Total site inspections performed during index construction and per-task
+  /// candidate lookup.
+  int get siteReadCount => _siteReadCount;
+
+  factory OfflineDownloadsResolver.build({
+    CmsConfig? currentConfig,
+    StorageService? storage,
+    Iterable<SubscriptionEntry>? subscriptions,
+    Iterable<CmsSite>? allKnownSites,
+    required bool privacySessionUnlocked,
+  }) {
+    final effectiveSubs = subscriptions?.toList(growable: false) ??
+        storage?.getSubscriptions() ??
+        const <SubscriptionEntry>[];
+    final subsById = <String, List<SubscriptionEntry>>{};
+    for (final s in effectiveSubs) {
+      final id = s.id.trim();
+      if (id.isEmpty) continue;
+      subsById.putIfAbsent(id, () => <SubscriptionEntry>[]).add(s);
+    }
+
+    final knownSites = allKnownSites?.toList(growable: false) ??
+        storage?.loadAllKnownSitesForOfflinePrivacy() ??
+        const <CmsSite>[];
+    final sitesByKey = <String, List<CmsSite>>{};
+    final subIdsWithSites = <String>{};
+    final seenCandidateSigs = <String>{};
+    var reads = 0;
+
+    void indexCandidate(CmsSite s) {
+      reads++;
+      final subId = s.subscriptionId.trim();
+      final normApi = AdaptiveShell._normalizeOfflineSiteApi(s.api);
+      final normSourceApi = AdaptiveShell._normalizeOfflineSiteApi(s.sourceApi);
+      final sig =
+          '$subId|${s.key}|${s.sourceKey}|$normApi|$normSourceApi|${s.type}|${s.isEffectivelyPrivate}|${s.group}';
+      if (!seenCandidateSigs.add(sig)) return;
+      if (subId.isNotEmpty) {
+        subIdsWithSites.add(subId);
+      }
+      if (s.key.isNotEmpty) {
+        sitesByKey.putIfAbsent(s.key, () => <CmsSite>[]).add(s);
+      }
+      if (s.sourceKey.isNotEmpty && s.sourceKey != s.key) {
+        sitesByKey.putIfAbsent(s.sourceKey, () => <CmsSite>[]).add(s);
+      }
+    }
+
+    if (currentConfig != null) {
+      for (final s in currentConfig.sites) {
+        indexCandidate(s);
+      }
+    }
+    for (final s in knownSites) {
+      indexCandidate(s);
+    }
+
+    return OfflineDownloadsResolver._(
+      privacySessionUnlocked: privacySessionUnlocked,
+      subsById: subsById,
+      sitesByKey: sitesByKey,
+      subIdsWithSites: subIdsWithSites,
+      initialSiteReads: reads,
+    );
+  }
+
+  OfflineTaskResolution resolve(DownloadTask task) {
+    final cached = _cache[task];
+    if (cached != null) return cached;
+
+    final stored = task.sourceSite;
+    final taskEffectiveApi = AdaptiveShell._normalizeOfflineSiteApi(
+      (stored != null && stored.api.trim().isNotEmpty)
+          ? stored.api
+          : task.siteApi,
+    );
+    final taskOriginalApi = AdaptiveShell._normalizeOfflineSiteApi(
+      (stored != null && stored.sourceApi.trim().isNotEmpty)
+          ? stored.sourceApi
+          : taskEffectiveApi,
+    );
+    final rawTaskApi = AdaptiveShell._normalizeOfflineSiteApi(task.siteApi);
+    final taskApiSet = <String>{
+      if (taskEffectiveApi.isNotEmpty) taskEffectiveApi,
+      if (taskOriginalApi.isNotEmpty) taskOriginalApi,
+      if (rawTaskApi.isNotEmpty) rawTaskApi,
+    };
+    final taskType = stored?.type ?? task.siteType;
+    final taskSubId = (stored?.subscriptionId ?? '').trim();
+    final taskHasApiOverride = stored != null &&
+        stored.originalApi != null &&
+        AdaptiveShell._normalizeOfflineSiteApi(stored.originalApi!).isNotEmpty &&
+        AdaptiveShell._normalizeOfflineSiteApi(stored.originalApi!) !=
+            AdaptiveShell._normalizeOfflineSiteApi(stored.api);
+
+    final matchingSubs = taskSubId.isEmpty
+        ? const <SubscriptionEntry>[]
+        : (_subsById[taskSubId] ?? const <SubscriptionEntry>[]);
+    final subConfirmedPrivate =
+        matchingSubs.any((s) => s.isEffectivelyPrivate);
+    final subConfirmedPublic = matchingSubs.isNotEmpty &&
+        matchingSubs.every((s) => !s.isEffectivelyPrivate);
+
+    final keySet = <String>{
+      task.siteKey,
+      if (stored != null) stored.key,
+      if (stored != null && stored.sourceKey.isNotEmpty) stored.sourceKey,
+    }..removeWhere((e) => e.isEmpty);
+
+    final keyMatches = <CmsSite>[];
+    final seenSites = Set<CmsSite>.identity();
+    for (final key in keySet) {
+      final bucket = _sitesByKey[key];
+      if (bucket == null) continue;
+      for (final s in bucket) {
+        _siteReadCount++;
+        if (seenSites.add(s)) {
+          keyMatches.add(s);
+        }
+      }
+    }
+
+    Set<String> siteApiSet(CmsSite s) => <String>{
+          AdaptiveShell._normalizeOfflineSiteApi(s.api),
+          AdaptiveShell._normalizeOfflineSiteApi(s.sourceApi),
+        }..removeWhere((e) => e.isEmpty);
+
+    bool hasApiOverride(CmsSite s) {
+      if (s.originalApi == null) return false;
+      final orig = AdaptiveShell._normalizeOfflineSiteApi(s.originalApi!);
+      final cur = AdaptiveShell._normalizeOfflineSiteApi(s.api);
+      return orig.isNotEmpty && orig != cur;
+    }
+
+    bool matchesApiAndType(CmsSite s) {
+      final sApis = siteApiSet(s);
+      if (!sApis.any(taskApiSet.contains)) return false;
+      if (taskType < 0 || s.type == taskType) return true;
+      // SiteOverride.applyTo may alter `s.type` when overriding `api`; match
+      // via the immutable original `sourceApi` when an API override is active
+      // on either the live site or the stored snapshot.
+      if (hasApiOverride(s) || taskHasApiOverride) {
+        final origNorm = AdaptiveShell._normalizeOfflineSiteApi(s.sourceApi);
+        if (origNorm.isNotEmpty && taskApiSet.contains(origNorm)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    List<CmsSite> narrowed = keyMatches;
+    if (narrowed.isNotEmpty && taskSubId.isNotEmpty) {
+      final subMatches = narrowed
+          .where((s) => s.subscriptionId.trim() == taskSubId)
+          .toList();
+      if (subMatches.isNotEmpty) {
+        narrowed = subMatches;
+      } else if (matchingSubs.isNotEmpty) {
+        narrowed = const <CmsSite>[];
+      } else if (taskApiSet.isNotEmpty) {
+        narrowed = narrowed
+            .where((s) => s.subscriptionId.trim().isEmpty)
+            .toList();
+      } else {
+        narrowed = const <CmsSite>[];
+      }
+    }
+    final preApiNarrowed = narrowed;
+    if (narrowed.isNotEmpty && taskApiSet.isNotEmpty) {
+      narrowed = narrowed.where(matchesApiAndType).toList();
+    } else if (narrowed.isNotEmpty && taskType >= 0) {
+      narrowed = narrowed.where((s) => s.type == taskType).toList();
+    }
+
+    final anyPrivateMatch = narrowed.any((s) => s.isEffectivelyPrivate);
+    final distinctOrigins = <String>{
+      for (final s in narrowed)
+        '${s.type}|${AdaptiveShell._normalizeOfflineSiteApi(s.sourceApi)}|${AdaptiveShell._normalizeOfflineSiteApi(s.api)}|${s.subscriptionId.trim()}|${s.isEffectivelyPrivate}',
+    };
+    final hasConflictingMatches = distinctOrigins.length > 1;
+    final hasPreApiConflict = narrowed.isEmpty && preApiNarrowed.isNotEmpty;
+
+    final bool identityConfirmedPublic;
+    if (stored != null) {
+      if (stored.isEffectivelyPrivate ||
+          subConfirmedPrivate ||
+          anyPrivateMatch ||
+          hasConflictingMatches ||
+          hasPreApiConflict) {
+        identityConfirmedPublic = false;
+      } else if (narrowed.isNotEmpty) {
+        identityConfirmedPublic = true;
+      } else {
+        final subHasNoParsedSites = subConfirmedPublic &&
+            matchingSubs.every((s) => s.rawContent.trim().isEmpty) &&
+            !_subIdsWithSites.contains(taskSubId);
+        identityConfirmedPublic = subHasNoParsedSites;
+      }
+    } else {
+      final legacyApiCorroborated = taskApiSet.isNotEmpty ||
+          (keyMatches.length == 1 &&
+              narrowed.length == 1 &&
+              siteApiSet(narrowed.first).isEmpty &&
+              (taskType < 0 || narrowed.first.type == taskType));
+      identityConfirmedPublic = !subConfirmedPrivate &&
+          narrowed.isNotEmpty &&
+          !anyPrivateMatch &&
+          !hasConflictingMatches &&
+          legacyApiCorroborated;
+    }
+
+    final isIntrinsicPrivate = !identityConfirmedPublic;
+    final effectivePrivate = privacySessionUnlocked || isIntrinsicPrivate;
+    final canonicalSite =
+        (narrowed.isNotEmpty && !hasConflictingMatches) ? narrowed.first : null;
+    final base = stored ?? canonicalSite;
+    final playbackSite = base != null
+        ? base.copyWith(isPrivate: effectivePrivate)
+        : CmsSite(
+            key: task.siteKey,
+            name: task.siteName,
+            type: task.siteType,
+            api: task.siteApi,
+            isPrivate: effectivePrivate,
+          );
+
+    // Anchor group identity on the confirmed original source (`sourceKey` +
+    // `sourceApi` / `originalApi` + `subscriptionId` + canonical `type`) so
+    // episodes downloaded before and after an API override stay in one group
+    // and one playback queue, while distinct subscriptions, siteTypes, and URL
+    // paths (such as `/media` vs `/media/`) remain strictly isolated.
+    final originSite = canonicalSite ?? stored;
+    final originSubId =
+        (originSite != null && originSite.subscriptionId.trim().isNotEmpty)
+            ? originSite.subscriptionId.trim()
+            : (stored?.subscriptionId ?? '').trim();
+    final originSourceKey =
+        (originSite != null && originSite.sourceKey.isNotEmpty)
+            ? originSite.sourceKey
+            : task.siteKey;
+    final rawOriginApi =
+        (originSite != null && originSite.sourceApi.trim().isNotEmpty)
+            ? originSite.sourceApi
+            : ((originSite != null && originSite.api.trim().isNotEmpty)
+                ? originSite.api
+                : task.siteApi);
+    final normOriginApi = AdaptiveShell._normalizeOfflineSiteApi(rawOriginApi);
+    final originType = originSite?.type ?? task.siteType;
+    final privacyDomain = isIntrinsicPrivate ? 'priv' : 'pub';
+
+    final String groupDomainKey;
+    if (task.sourceSite == null &&
+        normOriginApi.isEmpty &&
+        originSubId.isEmpty) {
+      groupDomainKey = 'unconfirmed\u0001${task.id}';
+    } else {
+      final originSig =
+          '$privacyDomain\u0001$originSubId\u0001$originType\u0001$normOriginApi\u0001$originSourceKey';
+      final videoId = task.videoId.trim();
+      if (videoId.isNotEmpty) {
+        groupDomainKey = 'v\u0001$originSig\u0001$videoId';
+      } else {
+        final title = task.title.trim();
+        groupDomainKey =
+            title.isNotEmpty ? 't\u0001$originSig\u0001$title' : 'u\u0001${task.id}';
+      }
+    }
+
+    final result = OfflineTaskResolution(
+      playbackSite: playbackSite,
+      canonicalSite: canonicalSite,
+      isIntrinsicPrivate: isIntrinsicPrivate,
+      groupDomainKey: groupDomainKey,
+    );
+    _cache[task] = result;
+    return result;
+  }
+
+  bool isPrivate(DownloadTask task) =>
+      resolve(task).playbackSite.isEffectivelyPrivate;
+
+  String groupKeyOf(DownloadTask task) => resolve(task).groupDomainKey;
+
+  List<DownloadTask> filterVisible(Iterable<DownloadTask> tasks) {
+    if (privacySessionUnlocked) {
+      return List<DownloadTask>.of(tasks);
+    }
+    return <DownloadTask>[
+      for (final t in tasks)
+        if (!isPrivate(t)) t,
+    ];
+  }
+
+  ({CmsSite site, List<DownloadTask> queue, int startIndex}) buildPlaybackQueue(
+    DownloadTask tapped,
+    Iterable<DownloadTask> sameGroupCompleted,
+  ) {
+    final tappedRes = resolve(tapped);
+    final tappedSite = tappedRes.playbackSite;
+    if (!privacySessionUnlocked && tappedSite.isEffectivelyPrivate) {
+      return (site: tappedSite, queue: const <DownloadTask>[], startIndex: -1);
+    }
+    final tappedGroupKey = tappedRes.groupDomainKey;
+
+    final filtered = <DownloadTask>[];
+    for (final item in sameGroupCompleted) {
+      if (item.filePath.isEmpty || item.lineName != tapped.lineName) continue;
+      final itemRes = resolve(item);
+      if (!tappedSite.isEffectivelyPrivate) {
+        if (itemRes.playbackSite.isEffectivelyPrivate) continue;
+      } else if (!privacySessionUnlocked) {
+        continue;
+      }
+      if (itemRes.groupDomainKey != tappedGroupKey) continue;
+      filtered.add(item);
+    }
+    filtered.sort((a, b) {
+      final epCmp = a.episodeIndex.compareTo(b.episodeIndex);
+      if (epCmp != 0) return epCmp;
+      return a.createdAt.compareTo(b.createdAt);
+    });
+    final start = filtered.indexWhere((x) => x.id == tapped.id);
+    return (
+      site: tappedSite,
+      queue: filtered,
+      startIndex: start,
+    );
+  }
+}
+
 /// Apple HIG adaptive shell:
 /// - macOS / iPadOS / Desktop (`width >= 700`): Translucent sidebar with traffic-light inset & source card
 /// - iOS (`width < 700`): Frosted-glass top navigation bar and translucent Cupertino bottom tab bar
@@ -88,6 +482,10 @@ class AdaptiveShell extends StatefulWidget {
   final Future<bool> Function(Uri uri)? onOpenExternalUrlForTest;
   @visibleForTesting
   final Future<void> Function(String text)? onCopyTextForTest;
+  @visibleForTesting
+  final Player Function({required bool embedded})? debugPlayerFactoryForTest;
+  @visibleForTesting
+  final Widget? debugVideoSurfaceForTest;
 
   const AdaptiveShell({
     super.key,
@@ -102,10 +500,198 @@ class AdaptiveShell extends StatefulWidget {
     this.windowCloseTotalBudgetForTest,
     this.onOpenExternalUrlForTest,
     this.onCopyTextForTest,
+    this.debugPlayerFactoryForTest,
+    this.debugVideoSurfaceForTest,
   });
 
   static const Duration defaultWindowCloseBudget =
       Duration(milliseconds: 1400);
+
+  /// Normalizes only the case-insensitive URI parts (scheme, host, default
+  /// HTTP/HTTPS port, and bare root `/`) while preserving exact case and
+  /// non-root trailing slashes in path, query, and fragment so distinct
+  /// endpoints such as `/media` vs `/media/` or case-differing paths remain
+  /// completely separate.
+  static String _normalizeOfflineSiteApi(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return '';
+    final parsed = Uri.tryParse(trimmed);
+    if (parsed != null && parsed.hasScheme && parsed.hasAuthority) {
+      final scheme = parsed.scheme.toLowerCase();
+      final host = parsed.host.toLowerCase();
+      final isDefaultPort = !parsed.hasPort ||
+          (scheme == 'http' && parsed.port == 80) ||
+          (scheme == 'https' && parsed.port == 443);
+      final authority = parsed.userInfo.isNotEmpty
+          ? '${parsed.userInfo}@$host${isDefaultPort ? '' : ':${parsed.port}'}'
+          : '$host${isDefaultPort ? '' : ':${parsed.port}'}';
+      final path = parsed.path == '/' ? '' : parsed.path;
+      final query = parsed.hasQuery ? '?${parsed.query}' : '';
+      final fragment = parsed.hasFragment ? '#${parsed.fragment}' : '';
+      return '$scheme://$authority$path$query$fragment';
+    }
+    return trimmed == '/' ? '' : trimmed;
+  }
+
+  /// Builds a shared per-refresh index and per-task resolution cache so
+  /// filtering, grouping, privacy checks, and playback queue construction over
+  /// large task/site lists run in linear time (`O(sites + tasks)`) while always
+  /// reflecting the latest subscription/privacy/override state.
+  @visibleForTesting
+  static OfflineDownloadsResolver createOfflineDownloadsResolver({
+    CmsConfig? currentConfig,
+    StorageService? storage,
+    Iterable<SubscriptionEntry>? subscriptions,
+    Iterable<CmsSite>? allKnownSites,
+    required bool privacySessionUnlocked,
+  }) =>
+      OfflineDownloadsResolver.build(
+        currentConfig: currentConfig,
+        storage: storage,
+        subscriptions: subscriptions,
+        allKnownSites: allKnownSites,
+        privacySessionUnlocked: privacySessionUnlocked,
+      );
+
+  /// Records the site-inspection count of the most recent Downloads list
+  /// refresh in `_buildDownloadsList` for regression tests verifying linear
+  /// scaling across large task/site sets.
+  @visibleForTesting
+  static int debugLastDownloadsRefreshSiteReads = 0;
+
+  /// Reconstructs the playback [CmsSite] for a single offline [DownloadTask],
+  /// verifying saved `sourceSite`, original source identity (`sourceKey` /
+  /// `sourceApi`), `siteApi`, `siteType`, and `subscriptionId` against all
+  /// matching candidates in [currentConfig] and ALL persisted subscriptions
+  /// (including disabled subscriptions and overridden/hidden sites via
+  /// [storage] / [subscriptions] / [allKnownSites]). Never re-trusts a stale
+  /// `sourceSite.isPrivate == false` when no current matching public site can
+  /// be confirmed; fails closed (`isPrivate: true`) on missing, disabled-private,
+  /// ambiguous, or conflicting identity.
+  @visibleForTesting
+  static CmsSite resolveOfflinePlaybackSite(
+    DownloadTask task, {
+    CmsConfig? currentConfig,
+    StorageService? storage,
+    Iterable<SubscriptionEntry>? subscriptions,
+    Iterable<CmsSite>? allKnownSites,
+    bool privacySessionUnlocked = false,
+    OfflineDownloadsResolver? resolver,
+  }) {
+    final effectiveResolver = resolver ??
+        OfflineDownloadsResolver.build(
+          currentConfig: currentConfig,
+          storage: storage,
+          subscriptions: subscriptions,
+          allKnownSites: allKnownSites,
+          privacySessionUnlocked: privacySessionUnlocked,
+        );
+    return effectiveResolver.resolve(task).playbackSite;
+  }
+
+  /// Returns whether a single offline [DownloadTask] must be treated as private
+  /// under the canonical per-item identity rules.
+  @visibleForTesting
+  static bool isOfflineTaskPrivate(
+    DownloadTask task, {
+    CmsConfig? currentConfig,
+    StorageService? storage,
+    Iterable<SubscriptionEntry>? subscriptions,
+    Iterable<CmsSite>? allKnownSites,
+    bool privacySessionUnlocked = false,
+    OfflineDownloadsResolver? resolver,
+  }) {
+    final effectiveResolver = resolver ??
+        OfflineDownloadsResolver.build(
+          currentConfig: currentConfig,
+          storage: storage,
+          subscriptions: subscriptions,
+          allKnownSites: allKnownSites,
+          privacySessionUnlocked: privacySessionUnlocked,
+        );
+    return effectiveResolver.isPrivate(task);
+  }
+
+  /// Computes a source- and privacy-domain-isolated grouping key for [task]
+  /// anchored on the confirmed canonical original source identity (`sourceKey`
+  /// and `sourceApi` / `originalApi`) so editing a site's API override never
+  /// splits episodes of the same series, while two subscriptions reusing the
+  /// same `siteKey` and `videoId`, distinct endpoints like `/media` vs
+  /// `/media/`, empty `videoId` movies with different titles, or same `videoId`
+  /// across different `siteType`s remain strictly isolated.
+  @visibleForTesting
+  static String offlineTaskGroupDomainKey(
+    DownloadTask task, {
+    CmsConfig? currentConfig,
+    StorageService? storage,
+    Iterable<SubscriptionEntry>? subscriptions,
+    Iterable<CmsSite>? allKnownSites,
+    OfflineDownloadsResolver? resolver,
+  }) {
+    final effectiveResolver = resolver ??
+        OfflineDownloadsResolver.build(
+          currentConfig: currentConfig,
+          storage: storage,
+          subscriptions: subscriptions,
+          allKnownSites: allKnownSites,
+          privacySessionUnlocked: false,
+        );
+    return effectiveResolver.groupKeyOf(task);
+  }
+
+  /// Filters the offline downloads list using the exact same per-item privacy
+  /// identity rules used by playback and episode switching, sharing a single
+  /// source index across all [tasks].
+  @visibleForTesting
+  static List<DownloadTask> filterVisibleOfflineTasks(
+    Iterable<DownloadTask> tasks, {
+    CmsConfig? currentConfig,
+    StorageService? storage,
+    Iterable<SubscriptionEntry>? subscriptions,
+    Iterable<CmsSite>? allKnownSites,
+    required bool privacySessionUnlocked,
+    OfflineDownloadsResolver? resolver,
+  }) {
+    if (privacySessionUnlocked) {
+      return List<DownloadTask>.of(tasks);
+    }
+    final effectiveResolver = resolver ??
+        OfflineDownloadsResolver.build(
+          currentConfig: currentConfig,
+          storage: storage,
+          subscriptions: subscriptions,
+          allKnownSites: allKnownSites,
+          privacySessionUnlocked: false,
+        );
+    return effectiveResolver.filterVisible(tasks);
+  }
+
+  /// Builds a privacy-safe offline playback queue for [tapped] from
+  /// [sameGroupCompleted], reusing the exact list grouping key
+  /// ([offlineTaskGroupDomainKey]) anchored on confirmed original source
+  /// identity and verifying EVERY episode individually via a shared resolver.
+  @visibleForTesting
+  static ({CmsSite site, List<DownloadTask> queue, int startIndex})
+      buildOfflinePlaybackQueue(
+    DownloadTask tapped,
+    Iterable<DownloadTask> sameGroupCompleted, {
+    CmsConfig? currentConfig,
+    StorageService? storage,
+    Iterable<SubscriptionEntry>? subscriptions,
+    Iterable<CmsSite>? allKnownSites,
+    required bool privacySessionUnlocked,
+    OfflineDownloadsResolver? resolver,
+  }) {
+    final effectiveResolver = resolver ??
+        OfflineDownloadsResolver.build(
+          currentConfig: currentConfig,
+          storage: storage,
+          subscriptions: subscriptions,
+          allKnownSites: allKnownSites,
+          privacySessionUnlocked: privacySessionUnlocked,
+        );
+    return effectiveResolver.buildPlaybackQueue(tapped, sameGroupCompleted);
+  }
 
   @visibleForTesting
   static Future<void> runWindowCloseSequence({
@@ -116,6 +702,8 @@ class AdaptiveShell extends StatefulWidget {
     required Future<void> Function() closeScripts,
     required Future<void> Function() destroyWindow,
     Future<void> Function()? hideWindow,
+    Future<void> Function()? prepareExit,
+    VoidCallback? onBeforeDestroyWindow,
     Duration totalBudget = defaultWindowCloseBudget,
   }) async {
     final sw = Stopwatch()..start();
@@ -156,6 +744,13 @@ class AdaptiveShell extends StatefulWidget {
             (_) => hideWindow(),
           );
         }
+        if (prepareExit != null) {
+          await runBounded(
+            'prepareExit',
+            const Duration(milliseconds: 900),
+            (_) => prepareExit(),
+          );
+        }
         await runBounded(
           'flushPendingHistory',
           const Duration(milliseconds: 300),
@@ -182,6 +777,11 @@ class AdaptiveShell extends StatefulWidget {
     } on Object catch (e) {
       debugPrint('AdaptiveShell: onWindowClose total budget reached: $e');
     } finally {
+      if (onBeforeDestroyWindow != null) {
+        onBeforeDestroyWindow();
+      } else if (prepareExit != null) {
+        WindowsTrayService.markNativeWindowDestroying();
+      }
       try {
         await setPreventClose(false)
             .timeout(const Duration(milliseconds: 150));
@@ -200,9 +800,10 @@ class AdaptiveShell extends StatefulWidget {
   State<AdaptiveShell> createState() => _AdaptiveShellState();
 }
 class _AdaptiveShellState extends State<AdaptiveShell>
-    with WindowListener, WidgetsBindingObserver {
+    with WindowListener, WidgetsBindingObserver, TickerProviderStateMixin {
   bool _windowListenerAttached = false;
   bool _isClosingWindow = false;
+  bool _isHidingToTray = false;
   Future<void>? _closingHistoryFlush;
   int _tabIndex = 0;
   String _windowsPage = 'home';
@@ -229,6 +830,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   bool _iosHeroPullArmed = false;
   final Map<String, Color> _iosHeroAmbientColors = {};
   final Set<String> _iosHeroAmbientPending = {};
+  final Map<int, bool> _rexShelfLightInkCache = {};
   int _currentPage = 1;
   int _pageCount = 1;
   bool _homeLoading = false;
@@ -287,37 +889,431 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   // Favorites / History segmented index
   int _librarySegment = 0;
   bool _dockCollapsed = false;
+  bool _dockStableCollapsed = false;
+  bool _homeUserDragging = false;
+  final ValueNotifier<double> _dockScrollProgress = ValueNotifier<double>(0.0);
+  final ValueNotifier<bool> _iosHomeStatusBarDark = ValueNotifier<bool>(false);
+  final ValueNotifier<double> _iosHomeTopScrimOpacity =
+      ValueNotifier<double>(0.0);
+  final ValueNotifier<double> _iosHeroOverscroll = ValueNotifier<double>(0.0);
+  final ValueNotifier<double> _rexBackdropScrollOffset =
+      ValueNotifier<double>(0.0);
+  final ValueNotifier<double> _rexCardInkScrollOffset =
+      ValueNotifier<double>(0.0);
+  double _lastIosHeroHeight = 460.0;
+  OverlayEntry? _undoHistoryOverlayEntry;
+  Timer? _undoHistoryTimer;
+  bool get _isIosNativeFlow =>
+      !kIsWeb &&
+      defaultTargetPlatform == TargetPlatform.iOS &&
+      !OhosRuntime.isOhos;
+  final ValueNotifier<bool> _useRootNativeTabChromeNotifier =
+      ValueNotifier<bool>(false);
+  final ValueNotifier<bool> _curatedDockVisibleNotifier =
+      ValueNotifier<bool>(false);
+  final ValueNotifier<int> _selectedTabIndexNotifier = ValueNotifier<int>(0);
+  late final AnimationController _dockMorphCtrl;
+  double _dockMorphFrom = 0.0;
+  double _dockMorphTo = 0.0;
+  int _dockMorphAnimToken = 0;
+  int _dockEpoch = 0;
+  IosDockOwner _dockOwner = IosDockOwner.home;
+  int _curatedRouteDepth = 0;
   bool _useRootNativeTabChrome = false;
   int _pushedRouteDepth = 0;
   bool _settingsSecondaryRouteActive = false;
   double _lastReportedDockProgress = 0.0;
   bool _lastReportedDockVisible = true;
   bool _sceneActive = true;
-  static const List<IosNativeDockItem> _iosNativeDockItems = <IosNativeDockItem>[
-    IosNativeDockItem(
-      label: '主页',
-      symbol: 'play.rectangle',
-      selectedSymbol: 'play.rectangle.fill',
-      kind: 'home',
+  static const List<(IconData, IconData, String)> _iosDockFallbackItems =
+      <(IconData, IconData, String)>[
+    (CupertinoIcons.house, CupertinoIcons.house_fill, '主页'),
+    (CupertinoIcons.tv, CupertinoIcons.tv_fill, '直播'),
+    (
+      CupertinoIcons.rectangle_stack,
+      CupertinoIcons.rectangle_stack_fill,
+      '片库',
     ),
-    IosNativeDockItem(
-      label: '直播',
-      symbol: 'dot.radiowaves.left.and.right',
-      kind: 'live',
-    ),
-    IosNativeDockItem(
-      label: '片库',
-      symbol: 'square.stack.3d.up',
-      selectedSymbol: 'square.stack.3d.up.fill',
-      kind: 'library',
-    ),
-    IosNativeDockItem(
-      label: '设置',
-      symbol: 'gearshape',
-      selectedSymbol: 'gearshape.fill',
-      kind: 'settings',
-    ),
+    (CupertinoIcons.gear_alt, CupertinoIcons.gear_alt_fill, '设置'),
   ];
+  List<IosNativeDockItem> _buildIosNativeDockItems() => <IosNativeDockItem>[
+        IosNativeDockItem(
+          label: '主页',
+          symbol: 'house',
+          selectedSymbol: 'house.fill',
+          kind: 'home',
+          menuItems: _buildDockTabNativeMenuItems(0),
+        ),
+        IosNativeDockItem(
+          label: '直播',
+          symbol: 'play.tv',
+          selectedSymbol: 'play.tv.fill',
+          kind: 'live',
+          menuItems: _buildDockTabNativeMenuItems(1),
+        ),
+        IosNativeDockItem(
+          label: '片库',
+          symbol: 'rectangle.stack',
+          selectedSymbol: 'rectangle.stack.fill',
+          kind: 'library',
+          menuItems: _buildDockTabNativeMenuItems(2),
+        ),
+        IosNativeDockItem(
+          label: '设置',
+          symbol: 'gearshape',
+          selectedSymbol: 'gearshape.fill',
+          kind: 'settings',
+          menuItems: _buildDockTabNativeMenuItems(3),
+        ),
+      ];
+  List<IosNativeMenuItem> _buildDockTabNativeMenuItems(int tabIndex) {
+    final latestWatch =
+        (!_privateSessionUnlocked && _cachedWatchHistory.isNotEmpty)
+            ? _cachedWatchHistory.first
+            : null;
+    return switch (tabIndex) {
+      0 => <IosNativeMenuItem>[
+          const IosNativeMenuItem(
+            id: 'search',
+            title: '搜索影片',
+            symbol: 'magnifyingglass',
+            section: 0,
+          ),
+          const IosNativeMenuItem(
+            id: 'switch_source',
+            title: '切换片源',
+            symbol: 'arrow.triangle.2.circlepath',
+            section: 0,
+          ),
+          const IosNativeMenuItem(
+            id: 'refresh_home',
+            title: '刷新主页',
+            symbol: 'arrow.clockwise',
+            section: 1,
+          ),
+          const IosNativeMenuItem(
+            id: 'top',
+            title: '回到顶部',
+            symbol: 'arrow.up.to.line',
+            section: 1,
+          ),
+        ],
+      1 => <IosNativeMenuItem>[
+          const IosNativeMenuItem(
+            id: 'import_live',
+            title: '导入直播源',
+            symbol: 'plus.circle',
+            section: 0,
+          ),
+          const IosNativeMenuItem(
+            id: 'manage_live',
+            title: '管理直播源',
+            symbol: 'antenna.radiowaves.left.and.right',
+            section: 0,
+          ),
+          const IosNativeMenuItem(
+            id: 'refresh_live',
+            title: '刷新频道列表',
+            symbol: 'arrow.clockwise',
+            section: 1,
+          ),
+          IosNativeMenuItem(
+            id: 'toggle_live_unreachable',
+            title: '隐藏失效频道',
+            symbol: _liveHideUnreachable ? 'eye.slash.fill' : 'eye.slash',
+            checked: _liveHideUnreachable,
+            section: 1,
+          ),
+        ],
+      2 => <IosNativeMenuItem>[
+          if (latestWatch != null)
+            IosNativeMenuItem(
+              id: 'resume_latest',
+              title: '继续上次播放',
+              subtitle: latestWatch.title,
+              symbol: 'play.fill',
+              section: 0,
+            ),
+          const IosNativeMenuItem(
+            id: 'favorites',
+            title: '收藏',
+            symbol: 'heart.fill',
+            section: 1,
+          ),
+          if (!_privateSessionUnlocked)
+            const IosNativeMenuItem(
+              id: 'history',
+              title: '观看历史',
+              symbol: 'clock.fill',
+              section: 1,
+            ),
+          const IosNativeMenuItem(
+            id: 'downloads',
+            title: '离线下载',
+            symbol: 'arrow.down.circle.fill',
+            section: 1,
+          ),
+          const IosNativeMenuItem(
+            id: 'lib_add_library',
+            title: '添加资源库',
+            symbol: 'plus.circle',
+            section: 2,
+          ),
+        ],
+      3 => <IosNativeMenuItem>[
+          const IosNativeMenuItem(
+            id: 'add_library',
+            title: '添加资源库',
+            symbol: 'plus.circle',
+            section: 0,
+          ),
+          const IosNativeMenuItem(
+            id: 'manage_subscriptions',
+            title: '管理订阅',
+            symbol: 'square.stack.3d.up',
+            section: 0,
+          ),
+          const IosNativeMenuItem(
+            id: 'netdisk_accounts',
+            title: '网盘账号',
+            symbol: 'cloud.fill',
+            section: 0,
+          ),
+          if (!_privateSessionUnlocked)
+            const IosNativeMenuItem(
+              id: 'cloud_sync',
+              title: '多端同步',
+              symbol: 'icloud.and.arrow.up',
+              section: 1,
+            ),
+          if (!_privateSessionUnlocked &&
+              isIosAiFeatureSupported &&
+              AiService.instance.isLabUnlocked)
+            const IosNativeMenuItem(
+              id: 'ai_assistant',
+              title: 'AI 观影实验室',
+              symbol: 'sparkles',
+              section: 1,
+            ),
+        ],
+      _ => const <IosNativeMenuItem>[],
+    };
+  }
+
+  void _syncNativeDockMenuItemsIfMounted() {
+    if (!mounted || !_useRootNativeTabChrome) return;
+    unawaited(IosLiquidGlassBridge.updateRootTabItems(_buildIosNativeDockItems()));
+  }
+
+  List<IosSlideMenuAction> _buildDockTabSlideMenuActions(int tabIndex) =>
+      iosSlideActionsFromNativeMenu(_buildDockTabNativeMenuItems(tabIndex));
+
+  /// Root tab that owns a Dock long-press menu action. Every menu-triggered
+  /// page switch first moves the Dock selection to this tab so the native and
+  /// Flutter Dock highlights always follow where the user actually lands.
+  static int? _dockMenuActionOwnerTab(String actionId) => switch (actionId) {
+        'top' || 'search' || 'switch_source' || 'refresh_home' => 0,
+        'import_live' ||
+        'manage_live' ||
+        'refresh_live' ||
+        'toggle_live_unreachable' =>
+          1,
+        'resume_latest' ||
+        'favorites' ||
+        'history' ||
+        'downloads' ||
+        'lib_add_library' =>
+          2,
+        'add_library' ||
+        'manage_subscriptions' ||
+        'netdisk_accounts' ||
+        'cloud_sync' ||
+        'ai_assistant' =>
+          3,
+        _ => null,
+      };
+
+  void _handleDockTabMenuAction(int tabIndex, String actionId) {
+    if (!mounted) return;
+    if ((actionId == 'history' || actionId == 'resume_latest') &&
+        _privateSessionUnlocked) {
+      _showAppleNotice('隐私空间已开启', '隐私空间不记录也不展示普通观看历史。');
+      return;
+    }
+    final ownerTab = _dockMenuActionOwnerTab(actionId);
+    if (ownerTab == null) return;
+    if (actionId == 'favorites') {
+      _librarySegment = 0;
+    } else if (actionId == 'history') {
+      _librarySegment = 1;
+    } else if (actionId == 'downloads') {
+      _librarySegment = 2;
+    }
+    // Canonical selection path: pops Curated, updates `_tabIndex` /
+    // `_selectedTabIndexNotifier`, pushes `setRootTabSelectedIndex` with a
+    // fresh monotonic epoch and reconciles Dock ownership.
+    _handleRootNativeTabSelected(ownerTab);
+    switch (actionId) {
+      case 'top':
+        _scrollHomeToTop();
+        return;
+      case 'search':
+        _showGlobalSearchSheet();
+        return;
+      case 'switch_source':
+        _showSitePickerDialog();
+        return;
+      case 'refresh_home':
+        _loadSiteHome(bypassSnapshot: true);
+        return;
+      case 'import_live':
+        unawaited(_showStandaloneLiveImportSheet());
+        return;
+      case 'manage_live':
+        _showLiveSourceManagerSheet();
+        return;
+      case 'refresh_live':
+        if (_visibleLives.isNotEmpty) {
+          final idx = _selectedLiveSource.clamp(0, _visibleLives.length - 1);
+          unawaited(_loadLivePlaylist(idx, forceRefresh: true));
+        }
+        return;
+      case 'toggle_live_unreachable':
+        final next = !_liveHideUnreachable;
+        setState(() => _liveHideUnreachable = next);
+        unawaited(widget.storage.setLiveHideUnreachable(next));
+        _syncNativeDockMenuItemsIfMounted();
+        return;
+      case 'resume_latest':
+        if (_cachedWatchHistory.isNotEmpty) {
+          final latest = _cachedWatchHistory.first;
+          _openSyncedMediaEntry(
+            siteKey: latest.site,
+            videoId: latest.id,
+            title: latest.title,
+            poster: latest.poster,
+            remarks: latest.episode,
+          );
+        }
+        return;
+      case 'lib_add_library':
+        unawaited(_showImportConfigDialog(iosBackLabel: '片库'));
+        return;
+      case 'add_library':
+        unawaited(_showImportConfigDialog(iosBackLabel: '设置'));
+        return;
+      case 'manage_subscriptions':
+        unawaited(_showSubscriptionManagerSheet(iosBackLabel: '设置'));
+        return;
+      case 'netdisk_accounts':
+        _openConfigCenterPage(initialFocus: 'netdisk', iosBackLabel: '设置');
+        return;
+      case 'cloud_sync':
+        unawaited(_openCloudSyncCenter(iosBackLabel: '设置'));
+        return;
+      case 'ai_assistant':
+        if (_privateSessionUnlocked) return;
+        unawaited(
+          _trackSecondaryRoute<void>(
+            () => pushIosAiSettingsPage(context, backLabel: '设置'),
+          ),
+        );
+        return;
+    }
+  }
+
+  void _openConfigCenterPage({
+    String initialFocus = 'overview',
+    String iosBackLabel = '主页',
+  }) {
+    final allSites = _config?.publicSupportedSites ?? const <CmsSite>[];
+    unawaited(
+      _trackSecondaryRoute<void>(
+        () => showNetdiskAccountSheet(
+          context,
+          widget.storage,
+          iosBackLabel: iosBackLabel,
+          initialFocus: initialFocus,
+          sites: allSites,
+          activeGroup: _activeSite?.group ?? '',
+          onOpenCatPawSettings:
+              allSites.any((s) => s.isCatPaw) ? _showCatPawSettings : null,
+          onOpenAddLibrary: () => _showImportConfigDialog(iosBackLabel: '配置中心'),
+          onOpenSubscriptionManager: () =>
+              _showSubscriptionManagerSheet(iosBackLabel: '配置中心'),
+          onOpenLibrarySubscription: (sub) {
+            final match = _visibleSupportedSites.where(
+              (s) =>
+                  s.subscriptionId == sub.id ||
+                  s.api.trim() == sub.url.trim() ||
+                  s.name.trim() == sub.name.trim(),
+            );
+            if (match.isNotEmpty) {
+              _selectSiteDirect(match.first);
+            }
+          },
+          onRemoveLibrarySubscription: (sub) async {
+            await widget.storage.removeSubscription(sub.id);
+            if (mounted) _reloadSavedConfig();
+          },
+          onChanged: () {
+            if (mounted) setState(() {});
+          },
+        ),
+      ),
+    );
+  }
+
+  List<IosNativeMenuItem> _buildHomeConfigCenterMenuItems() {
+    return const <IosNativeMenuItem>[
+      IosNativeMenuItem(
+        id: 'add_library',
+        title: '添加资源库',
+        symbol: 'plus.circle',
+        section: 0,
+      ),
+      IosNativeMenuItem(
+        id: 'manage_subscriptions',
+        title: '管理订阅',
+        symbol: 'square.stack.3d.up',
+        section: 0,
+      ),
+      IosNativeMenuItem(
+        id: 'netdisk_accounts',
+        title: '网盘账号',
+        symbol: 'cloud.fill',
+        section: 0,
+      ),
+    ];
+  }
+
+  void _onHomeConfigCenterMenuSelected(String id) {
+    if (!mounted) return;
+    switch (id) {
+      case 'add_library':
+        unawaited(_showImportConfigDialog(iosBackLabel: '主页'));
+        return;
+      case 'manage_subscriptions':
+        unawaited(_showSubscriptionManagerSheet(iosBackLabel: '主页'));
+        return;
+      case 'netdisk_accounts':
+        _openConfigCenterPage(initialFocus: 'netdisk', iosBackLabel: '主页');
+        return;
+    }
+  }
+
+  IosCuratedDockHost get _curatedDockHost => IosCuratedDockHost(
+        progress: _dockScrollProgress,
+        useNativeRootChrome: _useRootNativeTabChromeNotifier,
+        visibleOnCurated: _curatedDockVisibleNotifier,
+        selectedTabIndex: _selectedTabIndexNotifier,
+        items: _iosDockFallbackItems,
+        onSelectTab: _handleRootNativeTabSelected,
+        onSearch: _showGlobalSearchSheet,
+        onScrollToTop: _scrollHomeToTop,
+        onCuratedEnter: _onCuratedRouteEntered,
+        onCuratedExit: _onCuratedRouteExited,
+      );
   // Scroll controllers (inline shell views only; sheets own their own)
   final ScrollController _homeScrollController = ScrollController();
   final ScrollController _windowsDiscoverScrollController = ScrollController();
@@ -332,9 +1328,28 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   final Set<String> _expandedSettings = <String>{};
   List<WatchHistoryEntry> _cachedWatchHistory = const [];
   bool _onboardingRouteOpen = false;
+  bool _officialNoticeOpen = false;
+  bool _copyingAuthorSocialName = false;
+  int _authorSocialCopyToken = 0;
+  BuildContext? _authorSocialOriginContext;
+  ModalRoute<dynamic>? _authorSocialOriginRoute;
+  int? _authorSocialOriginTabIndex;
+  bool _openingOfficialCommunityLink = false;
+  int _officialCommunityActionToken = 0;
+  BuildContext? _officialCommunityOriginContext;
+  ModalRoute<dynamic>? _officialCommunityOriginRoute;
+  int? _officialCommunityOriginTabIndex;
+  bool _openingOfficialDonateLink = false;
+  int _officialDonateActionToken = 0;
+  BuildContext? _officialDonateOriginContext;
+  ModalRoute<dynamic>? _officialDonateOriginRoute;
+  int? _officialDonateOriginTabIndex;
   bool _startupOnboardingChecked = false;
-  bool _startupOfficialNoticeChecked = false;
-  bool _officialNoticeDialogOpen = false;
+  bool _windowsPostUpdateChecked = false;
+  bool get _isWindowsPostUpdateNoticeHost =>
+      !kIsWeb &&
+      !OhosRuntime.isOhos &&
+      defaultTargetPlatform == TargetPlatform.windows;
   bool get _isMacOS =>
       !kIsWeb &&
       defaultTargetPlatform == TargetPlatform.macOS &&
@@ -365,6 +1380,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _dockMorphCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 240),
+    )..addListener(_onDockMorphTick);
     _homeScrollController.addListener(_onHomeScroll);
     PosterLoader.cacheRevision.addListener(_onPosterCacheUpdated);
     _cachedWatchHistory = widget.storage.getWatchHistory();
@@ -387,7 +1406,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         );
       }
     }
-    unawaited(_loadInstalledVersion());
+    unawaited(CuratedDiscoveryService.warmFromDisk());
+    _installedVersionFuture = _loadInstalledVersion();
+    if (!kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        !OhosRuntime.isOhos &&
+        !Platform.environment.containsKey('FLUTTER_TEST') &&
+        widget.storage.autoHardwareQualityEnabled &&
+        widget.storage.lastHardwareProfileSummary.isEmpty) {
+      unawaited(DeviceQualityProfiler.detectAndApply(widget.storage));
+    }
     GlassworkBackdrop.reduceTransparency.value =
         widget.storage.glassBlurLevel == 'solid' ||
             widget.storage.glassBlurStrength <= 0.02;
@@ -419,8 +1447,23 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     IosLiquidGlassBridge.activeSheetNotifier.addListener(
       _onRootOverlayVisibilityChanged,
     );
+    IosLiquidGlassBridge.rootTabSuppressionCount.addListener(
+      _onRootOverlayVisibilityChanged,
+    );
+    IosRootTabNavigatorObserver.secondaryRouteDepth.addListener(
+      _onRootOverlayVisibilityChanged,
+    );
+    IosRootTabNavigatorObserver.topRouteIsCurated.addListener(
+      _onRootOverlayVisibilityChanged,
+    );
     activeAppleModalSheetCount.addListener(_onRootOverlayVisibilityChanged);
     activeIosGlassPopoverCount.addListener(_onRootOverlayVisibilityChanged);
+    if (_isWindowsPostUpdateNoticeHost) {
+      AiLabPasscodeStore.instance.addListener(_onWindowsAiLabStateChanged);
+      AiService.instance.addListener(_onWindowsAiLabStateChanged);
+      unawaited(AiLabPasscodeStore.instance.ensureLoaded());
+      unawaited(AiService.instance.ensureLoaded());
+    }
     if (!kIsWeb &&
         defaultTargetPlatform == TargetPlatform.iOS &&
         !OhosRuntime.isOhos) {
@@ -432,6 +1475,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       unawaited(_initRootNativeTabChrome());
     }
     unawaited(_runStartupPrompts());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        MarcoLaunchDiagnostics.record(
+          'shell_interactive',
+          'subs=${widget.storage.getSubscriptions().length}',
+        );
+      }
+    });
     if (!Platform.environment.containsKey('FLUTTER_TEST')) {
       unawaited(_runStartupWebdavSync());
     }
@@ -449,26 +1500,35 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       if (_useRootNativeTabChrome) {
         setState(() => _useRootNativeTabChrome = false);
       }
+      _useRootNativeTabChromeNotifier.value = false;
       return;
     }
-    final safeIdx = _tabIndex.clamp(0, _iosNativeDockItems.length - 1);
+    final items = _buildIosNativeDockItems();
+    final safeIdx = _tabIndex.clamp(0, items.length - 1);
+    final owner = _computeDockOwner();
+    _dockOwner = owner;
+    final epoch = ++_dockEpoch;
     final configured = await IosLiquidGlassBridge.configureRootTabChrome(
-      items: _iosNativeDockItems,
+      items: items,
       selectedIndex: safeIdx,
       showSearch: true,
-      visible: _computeRootTabShouldBeVisible(),
-      minimized: _dockCollapsed && safeIdx == 0,
+      visible: owner != IosDockOwner.hidden,
+      minimized: owner == IosDockOwner.curated || (_dockCollapsed && safeIdx == 0),
       adaptiveTopOnWide: true,
+      epoch: epoch,
       onSelect: _handleRootNativeTabSelected,
       onSearch: _showGlobalSearchSheet,
       onScrollToTop: _scrollHomeToTop,
+      onTabMenuAction: _handleDockTabMenuAction,
     );
     if (!mounted) return;
+    _useRootNativeTabChromeNotifier.value = configured;
     if (configured != _useRootNativeTabChrome) {
       setState(() => _useRootNativeTabChrome = configured);
     }
     if (configured) {
-      _lastReportedDockVisible = _computeRootTabShouldBeVisible();
+      _lastReportedDockVisible = owner != IosDockOwner.hidden;
+      _reconcileDockOwnership(animated: false);
     }
   }
 
@@ -477,6 +1537,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     if (IosLiquidGlassBridge.isAvailable && !_useRootNativeTabChrome) {
       unawaited(_initRootNativeTabChrome());
     } else if (!IosLiquidGlassBridge.isAvailable && _useRootNativeTabChrome) {
+      _useRootNativeTabChromeNotifier.value = false;
       setState(() => _useRootNativeTabChrome = false);
     }
   }
@@ -491,37 +1552,186 @@ class _AdaptiveShellState extends State<AdaptiveShell>
 
   void _onRootOverlayVisibilityChanged() {
     if (!mounted) return;
-    _syncRootTabVisibility(animated: true);
+    _reconcileDockOwnership(animated: true);
+  }
+
+  void _onCuratedRouteEntered() {
+    if (!mounted) return;
+    _curatedRouteDepth++;
+    _homeUserDragging = false;
+    _reconcileDockOwnership(animated: true);
+  }
+
+  void _onCuratedRouteExited() {
+    if (!mounted) return;
+    _curatedRouteDepth = math.max(0, _curatedRouteDepth - 1);
+    _reconcileDockOwnership(animated: true);
+  }
+
+  void _onDockMorphTick() {
+    if (!mounted) return;
+    final eased = Curves.easeOutCubic.transform(_dockMorphCtrl.value);
+    final nextP = (_dockMorphFrom + (_dockMorphTo - _dockMorphFrom) * eased)
+        .clamp(0.0, 1.0);
+    _dockScrollProgress.value = nextP;
+    _dockCollapsed = nextP >= 0.5;
+  }
+
+  void _animateDockProgressTo(
+    double target, {
+    required bool animated,
+    required int epoch,
+  }) {
+    final clampedTarget = target.clamp(0.0, 1.0);
+    final token = ++_dockMorphAnimToken;
+    _dockMorphCtrl.stop();
+    final current = _dockScrollProgress.value.clamp(0.0, 1.0);
+    final reduceMotion = mounted && MediaQuery.disableAnimationsOf(context);
+    _dockCollapsed = clampedTarget >= 0.5;
+    if (!animated || reduceMotion || (current - clampedTarget).abs() <= 0.004) {
+      _dockScrollProgress.value = clampedTarget;
+    } else {
+      _dockMorphFrom = current;
+      _dockMorphTo = clampedTarget;
+      _dockMorphCtrl.value = 0.0;
+      unawaited(
+        _dockMorphCtrl.forward().whenComplete(() {
+          if (!mounted || token != _dockMorphAnimToken) return;
+          _dockScrollProgress.value = clampedTarget;
+          _dockCollapsed = clampedTarget >= 0.5;
+        }),
+      );
+    }
+    if (_useRootNativeTabChrome) {
+      _lastReportedDockProgress = clampedTarget;
+      unawaited(
+        IosLiquidGlassBridge.setRootTabMinimized(
+          clampedTarget >= 0.5,
+          animated: animated && !reduceMotion,
+          epoch: epoch,
+        ),
+      );
+    }
+  }
+
+  double _stableHomeDockTargetForOffset(double offset, {bool useHysteresis = false}) {
+    if (offset <= 12.0) return 0.0;
+    if (offset >= 152.0) return 1.0;
+    final progress = ((offset - 12.0) / 140.0).clamp(0.0, 1.0);
+    final threshold = useHysteresis
+        ? (_dockStableCollapsed ? 0.44 : 0.56)
+        : 0.5;
+    return progress >= threshold ? 1.0 : 0.0;
+  }
+
+  void _settleHomeDockToStableEndpoint({bool animated = true}) {
+    if (!mounted || _dockOwner != IosDockOwner.home || _tabIndex != 0) return;
+    final offset =
+        _homeScrollController.hasClients ? _homeScrollController.offset : 0.0;
+    final target = _stableHomeDockTargetForOffset(offset, useHysteresis: true);
+    _dockStableCollapsed = target >= 0.5;
+    final epoch = ++_dockEpoch;
+    _animateDockProgressTo(target, animated: animated, epoch: epoch);
   }
 
   void _handleRootNativeTabSelected(int index) {
     if (!mounted) return;
-    final clamped = index.clamp(0, _iosNativeDockItems.length - 1);
+    final items = _buildIosNativeDockItems();
+    final clamped = index.clamp(0, items.length - 1);
+    final wasInCurated = _curatedRouteDepth > 0 ||
+        IosRootTabNavigatorObserver.topRouteIsCurated.value ||
+        IosRootTabNavigatorObserver.curatedRouteDepth.value > 0;
+    if (wasInCurated) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      _curatedRouteDepth = 0;
+    }
+    final homeOffset =
+        _homeScrollController.hasClients ? _homeScrollController.offset : 0.0;
+    final targetProgress = clamped == 0
+        ? _stableHomeDockTargetForOffset(homeOffset)
+        : 0.0;
+    _dockStableCollapsed = clamped == 0 && targetProgress >= 0.5;
     setState(() {
       _tabIndex = clamped;
-      if (clamped != 0) _dockCollapsed = false;
+      _dockCollapsed = targetProgress >= 0.5;
     });
+    _selectedTabIndexNotifier.value = clamped;
+    final epoch = ++_dockEpoch;
     if (_useRootNativeTabChrome) {
-      unawaited(IosLiquidGlassBridge.setRootTabSelectedIndex(clamped));
-      if (clamped != 0) {
-        _lastReportedDockProgress = 0.0;
-        unawaited(
-          IosLiquidGlassBridge.setRootTabMinimized(false, progress: 0.0),
-        );
-      }
+      unawaited(
+        IosLiquidGlassBridge.setRootTabSelectedIndex(clamped, epoch: epoch),
+      );
+    }
+    _dockOwner = _computeDockOwner();
+    _curatedDockVisibleNotifier.value = _dockOwner == IosDockOwner.curated;
+    _syncRootTabVisibility(animated: true, forceEpoch: epoch);
+    if (_dockOwner == IosDockOwner.home || _dockOwner == IosDockOwner.rootTab) {
+      _animateDockProgressTo(targetProgress, animated: true, epoch: ++_dockEpoch);
     }
   }
 
-  bool _computeRootTabShouldBeVisible() {
-    return !_privacyPortalAnimating &&
-        _pushedRouteDepth == 0 &&
-        !_settingsSecondaryRouteActive &&
-        activeAppleModalSheetCount.value == 0 &&
-        activeIosGlassPopoverCount.value == 0 &&
-        !IosLiquidGlassBridge.activeSheetNotifier.value;
+  IosDockOwner _computeDockOwner() {
+    if (_privacyPortalAnimating ||
+        _settingsSecondaryRouteActive ||
+        IosLiquidGlassBridge.rootTabSuppressionCount.value > 0 ||
+        activeAppleModalSheetCount.value > 0 ||
+        activeIosGlassPopoverCount.value > 0 ||
+        IosLiquidGlassBridge.activeSheetNotifier.value) {
+      return IosDockOwner.hidden;
+    }
+    final obsDepth = IosRootTabNavigatorObserver.secondaryRouteDepth.value;
+    final obsTopCurated = IosRootTabNavigatorObserver.topRouteIsCurated.value;
+    final obsCuratedDepth = IosRootTabNavigatorObserver.curatedRouteDepth.value;
+    final nonCuratedPushed =
+        _pushedRouteDepth > 0 || (obsDepth > 0 && !obsTopCurated);
+    if (nonCuratedPushed) {
+      return IosDockOwner.hidden;
+    }
+    if (_curatedRouteDepth > 0 || obsTopCurated || obsCuratedDepth > 0) {
+      return IosDockOwner.curated;
+    }
+    return _tabIndex == 0 ? IosDockOwner.home : IosDockOwner.rootTab;
   }
 
-  void _syncRootTabVisibility({bool animated = true}) {
+  bool _computeRootTabShouldBeVisible() =>
+      _computeDockOwner() != IosDockOwner.hidden;
+
+  void _reconcileDockOwnership({bool animated = true}) {
+    final prevOwner = _dockOwner;
+    final nextOwner = _computeDockOwner();
+    _dockOwner = nextOwner;
+    _curatedDockVisibleNotifier.value = nextOwner == IosDockOwner.curated;
+    final epoch = ++_dockEpoch;
+    _syncRootTabVisibility(animated: animated, forceEpoch: epoch);
+
+    if (nextOwner == IosDockOwner.hidden) {
+      _homeUserDragging = false;
+      _dockMorphAnimToken++;
+      _dockMorphCtrl.stop();
+      return;
+    }
+    if (nextOwner == IosDockOwner.curated) {
+      _homeUserDragging = false;
+      _animateDockProgressTo(1.0, animated: animated, epoch: ++_dockEpoch);
+      return;
+    }
+    if (nextOwner == IosDockOwner.rootTab) {
+      _homeUserDragging = false;
+      _dockStableCollapsed = false;
+      _animateDockProgressTo(0.0, animated: animated, epoch: ++_dockEpoch);
+      return;
+    }
+    // nextOwner == IosDockOwner.home
+    if (prevOwner != IosDockOwner.home) {
+      final offset =
+          _homeScrollController.hasClients ? _homeScrollController.offset : 0.0;
+      final target = _stableHomeDockTargetForOffset(offset);
+      _dockStableCollapsed = target >= 0.5;
+      _animateDockProgressTo(target, animated: animated, epoch: ++_dockEpoch);
+    }
+  }
+
+  void _syncRootTabVisibility({bool animated = true, int? forceEpoch}) {
     if (!_useRootNativeTabChrome) return;
     final shouldBeVisible = _computeRootTabShouldBeVisible();
     if (shouldBeVisible != _lastReportedDockVisible) {
@@ -530,6 +1740,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         IosLiquidGlassBridge.setRootTabVisible(
           shouldBeVisible,
           animated: animated,
+          epoch: forceEpoch ?? ++_dockEpoch,
         ),
       );
     }
@@ -537,71 +1748,746 @@ class _AdaptiveShellState extends State<AdaptiveShell>
 
   Future<T?> _trackSecondaryRoute<T>(Future<T?> Function() pushFn) async {
     _pushedRouteDepth++;
-    _syncRootTabVisibility(animated: true);
+    _reconcileDockOwnership(animated: true);
     try {
       return await pushFn();
     } finally {
       _pushedRouteDepth = math.max(0, _pushedRouteDepth - 1);
-      _syncRootTabVisibility(animated: true);
+      if (mounted) {
+        _reconcileDockOwnership(animated: true);
+      }
     }
   }
+
+  void _onWindowsAiLabStateChanged() {
+    if (mounted) setState(() {});
+  }
+
+  Future<String> _resolveInstalledAppVersionTag() async {
+    if (OhosRuntime.isOhos) return '';
+    try {
+      final info = await PackageInfo.fromPlatform();
+      return WindowsPostUpdateNoticePrefs.normalizeVersionTag(
+        info.version,
+        info.buildNumber,
+      );
+    } catch (_) {
+      return '';
+    }
+  }
+
+  final Set<Timer> _startupTimers = <Timer>{};
+
+  Future<T> _awaitCancellableTimeout<T>(
+    Future<T> future,
+    Duration timeout,
+    T Function() onTimeout,
+  ) {
+    final completer = Completer<T>();
+    Timer? timer;
+    timer = Timer(timeout, () {
+      _startupTimers.remove(timer);
+      if (!completer.isCompleted) {
+        completer.complete(onTimeout());
+      }
+    });
+    _startupTimers.add(timer);
+    future.then(
+      (value) {
+        timer?.cancel();
+        _startupTimers.remove(timer);
+        if (!completer.isCompleted) {
+          completer.complete(value);
+        }
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        timer?.cancel();
+        _startupTimers.remove(timer);
+        if (!completer.isCompleted) {
+          completer.completeError(error, stackTrace);
+        }
+      },
+    );
+    return completer.future;
+  }
+
+  Future<String> _resolveInstalledAppVersion() async {
+    final info = await _resolveInstalledAppVersionInfo();
+    if (info.displayVersion.isNotEmpty) return info.displayVersion;
+    final cur = _currentAppVersion.trim();
+    if (cur.isNotEmpty && cur != '读取中' && cur != '未知') {
+      return cur;
+    }
+    return '';
+  }
+
+  bool _hasCompletedInitialSetup(OnboardingPrefs prefs) =>
+      _hasExistingLocalUserData() ||
+      prefs.doneVersion >= OnboardingPrefs.currentVersion;
 
   Future<void> _runStartupPrompts() async {
-    if (_isMacOS) {
-      await _maybeShowMacosFirstLaunchOfficialNotice();
+    if (!mounted) return;
+    if (_isWindowsPostUpdateNoticeHost) {
+      await _runWindowsPostUpdateNoticePrompt();
+      if (!mounted) return;
     }
-    if (!mounted || OhosRuntime.isOhos) return;
-    await _maybeShowFirstLaunchOnboarding();
+    await _runUnifiedStartupPromptCoordinator();
   }
 
-  Future<void> _maybeShowMacosFirstLaunchOfficialNotice() async {
-    if (_startupOfficialNoticeChecked || !_isMacOS || !mounted) return;
-    _startupOfficialNoticeChecked = true;
-    final prefs = await MacosOfficialNoticePrefs.load();
-    if (!mounted || !prefs.shouldShow(isMacosOverride: _isMacOS)) return;
-    final ready = Completer<void>();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!ready.isCompleted) ready.complete();
-    });
-    WidgetsBinding.instance.ensureVisualUpdate();
-    await ready.future;
-    if (!mounted || _officialNoticeDialogOpen) return;
-    _officialNoticeDialogOpen = true;
-    try {
-      final confirmed = await showMacosFirstLaunchOfficialNoticeDialog(
-        context,
-        onOpenUrl: widget.onOpenExternalUrlForTest,
-        onCopyText: widget.onCopyTextForTest,
-      );
-      if (confirmed == true) {
-        await prefs.markAcknowledged();
-      }
-    } finally {
-      _officialNoticeDialogOpen = false;
-    }
-  }
-
-  Future<void> _maybeShowFirstLaunchOnboarding() async {
-    if (_startupOnboardingChecked || OhosRuntime.isOhos || !mounted) return;
+  Future<void> _runUnifiedStartupPromptCoordinator() async {
+    if (_startupOnboardingChecked || !mounted) return;
     _startupOnboardingChecked = true;
-    // Only launch first-run guide on fresh installs without existing configs
-    // (never hijack corruption recovery alerts).
-    if (_config != null ||
-        widget.storage.getSubscriptions().isNotEmpty ||
-        widget.storage.isSubscriptionsCorrupted) {
+    if (widget.storage.isSubscriptionsCorrupted ||
+        widget.storage.isHistoryCorrupted) {
       return;
     }
-    final prefs = await OnboardingPrefs.load();
-    if (!mounted || !prefs.shouldShowOnboarding()) return;
-    if (_config != null ||
-        widget.storage.getSubscriptions().isNotEmpty ||
-        widget.storage.isSubscriptionsCorrupted) {
+    final OnboardingPrefs? loadedPrefs;
+    try {
+      loadedPrefs = await _awaitCancellableTimeout<OnboardingPrefs?>(
+        OnboardingPrefs.load(),
+        const Duration(seconds: 3),
+        () => null,
+      );
+    } catch (e) {
+      debugPrint('OnboardingPrefs load skipped on cold launch: $e');
+      return;
+    }
+    if (loadedPrefs == null || !mounted) return;
+    final prefs = loadedPrefs;
+
+    final isIosPostUpdateHost =
+        defaultTargetPlatform == TargetPlatform.iOS && !OhosRuntime.isOhos;
+    final hasCompletedSetup = _hasCompletedInitialSetup(prefs);
+    final hasPostUpdateCandidateState =
+        hasCompletedSetup || prefs.lastSeenAppVersion.isNotEmpty;
+
+    // 1. iOS post-update welcome check for existing / previously stamped installs.
+    // Kept strictly independent of `officialChannelNoticeVersion` vs `doneVersion`
+    // so:
+    //  - Windows fresh installs that just confirmed the Windows notice still
+    //    proceed to OnboardingScreen.
+    //  - iOS fresh installs whose OnboardingScreen was interrupted after
+    //    confirming OfficialChannelNoticeDialog resume OnboardingScreen on next
+    //    launch without re-popping the notice or post-update welcome on the same build.
+    if (isIosPostUpdateHost && hasPostUpdateCandidateState) {
+      final installedInfo = await _awaitCancellableTimeout<
+          ({String displayVersion, String versionToken})>(
+        _installedVersionFuture ?? _resolveInstalledAppVersionInfo(),
+        const Duration(seconds: 3),
+        () => (
+          displayVersion: (_currentAppVersion != '读取中' &&
+                  _currentAppVersion != '未知')
+              ? _currentAppVersion
+              : '',
+          versionToken: _installedVersionToken,
+        ),
+      );
+      if (!mounted ||
+          widget.storage.isSubscriptionsCorrupted ||
+          widget.storage.isHistoryCorrupted) {
+        return;
+      }
+      final displayVersion = installedInfo.displayVersion.trim();
+      final versionToken = installedInfo.versionToken.trim().isNotEmpty
+          ? installedInfo.versionToken.trim()
+          : displayVersion;
+      if (versionToken.isNotEmpty) {
+        await prefs.migrateLegacyBareVersionTokenIfNeeded(versionToken);
+        if (!mounted) return;
+      }
+      var showedPostUpdate = false;
+      if (displayVersion.isNotEmpty && versionToken.isNotEmpty) {
+        showedPostUpdate = await _maybeShowPostUpdateWelcomeIfNeeded(
+          prefs: prefs,
+          displayVersion: displayVersion,
+          versionToken: versionToken,
+        );
+      }
+      if (!mounted) return;
+      // Existing users (with data or finished onboarding), or installs that
+      // just saw PostUpdateWelcomeDialog, stop here cleanly.
+      if (hasCompletedSetup || showedPostUpdate) {
+        return;
+      }
+    } else if (hasCompletedSetup) {
+      return;
+    }
+
+    // 2. First-run Official Channel safety notice (only when not yet acknowledged).
+    if (prefs.shouldShowOfficialChannelNotice() && !_officialNoticeOpen) {
+      final frameReady = Completer<void>();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!frameReady.isCompleted) frameReady.complete();
+      });
+      await frameReady.future;
+      if (!mounted ||
+          _officialNoticeOpen ||
+          _hasCompletedInitialSetup(prefs) ||
+          widget.storage.isSubscriptionsCorrupted ||
+          widget.storage.isHistoryCorrupted) {
+        return;
+      }
+      _officialNoticeOpen = true;
+      var acknowledged = false;
+      var persisted = false;
+      try {
+        acknowledged = await showOfficialChannelNoticeDialog(
+          context,
+          urlOpener: widget.onOpenExternalUrlForTest,
+          onConfirm: () async {
+            persisted = await prefs.markOfficialChannelNoticeSeen();
+            var token = _installedVersionToken.trim();
+            if (token.isEmpty && isIosPostUpdateHost) {
+              final resolved = await _awaitCancellableTimeout<
+                  ({String displayVersion, String versionToken})>(
+                _installedVersionFuture ?? _resolveInstalledAppVersionInfo(),
+                const Duration(milliseconds: 500),
+                () => (
+                  displayVersion: (_currentAppVersion != '读取中' &&
+                          _currentAppVersion != '未知')
+                      ? _currentAppVersion
+                      : '',
+                  versionToken: _installedVersionToken,
+                ),
+              );
+              token = resolved.versionToken.trim().isNotEmpty
+                  ? resolved.versionToken.trim()
+                  : resolved.displayVersion.trim();
+            }
+            if (token.isEmpty &&
+                _currentAppVersion != '读取中' &&
+                _currentAppVersion != '未知') {
+              token = _currentAppVersion.trim();
+            }
+            if (token.isNotEmpty) {
+              await prefs.markPostUpdateNoticeSeen(token);
+            }
+            return persisted;
+          },
+        );
+      } finally {
+        _officialNoticeOpen = false;
+      }
+      if (acknowledged && !persisted) {
+        debugPrint(
+          'OfficialChannelNotice: acknowledged for current session; preference write did not persist.',
+        );
+      }
+      if (!mounted || !acknowledged) return;
+    }
+
+    // 3. First-run Onboarding (independent of OfficialChannelNoticeSeen so
+    // Windows fresh installs and interrupted iOS first-run onboarding both enter).
+    if (OhosRuntime.isOhos || !prefs.shouldShowOnboarding()) return;
+    if (_hasExistingLocalUserData() ||
+        widget.storage.isSubscriptionsCorrupted ||
+        widget.storage.isHistoryCorrupted) {
       return;
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _onboardingRouteOpen) return;
       unawaited(_openOnboardingRoute(preloadedPrefs: prefs));
     });
+  }
+
+  Future<void> _runWindowsPostUpdateNoticePrompt() async {
+    if (_windowsPostUpdateChecked || !mounted) return;
+    _windowsPostUpdateChecked = true;
+    if (_privateSessionUnlocked ||
+        widget.storage.isSubscriptionsCorrupted ||
+        widget.storage.isHistoryCorrupted) {
+      return;
+    }
+    final currentTag = await _resolveInstalledAppVersionTag();
+    if (currentTag.isEmpty || !mounted) return;
+    final WindowsPostUpdateNoticePrefs postUpdatePrefs;
+    OnboardingPrefs? onboardingPrefs;
+    try {
+      postUpdatePrefs = await WindowsPostUpdateNoticePrefs.load()
+          .timeout(const Duration(seconds: 3));
+      onboardingPrefs = await OnboardingPrefs.load()
+          .timeout(const Duration(seconds: 3));
+    } catch (e) {
+      debugPrint('WindowsPostUpdateNoticePrefs load skipped on launch: $e');
+      return;
+    }
+    if (!mounted ||
+        _officialNoticeOpen ||
+        _privateSessionUnlocked ||
+        widget.storage.isSubscriptionsCorrupted ||
+        widget.storage.isHistoryCorrupted) {
+      return;
+    }
+    if (!postUpdatePrefs.shouldShowForVersion(currentTag)) {
+      return;
+    }
+    final frameReady = Completer<void>();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!frameReady.isCompleted) frameReady.complete();
+    });
+    await frameReady.future;
+    if (!mounted ||
+        _officialNoticeOpen ||
+        _privateSessionUnlocked ||
+        widget.storage.isSubscriptionsCorrupted ||
+        widget.storage.isHistoryCorrupted) {
+      return;
+    }
+    final isUpgrade = postUpdatePrefs.lastSeenVersion.isNotEmpty ||
+        _config != null ||
+        widget.storage.getSubscriptions().isNotEmpty ||
+        (onboardingPrefs.doneVersion >= OnboardingPrefs.currentVersion);
+    final displayVersion =
+        WindowsPostUpdateNoticePrefs.displayVersionFromTag(currentTag);
+    _officialNoticeOpen = true;
+    var persisted = false;
+    try {
+      await showWindowsPostUpdateNoticeDialog(
+        context,
+        isUpgrade: isUpgrade,
+        versionLabel: displayVersion,
+        urlOpener: widget.onOpenExternalUrlForTest,
+        onConfirm: () async {
+          persisted = await postUpdatePrefs.markVersionSeen(currentTag);
+          if (onboardingPrefs != null &&
+              onboardingPrefs.shouldShowOfficialChannelNotice()) {
+            await onboardingPrefs.markOfficialChannelNoticeSeen();
+          }
+          return persisted;
+        },
+      );
+    } finally {
+      _officialNoticeOpen = false;
+    }
+    if (!persisted) {
+      debugPrint(
+        'WindowsPostUpdateNotice: acknowledged for current session; preference write did not persist.',
+      );
+    }
+  }
+
+  bool _isSettingsOriginActive(
+    BuildContext originContext,
+    ModalRoute<dynamic>? originRoute,
+    int originTabIndex,
+  ) {
+    if (!mounted || !originContext.mounted) return false;
+    if (_tabIndex != originTabIndex) return false;
+    if (originRoute != null && !originRoute.isCurrent) return false;
+    return true;
+  }
+
+  Future<void> _copyAuthorSocialName({BuildContext? originContext}) async {
+    final targetContext = originContext ?? context;
+    if (_copyingAuthorSocialName &&
+        _authorSocialOriginContext != null &&
+        _authorSocialOriginTabIndex != null &&
+        _isSettingsOriginActive(
+          _authorSocialOriginContext!,
+          _authorSocialOriginRoute,
+          _authorSocialOriginTabIndex!,
+        )) {
+      return;
+    }
+    final token = ++_authorSocialCopyToken;
+    final originRoute = ModalRoute.of(targetContext);
+    final originTabIndex = _tabIndex;
+    _copyingAuthorSocialName = true;
+    _authorSocialOriginContext = targetContext;
+    _authorSocialOriginRoute = originRoute;
+    _authorSocialOriginTabIndex = originTabIndex;
+    beginExplicitOfficialClipboardCopy();
+    try {
+      final copied = await copyOfficialChannelText(
+        OfficialChannelInfo.authorSocialName,
+      );
+      if (token != _authorSocialCopyToken ||
+          !_isSettingsOriginActive(
+            targetContext,
+            originRoute,
+            originTabIndex,
+          ) ||
+          !targetContext.mounted) {
+        return;
+      }
+      if (copied) {
+        await showAppleNativeAlert(
+          targetContext,
+          title: '已复制作者社媒账号名',
+          message:
+              '账号名：${OfficialChannelInfo.authorSocialName}\n支持平台：${OfficialChannelInfo.socialPlatformsDisplay}。',
+          actions: const [
+            AppleNativeAlertAction(id: 'ok', title: '好', isDefault: true),
+          ],
+        );
+        return;
+      }
+      await showOfficialChannelManualCopyDialog(
+        targetContext,
+        title: '复制失败，请手动选取',
+        message:
+            '当前无法写入系统剪贴板，请手动选取以下作者社媒账号名（${OfficialChannelInfo.socialPlatformsDisplay}）：',
+        selectableValue: OfficialChannelInfo.authorSocialName,
+      );
+    } finally {
+      if (token == _authorSocialCopyToken) {
+        _copyingAuthorSocialName = false;
+        _authorSocialOriginContext = null;
+        _authorSocialOriginRoute = null;
+        _authorSocialOriginTabIndex = null;
+      }
+    }
+  }
+
+  Future<void> _openOfficialCommunityLink({BuildContext? originContext}) async {
+    final targetContext = originContext ?? context;
+    if (_openingOfficialCommunityLink &&
+        _officialCommunityOriginContext != null &&
+        _officialCommunityOriginTabIndex != null &&
+        _isSettingsOriginActive(
+          _officialCommunityOriginContext!,
+          _officialCommunityOriginRoute,
+          _officialCommunityOriginTabIndex!,
+        )) {
+      return;
+    }
+    final token = ++_officialCommunityActionToken;
+    final originRoute = ModalRoute.of(targetContext);
+    final originTabIndex = _tabIndex;
+    final startClipboardEpoch = officialExplicitClipboardEpoch;
+    _openingOfficialCommunityLink = true;
+    _officialCommunityOriginContext = targetContext;
+    _officialCommunityOriginRoute = originRoute;
+    _officialCommunityOriginTabIndex = originTabIndex;
+    try {
+      final opened = await launchExternalOfficialUrl(
+        OfficialChannelInfo.officialCommunityUri,
+        urlOpener: widget.onOpenExternalUrlForTest,
+      );
+      if (opened) {
+        return;
+      }
+      // Validate origin, action token, and clipboard epoch BEFORE any fallback
+      // clipboard write so an abandoned or superseded link request never
+      // overwrites a newer explicit copy (staying on page or after re-entry).
+      if (token != _officialCommunityActionToken ||
+          officialExplicitClipboardEpoch != startClipboardEpoch ||
+          !_isSettingsOriginActive(
+            targetContext,
+            originRoute,
+            originTabIndex,
+          ) ||
+          !targetContext.mounted) {
+        return;
+      }
+      final copied = await copyOfficialChannelText(
+        OfficialChannelInfo.officialCommunityUrl,
+      );
+      if (token != _officialCommunityActionToken ||
+          officialExplicitClipboardEpoch != startClipboardEpoch ||
+          !_isSettingsOriginActive(
+            targetContext,
+            originRoute,
+            originTabIndex,
+          ) ||
+          !targetContext.mounted) {
+        return;
+      }
+      if (copied) {
+        await showAppleNativeAlert(
+          targetContext,
+          title: '已复制官网交流群链接',
+          message: '请在浏览器中打开：${OfficialChannelInfo.officialCommunityUrl}',
+          actions: const [
+            AppleNativeAlertAction(id: 'ok', title: '好', isDefault: true),
+          ],
+        );
+        return;
+      }
+      await showOfficialChannelManualCopyDialog(
+        targetContext,
+        title: '无法自动打开或复制链接',
+        message: '请手动选取以下官网交流群地址，并在浏览器中打开：',
+        selectableValue: OfficialChannelInfo.officialCommunityUrl,
+      );
+    } finally {
+      if (token == _officialCommunityActionToken) {
+        _openingOfficialCommunityLink = false;
+        _officialCommunityOriginContext = null;
+        _officialCommunityOriginRoute = null;
+        _officialCommunityOriginTabIndex = null;
+      }
+    }
+  }
+
+  Future<void> _openOfficialDonateLink({BuildContext? originContext}) async {
+    final targetContext = originContext ?? context;
+    if (_openingOfficialDonateLink &&
+        _officialDonateOriginContext != null &&
+        _officialDonateOriginTabIndex != null &&
+        _isSettingsOriginActive(
+          _officialDonateOriginContext!,
+          _officialDonateOriginRoute,
+          _officialDonateOriginTabIndex!,
+        )) {
+      return;
+    }
+    final token = ++_officialDonateActionToken;
+    final originRoute = ModalRoute.of(targetContext);
+    final originTabIndex = _tabIndex;
+    final startClipboardEpoch = officialExplicitClipboardEpoch;
+    _openingOfficialDonateLink = true;
+    _officialDonateOriginContext = targetContext;
+    _officialDonateOriginRoute = originRoute;
+    _officialDonateOriginTabIndex = originTabIndex;
+    try {
+      final opened = await launchExternalOfficialUrl(
+        OfficialChannelInfo.officialDonateUri,
+        urlOpener: widget.onOpenExternalUrlForTest,
+      );
+      if (opened) {
+        return;
+      }
+      if (token != _officialDonateActionToken ||
+          officialExplicitClipboardEpoch != startClipboardEpoch ||
+          !_isSettingsOriginActive(
+            targetContext,
+            originRoute,
+            originTabIndex,
+          ) ||
+          !targetContext.mounted) {
+        return;
+      }
+      final copied = await copyOfficialChannelText(
+        OfficialChannelInfo.officialDonateUrl,
+      );
+      if (token != _officialDonateActionToken ||
+          officialExplicitClipboardEpoch != startClipboardEpoch ||
+          !_isSettingsOriginActive(
+            targetContext,
+            originRoute,
+            originTabIndex,
+          ) ||
+          !targetContext.mounted) {
+        return;
+      }
+      if (copied) {
+        await showAppleNativeAlert(
+          targetContext,
+          title: '已复制官网捐赠区链接',
+          message: '请在浏览器中打开：${OfficialChannelInfo.officialDonateUrl}',
+          actions: const [
+            AppleNativeAlertAction(id: 'ok', title: '好', isDefault: true),
+          ],
+        );
+        return;
+      }
+      await showOfficialChannelManualCopyDialog(
+        targetContext,
+        title: '无法自动打开或复制链接',
+        message: '请手动选取以下官网捐赠区地址，并在浏览器中打开：',
+        selectableValue: OfficialChannelInfo.officialDonateUrl,
+      );
+    } finally {
+      if (token == _officialDonateActionToken) {
+        _openingOfficialDonateLink = false;
+        _officialDonateOriginContext = null;
+        _officialDonateOriginRoute = null;
+        _officialDonateOriginTabIndex = null;
+      }
+    }
+  }
+
+  Future<void> _openOfficialNoticeDialogFromSettings() async {
+    if (!mounted || _officialNoticeOpen) return;
+    _officialNoticeOpen = true;
+    try {
+      if (_isWindowsPostUpdateNoticeHost) {
+        final displayVer =
+            (_currentAppVersion == '读取中' || _currentAppVersion == '未知')
+                ? ''
+                : _currentAppVersion;
+        await showWindowsPostUpdateNoticeDialog(
+          context,
+          isUpgrade: false,
+          versionLabel: displayVer,
+          urlOpener: widget.onOpenExternalUrlForTest,
+          barrierDismissible: true,
+        );
+      } else {
+        await showOfficialChannelNoticeDialog(
+          context,
+          urlOpener: widget.onOpenExternalUrlForTest,
+          barrierDismissible: true,
+        );
+      }
+    } finally {
+      _officialNoticeOpen = false;
+    }
+  }
+
+  Future<void> _deleteWindowsHistoryEntryWithUndo(
+    WatchHistoryEntry entry,
+  ) async {
+    await widget.storage.removeWatchHistoryItem(entry.site, entry.id);
+    if (!mounted) return;
+    _cachedWatchHistory = widget.storage.getWatchHistory();
+    setState(() {});
+    _showWindowsUndoHistoryBanner(entry);
+  }
+
+  void _showWindowsUndoHistoryBanner(WatchHistoryEntry entry) {
+    if (!mounted) return;
+    _dismissUndoHistoryBanner();
+    final overlay = Overlay.maybeOf(context, rootOverlay: true);
+    if (overlay == null) return;
+    late OverlayEntry bannerEntry;
+    bannerEntry = OverlayEntry(
+      builder: (_) => Positioned(
+        left: 24,
+        right: 24,
+        bottom: 24,
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 440),
+            child: Material(
+              type: MaterialType.transparency,
+              child: Container(
+                key: const ValueKey('windows-undo-history-banner'),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 11,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xF21A202C),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.14),
+                  ),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x44000000),
+                      blurRadius: 18,
+                      offset: Offset(0, 6),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '已删除「${entry.title}」的观看记录',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13.2,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    TextButton(
+                      key: const ValueKey('windows-undo-history-action'),
+                      onPressed: () async {
+                        _dismissUndoHistoryBanner();
+                        await widget.storage.restoreWatchHistoryEntry(entry);
+                        if (!mounted) return;
+                        _cachedWatchHistory = widget.storage.getWatchHistory();
+                        setState(() {});
+                      },
+                      style: TextButton.styleFrom(
+                        foregroundColor: const Color(0xFF6FA8FF),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
+                      ),
+                      child: const Text(
+                        '撤销',
+                        style: TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    _undoHistoryOverlayEntry = bannerEntry;
+    overlay.insert(bannerEntry);
+    _undoHistoryTimer = Timer(const Duration(seconds: 3), () {
+      if (_undoHistoryOverlayEntry == bannerEntry) {
+        _dismissUndoHistoryBanner();
+      }
+    });
+  }
+
+  Future<void> _openWindowsAiSearchDialog() async {
+    if (!mounted ||
+        _privateSessionUnlocked ||
+        !AiLabPasscodeStore.instance.isUnlocked) {
+      return;
+    }
+    await showWindowsAiSearchDialog(
+      context,
+      isPrivateSession: _privateSessionUnlocked,
+      onOpenSettings: () {
+        if (!mounted) return;
+        setState(() {
+          _windowsSettings = 'AI 实验室';
+          _windowsPage = 'settings';
+        });
+      },
+      onPickTitle: (title) {
+        if (!mounted) return;
+        setState(() {
+          _windowsPage = 'search';
+          _searchController.text = title;
+        });
+        _runGlobalSearch(title);
+      },
+    );
+  }
+
+  Future<void> _openWindowsAiPicksDialog() async {
+    if (!mounted ||
+        _privateSessionUnlocked ||
+        !AiLabPasscodeStore.instance.isUnlocked) {
+      return;
+    }
+    final recentTitles = _cachedWatchHistory
+        .map((e) => e.title)
+        .where((t) => t.trim().isNotEmpty)
+        .toList(growable: false);
+    final favoriteTitles = widget.storage
+        .getFavorites()
+        .map((f) => f.title)
+        .where((t) => t.trim().isNotEmpty)
+        .toList(growable: false);
+    await showWindowsAiPicksDialog(
+      context,
+      recentTitles: recentTitles,
+      favoriteTitles: favoriteTitles,
+      isPrivateSession: _privateSessionUnlocked,
+      onOpenSettings: () {
+        if (!mounted) return;
+        setState(() {
+          _windowsSettings = 'AI 实验室';
+          _windowsPage = 'settings';
+        });
+      },
+      onPickTitle: (title) {
+        if (!mounted) return;
+        setState(() {
+          _windowsPage = 'search';
+          _searchController.text = title;
+        });
+        _runGlobalSearch(title);
+      },
+    );
   }
 
   Future<void> _openOnboardingRoute({
@@ -714,6 +2600,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
   }
   Future<void> _runStartupWebdavSync() async {
+    await widget.storage.waitForCredentialsReady();
+    if (!mounted) return;
     if (!widget.storage.isWebdavConfigured || !widget.storage.webdavAuto) {
       return;
     }
@@ -815,29 +2703,95 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }
 
   @override
+  void onWindowMoved() {
+    if (!kIsWeb && Platform.isWindows) {
+      WindowsWindowBoundsController.shared?.scheduleCapture();
+    }
+  }
+
+  @override
+  void onWindowResized() {
+    if (!kIsWeb && Platform.isWindows) {
+      WindowsWindowBoundsController.shared?.scheduleCapture();
+    }
+  }
+
+  @override
+  void onWindowMaximize() {
+    if (!kIsWeb && Platform.isWindows) {
+      unawaited(WindowsWindowBoundsController.shared?.captureAndPersist());
+    }
+  }
+
+  @override
+  void onWindowUnmaximize() {
+    if (!kIsWeb && Platform.isWindows) {
+      WindowsWindowBoundsController.shared?.scheduleCapture(
+        debounce: const Duration(milliseconds: 120),
+      );
+    }
+  }
+
+  Future<void> _captureWindowsBoundsBeforeHideOrExit() async {
+    if (kIsWeb || !Platform.isWindows) return;
+    final ctrl = WindowsWindowBoundsController.shared;
+    if (ctrl == null) return;
+    try {
+      await ctrl
+          .captureAndPersist(immediate: true)
+          .timeout(const Duration(milliseconds: 200));
+    } catch (_) {}
+  }
+
+  bool get _isWindowsDesktopHost =>
+      !kIsWeb &&
+      !OhosRuntime.isOhos &&
+      (Platform.environment.containsKey('FLUTTER_TEST')
+          ? defaultTargetPlatform == TargetPlatform.windows
+          : Platform.isWindows);
+
+  @override
   Future<void> onWindowClose() async {
-    if (!kIsWeb &&
-        (Platform.isWindows || defaultTargetPlatform == TargetPlatform.windows) &&
+    if (_isClosingWindow || _isHidingToTray) return;
+    if (_isWindowsDesktopHost &&
         widget.storage.windowsCloseAction == 'tray') {
-      unawaited(widget.storage.flushPendingHistory());
-      final hidden = await WindowsTrayService.hideToTray(tooltip: 'Marco Movie');
-      if (hidden) {
-        return;
-      }
+      _isHidingToTray = true;
       try {
-        await windowManager.minimize();
-        return;
-      } catch (_) {}
+        await _captureWindowsBoundsBeforeHideOrExit();
+        unawaited(widget.storage.flushPendingHistory());
+        final hidden =
+            await WindowsTrayService.hideToTray(tooltip: 'Marco Movie');
+        if (hidden) {
+          return;
+        }
+        try {
+          await windowManager.minimize();
+          return;
+        } catch (_) {}
+      } finally {
+        _isHidingToTray = false;
+      }
     }
     await _executeWindowExit();
+  }
+
+  Future<void> _destroyDesktopWindow() async {
+    if (_isWindowsDesktopHost) {
+      final destroyed = await WindowsTrayService.destroyWindow();
+      if (destroyed) return;
+    }
+    await windowManager.destroy();
   }
 
   Future<void> _executeWindowExit() async {
     if (_isClosingWindow) return;
     _isClosingWindow = true;
-    if (!kIsWeb &&
-        (Platform.isWindows || defaultTargetPlatform == TargetPlatform.windows)) {
-      unawaited(WindowsTrayService.removeTray());
+    final isWindowsDesktop = _isWindowsDesktopHost;
+    if (isWindowsDesktop) {
+      await _captureWindowsBoundsBeforeHideOrExit();
+      if (widget.onDestroyWindowForTest == null) {
+        unawaited(WindowsTrayService.removeTray());
+      }
     }
     await AdaptiveShell.runWindowCloseSequence(
       setPreventClose: (prevent) => widget.onSetPreventCloseForTest != null
@@ -846,6 +2800,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       hideWindow: widget.onDestroyWindowForTest != null
           ? null
           : () => windowManager.hide(),
+      prepareExit: !isWindowsDesktop
+          ? null
+          : () => WindowsTrayService.runBeforeExitHooks(
+                timeout: const Duration(milliseconds: 900),
+              ),
+      onBeforeDestroyWindow:
+          isWindowsDesktop ? WindowsTrayService.markNativeWindowDestroying : null,
       flushHistory: _flushPendingHistoryForCloseOrDispose,
       flushSync: (timeout) => widget.onFlushSyncForTest != null
           ? widget.onFlushSyncForTest!(timeout)
@@ -858,7 +2819,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           : CmsClient.closeScriptSessions(),
       destroyWindow: () => widget.onDestroyWindowForTest != null
           ? widget.onDestroyWindowForTest!()
-          : windowManager.destroy(),
+          : _destroyDesktopWindow(),
       totalBudget: widget.windowCloseTotalBudgetForTest ??
           AdaptiveShell.defaultWindowCloseBudget,
     );
@@ -942,8 +2903,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     if (mounted) {
       setState(() {
         _cachedWatchHistory = widget.storage.getWatchHistory();
-    _liveHideUnreachable = widget.storage.liveHideUnreachable;
+        _liveHideUnreachable = widget.storage.liveHideUnreachable;
       });
+      _syncNativeDockMenuItemsIfMounted();
     }
   }
   @override
@@ -987,8 +2949,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     IosLiquidGlassBridge.activeSheetNotifier.removeListener(
       _onRootOverlayVisibilityChanged,
     );
+    IosLiquidGlassBridge.rootTabSuppressionCount.removeListener(
+      _onRootOverlayVisibilityChanged,
+    );
+    IosRootTabNavigatorObserver.secondaryRouteDepth.removeListener(
+      _onRootOverlayVisibilityChanged,
+    );
+    IosRootTabNavigatorObserver.topRouteIsCurated.removeListener(
+      _onRootOverlayVisibilityChanged,
+    );
     activeAppleModalSheetCount.removeListener(_onRootOverlayVisibilityChanged);
     activeIosGlassPopoverCount.removeListener(_onRootOverlayVisibilityChanged);
+    AiLabPasscodeStore.instance.removeListener(_onWindowsAiLabStateChanged);
+    AiService.instance.removeListener(_onWindowsAiLabStateChanged);
+    AiService.instance.setPrivacySessionActive(false);
     if (_useRootNativeTabChrome) {
       unawaited(IosLiquidGlassBridge.setRootTabVisible(false, animated: false));
     }
@@ -1008,14 +2982,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _windowListenerAttached = false;
       if (!kIsWeb && Platform.isWindows) {
         WindowsTrayService.detach();
-        unawaited(WindowsTrayService.removeTray());
+        if (!_isClosingWindow) {
+          unawaited(WindowsTrayService.removeTray());
+        }
       }
     }
     if (!kIsWeb &&
-        (Platform.isWindows ||
-            Platform.isMacOS ||
-            Platform.isLinux ||
-            widget.onSetPreventCloseForTest != null)) {
+        (widget.onSetPreventCloseForTest != null ||
+            (!_isClosingWindow &&
+                (Platform.isWindows ||
+                    Platform.isMacOS ||
+                    Platform.isLinux)))) {
       unawaited(
         (widget.onSetPreventCloseForTest != null
                 ? widget.onSetPreventCloseForTest!(false)
@@ -1026,18 +3003,36 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       );
     }
     _installedVersionTimer?.cancel();
+    for (final t in _startupTimers) {
+      t.cancel();
+    }
+    _startupTimers.clear();
     _cancelCatalogue();
     if (_liveAbort != null && !_liveAbort!.isCompleted) _liveAbort!.complete();
     if (_liveProbeAbort != null && !_liveProbeAbort!.isCompleted) {
       _liveProbeAbort!.complete();
     }
     _searchSubscription?.cancel();
-    unawaited(CatPawHost.instance.close());
-    unawaited(CmsClient.closeScriptSessions());
+    if (!_isClosingWindow) {
+      unawaited(CatPawHost.instance.close());
+      unawaited(CmsClient.closeScriptSessions());
+    }
     _searchController.dispose();
     _searchStateRevision.dispose();
     _liveSearchController.dispose();
     _homeScrollController.removeListener(_onHomeScroll);
+    _dockMorphCtrl.removeListener(_onDockMorphTick);
+    _dockMorphCtrl.dispose();
+    _dockScrollProgress.dispose();
+    _iosHomeStatusBarDark.dispose();
+    _iosHomeTopScrimOpacity.dispose();
+    _iosHeroOverscroll.dispose();
+    _rexBackdropScrollOffset.dispose();
+    _rexCardInkScrollOffset.dispose();
+    _dismissUndoHistoryBanner();
+    _useRootNativeTabChromeNotifier.dispose();
+    _curatedDockVisibleNotifier.dispose();
+    _selectedTabIndexNotifier.dispose();
     PosterLoader.cacheRevision.removeListener(_onPosterCacheUpdated);
     _homeScrollController.dispose();
     _windowsDiscoverScrollController.dispose();
@@ -1073,6 +3068,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _windowsLiveChannel = null;
     final saved = widget.storage.loadSavedConfig();
     _config = saved;
+    if (saved != null && saved.publicSupportedSites.isNotEmpty) {
+      unawaited(
+        ConfigCenterBridge.syncAll(
+          storage: widget.storage,
+          sites: saved.publicSupportedSites,
+          pullFromExternal: true,
+          pushToExternal: true,
+        ),
+      );
+    }
     _cachedWatchHistory = widget.storage.getWatchHistory();
     _liveHideUnreachable = widget.storage.liveHideUnreachable;
     unawaited(CmsClient.retainScriptSessions(
@@ -1096,8 +3101,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _activeSite = availableSites.firstWhere(
         (s) => s.key == preferredKey,
         orElse: () => availableSites.firstWhere(
-          (s) => !CspBridge.isBannerNoticeSite(s),
-          orElse: () => availableSites.first,
+          CspBridge.isPrimaryPlayableVodSite,
+          orElse: () => availableSites.firstWhere(
+            (s) =>
+                !CspBridge.isBannerNoticeSite(s) &&
+                !CspBridge.isDoubanSearchUtilitySite(s),
+            orElse: () => availableSites.firstWhere(
+              (s) => !CspBridge.isBannerNoticeSite(s),
+              orElse: () => availableSites.first,
+            ),
+          ),
         ),
       );
       if (_privateSessionUnlocked) {
@@ -1182,17 +3195,27 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     final candidates = videos
         .where((v) => !v.id.startsWith('netdisk_qr:') && v.title.trim().isNotEmpty)
-        .take(6);
-    for (final v in candidates) {
-      unawaited(
-        PosterLoader.loadHdByTitle(
-          v.title,
-          rawUrl: v.poster,
-          year: v.year,
-          strictHero: true,
-        ).catchError((_) => Uint8List(0)),
-      );
-    }
+        .take(6)
+        .toList(growable: false);
+    // Warm direct CMS poster URLs immediately so visible cards render first,
+    // then run heavier external HD upgrades after initial shelves settle.
+    PosterLoader.prefetchUrls(
+      candidates.map((v) => v.poster),
+      limit: 6,
+    );
+    Future<void>.delayed(const Duration(milliseconds: 900), () {
+      if (!mounted) return;
+      for (final v in candidates.take(4)) {
+        unawaited(
+          PosterLoader.loadHdByTitle(
+            v.title,
+            rawUrl: v.poster,
+            year: v.year,
+            strictHero: true,
+          ).catchError((_) => Uint8List(0)),
+        );
+      }
+    });
   }
 
   Color _resolveHeroAmbientColor(CmsVideo video, ApplePalette palette) {
@@ -1243,23 +3266,320 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     if (palette.isDark) {
       return hsl
           .withSaturation(
-            hasChroma ? (hsl.saturation * 1.12).clamp(0.16, 0.50) : 0.06,
+            hasChroma ? (hsl.saturation * 1.18).clamp(0.18, 0.56) : 0.06,
           )
-          .withLightness((hsl.lightness * 0.62).clamp(0.11, 0.20))
+          .withLightness((hsl.lightness * 0.62).clamp(0.10, 0.22))
           .toColor();
     }
     return hsl
         .withSaturation(
-          hasChroma ? (hsl.saturation * 1.02).clamp(0.12, 0.48) : 0.06,
+          hasChroma ? (hsl.saturation * 1.12).clamp(0.16, 0.56) : 0.06,
         )
-        .withLightness(hsl.lightness.clamp(0.24, 0.68))
+        .withLightness(hsl.lightness.clamp(0.24, 0.54))
         .toColor();
   }
 
-  /// Whether foreground ink over [atmo] (Hero title/dots & first shelf header)
+  static const double _kRexAuraTopExtend = 280.0;
+  static const double _kRexAuraSolidPastHero = 42.0;
+
+  /// Smooth scroll-driven transition factor (`0.0` at top = full-screen Hero
+  /// atmosphere rendered all the way to the bottom edge like Rex; `1.0` once
+  /// scrolled past the Hero = pure Light/Dark page background).
+  double _rexHeroScrollFadeForOffset(double rawOffset, double heroHeight) {
+    final scrollDown = math.max(0.0, rawOffset);
+    final fadeStart = heroHeight * 0.06;
+    final fadeSpan = math.max(heroHeight * 0.78, 160.0);
+    final linear = ((scrollDown - fadeStart) / fadeSpan).clamp(0.0, 1.0);
+    return Curves.easeInOutCubic.transform(linear);
+  }
+
+  /// Single source of truth for Layer 0's full-screen tonal gradient, Layer 0's
+  /// solid-to-dissolve Hero top aura, and the Hero billboard's bottom dissolve
+  /// edge color. Keeping all three derived from the same calculation guarantees
+  /// pixel-exact color continuity across the Hero bottom boundary at every
+  /// scroll offset, theme mode, poster hue, and viewport height.
+  ({
+    Color liveEdgeColor,
+    Color fullScreenTopTone,
+    Color fullScreenMidTone,
+    Color fullScreenBotTone,
+    double auraTotalHeight,
+    double auraSolidEndStop,
+  }) _computeRexBackdropMetrics({
+    required Color liveAtmo,
+    required ApplePalette palette,
+    required double heroHeight,
+    required double scrollOffset,
+  }) {
+    final overscroll = math.max(0.0, -scrollOffset);
+    final stretchedHeight = heroHeight + overscroll;
+    final scrollFade = _rexHeroScrollFadeForOffset(scrollOffset, heroHeight);
+
+    final liveHsl = HSLColor.fromColor(liveAtmo);
+    final deepBottomBase = palette.isDark
+        ? Color.lerp(liveAtmo, Colors.black, 0.26)!
+        : liveHsl
+            .withLightness(
+              (liveHsl.lightness * 0.88).clamp(0.18, 0.50),
+            )
+            .toColor();
+    final midBase = Color.lerp(liveAtmo, deepBottomBase, 0.38)!;
+
+    final liveEdgeColor = Color.lerp(liveAtmo, palette.background, scrollFade)!;
+    final fullScreenMidTone =
+        Color.lerp(midBase, palette.background, scrollFade)!;
+    final fullScreenBotTone =
+        Color.lerp(deepBottomBase, palette.background, scrollFade)!;
+
+    final auraDissolveHeight = palette.isDark ? 260.0 : 200.0;
+    final solidHeight =
+        _kRexAuraTopExtend + stretchedHeight + _kRexAuraSolidPastHero;
+    final auraTotalHeight = solidHeight + auraDissolveHeight;
+    final auraSolidEndStop = (solidHeight / auraTotalHeight).clamp(0.45, 0.94);
+
+    return (
+      liveEdgeColor: liveEdgeColor,
+      fullScreenTopTone: liveEdgeColor,
+      fullScreenMidTone: fullScreenMidTone,
+      fullScreenBotTone: fullScreenBotTone,
+      auraTotalHeight: auraTotalHeight,
+      auraSolidEndStop: auraSolidEndStop,
+    );
+  }
+
+  /// Evaluates the exact composited Layer 0 backdrop color at [viewportY] so
+  /// shelf headers, card titles, and translucent secondary labels choose ink
+  /// against the true rendered background at every scroll offset.
+  Color _sampleRexBackdropColorAtY({
+    required double viewportY,
+    required double viewportHeight,
+    required double heroHeight,
+    required double scrollOffset,
+    required Color liveAtmo,
+    required ApplePalette palette,
+  }) {
+    final metrics = _computeRexBackdropMetrics(
+      liveAtmo: liveAtmo,
+      palette: palette,
+      heroHeight: heroHeight,
+      scrollOffset: scrollOffset,
+    );
+    final scrollDown = math.max(0.0, scrollOffset);
+    final auraTop = -_kRexAuraTopExtend - scrollDown;
+    final tAura = (viewportY - auraTop) / metrics.auraTotalHeight;
+    if (tAura <= metrics.auraSolidEndStop) {
+      return metrics.liveEdgeColor;
+    }
+
+    final safeH = math.max(viewportHeight, 1.0);
+    final tBg = (viewportY / safeH).clamp(0.0, 1.0);
+    final Color baseBg = tBg <= 0.62
+        ? Color.lerp(
+            metrics.fullScreenTopTone,
+            metrics.fullScreenMidTone,
+            tBg / 0.62,
+          )!
+        : Color.lerp(
+            metrics.fullScreenMidTone,
+            metrics.fullScreenBotTone,
+            (tBg - 0.62) / 0.38,
+          )!;
+
+    if (tAura >= 1.0) {
+      return baseBg;
+    }
+    final s0 = metrics.auraSolidEndStop;
+    final tail = math.max(1.0 - s0, 1e-6);
+    final u = ((tAura - s0) / tail).clamp(0.0, 1.0);
+    const stopPos = <double>[0.0, 0.18, 0.40, 0.64, 0.84, 1.0];
+    const stopAlpha = <double>[1.0, 0.86, 0.58, 0.28, 0.09, 0.0];
+    var alpha = 0.0;
+    for (var i = 0; i < stopPos.length - 1; i++) {
+      if (u <= stopPos[i + 1]) {
+        final segT = (u - stopPos[i]) / (stopPos[i + 1] - stopPos[i]);
+        alpha = stopAlpha[i] + (stopAlpha[i + 1] - stopAlpha[i]) * segT;
+        break;
+      }
+    }
+    return Color.alphaBlend(
+      metrics.liveEdgeColor.withValues(alpha: alpha),
+      baseBg,
+    );
+  }
+
+  static double _wcagContrastRatio(Color foreground, Color background) {
+    final effectiveFg = foreground.a < 0.999
+        ? Color.alphaBlend(foreground, background)
+        : foreground;
+    final l1 = effectiveFg.computeLuminance();
+    final l2 = background.computeLuminance();
+    final lighter = math.max(l1, l2);
+    final darker = math.min(l1, l2);
+    return (lighter + 0.05) / (darker + 0.05);
+  }
+
+  static Color _ensureSecondaryContrast(
+    Color primaryInk,
+    Color background, {
+    required double preferredAlpha,
+    required double minContrast,
+    required bool preferLight,
+  }) {
+    final baseCandidate = primaryInk.withValues(alpha: preferredAlpha);
+    if (_wcagContrastRatio(baseCandidate, background) >= minContrast) {
+      return baseCandidate;
+    }
+    final opaqueBase = primaryInk.withValues(alpha: 1.0);
+    if (_wcagContrastRatio(opaqueBase, background) >= minContrast) {
+      var lo = preferredAlpha;
+      var hi = 1.0;
+      for (var i = 0; i < 8; i++) {
+        final mid = (lo + hi) * 0.5;
+        if (_wcagContrastRatio(primaryInk.withValues(alpha: mid), background) >=
+            minContrast) {
+          hi = mid;
+        } else {
+          lo = mid;
+        }
+      }
+      return primaryInk.withValues(alpha: hi);
+    }
+    final extreme = preferLight ? Colors.white : Colors.black;
+    var lo = preferredAlpha;
+    var hi = 1.0;
+    for (var i = 0; i < 8; i++) {
+      final mid = (lo + hi) * 0.5;
+      if (_wcagContrastRatio(extreme.withValues(alpha: mid), background) >=
+          minContrast) {
+        hi = mid;
+      } else {
+        lo = mid;
+      }
+    }
+    return extreme.withValues(alpha: hi);
+  }
+
+  /// Resolves high-contrast primary and secondary inks against a sampled
+  /// Layer 0 backdrop pair ([primaryBg] for titles, [secondaryBg] for normal /
+  /// secondary copy), using a narrow luminance hysteresis band (`[0.175, 0.177]`)
+  /// so continuous scrolling never flickers while keeping normal & translucent
+  /// text at >= 4.5:1.
+  ({Color primary, Color secondary, bool useLight})
+      _resolveRexInksForBackdropBand({
+    required int hysteresisSlotKey,
+    required Color primaryBg,
+    required Color secondaryBg,
+    required ApplePalette palette,
+  }) {
+    if (palette.isDark) {
+      final primary = palette.labelPrimary;
+      final lightestBg = primaryBg.computeLuminance() >
+              secondaryBg.computeLuminance()
+          ? primaryBg
+          : secondaryBg;
+      final secondary = _ensureSecondaryContrast(
+        primary,
+        lightestBg,
+        preferredAlpha: 0.78,
+        minContrast: 4.8,
+        preferLight: true,
+      );
+      _rexShelfLightInkCache[hysteresisSlotKey] = true;
+      return (primary: primary, secondary: secondary, useLight: true);
+    }
+
+    final textLum = secondaryBg.computeLuminance();
+    final prevLight = _rexShelfLightInkCache[hysteresisSlotKey];
+    final bool useLight;
+    if (prevLight == null) {
+      useLight = textLum < 0.176;
+    } else if (prevLight) {
+      useLight = textLum < 0.177;
+    } else {
+      useLight = textLum <= 0.175;
+    }
+    _rexShelfLightInkCache[hysteresisSlotKey] = useLight;
+
+    if (useLight) {
+      const primary = Colors.white;
+      final lightestBg = primaryBg.computeLuminance() >
+              secondaryBg.computeLuminance()
+          ? primaryBg
+          : secondaryBg;
+      final secondary = _ensureSecondaryContrast(
+        primary,
+        lightestBg,
+        preferredAlpha: 0.80,
+        minContrast: 4.65,
+        preferLight: true,
+      );
+      return (primary: primary, secondary: secondary, useLight: true);
+    }
+
+    final darkestBg = secondaryBg.computeLuminance() <
+            primaryBg.computeLuminance()
+        ? secondaryBg
+        : primaryBg;
+    final primary = _wcagContrastRatio(palette.labelPrimary, darkestBg) >= 4.60
+        ? palette.labelPrimary
+        : Colors.black;
+    final secondary = _ensureSecondaryContrast(
+      primary,
+      darkestBg,
+      preferredAlpha: 0.78,
+      minContrast: 4.65,
+      preferLight: false,
+    );
+    return (primary: primary, secondary: secondary, useLight: false);
+  }
+
+  /// Resolves high-contrast primary and secondary shelf inks against the exact
+  /// composited Layer 0 backdrop behind [shelfSlotIndex], using a narrow
+  /// luminance hysteresis band (`[0.175, 0.177]`) so continuous scrolling never
+  /// flickers while guaranteeing >= 4.5:1 contrast for normal & secondary text.
+  ({Color primary, Color secondary}) _resolveRexShelfInks({
+    required int shelfSlotIndex,
+    required Color liveAtmo,
+    required ApplePalette palette,
+    required double heroHeight,
+    required double viewportHeight,
+    required double scrollOffset,
+  }) {
+    final scrollDown = math.max(0.0, scrollOffset);
+    final shelfTopY = heroHeight - scrollDown + 14.0 + shelfSlotIndex * 235.0;
+    final headerY = (shelfTopY + 14.0).clamp(0.0, viewportHeight);
+    final cardTextY = (shelfTopY + 185.0).clamp(0.0, viewportHeight);
+
+    final headerBg = _sampleRexBackdropColorAtY(
+      viewportY: headerY,
+      viewportHeight: viewportHeight,
+      heroHeight: heroHeight,
+      scrollOffset: scrollOffset,
+      liveAtmo: liveAtmo,
+      palette: palette,
+    );
+    final cardBg = _sampleRexBackdropColorAtY(
+      viewportY: cardTextY,
+      viewportHeight: viewportHeight,
+      heroHeight: heroHeight,
+      scrollOffset: scrollOffset,
+      liveAtmo: liveAtmo,
+      palette: palette,
+    );
+
+    final resolved = _resolveRexInksForBackdropBand(
+      hysteresisSlotKey: shelfSlotIndex,
+      primaryBg: headerBg,
+      secondaryBg: cardBg,
+      palette: palette,
+    );
+    return (primary: resolved.primary, secondary: resolved.secondary);
+  }
+
+  /// Whether foreground ink over [atmo] (Hero title/dots & upper shelves)
   /// should use crisp white (`true`) or deep charcoal (`false`).
   bool _useLightInkForHeroAtmo(Color atmo, bool isDark) {
-    return isDark || atmo.computeLuminance() < 0.27;
+    return isDark || atmo.computeLuminance() < 0.185;
   }
 
   /// Live horizontal-swipe interpolated Rex Hero atmosphere color across
@@ -1442,7 +3762,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       return;
     }
     if (_primaryTab == tabKey) {
-      setState(() => _filterExpanded = !_filterExpanded);
+      if (defaultTargetPlatform == TargetPlatform.iOS && !OhosRuntime.isOhos) {
+        unawaited(_openNativeFilterSheet());
+      } else {
+        setState(() => _filterExpanded = !_filterExpanded);
+      }
       return;
     }
     final resolved = CmsParser.resolvePrimaryTabCategory(_categories, tabKey);
@@ -1991,9 +4315,30 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     String? sourcePosterUrl,
     bool isFullBleedHero = false,
     Color? ambientColor,
+    List<WorkSourceRef> initialSources = const [],
   }) {
     if (!CuratedDiscoveryService.isCuratedSite(site) && !site.supported) {
       _showAppleNotice(site.name, site.unsupportedReason);
+      return;
+    }
+    if (video.tag == 'media-folder' || video.id.startsWith('mmfolder://')) {
+      unawaited(
+        _trackSecondaryRoute<void>(
+          () => Navigator.of(context).push<void>(
+            buildApplePageRoute<void>(
+              builder: (_) => MediaFolderBrowserPage(
+                site: site,
+                client: widget.client,
+                storage: widget.storage,
+                folderId: video.id,
+                folderTitle: video.title,
+                backLabel: site.name,
+                onOpenVideo: (s, v) => _openVideoDetail(s, v),
+              ),
+            ),
+          ),
+        ),
+      );
       return;
     }
     if (video.id.startsWith('netdisk_qr:')) {
@@ -2004,6 +4349,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             context,
             widget.storage,
             initialDriveKey: driveKey.isEmpty ? null : driveKey,
+            sites: _config?.publicSupportedSites ?? const <CmsSite>[],
+            activeGroup: _activeSite?.group ?? '',
+            onOpenCatPawSettings:
+                (_config?.publicSupportedSites.any((s) => s.isCatPaw) ?? false)
+                    ? _showCatPawSettings
+                    : null,
             onChanged: () {
               if (mounted) setState(() {});
             },
@@ -2035,6 +4386,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           initialVideo: video,
           client: widget.client,
           storage: widget.storage,
+          initialSources: initialSources,
         );
     final usePosterExpand =
         (defaultTargetPlatform == TargetPlatform.iOS ||
@@ -2060,8 +4412,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             sourceBorderRadius: isFullBleedHero ? 0.0 : sourceRadius,
             sourceCardId: sourceCardId,
             posterUrl: effectivePosterUrl,
-            title: site.isEffectivelyPrivate ? '' : video.title,
-            year: site.isEffectivelyPrivate ? '' : video.year,
+            title: (site.isEffectivelyPrivate || _privateSessionUnlocked)
+                ? ''
+                : video.title,
+            year: (site.isEffectivelyPrivate || _privateSessionUnlocked)
+                ? ''
+                : video.year,
+            isPrivate: site.isEffectivelyPrivate || _privateSessionUnlocked,
             isFullBleedHero: isFullBleedHero,
             strictHighResPoster: isFullBleedHero,
             forBackdrop: isLandscapeCuratedCard,
@@ -2089,7 +4446,178 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       ),
     );
   }
+
+  Future<bool> _confirmIosDestructiveAction(
+    BuildContext dialogContext, {
+    required String title,
+    required String message,
+    required String confirmLabel,
+  }) async {
+    if (!dialogContext.mounted) return false;
+    final choice = await showAppleNativeAlert(
+      dialogContext,
+      title: title,
+      message: message,
+      actions: [
+        const AppleNativeAlertAction(
+          id: 'cancel',
+          title: '取消',
+          isCancel: true,
+        ),
+        AppleNativeAlertAction(
+          id: 'confirm',
+          title: confirmLabel,
+          isDestructive: true,
+        ),
+      ],
+    );
+    return choice == 'confirm';
+  }
+
+  void _dismissUndoHistoryBanner() {
+    _undoHistoryTimer?.cancel();
+    _undoHistoryTimer = null;
+    try {
+      _undoHistoryOverlayEntry?.remove();
+    } catch (_) {}
+    _undoHistoryOverlayEntry = null;
+  }
+
+  void _showIosUndoHistoryBanner(
+    BuildContext hostContext,
+    WatchHistoryEntry entry, {
+    VoidCallback? onRestored,
+  }) {
+    if (!_isIosNativeFlow || !mounted) return;
+    _dismissUndoHistoryBanner();
+    final overlay = Overlay.maybeOf(hostContext, rootOverlay: true) ??
+        Overlay.maybeOf(context, rootOverlay: true);
+    if (overlay == null) return;
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    final isDark = ApplePalette.isDarkOf(context);
+    late OverlayEntry bannerEntry;
+    bannerEntry = OverlayEntry(
+      builder: (overlayCtx) => Positioned(
+        left: 16,
+        right: 16,
+        bottom: bottomInset + 92,
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Material(
+              type: MaterialType.transparency,
+              child: Container(
+                key: const ValueKey('ios-undo-history-banner'),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  color: isDark
+                      ? const Color(0xF022242C)
+                      : const Color(0xF21C1D22),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.14),
+                    width: 0.6,
+                  ),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x40000000),
+                      blurRadius: 18,
+                      offset: Offset(0, 6),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '已删除「${entry.title}」',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    CupertinoButton(
+                      key: const ValueKey('ios-undo-history-action'),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 4,
+                      ),
+                      minimumSize: const Size(32, 32),
+                      onPressed: () async {
+                        _dismissUndoHistoryBanner();
+                        await widget.storage.restoreWatchHistoryEntry(entry);
+                        if (!mounted) return;
+                        onRestored?.call();
+                        setState(() {});
+                      },
+                      child: const Text(
+                        '撤销',
+                        style: TextStyle(
+                          color: AppleColors.systemBlue,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    _undoHistoryOverlayEntry = bannerEntry;
+    overlay.insert(bannerEntry);
+    _undoHistoryTimer = Timer(const Duration(seconds: 3), () {
+      if (_undoHistoryOverlayEntry == bannerEntry) {
+        _dismissUndoHistoryBanner();
+      }
+    });
+  }
+
+  void _updateHomeScrollVisualNotifiers(double offset) {
+    final heroH = _lastIosHeroHeight > 0 ? _lastIosHeroHeight : 460.0;
+    final nextDarkStatus = offset >= heroH * 0.42;
+    if (_iosHomeStatusBarDark.value != nextDarkStatus) {
+      _iosHomeStatusBarDark.value = nextDarkStatus;
+    }
+    final nextScrim = ((offset - 18.0) / 150.0).clamp(0.0, 1.0);
+    if ((nextScrim - _iosHomeTopScrimOpacity.value).abs() >= 0.015 ||
+        (nextScrim == 0.0 && _iosHomeTopScrimOpacity.value != 0.0) ||
+        (nextScrim == 1.0 && _iosHomeTopScrimOpacity.value != 1.0)) {
+      _iosHomeTopScrimOpacity.value = nextScrim;
+    }
+    final nextOverscroll = math.max(0.0, -offset);
+    if ((nextOverscroll - _iosHeroOverscroll.value).abs() >= 0.25 ||
+        (nextOverscroll == 0.0 && _iosHeroOverscroll.value != 0.0)) {
+      _iosHeroOverscroll.value = nextOverscroll;
+    }
+    final maxBackdropOffset = heroH + 380.0;
+    final nextBackdrop = offset.clamp(-400.0, maxBackdropOffset).toDouble();
+    if (_rexBackdropScrollOffset.value != nextBackdrop) {
+      _rexBackdropScrollOffset.value = nextBackdrop;
+    }
+    final cardFade = _rexHeroScrollFadeForOffset(offset, heroH);
+    final settledSentinel = heroH + 100.0;
+    final nextCardOffset = cardFade >= 0.999 ? settledSentinel : offset;
+    if (_rexCardInkScrollOffset.value != nextCardOffset) {
+      _rexCardInkScrollOffset.value = nextCardOffset;
+    }
+  }
   Future<void> _quickImportFromClipboard() async {
+    if (defaultTargetPlatform == TargetPlatform.iOS && !OhosRuntime.isOhos) {
+      await _showImportConfigDialog();
+      return;
+    }
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final text = (data?.text ?? '').trim();
     if (text.isEmpty) {
@@ -2112,72 +4640,114 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       );
       final merged = await widget.storage.upsertSubscriptions(entries);
       _reloadSavedConfig();
-      final totalSiteCount = merged?.publicSupportedSites.length ?? 0;
-      final availSiteCount = merged?.publicAvailableSiteCount ?? 0;
-      final liveCount = merged?.publicLives.length ?? 0;
-      _showAppleNotice(
-        '订阅导入成功',
-        '本次成功导入 ${entries.length} 个订阅源，当前 可用 $availSiteCount / 共 $totalSiteCount 个片源'
-        '${liveCount > 0 ? "、$liveCount 个直播源" : ""}。',
-      );
+      final limitation = (!kIsWeb && !Platform.isAndroid)
+          ? CspBridge.buildSubscriptionRuntimeLimitationNotice(entries)
+          : null;
+      if (limitation != null) {
+        _showAppleNotice(limitation.title, limitation.message);
+      } else {
+        final totalSiteCount = merged?.publicSupportedSites.length ?? 0;
+        final availSiteCount = merged?.publicAvailableSiteCount ?? 0;
+        final liveCount = merged?.publicLives.length ?? 0;
+        _showAppleNotice(
+          '订阅导入成功',
+          '本次成功导入 ${entries.length} 个订阅源，当前 可用 $availSiteCount / 共 $totalSiteCount 个片源'
+          '${liveCount > 0 ? "、$liveCount 个直播源" : ""}。',
+        );
+      }
     } catch (e) {
       _showImportConfigDialog(initialInput: text, initialError: '剪贴板内容未能直接导入：$e');
     }
   }
   void _onHomeScroll() {
-    if (!_homeScrollController.hasClients || _tabIndex != 0) return;
+    if (_homeScrollController.positions.length == 1) {
+      _updateHomeScrollVisualNotifiers(_homeScrollController.offset);
+    }
+    if (!_homeScrollController.hasClients ||
+        _tabIndex != 0 ||
+        _dockOwner != IosDockOwner.home) {
+      return;
+    }
     final offset = _homeScrollController.offset;
-    final progress = (offset / 72.0).clamp(0.0, 1.0);
-    if (!_dockCollapsed && offset > 72.0) {
-      setState(() => _dockCollapsed = true);
-      if (_useRootNativeTabChrome) {
-        _lastReportedDockProgress = 1.0;
+    // If the user is not dragging and a settle animation is in progress, let
+    // the settle animation finish unless the scroll has already crossed an
+    // outer boundary (top <= 12 or fully scrolled >= 152).
+    if (!_homeUserDragging && _dockMorphCtrl.isAnimating) {
+      if (offset > 12.0 && offset < 152.0) {
+        return;
+      }
+      _dockMorphAnimToken++;
+      _dockMorphCtrl.stop();
+    }
+    // Strictly linear progress in [0.0, 1.0] across 140pt of downward scroll.
+    // Driven without calling setState() on the full shell tree so scrolling
+    // stays locked at 60/120fps with zero frame drops or snap jumps.
+    final progress = ((offset - 12.0) / 140.0).clamp(0.0, 1.0);
+    _dockCollapsed = progress >= 0.5;
+    if (progress <= 0.001) {
+      _dockStableCollapsed = false;
+    } else if (progress >= 0.999) {
+      _dockStableCollapsed = true;
+    }
+    if ((_dockScrollProgress.value - progress).abs() >= 0.002 ||
+        (progress == 0.0 && _dockScrollProgress.value != 0.0) ||
+        (progress == 1.0 && _dockScrollProgress.value != 1.0)) {
+      _dockScrollProgress.value = progress;
+    }
+    if (_useRootNativeTabChrome) {
+      final crossedBoundary = (progress == 0.0 && _lastReportedDockProgress != 0.0) ||
+          (progress == 1.0 && _lastReportedDockProgress != 1.0);
+      if (crossedBoundary || (progress - _lastReportedDockProgress).abs() >= 0.004) {
+        _lastReportedDockProgress = progress;
         unawaited(
-          IosLiquidGlassBridge.setRootTabMinimized(true, progress: 1.0),
+          IosLiquidGlassBridge.setRootTabMinimized(
+            _dockCollapsed,
+            animated: false,
+            progress: progress,
+            epoch: ++_dockEpoch,
+          ),
         );
       }
-    } else if (_dockCollapsed && offset < 36.0) {
-      setState(() => _dockCollapsed = false);
-      if (_useRootNativeTabChrome) {
-        _lastReportedDockProgress = 0.0;
-        unawaited(
-          IosLiquidGlassBridge.setRootTabMinimized(false, progress: 0.0),
-        );
-      }
-    } else if (_useRootNativeTabChrome &&
-        (progress - _lastReportedDockProgress).abs() >= 0.08) {
-      _lastReportedDockProgress = progress;
-      unawaited(
-        IosLiquidGlassBridge.setRootTabMinimized(
-          _dockCollapsed,
-          animated: false,
-          progress: progress,
-        ),
-      );
     }
   }
 
   void _scrollHomeToTop() {
+    if (!mounted) return;
+    final wasInCurated = _curatedRouteDepth > 0 ||
+        IosRootTabNavigatorObserver.topRouteIsCurated.value ||
+        IosRootTabNavigatorObserver.curatedRouteDepth.value > 0;
+    if (wasInCurated) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      _curatedRouteDepth = 0;
+    }
+    if (_tabIndex != 0) {
+      setState(() => _tabIndex = 0);
+      _selectedTabIndexNotifier.value = 0;
+      if (_useRootNativeTabChrome) {
+        unawaited(
+          IosLiquidGlassBridge.setRootTabSelectedIndex(0, epoch: ++_dockEpoch),
+        );
+      }
+    }
+    _dockOwner = _computeDockOwner();
+    _curatedDockVisibleNotifier.value = _dockOwner == IosDockOwner.curated;
+    _dockStableCollapsed = false;
+    _homeUserDragging = false;
+    _syncRootTabVisibility(animated: true, forceEpoch: ++_dockEpoch);
     if (_homeScrollController.hasClients) {
       final useSpring = !isWindowsDesktopUi && !OhosRuntime.isOhos;
       unawaited(
         _homeScrollController.animateTo(
           0,
           duration: useSpring
-              ? Ios27Spring.smooth.nominalDuration
-              : const Duration(milliseconds: 360),
-          curve: useSpring ? Ios27Spring.smooth.curve : Curves.easeOutCubic,
+              ? const Duration(milliseconds: 360)
+              : const Duration(milliseconds: 340),
+          curve: Curves.easeOutCubic,
         ),
       );
-    }
-    if (_dockCollapsed) {
-      setState(() => _dockCollapsed = false);
-    }
-    if (_useRootNativeTabChrome) {
-      _lastReportedDockProgress = 0.0;
-      unawaited(
-        IosLiquidGlassBridge.setRootTabMinimized(false, progress: 0.0),
-      );
+      _animateDockProgressTo(0.0, animated: true, epoch: ++_dockEpoch);
+    } else {
+      _animateDockProgressTo(0.0, animated: true, epoch: ++_dockEpoch);
     }
   }
 
@@ -2247,7 +4817,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
   }
 
-  List<IosNativeMenuItem> _buildHomeSourceMenuItems() {
+  List<IosNativeMenuItem> _buildHomeSourceMenuItems({
+    bool currentGroupOnly = true,
+  }) {
     final inPrivacyMode = _privateSessionUnlocked;
     final rawSupported = inPrivacyMode
         ? (_config?.privateSupportedSites ?? const <CmsSite>[])
@@ -2274,8 +4846,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final activeKey = _activeSite?.key ?? '';
     final defaultGroupName = inPrivacyMode ? '隐私分组' : '默认分组';
 
-    // Include ALL available routes (no 20-item cap); group into native inline
-    // sections when routes span multiple groups so long menus stay easy to scan.
     final orderedSites = <CmsSite>[];
     final seenKeys = <String>{};
     if (_activeSite != null &&
@@ -2294,55 +4864,39 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       final g = s.group.trim().isEmpty ? defaultGroupName : s.group.trim();
       groupBuckets.putIfAbsent(g, () => <CmsSite>[]).add(s);
     }
-    final useGroupSections = groupBuckets.length > 1;
-    final unsupportedCount = filtered.length - availableOnly.length;
+
+    final activeGroupName = (_activeSite?.group.trim().isNotEmpty ?? false)
+        ? _activeSite!.group.trim()
+        : (groupBuckets.isNotEmpty ? groupBuckets.keys.first : defaultGroupName);
+    final scopedSites = currentGroupOnly && groupBuckets.length > 1
+        ? (groupBuckets[activeGroupName] ?? orderedSites)
+        : orderedSites;
 
     final items = <IosNativeMenuItem>[
       IosNativeMenuItem(
         id: '__all__',
-        title: inPrivacyMode ? '搜索与管理隐私片源…' : '搜索与管理全部片源…',
-        subtitle: unsupportedCount > 0
-            ? '可用 ${availableOnly.length} / 共 ${filtered.length} 条（已自动过滤未适配）'
-            : '共 ${orderedSites.length} 条可用线路',
-        symbol: 'magnifyingglass',
+        title: inPrivacyMode ? '管理隐私片源' : '管理片源',
+        subtitle: '查看全部 ${orderedSites.length} 条线路',
+        symbol: 'slider.horizontal.3',
         section: 0,
       ),
     ];
 
-    if (useGroupSections) {
-      var sectionIdx = 1;
-      for (final entry in groupBuckets.entries) {
-        final groupTitle = '${entry.key} (${entry.value.length})';
-        for (final s in entry.value) {
-          items.add(
-            IosNativeMenuItem(
-              id: 'site:${s.key}',
-              title: s.name,
-              symbol: (!inPrivacyMode && s.key == prefKey)
-                  ? 'star.fill'
-                  : (inPrivacyMode ? 'lock.shield' : 'play.tv'),
-              checked: s.key == activeKey,
-              section: sectionIdx,
-              sectionTitle: groupTitle,
-            ),
-          );
-        }
-        sectionIdx++;
-      }
-    } else {
-      for (final s in orderedSites) {
-        items.add(
-          IosNativeMenuItem(
-            id: 'site:${s.key}',
-            title: s.name,
-            symbol: (!inPrivacyMode && s.key == prefKey)
-                ? 'star.fill'
-                : (inPrivacyMode ? 'lock.shield' : 'play.tv'),
-            checked: s.key == activeKey,
-            section: 1,
-          ),
-        );
-      }
+    final groupTitle =
+        '$activeGroupName (${scopedSites.length})';
+    for (final s in scopedSites) {
+      items.add(
+        IosNativeMenuItem(
+          id: 'site:${s.key}',
+          title: s.name,
+          symbol: (!inPrivacyMode && s.key == prefKey)
+              ? 'star.fill'
+              : (inPrivacyMode ? 'lock.shield' : 'play.tv'),
+          checked: s.key == activeKey,
+          section: 1,
+          sectionTitle: groupBuckets.length > 1 ? groupTitle : null,
+        ),
+      );
     }
     return items;
   }
@@ -2396,8 +4950,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }
 
   Future<void> _openNativeFilterSheet() async {
+    final sanitizedCats = sanitizeIosFilterCategories(_categories);
     final subCats = CmsParser.subCategoriesForPrimaryTab(
-      _categories,
+      sanitizedCats,
       _primaryTab,
     );
     final existingNames = subCats.map((c) => c.name.trim()).toSet();
@@ -2405,23 +4960,35 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       for (final g in CmsParser.fallbackGenreTags)
         if (!existingNames.any((n) => n.contains(g))) g,
     ];
-    final cats = <IosNativeFilterCategory>[
+    final cats = sanitizeIosFilterChoices(<IosNativeFilterCategory>[
       const IosNativeFilterCategory(id: '', label: '全部', kind: 'all'),
       for (final c in subCats)
         IosNativeFilterCategory(id: c.id, label: c.name, kind: 'cat'),
       for (final g in extraGenres)
         IosNativeFilterCategory(id: g, label: g, kind: 'genre'),
-    ];
-    final picked = await showAppleNativeFilterSheet(
-      title: '多维片库筛选',
-      categories: cats,
-      selectedCategoryId: _filterSubCategoryId,
-      selectedGenreLabel: _filterGenreLabel,
-      areas: CmsParser.filterAreas,
-      selectedArea: _filterArea,
-      years: CmsParser.filterYears,
-      selectedYear: _filterYear,
-    );
+    ]);
+    final picked = IosLiquidGlassBridge.isAvailable
+        ? await showAppleNativeFilterSheet(
+            title: '片库筛选',
+            categories: cats,
+            selectedCategoryId: _filterSubCategoryId,
+            selectedGenreLabel: _filterGenreLabel,
+            areas: CmsParser.filterAreas,
+            selectedArea: _filterArea,
+            years: CmsParser.filterYears,
+            selectedYear: _filterYear,
+          )
+        : await showIosCatalogFilterSheet(
+            context: context,
+            title: '片库筛选',
+            categories: cats,
+            selectedCategoryId: _filterSubCategoryId,
+            selectedGenreLabel: _filterGenreLabel,
+            areas: CmsParser.filterAreas,
+            selectedArea: _filterArea,
+            years: CmsParser.filterYears,
+            selectedYear: _filterYear,
+          );
     if (picked == null || !mounted) return;
     final changed = picked.categoryId != _filterSubCategoryId ||
         picked.genreLabel != _filterGenreLabel ||
@@ -2457,45 +5024,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final size = MediaQuery.sizeOf(context);
     final useSidebar =
         _isDesktop ? (size.width >= 700) : (size.width > size.height);
-    const dockItems = <(IconData, IconData, String)>[
-      (CupertinoIcons.play_rectangle, CupertinoIcons.play_rectangle_fill, '主页'),
-      (
-        CupertinoIcons.dot_radiowaves_left_right,
-        CupertinoIcons.dot_radiowaves_left_right,
-        '直播',
-      ),
-      (
-        CupertinoIcons.square_stack_3d_up,
-        CupertinoIcons.square_stack_3d_up_fill,
-        '片库',
-      ),
-      (CupertinoIcons.gear_alt, CupertinoIcons.gear_alt_fill, '设置'),
-    ];
-    const nativeDockItems = <IosNativeDockItem>[
-      IosNativeDockItem(
-        label: '主页',
-        symbol: 'play.rectangle',
-        selectedSymbol: 'play.rectangle.fill',
-        kind: 'home',
-      ),
-      IosNativeDockItem(
-        label: '直播',
-        symbol: 'dot.radiowaves.left.and.right',
-        kind: 'live',
-      ),
-      IosNativeDockItem(
-        label: '片库',
-        symbol: 'square.stack.3d.up',
-        selectedSymbol: 'square.stack.3d.up.fill',
-        kind: 'library',
-      ),
-      IosNativeDockItem(
-        label: '设置',
-        symbol: 'gearshape',
-        selectedSymbol: 'gearshape.fill',
-        kind: 'settings',
-      ),
-    ];
+    const dockItems = _iosDockFallbackItems;
+    final nativeDockItems = _buildIosNativeDockItems();
     final safeTabIndex = _tabIndex.clamp(0, dockItems.length - 1);
     final Widget activePage = switch (safeTabIndex) {
       1 => _buildLiveTab(context, useSidebar: useSidebar),
@@ -2559,17 +5089,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               heightFactor: 1,
               child: AppleLiquidGlassDock(
                 selectedIndex: safeTabIndex,
-                onSelect: (i) => setState(() {
-                  _tabIndex = i;
-                  if (i != 0) _dockCollapsed = false;
-                }),
+                onSelect: _handleRootNativeTabSelected,
                 isLandscape: false,
                 items: dockItems,
                 nativeItems: nativeDockItems,
                 onSearch: _showGlobalSearchSheet,
                 onScrollToTop: _scrollHomeToTop,
+                tabMenuItemsBuilder: _buildDockTabSlideMenuActions,
+                onTabMenuAction: _handleDockTabMenuAction,
                 hidden: _privacyPortalAnimating,
                 collapsed: _dockCollapsed && safeTabIndex == 0,
+                scrollProgress: safeTabIndex == 0 ? _dockScrollProgress : null,
               ),
             ),
       body: Stack(
@@ -2629,11 +5159,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               child: Center(
                 child: AppleLiquidGlassDock(
                   selectedIndex: safeTabIndex,
-                  onSelect: (i) => setState(() => _tabIndex = i),
+                  onSelect: _handleRootNativeTabSelected,
                   isLandscape: true,
                   items: dockItems,
                   nativeItems: nativeDockItems,
                   onSearch: _showGlobalSearchSheet,
+                  onScrollToTop: _scrollHomeToTop,
+                  tabMenuItemsBuilder: _buildDockTabSlideMenuActions,
+                  onTabMenuAction: _handleDockTabMenuAction,
                   hidden: _privacyPortalAnimating,
                 ),
               ),
@@ -2702,11 +5235,88 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               : (widget.storage.activeDepotName.isEmpty
                   ? '切换仓库'
                   : widget.storage.activeDepotName);
-          final sourceLabel = _activeSite?.name ??
-              (_privateSessionUnlocked ? '选择隐私源' : '选择片源');
+          final sourceLabel = (_activeSite?.name ??
+                  (_privateSessionUnlocked ? '选择隐私源' : '选择片源'))
+              .replaceAll(RegExp(r'[\r\n\s]+'), ' ')
+              .trim();
           final double sourceMaxW = viewport.isCompactSplit
-              ? (depots.isEmpty ? 148.0 : 120.0)
-              : (compactHeader ? (depots.isEmpty ? 196.0 : 164.0) : 220.0);
+              ? (depots.isEmpty ? 156.0 : 126.0)
+              : (compactHeader ? (depots.isEmpty ? 204.0 : 168.0) : 228.0);
+          final isIosPlatform =
+              defaultTargetPlatform == TargetPlatform.iOS &&
+                  !OhosRuntime.isOhos;
+          final depotMenuItems =
+              depots.isNotEmpty ? _buildHomeDepotMenuItems(depots) : const <IosNativeMenuItem>[];
+          final sourceMenuItems = _buildHomeSourceMenuItems(currentGroupOnly: true);
+          void handleDepotMenuSelection(String id) {
+            if (id == '__manage__') {
+              _showDepotPickerDialog();
+              return;
+            }
+            if (id.startsWith('depot:')) {
+              final idx = int.tryParse(id.substring(6));
+              if (idx != null && idx >= 0 && idx < depots.length) {
+                unawaited(_switchToDepotDirect(depots[idx]));
+              }
+            }
+          }
+          final Widget depotFallbackButton = isIosPlatform
+              ? IosPressSlideMenuAnchor(
+                  key: const ValueKey('home-depot-button'),
+                  openOnTap: false,
+                  onTap: _showDepotPickerDialog,
+                  itemsBuilder: () =>
+                      iosSlideActionsFromNativeMenu(depotMenuItems),
+                  onSelected: handleDepotMenuSelection,
+                  accessibilityLabel:
+                      depotLabel.isEmpty ? '切换仓库' : '切换仓库 $depotLabel',
+                  menuKey: const ValueKey('home-depot-longpress-menu'),
+                  minTouchWidth: 44,
+                  minTouchHeight: 44,
+                  child: _buildHeaderCapsule(
+                    compact: compactHeader,
+                    icon: CupertinoIcons.archivebox_fill,
+                    label: depotLabel,
+                    onTap: () {},
+                    absorbTap: false,
+                  ),
+                )
+              : _buildHeaderCapsule(
+                  compact: compactHeader,
+                  icon: CupertinoIcons.archivebox_fill,
+                  label: depotLabel,
+                  onTap: _showDepotPickerDialog,
+                );
+          final Widget sourceFallbackButton = isIosPlatform
+              ? IosPressSlideMenuAnchor(
+                  key: const ValueKey('home-source-button'),
+                  openOnTap: false,
+                  onTap: _showSitePickerDialog,
+                  itemsBuilder: () =>
+                      iosSlideActionsFromNativeMenu(sourceMenuItems),
+                  onSelected: _onHomeSourceMenuSelected,
+                  accessibilityLabel: '切换片源 $sourceLabel',
+                  menuKey: const ValueKey('home-source-longpress-menu'),
+                  minTouchWidth: 44,
+                  minTouchHeight: 44,
+                  child: _buildHeaderCapsule(
+                    compact: compactHeader,
+                    icon: _privateSessionUnlocked
+                        ? CupertinoIcons.lock_shield_fill
+                        : CupertinoIcons.layers_alt_fill,
+                    label: sourceLabel,
+                    onTap: () {},
+                    absorbTap: false,
+                  ),
+                )
+              : _buildHeaderCapsule(
+                  compact: compactHeader,
+                  icon: _privateSessionUnlocked
+                      ? CupertinoIcons.lock_shield_fill
+                      : CupertinoIcons.layers_alt_fill,
+                  label: sourceLabel,
+                  onTap: _showSitePickerDialog,
+                );
           final sourceControls = Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
@@ -2722,28 +5332,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     height: 36,
                     width: compactHeader ? 36 : null,
                     maxWidth: 148,
-                    accessibilityLabel: depotLabel.isEmpty ? '切换仓库' : depotLabel,
+                    accessibilityLabel:
+                        depotLabel.isEmpty ? '切换仓库' : '切换仓库 $depotLabel',
                     menuTitle: '切换多仓子仓库',
-                    menuItems: _buildHomeDepotMenuItems(depots),
-                    onMenuSelected: (id) {
-                      if (id == '__manage__') {
-                        _showDepotPickerDialog();
-                        return;
-                      }
-                      if (id.startsWith('depot:')) {
-                        final idx = int.tryParse(id.substring(6));
-                        if (idx != null && idx >= 0 && idx < depots.length) {
-                          unawaited(_switchToDepotDirect(depots[idx]));
-                        }
-                      }
-                    },
+                    menuItems: depotMenuItems,
+                    menuAsPrimaryAction: false,
+                    onMenuSelected: handleDepotMenuSelection,
                     onTap: _showDepotPickerDialog,
-                    fallback: _buildHeaderCapsule(
-                      compact: compactHeader,
-                      icon: CupertinoIcons.archivebox_fill,
-                      label: depotLabel,
-                      onTap: _showDepotPickerDialog,
-                    ),
+                    fallback: depotFallbackButton,
                   ),
                 ),
                 const SizedBox(width: 6),
@@ -2762,17 +5358,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   maxWidth: sourceMaxW,
                   accessibilityLabel: '切换片源 $sourceLabel',
                   menuTitle: _privateSessionUnlocked ? '隐私片源' : '切换片源',
-                  menuItems: _buildHomeSourceMenuItems(),
+                  menuItems: sourceMenuItems,
+                  menuAsPrimaryAction: false,
                   onMenuSelected: _onHomeSourceMenuSelected,
                   onTap: _showSitePickerDialog,
-                  fallback: _buildHeaderCapsule(
-                    compact: compactHeader,
-                    icon: _privateSessionUnlocked
-                        ? CupertinoIcons.lock_shield_fill
-                        : CupertinoIcons.layers_alt_fill,
-                    label: sourceLabel,
-                    onTap: _showSitePickerDialog,
-                  ),
+                  fallback: sourceFallbackButton,
                 ),
               ),
             ],
@@ -2797,8 +5387,38 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             overImmersiveHero: showIosImmersiveHero,
           );
           final iosHeroHeight = viewport.iosHomeHeroHeight(maxH);
+          final heroHeightChanged =
+              (_lastIosHeroHeight - iosHeroHeight).abs() >= 0.5;
+          _lastIosHeroHeight = iosHeroHeight;
+          if (_homeScrollController.positions.length == 1) {
+            final currentOffset = _homeScrollController.offset;
+            final desiredDarkStatus = currentOffset >= iosHeroHeight * 0.42;
+            if (heroHeightChanged ||
+                desiredDarkStatus != _iosHomeStatusBarDark.value) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (!mounted || _homeScrollController.positions.length != 1) {
+                  return;
+                }
+                _updateHomeScrollVisualNotifiers(_homeScrollController.offset);
+              });
+            }
+          }
 
-          List<Widget> buildSourceCatalogSlivers() {
+          List<Widget> buildSourceCatalogSlivers({int? rexSectionSlotIndex}) {
+            final useRexCardInk =
+                showIosImmersiveHero && rexSectionSlotIndex != null;
+            final gridExtent = viewport.posterGridExtent(
+              useSidebar: useSidebar,
+              density: widget.storage.gridDensity,
+            );
+            final gridWidth =
+                math.max(1.0, constraints.maxWidth - horizontalPad * 2);
+            final crossAxisCount =
+                ((gridWidth + 12.0) / (gridExtent + 12.0)).ceil().clamp(1, 12);
+            final tileWidth =
+                (gridWidth - 12.0 * (crossAxisCount - 1)) / crossAxisCount;
+            final tileHeight = tileWidth / 0.56;
+
             return [
               if (_homeError != null)
                 SliverFillRemaining(
@@ -2862,10 +5482,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
                   sliver: SliverGrid(
                     gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-                      maxCrossAxisExtent: viewport.posterGridExtent(
-                        useSidebar: useSidebar,
-                        density: widget.storage.gridDensity,
-                      ),
+                      maxCrossAxisExtent: gridExtent,
                       mainAxisSpacing: 16,
                       crossAxisSpacing: 12,
                       childAspectRatio: 0.56,
@@ -2873,7 +5490,83 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     delegate: SliverChildBuilderDelegate(
                       (context, index) {
                         final video = _homeVideos[index];
-                        return _buildVideoCard(_activeSite!, video);
+                        if (!useRexCardInk) {
+                          return _buildVideoCard(_activeSite!, video);
+                        }
+                        final site = _activeSite!;
+                        final cardKey =
+                            'vcard_${site.key}_${video.id.isNotEmpty ? video.id : video.title}_';
+                        final row = index ~/ crossAxisCount;
+                        return RepaintBoundary(
+                          key: ValueKey(cardKey),
+                          child: AnimatedBuilder(
+                            animation: Listenable.merge([
+                              _iosHeroPageController,
+                              _rexCardInkScrollOffset,
+                            ]),
+                            builder: (cardCtx, _) {
+                              final rawOffset = _rexCardInkScrollOffset.value;
+                              final scrollFade = _rexHeroScrollFadeForOffset(
+                                rawOffset,
+                                iosHeroHeight,
+                              );
+                              if (scrollFade >= 0.999) {
+                                return _buildVideoCard(
+                                  site,
+                                  video,
+                                  includeOuterKey: false,
+                                );
+                              }
+                              final palette = ApplePalette.of(cardCtx);
+                              final liveAtmo = _resolveLiveRexHeroAtmo(
+                                heroCandidates,
+                                palette,
+                              );
+                              final scrollDown = math.max(0.0, rawOffset);
+                              final titleContentY = iosHeroHeight +
+                                  rexSectionSlotIndex * 235.0 +
+                                  104.0 +
+                                  row * (tileHeight + 16.0) +
+                                  tileHeight -
+                                  28.0;
+                              final subContentY = titleContentY + 16.0;
+                              final titleY =
+                                  (titleContentY - scrollDown).clamp(0.0, maxH);
+                              final subY =
+                                  (subContentY - scrollDown).clamp(0.0, maxH);
+                              final titleBg = _sampleRexBackdropColorAtY(
+                                viewportY: titleY,
+                                viewportHeight: maxH,
+                                heroHeight: iosHeroHeight,
+                                scrollOffset: rawOffset,
+                                liveAtmo: liveAtmo,
+                                palette: palette,
+                              );
+                              final subBg = _sampleRexBackdropColorAtY(
+                                viewportY: subY,
+                                viewportHeight: maxH,
+                                heroHeight: iosHeroHeight,
+                                scrollOffset: rawOffset,
+                                liveAtmo: liveAtmo,
+                                palette: palette,
+                              );
+                              final inks = _resolveRexInksForBackdropBand(
+                                hysteresisSlotKey:
+                                    1000 + rexSectionSlotIndex * 100 + row,
+                                primaryBg: titleBg,
+                                secondaryBg: subBg,
+                                palette: palette,
+                              );
+                              return _buildVideoCard(
+                                site,
+                                video,
+                                includeOuterKey: false,
+                                titleColorOverride: inks.primary,
+                                subtitleColorOverride: inks.secondary,
+                              );
+                            },
+                          ),
+                        );
                       },
                       childCount: _homeVideos.length,
                       findChildIndexCallback: (Key key) {
@@ -2978,26 +5671,38 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             var emittedCount = 0;
 
             Widget wrapFirstHeroShelfHeader(
-              Widget Function(Color? headerInk) builder,
+              Widget Function(Color? headerInk, Color? secondaryInk) builder,
             ) {
-              if (!(emittedCount == 0 && showIosImmersiveHero)) {
-                return builder(null);
+              if (!showIosImmersiveHero) {
+                return builder(null, null);
               }
+              final slotIndex = emittedCount;
               return AnimatedBuilder(
-                animation: _iosHeroPageController,
+                animation: Listenable.merge([
+                  _iosHeroPageController,
+                  _rexCardInkScrollOffset,
+                ]),
                 builder: (context, _) {
                   final palette = ApplePalette.of(context);
+                  final rawOffset = _rexCardInkScrollOffset.value;
+                  final scrollFade =
+                      _rexHeroScrollFadeForOffset(rawOffset, iosHeroHeight);
+                  if (scrollFade >= 0.999) {
+                    return builder(null, null);
+                  }
                   final liveAtmo = _resolveLiveRexHeroAtmo(
                     heroCandidates,
                     palette,
                   );
-                  final useLight = _useLightInkForHeroAtmo(
-                    liveAtmo,
-                    palette.isDark,
+                  final inks = _resolveRexShelfInks(
+                    shelfSlotIndex: slotIndex,
+                    liveAtmo: liveAtmo,
+                    palette: palette,
+                    heroHeight: iosHeroHeight,
+                    viewportHeight: maxH,
+                    scrollOffset: rawOffset,
                   );
-                  return builder(
-                    useLight ? Colors.white : const Color(0xFF141821),
-                  );
+                  return builder(inks.primary, inks.secondary);
                 },
               );
             }
@@ -3013,12 +5718,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     SliverToBoxAdapter(
                       key: const ValueKey('home-section-watch_history'),
                       child: wrapFirstHeroShelfHeader(
-                        (headerInk) => _buildHomeHistoryShelf(
+                        (headerInk, secondaryInk) => _buildHomeHistoryShelf(
                           context,
                           history: history,
                           horizontalPad: horizontalPad,
                           topSpacing: isFirstUnderHero ? 14 : 16,
                           headerInkOverride: headerInk,
+                          secondaryInkOverride: secondaryInk,
                         ),
                       ),
                     ),
@@ -3041,12 +5747,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           top: isFirstUnderHero ? 14 : 22,
                         ),
                         child: wrapFirstHeroShelfHeader(
-                          (headerInk) => CuratedDiscoverySection(
+                          (headerInk, secondaryInk) => CuratedDiscoverySection(
                             visibleSectionIds: [sectionId],
                             hasUserSources: hasSearchable,
                             loadLive:
                                 !Platform.environment.containsKey('FLUTTER_TEST'),
                             headerInkOverride: headerInk,
+                            secondaryInkOverride: secondaryInk,
+                            dockHost: defaultTargetPlatform == TargetPlatform.iOS &&
+                                    !OhosRuntime.isOhos
+                                ? _curatedDockHost
+                                : null,
                             onOpenVideo: (video) => _openVideoDetail(
                               CuratedDiscoveryService.curatedSiteSentinel,
                               video,
@@ -3081,12 +5792,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   SliverToBoxAdapter(
                     key: const ValueKey('home-section-source_updates'),
                     child: wrapFirstHeroShelfHeader(
-                      (headerInk) => _buildHomeSourceUpdatesHeader(
+                      (headerInk, secondaryInk) =>
+                          _buildHomeSourceUpdatesHeader(
                         context,
                         horizontalPad: horizontalPad,
                         topPadding: topPad,
                         bottomPadding: 10,
                         headerInkOverride: headerInk,
+                        secondaryInkOverride: secondaryInk,
                       ),
                     ),
                   ),
@@ -3104,7 +5817,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     ),
                   ),
                 );
-                slivers.addAll(buildSourceCatalogSlivers());
+                slivers.addAll(
+                  buildSourceCatalogSlivers(
+                    rexSectionSlotIndex: emittedCount,
+                  ),
+                );
                 emittedCount++;
               }
             }
@@ -3285,6 +6002,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                     .any((s) => s.searchable),
                             loadLive:
                                 !Platform.environment.containsKey('FLUTTER_TEST'),
+                            dockHost: defaultTargetPlatform == TargetPlatform.iOS &&
+                                    !OhosRuntime.isOhos
+                                ? _curatedDockHost
+                                : null,
                             onOpenVideo: (video) => _openVideoDetail(
                               CuratedDiscoveryService.curatedSiteSentinel,
                               video,
@@ -3329,6 +6050,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                   .any((s) => s.searchable),
                           loadLive:
                               !Platform.environment.containsKey('FLUTTER_TEST'),
+                          dockHost: defaultTargetPlatform == TargetPlatform.iOS &&
+                                  !OhosRuntime.isOhos
+                              ? _curatedDockHost
+                              : null,
                           onOpenVideo: (video) => _openVideoDetail(
                             CuratedDiscoveryService.curatedSiteSentinel,
                             video,
@@ -3351,6 +6076,27 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             );
           final autoPagingScrollView = NotificationListener<ScrollNotification>(
             onNotification: (notification) {
+              if (notification.depth == 0 &&
+                  notification.metrics.axis == Axis.vertical &&
+                  _dockOwner == IosDockOwner.home &&
+                  _tabIndex == 0 &&
+                  defaultTargetPlatform == TargetPlatform.iOS &&
+                  !OhosRuntime.isOhos) {
+                if (notification is ScrollStartNotification) {
+                  if (notification.dragDetails != null) {
+                    _homeUserDragging = true;
+                    _dockMorphAnimToken++;
+                    _dockMorphCtrl.stop();
+                  }
+                } else if (notification is ScrollUpdateNotification) {
+                  if (notification.dragDetails != null) {
+                    _homeUserDragging = true;
+                  }
+                } else if (notification is ScrollEndNotification) {
+                  _homeUserDragging = false;
+                  _settleHomeDockToStableEndpoint(animated: true);
+                }
+              }
               if (showIosImmersiveHero &&
                   notification.metrics.axis == Axis.vertical) {
                 final overscroll = -notification.metrics.pixels;
@@ -3456,47 +6202,57 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               if (showIosImmersiveHero)
                 Positioned.fill(
                   child: IgnorePointer(
-                    child: AnimatedBuilder(
-                      animation: Listenable.merge([
-                        _homeScrollController,
-                        _iosHeroPageController,
-                      ]),
-                      builder: (context, _) {
-                        final palette = ApplePalette.of(context);
-                        final liveAtmo = _resolveLiveRexHeroAtmo(
-                          heroCandidates,
-                          palette,
-                        );
-                        final rawOffset =
-                            _homeScrollController.positions.length == 1
-                                ? _homeScrollController.offset
-                                : 0.0;
-                        final overscroll = math.max(0.0, -rawOffset);
+                    child: RepaintBoundary(
+                      child: AnimatedBuilder(
+                        animation: Listenable.merge([
+                          _rexBackdropScrollOffset,
+                          _iosHeroPageController,
+                        ]),
+                        builder: (context, _) {
+                          final palette = ApplePalette.of(context);
+                          final liveAtmo = _resolveLiveRexHeroAtmo(
+                            heroCandidates,
+                            palette,
+                          );
+                          final rawOffset = _rexBackdropScrollOffset.value;
                         final scrollDown = math.max(0.0, rawOffset);
-                        final stretchedHeight = iosHeroHeight + overscroll;
-
-                        const auraTopExtend = 280.0;
-                        const auraSolidPastHero = 26.0;
-                        const auraDissolveHeight = 148.0;
-                        final auraTotalHeight = auraTopExtend +
-                            stretchedHeight +
-                            auraSolidPastHero +
-                            auraDissolveHeight;
-                        final solidEndStop = ((auraTopExtend +
-                                    stretchedHeight +
-                                    auraSolidPastHero) /
-                                auraTotalHeight)
-                            .clamp(0.55, 0.92);
+                        final metrics = _computeRexBackdropMetrics(
+                          liveAtmo: liveAtmo,
+                          palette: palette,
+                          heroHeight: iosHeroHeight,
+                          scrollOffset: rawOffset,
+                        );
+                        final edge = metrics.liveEdgeColor;
+                        final solidEndStop = metrics.auraSolidEndStop;
                         final tail = 1.0 - solidEndStop;
 
                         return Stack(
                           fit: StackFit.expand,
                           children: [
+                            Positioned.fill(
+                              child: DecoratedBox(
+                                key: const ValueKey(
+                                  'ios-hero-rex-full-tonal-bg',
+                                ),
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topCenter,
+                                    end: Alignment.bottomCenter,
+                                    colors: [
+                                      metrics.fullScreenTopTone,
+                                      metrics.fullScreenMidTone,
+                                      metrics.fullScreenBotTone,
+                                    ],
+                                    stops: const [0.0, 0.62, 1.0],
+                                  ),
+                                ),
+                              ),
+                            ),
                             Positioned(
-                              top: -auraTopExtend - scrollDown,
+                              top: -_kRexAuraTopExtend - scrollDown,
                               left: 0,
                               right: 0,
-                              height: auraTotalHeight,
+                              height: metrics.auraTotalHeight,
                               child: DecoratedBox(
                                 key: const ValueKey(
                                   'ios-hero-top-ambient-aura',
@@ -3506,13 +6262,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                     begin: Alignment.topCenter,
                                     end: Alignment.bottomCenter,
                                     colors: [
-                                      liveAtmo,
-                                      liveAtmo,
-                                      liveAtmo.withValues(alpha: 0.80),
-                                      liveAtmo.withValues(alpha: 0.50),
-                                      liveAtmo.withValues(alpha: 0.22),
-                                      liveAtmo.withValues(alpha: 0.06),
-                                      liveAtmo.withValues(alpha: 0.0),
+                                      edge,
+                                      edge,
+                                      edge.withValues(alpha: 0.86),
+                                      edge.withValues(alpha: 0.58),
+                                      edge.withValues(alpha: 0.28),
+                                      edge.withValues(alpha: 0.09),
+                                      edge.withValues(alpha: 0.0),
                                     ],
                                     stops: [
                                       0.0,
@@ -3531,6 +6287,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         );
                       },
                     ),
+                    ),
                   ),
                 ),
               maskedScroll,
@@ -3541,15 +6298,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   right: 0,
                   height: topSafePad + 54,
                   child: IgnorePointer(
-                    child: AnimatedBuilder(
-                      animation: _homeScrollController,
-                      builder: (context, child) {
-                        final offset =
-                            _homeScrollController.positions.length == 1
-                                ? _homeScrollController.offset
-                                : 0.0;
-                        final scrimOpacity =
-                            ((offset - 18.0) / 150.0).clamp(0.0, 1.0);
+                    child: ValueListenableBuilder<double>(
+                      valueListenable: _iosHomeTopScrimOpacity,
+                      builder: (context, scrimOpacity, child) {
                         if (scrimOpacity <= 0.01) {
                           return const SizedBox.shrink();
                         }
@@ -3580,16 +6331,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             return homeStack;
           }
           final isDarkHome = ApplePalette.isDarkOf(context);
-          return AnimatedBuilder(
-            animation: _homeScrollController,
+          return ValueListenableBuilder<bool>(
+            valueListenable: _iosHomeStatusBarDark,
             child: homeStack,
-            builder: (context, child) {
-              final offset = _homeScrollController.positions.length == 1
-                  ? _homeScrollController.offset
-                  : 0.0;
+            builder: (context, pastHeroThreshold, child) {
               // Keep iOS status bar light over the dark immersive Hero poster,
               // flipping to dark in Light Mode once scrolled into light shelves.
-              final overlayStyle = (isDarkHome || offset < iosHeroHeight * 0.42)
+              final overlayStyle = (isDarkHome || !pastHeroThreshold)
                   ? SystemUiOverlayStyle.light
                   : SystemUiOverlayStyle.dark;
               return AnnotatedRegion<SystemUiOverlayStyle>(
@@ -3685,23 +6433,19 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         const SizedBox(width: 6),
         Builder(
           builder: (context) {
+            final isIosPlatform =
+                defaultTargetPlatform == TargetPlatform.iOS &&
+                    !OhosRuntime.isOhos;
             final loggedCount = NetdiskService.drives
                 .where((d) => widget.storage.isNetdiskLoggedIn(d.key))
                 .length;
-            void openNetdisk() => unawaited(
-                  _trackSecondaryRoute<void>(
-                    () => showNetdiskAccountSheet(
-                      context,
-                      widget.storage,
-                      onChanged: () {
-                        if (mounted) setState(() {});
-                      },
-                    ),
-                  ),
-                );
+            void openNetdisk() {
+              _openConfigCenterPage(iosBackLabel: '主页');
+            }
+            final configMenuItems = _buildHomeConfigCenterMenuItems();
             final netdiskLabel = compactHeader
                 ? ''
-                : (loggedCount > 0 ? '网盘 · $loggedCount' : '网盘');
+                : (loggedCount > 0 ? '配置 · $loggedCount' : '配置中心');
             final netdiskGlass = LiquidGlass(
               borderRadius: 999,
               elevated: false,
@@ -3747,13 +6491,29 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     onTap: openNetdisk,
                     child: netdiskGlass,
                   )
-                : Ios27Pressable(
-                    key: const ValueKey('home-netdisk-button'),
-                    pressedScale: Ios27Spring.pressSwellScale,
-                    borderRadius: 999,
-                    onTap: openNetdisk,
-                    child: netdiskGlass,
-                  );
+                : isIosPlatform
+                    ? IosPressSlideMenuAnchor(
+                        key: const ValueKey('home-netdisk-button'),
+                        openOnTap: false,
+                        onTap: openNetdisk,
+                        itemsBuilder: () =>
+                            iosSlideActionsFromNativeMenu(configMenuItems),
+                        onSelected: _onHomeConfigCenterMenuSelected,
+                        accessibilityLabel: '配置中心',
+                        menuKey: const ValueKey(
+                          'home-config-center-longpress-menu',
+                        ),
+                        minTouchWidth: 44,
+                        minTouchHeight: 44,
+                        child: netdiskGlass,
+                      )
+                    : Ios27Pressable(
+                        key: const ValueKey('home-netdisk-button'),
+                        pressedScale: Ios27Spring.pressSwellScale,
+                        borderRadius: 999,
+                        onTap: openNetdisk,
+                        child: netdiskGlass,
+                      );
             return IosNativeGlassButton(
               style: compactHeader ? 'circle' : 'capsule',
               symbol: loggedCount > 0 ? 'cloud.fill' : 'qrcode.viewfinder',
@@ -3767,8 +6527,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               forceDark: overImmersiveHero,
               width: compactHeader ? 36 : null,
               height: 36,
-              maxWidth: 112,
-              accessibilityLabel: '我的云盘',
+              maxWidth: 124,
+              accessibilityLabel: '配置中心',
+              menuTitle: '配置中心',
+              menuItems: configMenuItems,
+              menuAsPrimaryAction: false,
+              onMenuSelected: _onHomeConfigCenterMenuSelected,
               onTap: openNetdisk,
               fallback: fallback,
             );
@@ -3784,12 +6548,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     required double horizontalPad,
     required double topSpacing,
     Color? headerInkOverride,
+    Color? secondaryInkOverride,
   }) {
     final titleColor =
         headerInkOverride ?? ApplePalette.of(context).labelPrimary;
-    final actionColor = headerInkOverride == Colors.white
-        ? Colors.white.withValues(alpha: 0.84)
-        : AppleColors.systemBlue;
+    final actionColor = secondaryInkOverride ??
+        (headerInkOverride != null &&
+                headerInkOverride.computeLuminance() > 0.48
+            ? headerInkOverride.withValues(alpha: 0.86)
+            : AppleColors.systemBlue);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -3853,12 +6620,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     required double topPadding,
     required double bottomPadding,
     Color? headerInkOverride,
+    Color? secondaryInkOverride,
   }) {
     final palette = ApplePalette.of(context);
     final titleColor = headerInkOverride ?? palette.labelPrimary;
-    final subColor = headerInkOverride != null
-        ? headerInkOverride.withValues(alpha: 0.72)
-        : palette.labelTertiary;
+    final subColor = secondaryInkOverride ??
+        (headerInkOverride != null
+            ? headerInkOverride.withValues(alpha: 0.84)
+            : palette.labelSecondary);
     return Padding(
       key: const ValueKey('home-source-updates-header'),
       padding: EdgeInsets.fromLTRB(
@@ -3964,44 +6733,74 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 maxWidth: 108,
                 accessibilityLabel: '片库筛选',
                 onTap: () => unawaited(_openNativeFilterSheet()),
-                fallback: GestureDetector(
-                  key: const ValueKey('home-filter-button'),
-                  onTap: () =>
-                      setState(() => _filterExpanded = !_filterExpanded),
-                  child: LiquidGlass(
-                    height: 36,
-                    borderRadius: 999,
-                    elevated: false,
-                    rimStrength:
-                        (_filterExpanded || activeFilterCount > 0) ? 1.05 : 0.88,
-                    tint: (_filterExpanded || activeFilterCount > 0)
-                        ? const Color(0xCC0A84FF)
-                        : const Color(0x241E1E24),
-                    padding: const EdgeInsets.symmetric(horizontal: 13),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          CupertinoIcons.slider_horizontal_3,
-                          size: 14,
-                          color: (_filterExpanded || activeFilterCount > 0)
-                              ? Colors.white
-                              : ApplePalette.of(context).labelPrimary,
-                        ),
-                        const SizedBox(width: 5),
-                        Text(
-                          activeFilterCount > 0
-                              ? '筛选 · $activeFilterCount'
-                              : '筛选',
-                          style: TextStyle(
-                            color: (_filterExpanded || activeFilterCount > 0)
-                                ? Colors.white
-                                : ApplePalette.of(context).labelPrimary,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
+                fallback: Semantics(
+                  button: true,
+                  label: '片库筛选',
+                  child: GestureDetector(
+                    key: const ValueKey('home-filter-button'),
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () {
+                      if (defaultTargetPlatform == TargetPlatform.iOS &&
+                          !OhosRuntime.isOhos) {
+                        unawaited(_openNativeFilterSheet());
+                      } else {
+                        setState(() => _filterExpanded = !_filterExpanded);
+                      }
+                    },
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        minHeight: defaultTargetPlatform == TargetPlatform.iOS
+                            ? 44
+                            : 36,
+                        minWidth: defaultTargetPlatform == TargetPlatform.iOS
+                            ? 44
+                            : 0,
+                      ),
+                      child: Align(
+                        alignment: Alignment.center,
+                        widthFactor: 1.0,
+                        child: LiquidGlass(
+                          height: 36,
+                          borderRadius: 999,
+                          elevated: false,
+                          rimStrength:
+                              (_filterExpanded || activeFilterCount > 0)
+                                  ? 1.05
+                                  : 0.88,
+                          tint: (_filterExpanded || activeFilterCount > 0)
+                              ? const Color(0xCC0A84FF)
+                              : const Color(0x241E1E24),
+                          padding: const EdgeInsets.symmetric(horizontal: 13),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                CupertinoIcons.slider_horizontal_3,
+                                size: 14,
+                                color:
+                                    (_filterExpanded || activeFilterCount > 0)
+                                        ? Colors.white
+                                        : ApplePalette.of(context).labelPrimary,
+                              ),
+                              const SizedBox(width: 5),
+                              Text(
+                                activeFilterCount > 0
+                                    ? '筛选 · $activeFilterCount'
+                                    : '筛选',
+                                style: TextStyle(
+                                  color:
+                                      (_filterExpanded || activeFilterCount > 0)
+                                          ? Colors.white
+                                          : ApplePalette.of(context)
+                                              .labelPrimary,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
@@ -4019,7 +6818,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               children: [
                 if (_filterSubCategoryId.isNotEmpty)
                   _buildActiveFilterBadge(
-                    _categories
+                    (defaultTargetPlatform == TargetPlatform.iOS &&
+                                !OhosRuntime.isOhos
+                            ? sanitizeIosFilterCategories(_categories)
+                            : _categories)
                             .where((c) => c.id == _filterSubCategoryId)
                             .map((c) => c.name)
                             .firstOrNull ??
@@ -4131,9 +6933,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final bool isShortHero = heroHeight < 460;
 
     final activeAtmo = _resolveRexHeroAtmosphere(activeFeatured, palette);
-    final activeUseLight = _useLightInkForHeroAtmo(activeAtmo, isDark);
-    final activeDotInk =
-        activeUseLight ? Colors.white : const Color(0xFF141821);
 
     Widget buildHeroChromeFade({required Widget child}) {
       return ValueListenableBuilder<double>(
@@ -4156,13 +6955,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       key: const ValueKey('ios-home-immersive-hero'),
       height: heroHeight,
       width: double.infinity,
-      child: AnimatedBuilder(
-        animation: _homeScrollController,
-        builder: (context, _) {
-          final rawOffset = _homeScrollController.positions.length == 1
-              ? _homeScrollController.offset
-              : 0.0;
-          final overscroll = math.max(0.0, -rawOffset);
+      child: ValueListenableBuilder<double>(
+        valueListenable: _iosHeroOverscroll,
+        builder: (context, overscroll, _) {
           final stretchedHeight = heroHeight + overscroll;
           final stretchScale =
               (1.0 + (overscroll / math.max(heroHeight, 1.0)) * 0.68)
@@ -4198,43 +6993,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     final featured = featuredList[index];
                     final itemAtmo =
                         _resolveRexHeroAtmosphere(featured, palette);
-                    final useLightInk =
-                        _useLightInkForHeroAtmo(itemAtmo, isDark);
-                    final primaryInk =
-                        useLightInk ? Colors.white : const Color(0xFF141821);
-                    final secondaryInk = useLightInk
-                        ? Colors.white.withValues(alpha: 0.90)
-                        : const Color(0xFF141821).withValues(alpha: 0.80);
-                    final bodyInk = useLightInk
-                        ? Colors.white.withValues(alpha: 0.80)
-                        : const Color(0xFF141821).withValues(alpha: 0.72);
-                    final titleShadows = useLightInk
-                        ? const [
-                            Shadow(
-                              color: Color(0x99000000),
-                              blurRadius: 14,
-                              offset: Offset(0, 2),
-                            ),
-                          ]
-                        : const [
-                            Shadow(
-                              color: Color(0x45FFFFFF),
-                              blurRadius: 10,
-                            ),
-                          ];
-                    final subShadows = useLightInk
-                        ? const [
-                            Shadow(
-                              color: Color(0x88000000),
-                              blurRadius: 8,
-                            ),
-                          ]
-                        : const [
-                            Shadow(
-                              color: Color(0x38FFFFFF),
-                              blurRadius: 6,
-                            ),
-                          ];
+                    final posterLookupKey =
+                        '${featured.poster}|${featured.title}|${featured.year}';
                     final heroCardId =
                         'ios_hero_${site.key}_${featured.id.isNotEmpty ? featured.id : featured.title}_$index';
                     final metaParts = <String>[
@@ -4263,41 +7023,41 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         child: Stack(
                           fit: StackFit.expand,
                           children: [
-                            // Full-bleed crisp HD artwork with opaque poster
-                            // ambient backing (zero white ShaderMask cutout).
+                            // Full-bleed crisp HD artwork backed by Layer 0's live
+                            // interpolated atmosphere (never per-slide opaque backing
+                            // that splits at the bottom edge during swipes).
                             Positioned.fill(
                               child: PosterExpandSourceCard(
                                 cardId: heroCardId,
                                 child: ClipRect(
-                                  child: ColoredBox(
-                                    color: itemAtmo,
-                                    child: Transform.scale(
-                                      key: const ValueKey(
-                                        'ios-hero-stretch-zoom',
+                                  child: Transform.scale(
+                                    key: const ValueKey(
+                                      'ios-hero-stretch-zoom',
+                                    ),
+                                    scale: stretchScale,
+                                    alignment: const Alignment(0.0, -0.08),
+                                    child: PosterImage(
+                                      url: featured.poster,
+                                      title: (_privateSessionUnlocked ||
+                                              site.isEffectivelyPrivate)
+                                          ? ''
+                                          : featured.title,
+                                      year: (_privateSessionUnlocked ||
+                                              site.isEffectivelyPrivate)
+                                          ? ''
+                                          : featured.year,
+                                      isPrivate: _privateSessionUnlocked ||
+                                          site.isEffectivelyPrivate,
+                                      highRes: true,
+                                      strictHighRes: true,
+                                      fit: BoxFit.cover,
+                                      alignment: const Alignment(0.0, -0.22),
+                                      onBytesLoaded: (bytes) =>
+                                          _updateHeroAmbientFromBytes(
+                                        featured,
+                                        bytes,
                                       ),
-                                      scale: stretchScale,
-                                      alignment: const Alignment(0.0, -0.08),
-                                      child: PosterImage(
-                                        url: featured.poster,
-                                        title: site.isEffectivelyPrivate
-                                            ? ''
-                                            : featured.title,
-                                        year: site.isEffectivelyPrivate
-                                            ? ''
-                                            : featured.year,
-                                        highRes: true,
-                                        strictHighRes: true,
-                                        fit: BoxFit.cover,
-                                        alignment: const Alignment(0.0, -0.22),
-                                        onBytesLoaded: (bytes) =>
-                                            _updateHeroAmbientFromBytes(
-                                          featured,
-                                          bytes,
-                                        ),
-                                        placeholder: ColoredBox(
-                                          color: itemAtmo,
-                                        ),
-                                      ),
+                                      placeholder: const SizedBox.shrink(),
                                     ),
                                   ),
                                 ),
@@ -4331,220 +7091,431 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               ),
                             ),
 
-                            // Rex-style silky 8-stop single-color atmospheric
-                            // dissolve strictly below the faces: ends at 100%
-                            // solid `itemAtmo` matching Layer 0 pixel-for-pixel
-                            // with zero seam, zero Mach band, and zero rounded
-                            // sheet cliff in BOTH Light Mode and Dark Mode.
+                            // Rex-style live-interpolated 8-stop atmospheric dissolve
+                            // strictly below the faces: uses liveAtmo (matching Layer 0
+                            // pixel-for-pixel AT EVERY FRAME OF EVERY HORIZONTAL SWIPE!)
+                            // so there is ZERO horizontal bottom cut line mid-swipe
+                            // AND zero seam at rest in BOTH Light Mode and Dark Mode.
                             Positioned(
                               left: 0,
                               right: 0,
                               bottom: 0,
-                              height: stretchedHeight * 0.54,
+                              height: stretchedHeight * 0.58,
                               child: IgnorePointer(
                                 child: buildHeroChromeFade(
-                                  child: DecoratedBox(
-                                    key: const ValueKey(
-                                      'ios-hero-bottom-ambient-gradient',
-                                    ),
-                                    decoration: BoxDecoration(
-                                      gradient: LinearGradient(
-                                        begin: Alignment.topCenter,
-                                        end: Alignment.bottomCenter,
-                                        colors: [
-                                          itemAtmo.withValues(alpha: 0.0),
-                                          itemAtmo.withValues(alpha: 0.06),
-                                          itemAtmo.withValues(alpha: 0.20),
-                                          itemAtmo.withValues(alpha: 0.46),
-                                          itemAtmo.withValues(alpha: 0.72),
-                                          itemAtmo.withValues(alpha: 0.90),
-                                          itemAtmo.withValues(alpha: 0.98),
-                                          itemAtmo,
-                                        ],
-                                        stops: const [
-                                          0.0,
-                                          0.14,
-                                          0.30,
-                                          0.48,
-                                          0.66,
-                                          0.82,
-                                          0.93,
-                                          1.0,
-                                        ],
-                                      ),
-                                    ),
+                                  child: AnimatedBuilder(
+                                    animation: Listenable.merge([
+                                      _iosHeroPageController,
+                                      _rexBackdropScrollOffset,
+                                    ]),
+                                    builder: (context, _) {
+                                      final liveAtmo = _resolveLiveRexHeroAtmo(
+                                        featuredList,
+                                        palette,
+                                      );
+                                      final liveEdgeColor =
+                                          _computeRexBackdropMetrics(
+                                        liveAtmo: liveAtmo,
+                                        palette: palette,
+                                        heroHeight: heroHeight,
+                                        scrollOffset:
+                                            _rexBackdropScrollOffset.value,
+                                      ).liveEdgeColor;
+                                      return DecoratedBox(
+                                        key: const ValueKey(
+                                          'ios-hero-bottom-ambient-gradient',
+                                        ),
+                                        decoration: BoxDecoration(
+                                          gradient: LinearGradient(
+                                            begin: Alignment.topCenter,
+                                            end: Alignment.bottomCenter,
+                                            colors: [
+                                              liveEdgeColor.withValues(
+                                                alpha: 0.0,
+                                              ),
+                                              liveEdgeColor.withValues(
+                                                alpha: 0.05,
+                                              ),
+                                              liveEdgeColor.withValues(
+                                                alpha: 0.18,
+                                              ),
+                                              liveEdgeColor.withValues(
+                                                alpha: 0.44,
+                                              ),
+                                              liveEdgeColor.withValues(
+                                                alpha: 0.72,
+                                              ),
+                                              liveEdgeColor.withValues(
+                                                alpha: 0.90,
+                                              ),
+                                              liveEdgeColor.withValues(
+                                                alpha: 0.98,
+                                              ),
+                                              liveEdgeColor,
+                                            ],
+                                            stops: const [
+                                              0.0,
+                                              0.14,
+                                              0.30,
+                                              0.48,
+                                              0.66,
+                                              0.82,
+                                              0.93,
+                                              1.0,
+                                            ],
+                                          ),
+                                        ),
+                                      );
+                                    },
                                   ),
                                 ),
                               ),
                             ),
 
                             Positioned(
-                              left: horizontalPad + 6,
-                              right: horizontalPad + 6,
-                              bottom: featuredList.length > 1
-                                  ? (isShortHero ? 26 : 30)
-                                  : (isShortHero ? 14 : 16),
+                              left: 0,
+                              right: 0,
+                              bottom: 0,
+                              height: stretchedHeight * 0.62,
                               child: buildHeroChromeFade(
-                                child: Center(
-                                  child: ConstrainedBox(
-                                    constraints: const BoxConstraints(
-                                      maxWidth: 520,
-                                    ),
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.center,
+                                child: AnimatedBuilder(
+                                  animation: Listenable.merge([
+                                    _iosHeroPageController,
+                                    _rexBackdropScrollOffset,
+                                  ]),
+                                  builder: (context, _) {
+                                    final liveAtmo = _resolveLiveRexHeroAtmo(
+                                      featuredList,
+                                      palette,
+                                    );
+                                    final liveEdgeColor =
+                                        _computeRexBackdropMetrics(
+                                      liveAtmo: liveAtmo,
+                                      palette: palette,
+                                      heroHeight: heroHeight,
+                                      scrollOffset:
+                                          _rexBackdropScrollOffset.value,
+                                    ).liveEdgeColor;
+                                    final hasLoadedPoster =
+                                        _iosHeroAmbientColors
+                                                .containsKey(posterLookupKey) ||
+                                            PosterLoader.peekMemory(
+                                                  featured.poster,
+                                                  title: site
+                                                          .isEffectivelyPrivate
+                                                      ? ''
+                                                      : featured.title,
+                                                  year: site
+                                                          .isEffectivelyPrivate
+                                                      ? ''
+                                                      : featured.year,
+                                                  preferHd: true,
+                                                ) !=
+                                                null;
+                                    // At the title's position inside the bottom
+                                    // 58% dissolve, the gradient covers ~60% of
+                                    // a loaded poster and 100% liveEdgeColor
+                                    // when the poster image is missing.
+                                    final effectiveHeroBg = hasLoadedPoster
+                                        ? Color.alphaBlend(
+                                            liveEdgeColor.withValues(
+                                              alpha: 0.60,
+                                            ),
+                                            itemAtmo,
+                                          )
+                                        : liveEdgeColor;
+                                    final heroInks =
+                                        _resolveRexInksForBackdropBand(
+                                      hysteresisSlotKey: -100 - index,
+                                      primaryBg: effectiveHeroBg,
+                                      secondaryBg: effectiveHeroBg,
+                                      palette: palette,
+                                    );
+                                    final useLightInk = heroInks.useLight;
+                                    final primaryInk = heroInks.primary;
+                                    final secondaryInk = heroInks.secondary;
+                                    final bodyInk = heroInks.secondary;
+                                    final titleShadows = useLightInk
+                                        ? const [
+                                            Shadow(
+                                              color: Color(0x99000000),
+                                              blurRadius: 14,
+                                              offset: Offset(0, 2),
+                                            ),
+                                          ]
+                                        : const [
+                                            Shadow(
+                                              color: Color(0x45FFFFFF),
+                                              blurRadius: 10,
+                                            ),
+                                          ];
+                                    final subShadows = useLightInk
+                                        ? const [
+                                            Shadow(
+                                              color: Color(0x88000000),
+                                              blurRadius: 8,
+                                            ),
+                                          ]
+                                        : const [
+                                            Shadow(
+                                              color: Color(0x38FFFFFF),
+                                              blurRadius: 6,
+                                            ),
+                                          ];
+                                    final scrimTint = useLightInk
+                                        ? Colors.black
+                                        : liveEdgeColor;
+                                    final scrimHeight = math.min(
+                                      math.max(0.0, stretchedHeight * 0.60 - 22),
+                                      (stretchedHeight * 0.50).clamp(180.0, 275.0),
+                                    );
+                                    return Stack(
+                                      fit: StackFit.expand,
+                                      clipBehavior: Clip.none,
                                       children: [
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 9.5,
-                                            vertical: 4,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            color: useLightInk
-                                                ? Colors.white
-                                                    .withValues(alpha: 0.16)
-                                                : Colors.black
-                                                    .withValues(alpha: 0.08),
-                                            borderRadius: BorderRadius.circular(
-                                              999,
-                                            ),
-                                            border: Border.all(
-                                              color: useLightInk
-                                                  ? Colors.white
-                                                      .withValues(alpha: 0.24)
-                                                  : Colors.black
-                                                      .withValues(alpha: 0.14),
-                                              width: 0.6,
-                                            ),
-                                          ),
-                                          child: Row(
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              Icon(
-                                                CupertinoIcons.sparkles,
-                                                color: useLightInk
-                                                    ? const Color(0xFF5AC8FA)
-                                                    : AppleColors.systemBlue,
-                                                size: 11.5,
-                                              ),
-                                              const SizedBox(width: 4),
-                                              Flexible(
-                                                child: Text(
-                                                  '今日首推 · ${site.name}',
-                                                  maxLines: 1,
-                                                  overflow:
-                                                      TextOverflow.ellipsis,
-                                                  style: TextStyle(
-                                                    color: primaryInk,
-                                                    fontSize: 11,
-                                                    fontWeight: FontWeight.w600,
+                                        // Localized title-band legibility scrim
+                                        // over loaded posters: shields 2-line
+                                        // Hero typography from bright/dark local
+                                        // poster highlights while tapering to
+                                        // 0.0 at bottom: 22 so the Hero bottom
+                                        // seam at bottom: 0 remains untouched.
+                                        if (hasLoadedPoster && scrimHeight > 0)
+                                          Positioned(
+                                            left: 0,
+                                            right: 0,
+                                            bottom: 22,
+                                            height: scrimHeight,
+                                            child: IgnorePointer(
+                                              child: DecoratedBox(
+                                                key: const ValueKey(
+                                                  'ios-hero-title-contrast-scrim',
+                                                ),
+                                                decoration: BoxDecoration(
+                                                  gradient: LinearGradient(
+                                                    begin: Alignment.topCenter,
+                                                    end: Alignment.bottomCenter,
+                                                    colors: [
+                                                      scrimTint.withValues(
+                                                        alpha: 0.0,
+                                                      ),
+                                                      scrimTint.withValues(
+                                                        alpha: 0.24,
+                                                      ),
+                                                      scrimTint.withValues(
+                                                        alpha: 0.54,
+                                                      ),
+                                                      scrimTint.withValues(
+                                                        alpha: 0.56,
+                                                      ),
+                                                      scrimTint.withValues(
+                                                        alpha: 0.42,
+                                                      ),
+                                                      scrimTint.withValues(
+                                                        alpha: 0.14,
+                                                      ),
+                                                      scrimTint.withValues(
+                                                        alpha: 0.0,
+                                                      ),
+                                                    ],
+                                                    stops: const [
+                                                      0.0,
+                                                      0.14,
+                                                      0.32,
+                                                      0.58,
+                                                      0.78,
+                                                      0.92,
+                                                      1.0,
+                                                    ],
                                                   ),
                                                 ),
                                               ),
-                                            ],
-                                          ),
-                                        ),
-                                        const SizedBox(height: 6),
-                                        Text(
-                                          featured.title,
-                                          maxLines: 2,
-                                          textAlign: TextAlign.center,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: TextStyle(
-                                            color: primaryInk,
-                                            fontSize: heroHeight < 460 ? 22 : 25,
-                                            fontWeight: FontWeight.w800,
-                                            letterSpacing: -0.5,
-                                            height: 1.15,
-                                            shadows: titleShadows,
-                                          ),
-                                        ),
-                                        if (metaParts.isNotEmpty) ...[
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            metaParts.join(' · '),
-                                            maxLines: 1,
-                                            textAlign: TextAlign.center,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: TextStyle(
-                                              color: secondaryInk,
-                                              fontSize: 12.5,
-                                              fontWeight: FontWeight.w600,
-                                              letterSpacing: 0.1,
-                                              shadows: subShadows,
                                             ),
                                           ),
-                                        ],
-                                        if (infoLine.isNotEmpty) ...[
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            infoLine,
-                                            maxLines: 1,
-                                            textAlign: TextAlign.center,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: TextStyle(
-                                              color: bodyInk,
-                                              fontSize: 12,
-                                              height: 1.32,
-                                              shadows: subShadows,
-                                            ),
-                                          ),
-                                        ],
-                                        const SizedBox(height: 10),
-                                        ApplePressableScale(
-                                          pressedScale: 0.94,
-                                          onTap: () => _openVideoDetail(
-                                            site,
-                                            featured,
-                                            sourceContext: heroTapCtx,
-                                            sourceRadius: 0.0,
-                                            sourceCardId: heroCardId,
-                                            isFullBleedHero: true,
-                                            ambientColor: itemAtmo,
-                                          ),
-                                          child: Container(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 20,
-                                              vertical: 8.5,
-                                            ),
-                                            decoration: BoxDecoration(
-                                              color: AppleColors.systemBlue,
-                                              borderRadius:
-                                                  BorderRadius.circular(999),
-                                              boxShadow: const [
-                                                BoxShadow(
-                                                  color: Color(0x4D0A84FF),
-                                                  blurRadius: 14,
-                                                  offset: Offset(0, 4),
-                                                ),
-                                              ],
-                                            ),
-                                            child: const Row(
-                                              mainAxisSize: MainAxisSize.min,
-                                              children: [
-                                                Icon(
-                                                  CupertinoIcons.play_fill,
-                                                  color: Colors.white,
-                                                  size: 13,
-                                                ),
-                                                SizedBox(width: 5),
-                                                Text(
-                                                  '立即观看',
-                                                  style: TextStyle(
-                                                    color: Colors.white,
-                                                    fontSize: 13.5,
-                                                    fontWeight: FontWeight.w700,
-                                                    letterSpacing: -0.1,
+                                        Positioned(
+                                          left: horizontalPad + 6,
+                                          right: horizontalPad + 6,
+                                          bottom: featuredList.length > 1
+                                              ? (isShortHero ? 26 : 30)
+                                              : (isShortHero ? 14 : 16),
+                                          child: Center(
+                                            child: ConstrainedBox(
+                                              constraints: const BoxConstraints(
+                                                maxWidth: 520,
+                                              ),
+                                              child: Column(
+                                                mainAxisSize: MainAxisSize.min,
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.center,
+                                                children: [
+                                                  Container(
+                                                    padding:
+                                                        const EdgeInsets.symmetric(
+                                                      horizontal: 9.5,
+                                                      vertical: 4,
+                                                    ),
+                                                    decoration: BoxDecoration(
+                                                      color: useLightInk
+                                                          ? Colors.white.withValues(
+                                                              alpha: 0.16,
+                                                            )
+                                                          : Colors.black.withValues(
+                                                              alpha: 0.08,
+                                                            ),
+                                                      borderRadius:
+                                                          BorderRadius.circular(999),
+                                                      border: Border.all(
+                                                        color: useLightInk
+                                                            ? Colors.white.withValues(
+                                                                alpha: 0.24,
+                                                              )
+                                                            : Colors.black.withValues(
+                                                                alpha: 0.14,
+                                                              ),
+                                                        width: 0.6,
+                                                      ),
+                                                    ),
+                                                    child: Row(
+                                                      mainAxisSize: MainAxisSize.min,
+                                                      children: [
+                                                        Icon(
+                                                          CupertinoIcons.sparkles,
+                                                          color: useLightInk
+                                                              ? const Color(
+                                                                  0xFF5AC8FA,
+                                                                )
+                                                              : AppleColors
+                                                                  .systemBlue,
+                                                          size: 11.5,
+                                                        ),
+                                                        const SizedBox(width: 4),
+                                                        Flexible(
+                                                          child: Text(
+                                                            '今日首推 · ${site.name}',
+                                                            maxLines: 1,
+                                                            overflow:
+                                                                TextOverflow.ellipsis,
+                                                            style: TextStyle(
+                                                              color: primaryInk,
+                                                              fontSize: 11,
+                                                              fontWeight:
+                                                                  FontWeight.w600,
+                                                            ),
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
                                                   ),
-                                                ),
-                                              ],
+                                                  const SizedBox(height: 6),
+                                                  Text(
+                                                    featured.title,
+                                                    maxLines: 2,
+                                                    textAlign: TextAlign.center,
+                                                    overflow: TextOverflow.ellipsis,
+                                                    style: TextStyle(
+                                                      color: primaryInk,
+                                                      fontSize:
+                                                          heroHeight < 460 ? 22 : 25,
+                                                      fontWeight: FontWeight.w800,
+                                                      letterSpacing: -0.5,
+                                                      height: 1.15,
+                                                      shadows: titleShadows,
+                                                    ),
+                                                  ),
+                                                  if (metaParts.isNotEmpty) ...[
+                                                    const SizedBox(height: 4),
+                                                    Text(
+                                                      metaParts.join(' · '),
+                                                      maxLines: 1,
+                                                      textAlign: TextAlign.center,
+                                                      overflow: TextOverflow.ellipsis,
+                                                      style: TextStyle(
+                                                        color: secondaryInk,
+                                                        fontSize: 12.5,
+                                                        fontWeight: FontWeight.w600,
+                                                        letterSpacing: 0.1,
+                                                        shadows: subShadows,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                  if (infoLine.isNotEmpty) ...[
+                                                    const SizedBox(height: 4),
+                                                    Text(
+                                                      infoLine,
+                                                      maxLines: 1,
+                                                      textAlign: TextAlign.center,
+                                                      overflow: TextOverflow.ellipsis,
+                                                      style: TextStyle(
+                                                        color: bodyInk,
+                                                        fontSize: 12,
+                                                        height: 1.32,
+                                                        shadows: subShadows,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                  const SizedBox(height: 10),
+                                                  ApplePressableScale(
+                                                    pressedScale: 0.94,
+                                                    onTap: () => _openVideoDetail(
+                                                      site,
+                                                      featured,
+                                                      sourceContext: heroTapCtx,
+                                                      sourceRadius: 0.0,
+                                                      sourceCardId: heroCardId,
+                                                      isFullBleedHero: true,
+                                                      ambientColor: itemAtmo,
+                                                    ),
+                                                    child: Container(
+                                                      padding:
+                                                          const EdgeInsets.symmetric(
+                                                        horizontal: 20,
+                                                        vertical: 8.5,
+                                                      ),
+                                                      decoration: BoxDecoration(
+                                                        color: AppleColors.systemBlue,
+                                                        borderRadius:
+                                                            BorderRadius.circular(
+                                                          999,
+                                                        ),
+                                                        boxShadow: const [
+                                                          BoxShadow(
+                                                            color: Color(0x4D0A84FF),
+                                                            blurRadius: 14,
+                                                            offset: Offset(0, 4),
+                                                          ),
+                                                        ],
+                                                      ),
+                                                      child: const Row(
+                                                        mainAxisSize:
+                                                            MainAxisSize.min,
+                                                        children: [
+                                                          Icon(
+                                                            CupertinoIcons.play_fill,
+                                                            color: Colors.white,
+                                                            size: 13,
+                                                          ),
+                                                          SizedBox(width: 5),
+                                                          Text(
+                                                            '立即观看',
+                                                            style: TextStyle(
+                                                              color: Colors.white,
+                                                              fontSize: 13.5,
+                                                              fontWeight:
+                                                                  FontWeight.w700,
+                                                              letterSpacing: -0.1,
+                                                            ),
+                                                          ),
+                                                        ],
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
                                             ),
                                           ),
                                         ),
                                       ],
-                                    ),
-                                  ),
+                                    );
+                                  },
                                 ),
                               ),
                             ),
@@ -4628,28 +7599,50 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   bottom: isShortHero ? 10 : 12,
                   child: IgnorePointer(
                     child: buildHeroChromeFade(
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          for (int i = 0; i < featuredList.length; i++)
-                            AnimatedContainer(
-                              duration: (isWindowsDesktopUi || OhosRuntime.isOhos)
-                                  ? const Duration(milliseconds: 220)
-                                  : Ios27Spring.snappy.nominalDuration,
-                              curve: (isWindowsDesktopUi || OhosRuntime.isOhos)
-                                  ? Curves.easeOutCubic
-                                  : Ios27Spring.snappy.curve,
-                              margin: const EdgeInsets.symmetric(horizontal: 3),
-                              width: i == activeIdx ? 18 : 5.5,
-                              height: 5.5,
-                              decoration: BoxDecoration(
-                                color: i == activeIdx
-                                    ? activeDotInk
-                                    : activeDotInk.withValues(alpha: 0.36),
-                                borderRadius: BorderRadius.circular(999),
-                              ),
-                            ),
-                        ],
+                      child: ValueListenableBuilder<double>(
+                        valueListenable: _rexCardInkScrollOffset,
+                        builder: (context, cardOffset, _) {
+                          final activeLiveEdgeColor =
+                              _computeRexBackdropMetrics(
+                            liveAtmo: activeAtmo,
+                            palette: palette,
+                            heroHeight: heroHeight,
+                            scrollOffset: cardOffset,
+                          ).liveEdgeColor;
+                          final activeUseLight = _useLightInkForHeroAtmo(
+                            activeLiveEdgeColor,
+                            isDark,
+                          );
+                          final activeDotInk = activeUseLight
+                              ? Colors.white
+                              : const Color(0xFF141821);
+                          return Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              for (int i = 0; i < featuredList.length; i++)
+                                AnimatedContainer(
+                                  duration: (isWindowsDesktopUi ||
+                                          OhosRuntime.isOhos)
+                                      ? const Duration(milliseconds: 220)
+                                      : Ios27Spring.snappy.nominalDuration,
+                                  curve: (isWindowsDesktopUi ||
+                                          OhosRuntime.isOhos)
+                                      ? Curves.easeOutCubic
+                                      : Ios27Spring.snappy.curve,
+                                  margin:
+                                      const EdgeInsets.symmetric(horizontal: 3),
+                                  width: i == activeIdx ? 18 : 5.5,
+                                  height: 5.5,
+                                  decoration: BoxDecoration(
+                                    color: i == activeIdx
+                                        ? activeDotInk
+                                        : activeDotInk.withValues(alpha: 0.36),
+                                    borderRadius: BorderRadius.circular(999),
+                                  ),
+                                ),
+                            ],
+                          );
+                        },
                       ),
                     ),
                   ),
@@ -4710,15 +7703,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       onPressed: () => _showImportConfigDialog(),
                     ),
                   ),
-                  const SizedBox(height: 10),
-                  SizedBox(
-                    width: double.infinity,
-                    child: AppleCapsuleButton(
-                      label: '一键粘贴剪贴板并导入',
-                      icon: CupertinoIcons.doc_on_clipboard_fill,
-                      onPressed: _quickImportFromClipboard,
+                  if (defaultTargetPlatform != TargetPlatform.iOS ||
+                      OhosRuntime.isOhos) ...[
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      width: double.infinity,
+                      child: AppleCapsuleButton(
+                        label: '一键粘贴剪贴板并导入',
+                        icon: CupertinoIcons.doc_on_clipboard_fill,
+                        onPressed: _quickImportFromClipboard,
+                      ),
                     ),
-                  ),
+                  ],
                   const SizedBox(height: 10),
                   SizedBox(
                     width: double.infinity,
@@ -4911,54 +7907,57 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     bool compact = false,
     required String label,
     required VoidCallback onTap,
+    bool absorbTap = true,
   }) {
     final palette = ApplePalette.of(context);
+    final pill = ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 176),
+      child: LiquidGlass(
+        borderRadius: 999,
+        elevated: false,
+        rimStrength: 0.9,
+        tint: palette.isDark
+            ? const Color(0x281E1E24)
+            : const Color(0xCCFFFFFF),
+        padding: EdgeInsets.symmetric(
+          horizontal: compact ? 8 : 12,
+          vertical: 8.5,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!compact || label.isEmpty)
+              Icon(icon, color: palette.labelSecondary, size: 13.5),
+            if (!compact) const SizedBox(width: 5),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: palette.labelPrimary,
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            if (!compact) const SizedBox(width: 4),
+            if (!compact)
+              Icon(
+                CupertinoIcons.chevron_down,
+                color: palette.labelSecondary,
+                size: 11.5,
+              ),
+          ],
+        ),
+      ),
+    );
+    if (!absorbTap) return pill;
     return ApplePressableScale(
       pressedScale: 0.93,
       pressedOpacity: 0.86,
       onTap: onTap,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 176),
-        child: LiquidGlass(
-          borderRadius: 999,
-          elevated: false,
-          rimStrength: 0.9,
-          tint: palette.isDark
-              ? const Color(0x281E1E24)
-              : const Color(0xCCFFFFFF),
-          padding: EdgeInsets.symmetric(
-            horizontal: compact ? 8 : 12,
-            vertical: 8.5,
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (!compact || label.isEmpty)
-                Icon(icon, color: palette.labelSecondary, size: 13.5),
-              if (!compact) const SizedBox(width: 5),
-              Flexible(
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: palette.labelPrimary,
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              if (!compact) const SizedBox(width: 4),
-              if (!compact)
-                Icon(
-                  CupertinoIcons.chevron_down,
-                  color: palette.labelSecondary,
-                  size: 11.5,
-                ),
-            ],
-          ),
-        ),
-      ),
+      child: pill,
     );
   }
   /// macOS widescreen home hero + optional docked right-hand Continue Watching
@@ -5539,8 +8538,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         ),
                         child: PosterImage(
                           url: featured.poster,
-                          title: featured.title,
-                          year: featured.year,
+                          title: (_privateSessionUnlocked ||
+                                  site.isEffectivelyPrivate)
+                              ? ''
+                              : featured.title,
+                          year: (_privateSessionUnlocked ||
+                                  site.isEffectivelyPrivate)
+                              ? ''
+                              : featured.year,
+                          isPrivate: _privateSessionUnlocked ||
+                              site.isEffectivelyPrivate,
                           highRes: !isWindowsDesktopUi,
                           forBackdrop: true,
                           placeholder: const SizedBox.shrink(),
@@ -5599,12 +8606,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               ],
                               child: PosterImage(
                                 url: featured.poster,
-                                title: site.isEffectivelyPrivate
+                                title: (_privateSessionUnlocked ||
+                                        site.isEffectivelyPrivate)
                                     ? ''
                                     : featured.title,
-                                year: site.isEffectivelyPrivate
+                                year: (_privateSessionUnlocked ||
+                                        site.isEffectivelyPrivate)
                                     ? ''
                                     : featured.year,
+                                isPrivate: _privateSessionUnlocked ||
+                                    site.isEffectivelyPrivate,
                                 highRes: true,
                                 strictHighRes: true,
                                 placeholder: _buildPosterPlaceholder(),
@@ -5901,9 +8912,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               for (final genre in extraGenres)
                 _buildMiniFilterChip(
                   label: genre,
-                  selected: _filterGenreLabel == genre,
+                  selected: _filterSubCategoryId.isEmpty &&
+                      _filterGenreLabel == genre,
                   onTap: () {
                     setState(() {
+                      _filterSubCategoryId = '';
                       _filterGenreLabel =
                           _filterGenreLabel == genre ? '' : genre;
                     });
@@ -6473,12 +9486,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     String cardIdPrefix = 'vcard',
     void Function(BuildContext posterContext, double radius, String cardId)?
         onTapWithSource,
+    bool includeOuterKey = true,
+    Color? titleColorOverride,
+    Color? subtitleColorOverride,
   }) {
     final cardKey =
         '${cardIdPrefix}_${site.key}_${video.id.isNotEmpty ? video.id : video.title}_${badge ?? ""}';
     BuildContext? posterCtx;
     return RepaintBoundary(
-      key: ValueKey(cardKey),
+      key: includeOuterKey ? ValueKey(cardKey) : null,
       child: ApplePressableScale(
         pressedScale: 0.945,
         pressedOpacity: 0.90,
@@ -6524,12 +9540,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                 )
                               : PosterImage(
                                   url: video.poster,
-                                  title: site.isEffectivelyPrivate
+                                  title: (_privateSessionUnlocked ||
+                                          site.isEffectivelyPrivate)
                                       ? ''
                                       : video.title,
-                                  year: site.isEffectivelyPrivate
+                                  year: (_privateSessionUnlocked ||
+                                          site.isEffectivelyPrivate)
                                       ? ''
                                       : video.year,
+                                  isPrivate: _privateSessionUnlocked ||
+                                      site.isEffectivelyPrivate,
                                   placeholder: _buildPosterPlaceholder(),
                                 ),
                           if (badge != null && badge.isNotEmpty)
@@ -6615,7 +9635,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                color: ApplePalette.of(context).labelPrimary,
+                color: titleColorOverride ??
+                    ApplePalette.of(context).labelPrimary,
                 fontSize: 13,
                 fontWeight: FontWeight.w600,
                 letterSpacing: -0.2,
@@ -6644,7 +9665,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  color: ApplePalette.of(context).labelSecondary,
+                  color: subtitleColorOverride ??
+                      ApplePalette.of(context).labelSecondary,
                   fontSize: 11,
                 ),
               ),
@@ -6748,6 +9770,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _searchSubscription?.cancel();
     _searchResults.clear();
     _searchController.clear();
+    AiService.instance.setPrivacySessionActive(true);
     setState(() {
       _privateSessionUnlocked = true;
       _privacyPortalAnimating = true;
@@ -6755,6 +9778,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _tabIndex = 0;
       _windowsPage = 'home';
     });
+    _syncNativeDockMenuItemsIfMounted();
     _syncRootTabVisibility(animated: true);
     _reloadSavedConfig();
   }
@@ -6762,12 +9786,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   void _exitPrivacySpace() {
     HapticFeedback.lightImpact();
     widget.storage.clearPrivateVideoSkipRecords();
+    PosterLoader.clearPrivateCache();
     _searchSubscription?.cancel();
     _searchResults.clear();
     _searchController.clear();
+    AiService.instance.setPrivacySessionActive(false);
     setState(() {
       _privateSessionUnlocked = false;
     });
+    _syncNativeDockMenuItemsIfMounted();
     _reloadSavedConfig(bypassHomeSnapshot: true);
   }
 
@@ -7380,6 +10407,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           setState(() {
             _privateSessionUnlocked = false;
           });
+          AiService.instance.setPrivacySessionActive(false);
+          PosterLoader.clearPrivateCache();
+          _syncNativeDockMenuItemsIfMounted();
           _reloadSavedConfig();
         },
         child: const Text(
@@ -7524,6 +10554,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           _privateSessionUnlocked = true;
                           _activeSite = s;
                         });
+                        AiService.instance.setPrivacySessionActive(true);
+                        _syncNativeDockMenuItemsIfMounted();
                         _loadSiteHome();
                       },
                     );
@@ -7552,6 +10584,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             _tabIndex = 1;
                             _windowsPage = 'live';
                           });
+                          AiService.instance.setPrivacySessionActive(true);
+                          _syncNativeDockMenuItemsIfMounted();
                           final idx = _visibleLives.indexWhere(
                             (l) => l.url == privateLives[i].url,
                           );
@@ -8145,6 +11179,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               isLive: true,
               liveGroups: catalogGroups,
               initialLiveChannel: ch,
+              debugPlayer:
+                  widget.debugPlayerFactoryForTest?.call(embedded: false),
+              debugVideoSurface: widget.debugVideoSurfaceForTest,
             ),
           ),
         ),
@@ -9251,6 +12288,19 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         padding: const EdgeInsets.symmetric(horizontal: 8),
         minSize: 28,
         onPressed: () async {
+          if (widget.storage.getWatchHistory().isEmpty) {
+            if (context.mounted) Navigator.of(context).pop();
+            return;
+          }
+          if (_isIosNativeFlow) {
+            final ok = await _confirmIosDestructiveAction(
+              context,
+              title: '清空全部观看历史？',
+              message: '清空后将移除所有观看进度，收藏片单与订阅配置会保留。',
+              confirmLabel: '清空全部',
+            );
+            if (!ok || !mounted) return;
+          }
           await widget.storage.clearWatchHistory();
           if (mounted) setState(() {});
           if (context.mounted) Navigator.of(context).pop();
@@ -9333,6 +12383,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       );
                       setSheetState(() {});
                       if (mounted) setState(() {});
+                      _showIosUndoHistoryBanner(
+                        ctx,
+                        h,
+                        onRestored: () {
+                          if (ctx.mounted) setSheetState(() {});
+                        },
+                      );
                     },
                   );
                 },
@@ -9384,6 +12441,74 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 ),
                 const SizedBox(width: 8),
                 if (!_privateSessionUnlocked && _librarySegment != 2)
+                if (isIosAiFeatureSupported &&
+                    !_privateSessionUnlocked &&
+                    AiService.instance.isLabUnlocked &&
+                    AiService.instance.config.moodCurationEnabled)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 12),
+                    child: CupertinoButton(
+                      key: const ValueKey('library-open-ai-sommelier'),
+                      padding: EdgeInsets.zero,
+                      minSize: 28,
+                      onPressed: () {
+                        final histTitles = widget.storage
+                            .getWatchHistory()
+                            .map((h) => h.title)
+                            .toList();
+                        final favTitles = widget.storage
+                            .getFavorites()
+                            .map((f) => f.title)
+                            .toList();
+                        final activeSite = _activeSite;
+                        final snap = <(CmsSite, CmsVideo)>[
+                          if (activeSite != null)
+                            for (final v in _homeVideos.take(40))
+                              (activeSite, v),
+                        ];
+                        unawaited(
+                          showIosAiMoodSommelierSheet(
+                            context,
+                            recentHistoryTitles: histTitles,
+                            favoriteTitles: favTitles,
+                            availableLibrarySnapshot: snap,
+                            onSelectPick: (pick) {
+                              if (pick.matchedSite != null &&
+                                  pick.matchedVideo != null) {
+                                _openVideoDetail(
+                                  pick.matchedSite!,
+                                  pick.matchedVideo!,
+                                );
+                              } else {
+                                _searchController.text = pick.title;
+                                _showGlobalSearchSheet();
+                                unawaited(_runGlobalSearch(pick.title));
+                              }
+                            },
+                          ),
+                        );
+                      },
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            CupertinoIcons.sparkles,
+                            color: AppleColors.systemPurple,
+                            size: 15,
+                          ),
+                          SizedBox(width: 4),
+                          Text(
+                            'AI 策展',
+                            style: TextStyle(
+                              color: AppleColors.systemPurple,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                   Padding(
                     padding: const EdgeInsets.only(right: 12),
                     child: CupertinoButton(
@@ -9435,8 +12560,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     padding: EdgeInsets.zero,
                     minSize: 28,
                     onPressed: () async {
+                      if (_isIosNativeFlow) {
+                        final ok = await _confirmIosDestructiveAction(
+                          context,
+                          title: '清空全部观看历史？',
+                          message: '清空后将移除所有观看进度，收藏片单与订阅配置会保留。',
+                          confirmLabel: '清空记录',
+                        );
+                        if (!ok || !mounted) return;
+                      }
                       await widget.storage.clearWatchHistory();
-                      setState(() {});
+                      if (mounted) setState(() {});
                     },
                     child: const Text(
                       '清空记录',
@@ -9618,6 +12752,37 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                 ),
                               ),
                             )
+                          : (_isIosNativeFlow
+                          ? IosHistoryPosterWall(
+                              entries: history,
+                              posterOf: _resolveHistoryPoster,
+                              maxCrossAxisExtent: viewport.posterGridExtent(
+                                useSidebar: useSidebar,
+                              ),
+                              padding: EdgeInsets.only(
+                                bottom: useSidebar ? 24 : 124,
+                              ),
+                              placeholderBuilder: _buildPosterPlaceholder,
+                              onOpen: (h, posterCtx, radius, cardId) =>
+                                  _openSyncedMediaEntry(
+                                siteKey: h.site,
+                                videoId: h.id,
+                                title: h.title,
+                                poster: _resolveHistoryPoster(h),
+                                sourceContext: posterCtx,
+                                sourceRadius: radius,
+                                sourceCardId: cardId,
+                              ),
+                              onDelete: (h) async {
+                                await widget.storage.removeWatchHistoryItem(
+                                  h.site,
+                                  h.id,
+                                );
+                                if (!mounted) return;
+                                setState(() {});
+                                _showIosUndoHistoryBanner(this.context, h);
+                              },
+                            )
                           : ListView.separated(
                               padding: EdgeInsets.only(
                                 bottom: useSidebar ? 24 : 124,
@@ -9672,10 +12837,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                       h.id,
                                     );
                                     if (mounted) setState(() {});
+                                    if (ctx.mounted) {
+                                      _showIosUndoHistoryBanner(ctx, h);
+                                    }
                                   },
                                 );
                               },
-                            ))),
+                            )))),
             ),
           ],
         ),
@@ -9685,8 +12853,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   Widget _buildDownloadsList({required bool useSidebar}) {
     final service = DownloadService.instance;
     return AnimatedBuilder(
-      animation: service,
+      animation: Listenable.merge(<Listenable>[
+        service,
+        widget.storage.configRevisionNotifier,
+      ]),
       builder: (context, _) {
+        if (service.isInitializing) {
+          return const Center(child: CupertinoActivityIndicator(radius: 12));
+        }
         if (!service.isReady) {
           return Center(
             child: Text(
@@ -9695,7 +12869,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             ),
           );
         }
-        final tasks = service.tasks;
+        final liveConfig = widget.storage.loadSavedConfig();
+        final resolver = AdaptiveShell.createOfflineDownloadsResolver(
+          currentConfig: liveConfig,
+          storage: widget.storage,
+          privacySessionUnlocked: _privateSessionUnlocked,
+        );
+        final tasks = resolver.filterVisible(service.tasks);
+        // Pre-populate per-task resolutions once for this refresh so grouping,
+        // privacy checks, and row builds reuse cached results with 0 extra
+        // site scans, and record the total site-read count for tests.
+        for (final t in tasks) {
+          resolver.resolve(t);
+        }
+        AdaptiveShell.debugLastDownloadsRefreshSiteReads = resolver.siteReadCount;
         if (tasks.isEmpty) {
           return Center(
             child: Column(
@@ -9728,7 +12915,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             ),
           );
         }
-        final active = service.activeCount;
+        final active = tasks.where((t) => t.isActive).length;
         final hasPaused = tasks.any((t) => t.status == DownloadStatus.paused);
         return ListView(
           padding: EdgeInsets.only(bottom: useSidebar ? 24 : 124),
@@ -9747,10 +12934,22 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     ),
                     const Spacer(),
                     CupertinoButton(
+                      key: const ValueKey('ios-downloads-bulk-toggle'),
                       padding: EdgeInsets.zero,
                       minSize: 26,
-                      onPressed:
-                          active > 0 ? service.pauseAll : service.resumeAll,
+                      onPressed: active > 0
+                          ? () => service.pauseTasks(
+                                tasks
+                                    .where((t) => t.isActive)
+                                    .map((t) => t.id),
+                              )
+                          : () => service.resumeTasks(
+                                tasks
+                                    .where(
+                                      (t) => t.status == DownloadStatus.paused,
+                                    )
+                                    .map((t) => t.id),
+                              ),
                       child: Text(
                         active > 0 ? '全部暂停' : '全部继续',
                         style: const TextStyle(
@@ -9762,9 +12961,31 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ],
                 ),
               ),
-            AppleGroupedSection(
-              children: [for (final t in tasks) _buildDownloadRow(t)],
-            ),
+            if (_isIosNativeFlow)
+              IosDownloadGroupsView(
+                key: const ValueKey('ios-download-groups-view'),
+                tasks: tasks,
+                singleRowBuilder: (t) => _buildDownloadRow(t, resolver: resolver),
+                placeholderBuilder: _buildPosterPlaceholder,
+                groupKeyBuilder: resolver.groupKeyOf,
+                isTaskPrivate: (t) =>
+                    _privateSessionUnlocked || resolver.isPrivate(t),
+                onPlay: _playDownloaded,
+                onPause: (t) => service.pause(t.id),
+                onResume: (t) => service.resume(t.id),
+                onDeleteTask: _confirmDeleteDownload,
+                onPauseGroup: (g) =>
+                    service.pauseTasks(g.tasks.map((t) => t.id)),
+                onResumeGroup: (g) =>
+                    service.resumeTasks(g.tasks.map((t) => t.id)),
+                onDeleteGroup: _confirmDeleteDownloadGroup,
+              )
+            else
+              AppleGroupedSection(
+                children: [
+                  for (final t in tasks) _buildDownloadRow(t, resolver: resolver),
+                ],
+              ),
             if (service.rootPath.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
@@ -9781,10 +13002,22 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       },
     );
   }
-  Widget _buildDownloadRow(DownloadTask t) {
+  Widget _buildDownloadRow(
+    DownloadTask t, {
+    OfflineDownloadsResolver? resolver,
+  }) {
     final service = DownloadService.instance;
     final done = t.status == DownloadStatus.completed;
     final failed = t.status == DownloadStatus.failed;
+    final isTaskPrivate = _privateSessionUnlocked ||
+        (resolver != null
+            ? resolver.isPrivate(t)
+            : AdaptiveShell.isOfflineTaskPrivate(
+                t,
+                currentConfig: _config,
+                storage: widget.storage,
+                privacySessionUnlocked: _privateSessionUnlocked,
+              ));
     final statusColor = failed
         ? AppleColors.systemRed
         : (done ? AppleColors.systemGreen : ApplePalette.of(context).labelSecondary);
@@ -9817,7 +13050,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   height: 56,
                   child: PosterImage(
                     url: t.poster,
-                    title: t.title,
+                    title: isTaskPrivate ? '' : t.title,
+                    isPrivate: isTaskPrivate,
                     placeholder: _buildPosterPlaceholder(),
                   ),
                 ),
@@ -9854,7 +13088,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         child: LinearProgressIndicator(
                           value: t.status == DownloadStatus.queued &&
                                   t.progress <= 0
-                              ? null
+                              ? (_isIosNativeFlow ? 0.0 : null)
                               : t.progress.clamp(0.0, 1.0),
                           minHeight: 3,
                           backgroundColor: ApplePalette.of(context).fill,
@@ -9926,19 +13160,46 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       }),
     );
   }
-  void _playDownloaded(DownloadTask t) {
-    final completed = DownloadService.instance
-        .completedFor(t.siteKey, t.videoId)
-        .where((x) => x.lineName == t.lineName && x.filePath.isNotEmpty)
-        .toList();
-    if (completed.isEmpty) return;
-    final start = completed.indexWhere((x) => x.id == t.id);
-    final site = CmsSite(
-      key: t.siteKey,
-      name: t.siteName,
-      type: t.siteType,
-      api: t.siteApi,
+  void _confirmDeleteDownloadGroup(DownloadSeriesGroup g) {
+    unawaited(
+      showAppleNativeAlert(
+        context,
+        title: '删除整部剧集下载？',
+        message: '「${g.title}」共 ${g.episodeCount} 集及已下载的文件将被删除。',
+        actions: const [
+          AppleNativeAlertAction(id: 'cancel', title: '取消', isCancel: true),
+          AppleNativeAlertAction(
+            id: 'delete',
+            title: '删除',
+            isDestructive: true,
+          ),
+        ],
+      ).then((choice) {
+        if (choice == 'delete') {
+          unawaited(
+            DownloadService.instance.removeTasks(
+              g.tasks.map((t) => t.id),
+            ),
+          );
+        }
+      }),
     );
+  }
+  void _playDownloaded(DownloadTask t) {
+    final completedAll = DownloadService.instance.tasks
+        .where((x) => x.status == DownloadStatus.completed)
+        .toList()
+      ..sort((a, b) => a.episodeIndex.compareTo(b.episodeIndex));
+    final built = AdaptiveShell.buildOfflinePlaybackQueue(
+      t,
+      completedAll,
+      currentConfig: widget.storage.loadSavedConfig(),
+      storage: widget.storage,
+      privacySessionUnlocked: _privateSessionUnlocked,
+    );
+    if (built.queue.isEmpty) return;
+    final start = built.startIndex;
+    final site = built.site;
     final video = CmsVideo(
       id: t.videoId,
       title: t.title,
@@ -9947,7 +13208,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         CmsLine(
           name: t.lineName,
           episodes: [
-            for (final x in completed)
+            for (final x in built.queue)
               CmsEpisode(name: x.episodeName, url: x.filePath),
           ],
         ),
@@ -10147,9 +13408,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
     if (onTap == null) return rowContent;
     return Material(
-      key: key,
       color: Colors.transparent,
       child: InkWell(
+        key: key,
         onTap: onTap,
         highlightColor: Colors.white.withValues(alpha: 0.08),
         splashColor: Colors.white.withValues(alpha: 0.04),
@@ -10275,17 +13536,26 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       return _buildSettingsQuickActionRow(
                         icon: CupertinoIcons.qrcode_viewfinder,
                         iconBgColor: const Color(0xFF0A84FF),
-                        title: '我的云盘 · 网盘扫码与账号中心',
-                        subtitle: '夸克（我的夸父）/ UC（我的优汐）/ 百度（我的嘟嘟）/ 阿里（我的阿狸）',
+                        title: '配置中心 · 多源网盘扫码与账号',
+                        subtitle: '一次扫码多源通用，支持夸克 / UC / 百度 / 阿里与源配置中心直读',
                         trailingText:
                             loggedCount > 0 ? '已登录 $loggedCount 个' : '去扫码',
-                        onTap: () => showNetdiskAccountSheet(
-                          context,
-                          widget.storage,
-                          onChanged: () {
-                            if (mounted) setState(() {});
-                          },
-                        ),
+                        onTap: () {
+                          final allSites =
+                              _config?.publicSupportedSites ?? const <CmsSite>[];
+                          showNetdiskAccountSheet(
+                            context,
+                            widget.storage,
+                            sites: allSites,
+                            activeGroup: _activeSite?.group ?? '',
+                            onOpenCatPawSettings: allSites.any((s) => s.isCatPaw)
+                                ? _showCatPawSettings
+                                : null,
+                            onChanged: () {
+                              if (mounted) setState(() {});
+                            },
+                          );
+                        },
                       );
                     },
                   ),
@@ -10351,71 +13621,51 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     ),
                 ],
               ),
-              if (_isMacOS) ...[
-                const SizedBox(height: 22),
-                AppleGroupedSection(
-                  key: const ValueKey('macos-settings-contact-section'),
-                  header: '联系与反馈作者',
-                  footer: MacosOfficialInfo.securityWarning,
-                  children: [
-                    _buildSettingsQuickActionRow(
-                      key: const ValueKey('macos-settings-contact-author'),
-                      icon: CupertinoIcons.bubble_left_bubble_right_fill,
+              const SizedBox(height: 22),
+              AppleGroupedSection(
+                header: '联系反馈与官方交流',
+                footer: OfficialChannelInfo.antiTamperWarning,
+                children: [
+                  Builder(
+                    builder: (rowCtx) => _buildSettingsQuickActionRow(
+                      key: const ValueKey('settings-author-socials'),
+                      icon: CupertinoIcons.person_crop_circle_badge_checkmark,
                       iconBgColor: AppleColors.systemPink,
-                      title: '联系反馈作者 · ${MacosOfficialInfo.authorSocialName}',
-                      subtitle:
-                          '${MacosOfficialInfo.socialPlatformsSummary}（全平台同名）',
-                      trailingText: '查看 / 复制',
-                      onTap: _showMacosAuthorContactSheet,
+                      title: '联系反馈作者（各社媒账号名）',
+                      subtitle: OfficialChannelInfo.authorSocialSummary,
+                      trailingText: '复制',
+                      onTap: () =>
+                          _copyAuthorSocialName(originContext: rowCtx),
                     ),
-                    _buildSettingsQuickActionRow(
-                      key: const ValueKey('macos-settings-official-group'),
-                      icon: CupertinoIcons.globe,
-                      iconBgColor: AppleColors.systemBlue,
-                      title: '官网交流群链接',
-                      subtitle:
-                          'Marco 官网：${MacosOfficialInfo.officialWebsiteDisplay}',
+                  ),
+                  Builder(
+                    builder: (rowCtx) => _buildSettingsQuickActionRow(
+                      key: const ValueKey('settings-official-community'),
+                      icon: CupertinoIcons.chat_bubble_2_fill,
+                      iconBgColor: AppleColors.systemGreen,
+                      title: '官网交流群',
+                      subtitle: OfficialChannelInfo.officialCommunityUrl,
                       trailingText: '打开官网',
-                      onTap: _openMacosOfficialWebsiteFromSettings,
+                      onTap: () =>
+                          _openOfficialCommunityLink(originContext: rowCtx),
                     ),
-                  ],
-                ),
-              ],
+                  ),
+                  _buildSettingsQuickActionRow(
+                    key: const ValueKey('settings-official-notice'),
+                    icon: CupertinoIcons.shield_lefthalf_fill,
+                    iconBgColor: AppleColors.systemOrange,
+                    title: '官方渠道安全声明',
+                    subtitle:
+                        '认准 Marco 官网 ${OfficialChannelInfo.officialWebsiteDisplay}',
+                    trailingText: '查看',
+                    onTap: _openOfficialNoticeDialogFromSettings,
+                  ),
+                ],
+              ),
             ],
           ),
         ),
       ),
-    );
-  }
-
-  void _showMacosAuthorContactSheet() {
-    showAppleModalSheet<void>(
-      context: context,
-      title: '联系与反馈作者',
-      builder: (_) => MacosAuthorContactSheet(
-        onOpenUrl: widget.onOpenExternalUrlForTest,
-        onCopyText: widget.onCopyTextForTest,
-      ),
-    );
-  }
-
-  Future<void> _openMacosOfficialWebsiteFromSettings() async {
-    final opened = await openMacosOfficialUrl(
-      MacosOfficialInfo.officialWebsiteUrl,
-      onOpenUrl: widget.onOpenExternalUrlForTest,
-    );
-    if (opened || !mounted) return;
-    if (widget.onCopyTextForTest != null) {
-      await widget.onCopyTextForTest!(MacosOfficialInfo.officialWebsiteUrl);
-    } else {
-      await Clipboard.setData(
-        const ClipboardData(text: MacosOfficialInfo.officialWebsiteUrl),
-      );
-    }
-    if (!mounted) return;
-    _showAppleNotice(
-      '已复制官网地址',
-      '请在浏览器中打开：${MacosOfficialInfo.officialWebsiteUrl}',
     );
   }
 
@@ -10757,6 +14007,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
   }
 
+  /// iOS Settings information architecture (0.7.9 IA).
+  ///
+  /// Root groups, in order: 内容与来源 → 播放 → 外观与主页 → 数据与存储 → 通用.
+  /// Every function / page inside Settings has exactly ONE canonical entry;
+  /// the in-settings search index ([SettingsPane.keywords]) resolves each term
+  /// to that single entry. Home 配置中心 and the Dock long-press menu remain
+  /// shortcuts outside of Settings.
   List<SettingsPane> _iosSettingsPages(VoidCallback refresh) {
     final storage = widget.storage;
     Widget choices<T>(
@@ -10800,7 +14057,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: children,
         );
+    const systemGray = Color(0xFF8E8E93);
+    final isIosNative = !kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        !OhosRuntime.isOhos;
     final sites = _config?.publicSupportedSites ?? const [];
+    final hasCatPaw = sites.any((site) => site.isCatPaw);
     final publicSubs = storage
         .getSubscriptions()
         .where((s) => !s.isEffectivelyPrivate)
@@ -10812,14 +14074,399 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         ? '${storage.playSpeed.toInt()}×'
         : '${storage.playSpeed}×';
     return [
+      // ───────────────────────── 内容与来源 ─────────────────────────
+      SettingsPane(
+        'sources',
+        '资源库与订阅',
+        '添加资源库，管理点播 / 直播订阅源与分组',
+        CupertinoIcons.square_stack_3d_up_fill,
+        AppleColors.systemGreen,
+        sectionGroup: 'ia-content',
+        trailingText: '${publicSubs.length} 个订阅',
+        keywords: const [
+          '添加资源库',
+          '订阅与分组管理',
+          '管理订阅',
+          '订阅源',
+          '订阅管理',
+          '直播源',
+          '点播',
+          'M3U',
+          'TXT',
+          'JSON',
+          'MacCMS',
+          '多仓',
+          '分组',
+          'Emby',
+          'Jellyfin',
+          'Plex',
+          'AList',
+          'SMB',
+        ],
+        content: stack([
+          IosSettingsGroup(
+            header: '资源库与订阅',
+            footer:
+                '支持 JSON 单仓 / 多仓、MacCMS 接口、Emby / Jellyfin / WebDAV 等资源库，以及 M3U / TXT 直播源批量导入与分组。跨设备同步订阅请前往「多端同步」。',
+            children: [
+              IosSettingsRow(
+                key: const ValueKey('ios-open-import-subscription'),
+                icon: CupertinoIcons.plus_app_fill,
+                iconColor: AppleColors.systemGreen,
+                title: '添加资源库',
+                showChevron: true,
+                onTap: () async {
+                  await _showImportConfigDialog(iosBackLabel: '资源库与订阅');
+                  refresh();
+                },
+              ),
+              IosSettingsRow(
+                key: const ValueKey('ios-open-subscriptions'),
+                icon: CupertinoIcons.folder_fill,
+                iconColor: AppleColors.systemBlue,
+                title: '订阅与分组管理',
+                trailingText: '${publicSubs.length} 个',
+                showChevron: true,
+                onTap: () async {
+                  await _showSubscriptionManagerSheet(
+                    iosBackLabel: '资源库与订阅',
+                    showAddEntries: false,
+                  );
+                  refresh();
+                },
+              ),
+            ],
+          ),
+        ]),
+      ),
+      SettingsPane(
+        'netdisk',
+        '配置中心',
+        '夸克 / UC / 百度 / 阿里网盘扫码登录与多源配置同步',
+        CupertinoIcons.qrcode,
+        AppleColors.systemBlue,
+        sectionGroup: 'ia-content',
+        trailingText:
+            loggedDriveCount > 0 ? '已登录 $loggedDriveCount 个' : '未登录',
+        keywords: const [
+          '网盘',
+          '网盘账号',
+          '扫码',
+          '夸克',
+          'UC',
+          '百度',
+          '阿里',
+          '4K 原画',
+          'Token',
+          'Cookie',
+          '切换盘序',
+        ],
+        // Canonical 配置中心 entry inside Settings. Add-library / subscription
+        // management / CatPaw live in their own single entries, so they are
+        // intentionally not wired into this instance of the page.
+        onOpen: () => showNetdiskAccountSheet(
+          context,
+          storage,
+          iosBackLabel: '设置',
+          sites: sites,
+          activeGroup: _activeSite?.group ?? '',
+          onChanged: refresh,
+        ),
+      ),
+      SettingsPane(
+        'extensions',
+        '蜘蛛扩展与网关',
+        '热插拔脚本扩展包、CatPaw 本机配置与自建局域网网关兜底（适配 .so 线路）',
+        CupertinoIcons.cube_box_fill,
+        AppleColors.systemIndigo,
+        sectionGroup: 'ia-content',
+        trailingText: SpiderPluginRegistry.instance.gatewayConfig.isActive
+            ? '网关已开启'
+            : (SpiderPluginRegistry.instance.enabledPackCount > 0
+                ? '${SpiderPluginRegistry.instance.enabledPackCount} 扩展包'
+                : '本机模式'),
+        keywords: const [
+          '蜘蛛',
+          'Spider',
+          '扩展包',
+          '导入脚本扩展包',
+          '自建蜘蛛网关',
+          '使用教程与常见疑问',
+          '脚本',
+          'CatPaw 本机配置',
+          '.so',
+        ],
+        content: stack([
+          if (hasCatPaw) ...[
+            IosSettingsGroup(
+              header: 'CatPaw',
+              children: [
+                IosSettingsRow(
+                  key: const ValueKey('ios-open-catpaw-settings'),
+                  icon: CupertinoIcons.slider_horizontal_3,
+                  iconColor: AppleColors.systemOrange,
+                  title: 'CatPaw 本机配置',
+                  showChevron: true,
+                  onTap: _showCatPawSettings,
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+          ],
+          SpiderExtensionsPanel(
+            storage: storage,
+            client: widget.client,
+            sites: sites,
+            onChanged: () {
+              _reloadSavedConfig();
+              refresh();
+            },
+            onNotice: _showAppleNotice,
+          ),
+        ]),
+      ),
+      // ───────────────────────────── 播放 ─────────────────────────────
+      SettingsPane(
+        'picture',
+        '播放器与画质',
+        '播放内核（AVPlayer / MPV）、画质线路、HDR、人声增强与超分',
+        CupertinoIcons.tv_fill,
+        AppleColors.systemPurple,
+        sectionGroup: 'ia-playback',
+        trailingText:
+            '${IosPlaybackEngineMode.fromId(storage.iosPlaybackEngineMode).shortLabel} · $_defaultAspectLabel',
+        keywords: const [
+          'AVPlayer',
+          'MPV',
+          '播放内核偏好',
+          '自动识别本机最佳配置',
+          '内核',
+          '解码偏好',
+          '硬件',
+          'HDR 色调映射',
+          '杜比',
+          '人声响度增强',
+          'Anime4K',
+          '超分',
+          '大容量预读缓冲',
+          '画面比例',
+          '画质与线路',
+          '默认播放来源与盘序',
+          '切换盘序',
+          '网盘顺序',
+          '4K',
+          '1080P',
+        ],
+        content: stack([
+          IosPlaybackEngineSettingsSection(
+            storage: storage,
+            onChanged: refresh,
+          ),
+          const SizedBox(height: 20),
+          IosSettingsGroup(
+            header: '默认播放来源与网盘排序',
+            footer: '自定义默认首选网盘（夸克 / UC / 百度 / 阿里）与手动拖拽排序，打开影片详情时将自动命中排在前面的可用网盘线路。',
+            children: [
+              IosSettingsRow(
+                key: const ValueKey('ios-settings-open-drive-priority'),
+                icon: CupertinoIcons.arrow_up_arrow_down_circle_fill,
+                iconColor: AppleColors.systemBlue,
+                title: '默认播放来源与盘序',
+                trailingText: formatPlaybackSourcePrioritySummary(storage),
+                showChevron: true,
+                onTap: () async {
+                  await showPlaybackSourcePrioritySheet(
+                    context,
+                    storage,
+                    onChanged: refresh,
+                  );
+                  refresh();
+                },
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          choices(
+            '画质与线路',
+            storage.preferredQuality,
+            const [
+              ('4k_netdisk', '4K 原画优先'),
+              ('1080p_direct', '1080P 直连'),
+              ('fast_hls', '极速流媒体'),
+              ('default', '站点默认'),
+            ],
+            (v) async {
+              await storage.setAutoHardwareQualityEnabled(false);
+              await storage.setPreferredQuality(v);
+            },
+          ),
+          choices(
+            '画面比例',
+            storage.defaultAspectMode,
+            const [
+              ('contain', '适应屏幕'),
+              ('cover', '铺满裁剪'),
+              ('fill', '拉伸全屏'),
+            ],
+            storage.setDefaultAspectMode,
+          ),
+          choices(
+            '解码偏好',
+            storage.playerKernel,
+            const [
+              ('ijk', '自动解码'),
+              ('exo', 'Apple 硬件优先'),
+            ],
+            (v) async {
+              await storage.setAutoHardwareQualityEnabled(false);
+              await storage.setPlayerKernel(v);
+            },
+          ),
+        ]),
+      ),
+      SettingsPane(
+        'episodes',
+        '倍速与连播',
+        isIosNative ? '起播倍速、连播与时钟显示' : '起播倍速、剧集排序、连播与时钟显示',
+        CupertinoIcons.speedometer,
+        AppleColors.systemOrange,
+        sectionGroup: 'ia-playback',
+        trailingText: speedLabel,
+        keywords: const ['倍速', '自动播放下一集', '连播', '播放页常显时间', '时钟', '剧集排序'],
+        content: stack([
+          choices(
+            '起播倍速',
+            storage.playSpeed,
+            const [
+              (0.75, '0.75×'),
+              (1.0, '1×'),
+              (1.25, '1.25×'),
+              (1.5, '1.5×'),
+              (2.0, '2×'),
+            ],
+            storage.setPlaySpeed,
+          ),
+          if (!isIosNative)
+            choices(
+              '剧集排序',
+              storage.episodesDescending,
+              const [(false, '正序'), (true, '倒序')],
+              storage.setEpisodesDescending,
+            ),
+          IosSettingsGroup(
+            header: '连续播放与时钟',
+            children: [
+              toggleRow(
+                '自动播放下一集',
+                CupertinoIcons.forward_end_fill,
+                AppleColors.systemGreen,
+                storage.autoNext,
+                storage.setAutoNext,
+              ),
+              toggleRow(
+                '播放页常显时间',
+                CupertinoIcons.clock_fill,
+                AppleColors.systemTeal,
+                storage.playerAlwaysShowClock,
+                storage.setPlayerAlwaysShowClock,
+              ),
+            ],
+          ),
+        ]),
+      ),
+      SettingsPane(
+        'skip',
+        '片头与片尾',
+        '设置点播剧集自动跳过片头片尾秒数',
+        CupertinoIcons.forward_fill,
+        AppleColors.systemIndigo,
+        sectionGroup: 'ia-playback',
+        trailingText: _skipIntroOutroSummary,
+        keywords: const ['自动跳过时长', '跳过片头', '跳过片尾'],
+        content: IosSettingsGroup(
+          header: '自动跳过时长',
+          footer: '仅对点播剧集生效，电视直播频道将自动保持实时播放。',
+          dividerIndent: 18,
+          children: [
+            _buildSkipIntroOutroDrawerBody(onStateChanged: refresh),
+          ],
+        ),
+      ),
+      if (!OhosRuntime.isOhos)
+        SettingsPane(
+          'danmu',
+          '弹幕',
+          '分片弹幕开关、显示类型、兼容服务源与屏蔽词',
+          CupertinoIcons.chat_bubble_text_fill,
+          AppleColors.systemTeal,
+          sectionGroup: 'ia-playback',
+          keywords: const [
+            '默认开启弹幕',
+            '弹幕样式、服务地址与屏蔽词',
+            '滚动弹幕',
+            '顶部固定弹幕',
+            '底部固定弹幕',
+          ],
+          content: IosDanmuSettingsSection(onChanged: refresh),
+        ),
+      if (!OhosRuntime.isOhos)
+        SettingsPane(
+          'hud',
+          '播放界面与手势',
+          '自定义底部工具栏按钮排序、细进度条、跳过倒计时与双击手势',
+          CupertinoIcons.hand_draw_fill,
+          AppleColors.systemBlue,
+          sectionGroup: 'ia-playback',
+          keywords: const [
+            '工具栏',
+            '按钮排序',
+            '自定义工具栏',
+            '两侧双击手势',
+            '长按倍速松手恢复',
+            '隐藏控制栏时显示细进度条',
+            'HUD',
+            '起播规格提示',
+            '跳过片头/片尾 3 秒倒计时',
+          ],
+          content: stack([
+            if (isIosNative) ...[
+              IosSettingsGroup(
+                header: '播放器工具栏按钮与排序',
+                footer: '自由添加、移除或拖拽排序播放页底部的快捷按钮（默认包含选集、线路、倍速、弹幕/字幕、画面、播放器、音轨、片头片尾、更多）。',
+                children: [
+                  IosSettingsRow(
+                    key: const ValueKey('ios-settings-customize-player-toolbar'),
+                    icon: CupertinoIcons.slider_horizontal_below_rectangle,
+                    iconColor: AppleColors.systemBlue,
+                    title: '自定义播放器工具栏按钮',
+                    trailingText: '${storage.iosPlayerToolbarItems.length} 项',
+                    showChevron: true,
+                    onTap: () async {
+                      await showIosPlayerToolbarCustomizeSheet(
+                        context,
+                        storage: storage,
+                        onChanged: (_) => refresh(),
+                      );
+                      refresh();
+                    },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+            ],
+            IosPlayerHudSettingsSection(onChanged: refresh),
+          ]),
+        ),
+      // ─────────────────────────── 外观与主页 ───────────────────────────
       SettingsPane(
         'appearance',
         '外观',
         '浅色白底与深色夜间，自动跟随系统切换',
         CupertinoIcons.circle_lefthalf_fill,
         AppleColors.systemPurple,
-        sectionGroup: 'core',
+        sectionGroup: 'ia-display',
         trailingText: AppleTheme.labelFor(storage.appThemeMode),
+        keywords: const ['主题模式', '深色夜间', '浅色', '简约白底', '跟随系统'],
         content: stack([
           Builder(
             builder: (ctx) {
@@ -10869,294 +14516,96 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         ]),
       ),
       SettingsPane(
-        'browsing',
-        '浏览',
-        '海报网格密度、副标题与主页模块',
-        CupertinoIcons.square_grid_2x2_fill,
+        'cards',
+        '海报与卡片',
+        '设置单行海报尺寸密度与副标题信息',
+        CupertinoIcons.rectangle_grid_2x2_fill,
         AppleColors.systemBlue,
-        sectionGroup: 'core',
+        sectionGroup: 'ia-display',
         trailingText: _gridDensityLabel,
-        children: [
-          SettingsPane(
-            'cards',
-            '海报与卡片',
-            '设置单行海报尺寸密度与副标题信息',
-            CupertinoIcons.rectangle_grid_2x2_fill,
-            AppleColors.systemBlue,
-            trailingText: _gridDensityLabel,
-            content: stack([
-              choices(
-                '海报密度',
-                storage.gridDensity,
-                const [
-                  ('comfortable', '舒展'),
-                  ('standard', '标准'),
-                  ('compact', '紧凑'),
-                ],
-                storage.setGridDensity,
-              ),
-              choices(
-                '卡片副标题',
-                storage.cardSubtitleMode,
-                const [
-                  ('remarks', '更新与备注'),
-                  ('year_area', '年份与地区'),
-                  ('site', '所属片源'),
-                  ('none', '隐藏'),
-                ],
-                storage.setCardSubtitleMode,
-              ),
-            ]),
-          ),
-          SettingsPane(
-            'home',
-            '首页板块与排序',
-            '单独开关首页各板块并自定义展示顺序',
-            CupertinoIcons.house_fill,
-            AppleColors.systemOrange,
-            content: _buildIosHomeSectionsSettingsBody(refresh),
-          ),
-        ],
-      ),
-      SettingsPane(
-        'playback',
-        '播放',
-        '默认优选画质、倍速与片头片尾跳过',
-        CupertinoIcons.play_circle_fill,
-        AppleColors.systemOrange,
-        sectionGroup: 'core',
-        trailingText: speedLabel,
-        children: [
-          SettingsPane(
-            'picture',
-            '画质与画面',
-            '播放内核（AVPlayer/MPV）、HDR 色调映射、人声响度与超分',
-            CupertinoIcons.tv_fill,
-            AppleColors.systemPurple,
-            trailingText:
-                '${IosPlaybackEngineMode.fromId(storage.iosPlaybackEngineMode).shortLabel} · $_defaultAspectLabel',
-            content: stack([
-              IosPlaybackEngineSettingsSection(
-                storage: storage,
-                onChanged: refresh,
-              ),
-              const SizedBox(height: 20),
-              choices(
-                '画质与线路',
-                storage.preferredQuality,
-                const [
-                  ('4k_netdisk', '4K 原画优先'),
-                  ('1080p_direct', '1080P 直连'),
-                  ('fast_hls', '极速流媒体'),
-                  ('default', '站点默认'),
-                ],
-                storage.setPreferredQuality,
-              ),
-              choices(
-                '画面比例',
-                storage.defaultAspectMode,
-                const [
-                  ('contain', '适应屏幕'),
-                  ('cover', '铺满裁剪'),
-                  ('fill', '拉伸全屏'),
-                ],
-                storage.setDefaultAspectMode,
-              ),
-              choices(
-                '解码偏好',
-                storage.playerKernel,
-                const [
-                  ('ijk', '自动解码'),
-                  ('exo', 'Apple 硬件优先'),
-                ],
-                storage.setPlayerKernel,
-              ),
-            ]),
-          ),
-          SettingsPane(
-            'episodes',
-            '倍速与选集',
-            '起播倍速、剧集排序、连播与时钟显示',
-            CupertinoIcons.speedometer,
-            AppleColors.systemOrange,
-            trailingText: speedLabel,
-            content: stack([
-              choices(
-                '起播倍速',
-                storage.playSpeed,
-                const [
-                  (0.75, '0.75×'),
-                  (1.0, '1×'),
-                  (1.25, '1.25×'),
-                  (1.5, '1.5×'),
-                  (2.0, '2×'),
-                ],
-                storage.setPlaySpeed,
-              ),
-              choices(
-                '剧集排序',
-                storage.episodesDescending,
-                const [(false, '正序'), (true, '倒序')],
-                storage.setEpisodesDescending,
-              ),
-              IosSettingsGroup(
-                header: '连续播放与时钟',
-                children: [
-                  toggleRow(
-                    '自动播放下一集',
-                    CupertinoIcons.forward_end_fill,
-                    AppleColors.systemGreen,
-                    storage.autoNext,
-                    storage.setAutoNext,
-                  ),
-                  toggleRow(
-                    '播放页常显时间',
-                    CupertinoIcons.clock_fill,
-                    AppleColors.systemTeal,
-                    storage.playerAlwaysShowClock,
-                    storage.setPlayerAlwaysShowClock,
-                  ),
-                ],
-              ),
-            ]),
-          ),
-          SettingsPane(
-            'skip',
-            '片头与片尾',
-            '设置点播剧集自动跳过片头片尾秒数',
-            CupertinoIcons.forward_fill,
-            AppleColors.systemIndigo,
-            trailingText: _skipIntroOutroSummary,
-            content: IosSettingsGroup(
-              header: '自动跳过时长',
-              footer: '仅对点播剧集生效，电视直播频道将自动保持实时播放。',
-              dividerIndent: 18,
-              children: [
-                _buildSkipIntroOutroDrawerBody(onStateChanged: refresh),
-              ],
-            ),
-          ),
-          if (!OhosRuntime.isOhos)
-            SettingsPane(
-              'danmu',
-              '弹幕设置',
-              '分片弹幕开关、显示类型、兼容服务源与屏蔽词',
-              CupertinoIcons.chat_bubble_text_fill,
-              AppleColors.systemTeal,
-              content: IosDanmuSettingsSection(onChanged: refresh),
-            ),
-          if (!OhosRuntime.isOhos)
-            SettingsPane(
-              'hud',
-              '播放界面与手势',
-              '起播规格提示、细进度条、跳过倒计时与双击手势',
-              CupertinoIcons.hand_draw_fill,
-              AppleColors.systemBlue,
-              content: IosPlayerHudSettingsSection(onChanged: refresh),
-            ),
-        ],
-      ),
-      SettingsPane(
-        'sources',
-        '订阅与账号',
-        '点播直播源管理与 4K 网盘扫码授权',
-        CupertinoIcons.layers_alt_fill,
-        AppleColors.systemGreen,
-        sectionGroup: 'account',
-        trailingText: '${publicSubs.length} 订阅',
+        keywords: const ['海报密度', '网格', '列数', '卡片副标题', '紧凑', '标准', '舒展'],
         content: stack([
-          IosSettingsGroup(
-            header: '片源与订阅管理',
-            footer: '支持 JSON 单仓/多仓、MacCMS 接口以及 M3U/TXT 直播源批量导入与分组。',
-            children: [
-              IosSettingsRow(
-                key: const ValueKey('ios-open-subscriptions'),
-                icon: CupertinoIcons.folder_fill,
-                iconColor: AppleColors.systemBlue,
-                title: '订阅源与分组管理',
-                trailingText: '${publicSubs.length} 个',
-                showChevron: true,
-                onTap: () async {
-                  await _showSubscriptionManagerSheet(
-                    iosBackLabel: '订阅与账号',
-                  );
-                  refresh();
-                },
-              ),
-              IosSettingsRow(
-                key: const ValueKey('ios-open-import-subscription'),
-                icon: CupertinoIcons.plus_app_fill,
-                iconColor: AppleColors.systemGreen,
-                title: '导入订阅资源',
-                showChevron: true,
-                onTap: () async {
-                  await _showImportConfigDialog(iosBackLabel: '订阅与账号');
-                  refresh();
-                },
-              ),
-              IosSettingsRow(
-                key: const ValueKey('ios-open-cloud-sync-shortcut'),
-                icon: CupertinoIcons.cloud_fill,
-                iconColor: AppleColors.systemTeal,
-                title: '多端网络同步（含订阅源同步）',
-                trailingText: storage.isWebdavConfigured ? '已配置' : '设置',
-                showChevron: true,
-                onTap: () async {
-                  await _openCloudSyncCenter(iosBackLabel: '订阅与账号');
-                  refresh();
-                },
-              ),
+          choices(
+            '海报密度',
+            storage.gridDensity,
+            const [
+              ('comfortable', '舒展'),
+              ('standard', '标准'),
+              ('compact', '紧凑'),
             ],
+            storage.setGridDensity,
           ),
-          const SizedBox(height: 24),
-          IosSettingsGroup(
-            header: '云盘账号与扩展',
-            footer: '绑定夸克、UC、百度或阿里云盘后，自动解锁对应 4K 原画直连线路。',
-            children: [
-              IosSettingsRow(
-                key: const ValueKey('ios-open-netdisk'),
-                icon: CupertinoIcons.qrcode,
-                iconColor: AppleColors.systemIndigo,
-                title: '我的云盘 · 扫码与账号',
-                trailingText:
-                    loggedDriveCount > 0 ? '已登录 $loggedDriveCount 个' : '未登录',
-                showChevron: true,
-                onTap: () => showNetdiskAccountSheet(
-                  context,
-                  storage,
-                  iosBackLabel: '订阅与账号',
-                  onChanged: refresh,
-                ),
-              ),
-              if (sites.any((site) => site.isCatPaw))
-                IosSettingsRow(
-                  icon: CupertinoIcons.slider_horizontal_3,
-                  iconColor: AppleColors.systemOrange,
-                  title: 'CatPaw 本机配置',
-                  showChevron: true,
-                  onTap: _showCatPawSettings,
-                ),
+          choices(
+            '卡片副标题',
+            storage.cardSubtitleMode,
+            const [
+              ('remarks', '更新与备注'),
+              ('year_area', '年份与地区'),
+              ('site', '所属片源'),
+              ('none', '隐藏'),
             ],
+            storage.setCardSubtitleMode,
           ),
         ]),
       ),
       SettingsPane(
-        'extensions',
-        '蜘蛛扩展与网关',
-        '热插拔脚本扩展包与自建局域网网关兜底（适配 .so 线路）',
-        CupertinoIcons.cube_box_fill,
-        AppleColors.systemIndigo,
-        sectionGroup: 'account',
-        trailingText: SpiderPluginRegistry.instance.gatewayConfig.isActive
-            ? '网关已开启'
-            : (SpiderPluginRegistry.instance.enabledPackCount > 0
-                ? '${SpiderPluginRegistry.instance.enabledPackCount} 扩展包'
-                : '本机模式'),
-        content: SpiderExtensionsPanel(
+        'home',
+        '首页板块',
+        '单独开关首页各板块并自定义展示顺序',
+        CupertinoIcons.house_fill,
+        AppleColors.systemOrange,
+        sectionGroup: 'ia-display',
+        keywords: const ['首页板块开关与顺序', '排序', '模块', '沉浸首推海报', '海报横幅'],
+        content: _buildIosHomeSectionsSettingsBody(refresh),
+      ),
+      // ─────────────────────────── 数据与存储 ───────────────────────────
+      SettingsPane(
+        'sync',
+        '多端同步',
+        storage.syncStatusSummary,
+        CupertinoIcons.cloud_fill,
+        AppleColors.systemBlue,
+        sectionGroup: 'ia-data',
+        trailingText: storage.isWebdavConfigured ? '已配置' : '未开启',
+        keywords: const [
+          'WebDAV',
+          '多端网络同步',
+          '局域网接收码',
+          '自动云同步',
+          '坚果云',
+          'NAS',
+          'Nextcloud',
+          '同步订阅',
+        ],
+        content: CloudSyncSettingsPanel(
           storage: storage,
-          client: widget.client,
-          sites: sites,
-          onChanged: () {
+          embeddedInList: true,
+          onSynced: ({required subscriptionsChanged}) {
+            if (subscriptionsChanged) {
+              _reloadSavedConfig();
+            }
+            refresh();
+          },
+          onNotice: _showAppleNotice,
+        ),
+      ),
+      SettingsPane(
+        'backup',
+        '备份与恢复',
+        '导入或导出跨平台 JSON 备份文件',
+        CupertinoIcons.arrow_2_circlepath,
+        AppleColors.systemGreen,
+        sectionGroup: 'ia-data',
+        keywords: const [
+          '复制当前备份 JSON',
+          '从剪贴板粘贴备份文本',
+          '从此备份文本恢复',
+          '导出',
+          '导入',
+        ],
+        content: _IosBackupRestorePanel(
+          storage: storage,
+          onRestored: () {
             _reloadSavedConfig();
             refresh();
           },
@@ -11164,124 +14613,164 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         ),
       ),
       SettingsPane(
-        'data',
-        '数据',
-        'WebDAV 云同步、备份恢复与缓存清理',
-        CupertinoIcons.tray_fill,
-        AppleColors.systemTeal,
-        sectionGroup: 'account',
-        trailingText: storage.isWebdavConfigured ? '云同步已开启' : null,
-        children: [
-          SettingsPane(
-            'sync',
-            '多端网络同步',
-            storage.syncStatusSummary,
-            CupertinoIcons.cloud_fill,
-            AppleColors.systemBlue,
-            trailingText: storage.isWebdavConfigured ? '已配置' : '设置',
-            content: CloudSyncSettingsPanel(
-              storage: storage,
-              embeddedInList: true,
-              onSynced: ({required subscriptionsChanged}) {
-                if (subscriptionsChanged) {
-                  _reloadSavedConfig();
-                }
-                refresh();
-              },
-              onNotice: _showAppleNotice,
-            ),
-          ),
-          SettingsPane(
-            'backup',
-            '备份与恢复',
-            '导入或导出跨平台 JSON 备份文件',
-            CupertinoIcons.arrow_2_circlepath,
-            AppleColors.systemGreen,
-            content: _IosBackupRestorePanel(
-              storage: storage,
-              onRestored: () {
-                _reloadSavedConfig();
-                refresh();
-              },
-              onNotice: _showAppleNotice,
-            ),
-          ),
-          SettingsPane(
-            'cache',
-            '缓存与搜索记录',
-            '媒体分块落盘缓存、HLS 点播去广告与海报搜索清理',
-            CupertinoIcons.trash_fill,
-            AppleColors.systemRed,
-            trailingText: PosterLoader.memoryCacheSizeLabel,
-            content: stack([
-              if (!OhosRuntime.isOhos) ...[
-                IosMediaCacheAndAdSection(
-                  storage: storage,
-                  onChanged: refresh,
-                ),
-                const SizedBox(height: 24),
-              ],
-              IosSettingsGroup(
-                header: '存储概览',
-                footer: '清理海报缓存和当前空间的搜索历史，不会删除收藏和观看记录。',
-                children: [
-                  IosSettingsRow(
-                    icon: CupertinoIcons.photo_on_rectangle,
-                    iconColor: AppleColors.systemBlue,
-                    title: '海报内存缓存',
-                    trailingText: PosterLoader.memoryCacheSizeLabel,
-                  ),
-                  IosSettingsRow(
-                    icon: CupertinoIcons.search,
-                    iconColor: AppleColors.systemTeal,
-                    title: '搜索记录',
-                    trailingText:
-                        '${storage.getSearchHistory(forPrivate: _privateSessionUnlocked).length} 条',
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24),
-              IosSettingsGroup(
-                dividerIndent: 18,
-                children: [
-                  IosSettingsRow(
-                    key: const ValueKey('ios-clear-cache-row'),
-                    title: '清理缓存与搜索记录',
-                    titleColor: AppleColors.systemRed,
-                    onTap: () async {
-                      await PosterLoader.clearCache();
-                      await storage.clearSearchHistory(
-                        forPrivate: _privateSessionUnlocked,
-                      );
-                      refresh();
-                      if (!mounted) return;
-                      await showAppleNativeAlert(
-                        context,
-                        title: '缓存已清理',
-                        message: '已清空海报缓存与搜索记录。',
-                        actions: const [
-                          AppleNativeAlertAction(
-                            id: 'ok',
-                            title: '好的',
-                            isDefault: true,
-                          ),
-                        ],
-                      );
-                    },
-                  ),
-                ],
-              ),
-            ]),
-          ),
+        'cache',
+        '缓存与存储',
+        '媒体分块落盘缓存、HLS 点播去广告与海报搜索清理',
+        CupertinoIcons.tray_full_fill,
+        systemGray,
+        sectionGroup: 'ia-data',
+        trailingText: PosterLoader.memoryCacheSizeLabel,
+        keywords: const [
+          '清理缓存与搜索记录',
+          'HLS 点播自动去广告',
+          '本地媒体落盘缓存上限',
+          '一键清理媒体落盘缓存',
+          '海报内存缓存',
+          '存储概览',
         ],
+        content: stack([
+          if (!OhosRuntime.isOhos) ...[
+            IosMediaCacheAndAdSection(
+              storage: storage,
+              onChanged: refresh,
+            ),
+            const SizedBox(height: 24),
+          ],
+          IosSettingsGroup(
+            header: '存储概览',
+            footer: '清理海报缓存和当前空间的搜索历史，不会删除收藏和观看记录。',
+            children: [
+              IosSettingsRow(
+                icon: CupertinoIcons.photo_on_rectangle,
+                iconColor: AppleColors.systemBlue,
+                title: '海报内存缓存',
+                trailingText: PosterLoader.memoryCacheSizeLabel,
+              ),
+              IosSettingsRow(
+                icon: CupertinoIcons.search,
+                iconColor: AppleColors.systemTeal,
+                title: '搜索记录',
+                trailingText:
+                    '${storage.getSearchHistory(forPrivate: _privateSessionUnlocked).length} 条',
+              ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          IosSettingsGroup(
+            dividerIndent: 18,
+            children: [
+              IosSettingsRow(
+                key: const ValueKey('ios-clear-cache-row'),
+                title: '清理缓存与搜索记录',
+                titleColor: AppleColors.systemRed,
+                onTap: () async {
+                  await PosterLoader.clearCache();
+                  await storage.clearSearchHistory(
+                    forPrivate: _privateSessionUnlocked,
+                  );
+                  refresh();
+                  if (!mounted) return;
+                  await showAppleNativeAlert(
+                    context,
+                    title: '缓存已清理',
+                    message: '已清空海报缓存与搜索记录。',
+                    actions: const [
+                      AppleNativeAlertAction(
+                        id: 'ok',
+                        title: '好的',
+                        isDefault: true,
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ],
+          ),
+        ]),
       ),
+      // ────────────────────────────── 通用 ──────────────────────────────
+      if (isIosNative && !_privateSessionUnlocked)
+        SettingsPane(
+          'ai',
+          'AI 观影实验室',
+          AiService.instance.isLabUnlocked
+              ? (AiService.instance.activePasscodePayload?.summaryBadgeZh ??
+                  '已开启内测 · 智能双语字幕、防剧透导览与 AI 找片')
+              : '内测中 · 输入口令开启',
+          AiService.instance.isLabUnlocked
+              ? CupertinoIcons.sparkles
+              : CupertinoIcons.lock_shield_fill,
+          AppleColors.systemPurple,
+          sectionGroup: 'ia-general',
+          trailingText: AiService.instance.statusSummaryZh,
+          keywords: AiService.instance.isLabUnlocked
+              ? const [
+                  'AI 观影实验室',
+                  'AI 实验室',
+                  'AI 助手',
+                  '内测',
+                  '口令',
+                  '大模型',
+                  '自然语言找片',
+                  'AI 找片',
+                  '文件名智能清洗',
+                  '标题智能清洗',
+                  'AI 字幕',
+                  '前情提要',
+                ]
+              : const [
+                  'AI 观影实验室',
+                  'AI 实验室',
+                  'AI 助手',
+                  '内测',
+                  '口令',
+                  '自然语言找片',
+                  'AI 找片',
+                ],
+          onOpen: () => _trackSecondaryRoute<void>(
+            () async {
+              if (!AiService.instance.isLabUnlocked) {
+                final unlocked = await showIosAiLabPasscodeSheet(
+                  context,
+                  urlLauncherOverride: widget.onOpenExternalUrlForTest,
+                );
+                _syncNativeDockMenuItemsIfMounted();
+                refresh();
+                if (!unlocked || !mounted) return;
+              }
+              await pushIosAiSettingsPage(
+                context,
+                backLabel: '设置',
+                urlLauncherOverride: widget.onOpenExternalUrlForTest,
+              );
+              _syncNativeDockMenuItemsIfMounted();
+              refresh();
+            },
+          ),
+        ),
       SettingsPane(
         'about',
         '关于与更新',
-        '版本信息、更新检查与脱敏诊断日志',
+        '版本与软件更新、支持开发者、新手引导、诊断日志与联系反馈（${OfficialChannelInfo.authorSocialName}）',
         CupertinoIcons.info_circle_fill,
-        AppleColors.systemIndigo,
-        sectionGroup: 'about',
+        systemGray,
+        sectionGroup: 'ia-general',
+        keywords: const [
+          '检查更新',
+          '检查版本更新',
+          '软件更新',
+          '打开官方下载站',
+          '捐赠',
+          '赞助',
+          '支持开发者',
+          '打赏',
+          '重新查看新手引导',
+          '导出诊断日志包',
+          '联系反馈作者',
+          '联系与反馈作者',
+          '官网交流群',
+          '官方渠道安全声明',
+        ],
         content: stack([
           const Padding(
             padding: EdgeInsets.only(top: 8, bottom: 24),
@@ -11302,21 +14791,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 title: '版本',
                 trailingText: _currentAppVersion,
               ),
-              IosSettingsRow(
-                title: '导出诊断日志包',
-                subtitle: '脱敏系统环境信息与最近异常日志',
-                onTap: () => _exportDiagnosticsBundle(context),
-              ),
-              if (!OhosRuntime.isOhos)
-                IosSettingsRow(
-                  key: const ValueKey('ios-replay-onboarding'),
-                  icon: CupertinoIcons.sparkles,
-                  iconColor: AppleColors.systemBlue,
-                  title: '重新查看新手引导',
-                  subtitle: '回顾配置导入、多端同步与播放手势指南',
-                  showChevron: true,
-                  onTap: () => _openOnboardingRoute(isReplay: true),
-                ),
             ],
           ),
           const SizedBox(height: 24),
@@ -11324,6 +14798,75 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             installedVersion: _currentAppVersion,
             embedded: true,
             autoCheck: false,
+          ),
+          const SizedBox(height: 20),
+          IosSupportDeveloperCard(
+            urlOpener: widget.onOpenExternalUrlForTest,
+          ),
+          const SizedBox(height: 24),
+          IosSettingsGroup(
+            header: '帮助与诊断',
+            children: [
+              if (!OhosRuntime.isOhos)
+                IosSettingsRow(
+                  key: const ValueKey('ios-replay-onboarding'),
+                  icon: CupertinoIcons.sparkles,
+                  iconColor: AppleColors.systemBlue,
+                  title: '重新查看新手引导',
+                  showChevron: true,
+                  onTap: () => _openOnboardingRoute(isReplay: true),
+                ),
+              IosSettingsRow(
+                key: const ValueKey('ios-export-diagnostics'),
+                icon: CupertinoIcons.doc_plaintext,
+                iconColor: AppleColors.systemOrange,
+                title: '导出诊断日志包',
+                showChevron: true,
+                onTap: () => _exportDiagnosticsBundle(context),
+              ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          IosSettingsGroup(
+            header: '联系反馈与官方交流',
+            footer: OfficialChannelInfo.antiTamperWarning,
+            dividerIndent: 18,
+            children: [
+              Builder(
+                builder: (rowCtx) => IosSettingsRow(
+                  key: const ValueKey('ios-settings-author-socials'),
+                  icon: CupertinoIcons.person_crop_circle_badge_checkmark,
+                  iconColor: AppleColors.systemPink,
+                  title: '联系反馈作者（各社媒账号名）',
+                  subtitle: OfficialChannelInfo.authorSocialSummary,
+                  subtitleMaxLines: 2,
+                  trailingText: '复制',
+                  onTap: () => _copyAuthorSocialName(originContext: rowCtx),
+                ),
+              ),
+              Builder(
+                builder: (rowCtx) => IosSettingsRow(
+                  key: const ValueKey('ios-settings-official-community'),
+                  icon: CupertinoIcons.chat_bubble_2_fill,
+                  iconColor: AppleColors.systemGreen,
+                  title: '官网交流群',
+                  subtitle: OfficialChannelInfo.officialCommunityUrl,
+                  showChevron: true,
+                  onTap: () =>
+                      _openOfficialCommunityLink(originContext: rowCtx),
+                ),
+              ),
+              IosSettingsRow(
+                key: const ValueKey('ios-settings-official-notice'),
+                icon: CupertinoIcons.shield_lefthalf_fill,
+                iconColor: AppleColors.systemOrange,
+                title: '官方渠道安全声明',
+                subtitle:
+                    '认准官网 ${OfficialChannelInfo.officialWebsiteDisplay}',
+                showChevron: true,
+                onTap: _openOfficialNoticeDialogFromSettings,
+              ),
+            ],
           ),
         ]),
       ),
@@ -11897,13 +15440,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             AppleGroupedTile(
               icon: CupertinoIcons.qrcode_viewfinder,
               iconBgColor: const Color(0xFF0A84FF),
-              title: '我的云盘 · 网盘扫码与账号中心',
-              subtitle: '夸克（我的夸父）/ UC（我的优汐）/ 百度（我的嘟嘟）/ 阿里（我的阿狸）',
+              title: '配置中心 · 多源网盘扫码与账号',
+              subtitle: '兼容多源配置中心直读，一次扫码全源通用',
               trailingText:
                   loggedDriveCount > 0 ? '已登录 $loggedDriveCount 个' : '去扫码',
               onTap: () => showNetdiskAccountSheet(
                 context,
                 widget.storage,
+                sites: publicSites,
+                activeGroup: _activeSite?.group ?? '',
+                onOpenCatPawSettings: publicSites.any((s) => s.isCatPaw)
+                    ? _showCatPawSettings
+                    : null,
                 onChanged: () {
                   refreshBoth();
                   if (mounted) setState(() {});
@@ -12564,62 +16112,140 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }
 
   String _currentAppVersion = '读取中';
+  String _installedVersionToken = '';
+  Future<({String displayVersion, String versionToken})>? _installedVersionFuture;
   Timer? _installedVersionTimer;
 
-  Future<String> _resolveInstalledAppVersion() async {
+  bool _hasExistingLocalUserData() {
+    if (_config != null) return true;
+    if (widget.storage.getSubscriptions().isNotEmpty) return true;
+    if (widget.storage.getWatchHistory().isNotEmpty) return true;
+    if (widget.storage.getFavorites().isNotEmpty) return true;
+    if (widget.storage.hasAnyNetdiskLoggedIn) return true;
+    return false;
+  }
+
+  Future<({String displayVersion, String versionToken})>
+      _resolveInstalledAppVersionInfo() async {
     if (OhosRuntime.isOhos) {
       final ohosPkg = await OhosRuntime.getPackageInfo();
       if (ohosPkg != null && ohosPkg.version.isNotEmpty) {
-        return ohosPkg.version;
+        final v = ohosPkg.version.trim();
+        return (displayVersion: v, versionToken: v);
       }
     }
     try {
       final info = await PackageInfo.fromPlatform();
-      if (info.version.trim().isNotEmpty) {
-        return info.version.trim();
-      }
-    } catch (_) {}
-    return '';
-  }
-
-  Future<void> _loadInstalledVersion() async {
-    _installedVersionTimer = Timer(const Duration(seconds: 3), () {
-      if (mounted) setState(() => _currentAppVersion = '未知');
-    });
-    try {
-      final version = await _resolveInstalledAppVersion();
-      _installedVersionTimer?.cancel();
-      if (mounted) {
-        setState(
-          () => _currentAppVersion = version.isNotEmpty ? version : '未知',
+      final v = info.version.trim();
+      if (v.isNotEmpty) {
+        final token = OnboardingPrefs.normalizeVersionToken(
+          v,
+          buildNumber: info.buildNumber,
+        );
+        return (
+          displayVersion: v,
+          versionToken: token.isNotEmpty ? token : v,
         );
       }
+    } catch (_) {}
+    return (displayVersion: '', versionToken: '');
+  }
+
+  Future<({String displayVersion, String versionToken})>
+      _loadInstalledVersion() async {
+    _installedVersionTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted && _currentAppVersion == '读取中') {
+        setState(() => _currentAppVersion = '未知');
+      }
+    });
+    try {
+      final resolved = await _resolveInstalledAppVersionInfo();
+      _installedVersionTimer?.cancel();
+      final version = resolved.displayVersion;
+      final token = resolved.versionToken;
+      if (mounted) {
+        setState(() {
+          _currentAppVersion = version.isNotEmpty ? version : '未知';
+          _installedVersionToken = token;
+        });
+      }
+      return resolved;
     } catch (_) {
       _installedVersionTimer?.cancel();
       if (mounted) setState(() => _currentAppVersion = '未知');
+      return (displayVersion: '', versionToken: '');
+    }
+  }
+
+  Future<bool> _maybeShowPostUpdateWelcomeIfNeeded({
+    required OnboardingPrefs prefs,
+    required String displayVersion,
+    required String versionToken,
+  }) async {
+    try {
+      if (widget.storage.isSubscriptionsCorrupted ||
+          widget.storage.isHistoryCorrupted) {
+        return false;
+      }
+      final inFlutterTest =
+          !kIsWeb && Platform.environment.containsKey('FLUTTER_TEST');
+      if (inFlutterTest &&
+          prefs.lastSeenAppVersion.isEmpty &&
+          !OnboardingPrefs.debugEnablePostUpdateAutoPopInTest) {
+        return false;
+      }
+      final existingUser = _hasExistingLocalUserData();
+      if (!mounted ||
+          !prefs.shouldShowPostUpdateNotice(
+            versionToken,
+            hasExistingUserData: existingUser,
+          )) {
+        return false;
+      }
+      final frameReady = Completer<void>();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!frameReady.isCompleted) frameReady.complete();
+      });
+      await frameReady.future;
+      // Wait for IosLaunchCurtainHost's real completion event instead of a
+      // hardcoded 420 ms sleep so the dialog never races behind the curtain.
+      await IosLaunchCurtainHost.waitUntilCurtainCompleted();
+      if (!mounted ||
+          _officialNoticeOpen ||
+          _onboardingRouteOpen ||
+          _privateSessionUnlocked ||
+          !prefs.shouldShowPostUpdateNotice(
+            versionToken,
+            hasExistingUserData: _hasExistingLocalUserData(),
+          )) {
+        return false;
+      }
+      _officialNoticeOpen = true;
+      try {
+        await showPostUpdateWelcomeDialog(
+          context,
+          version: displayVersion,
+          urlOpener: widget.onOpenExternalUrlForTest,
+          onConfirm: () async {
+            final saved = await prefs.markPostUpdateNoticeSeen(versionToken);
+            if (prefs.shouldShowOfficialChannelNotice()) {
+              await prefs.markOfficialChannelNoticeSeen();
+            }
+            return saved;
+          },
+        );
+        return true;
+      } finally {
+        _officialNoticeOpen = false;
+      }
+    } catch (e) {
+      debugPrint('PostUpdateWelcomeDialog skipped: $e');
+      return false;
     }
   }
 
   static String _formatCleanReleaseNotes(String raw) =>
       ReleaseNotesSummary.formatPlainText(raw);
-
-  static bool _isRemoteVersionNewer(String remote, String current) {
-    List<int> parseParts(String v) => v
-        .replaceAll(RegExp(r'^[vV]'), '')
-        .split(RegExp(r'[^0-9]+'))
-        .where((s) => s.isNotEmpty)
-        .map((s) => int.tryParse(s) ?? 0)
-        .toList();
-    final r = parseParts(remote);
-    final c = parseParts(current);
-    final len = math.max(r.length, c.length);
-    for (var i = 0; i < len; i++) {
-      final rv = i < r.length ? r[i] : 0;
-      final cv = i < c.length ? c[i] : 0;
-      if (rv != cv) return rv > cv;
-    }
-    return false;
-  }
 
   Future<T?> _openIosOrModalPage<T>({
     required String title,
@@ -12675,6 +16301,19 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         context: context,
         title: '检查版本更新',
         builder: (_) => MacosUpdateSheet(installedVersion: _currentAppVersion),
+      );
+      return;
+    }
+    if (!kIsWeb &&
+        !OhosRuntime.isOhos &&
+        defaultTargetPlatform == TargetPlatform.windows) {
+      showAppleModalSheet<void>(
+        context: context,
+        title: '检查版本更新',
+        builder: (_) => WindowsUpdateSheet(
+          installedVersion: _currentAppVersion,
+          readVersion: _resolveInstalledAppVersion,
+        ),
       );
       return;
     }
@@ -13146,7 +16785,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Apple 影院级预设背景',
+                  defaultTargetPlatform == TargetPlatform.iOS
+                      ? '预设背景'
+                      : 'Apple 影院级预设背景',
                   style: TextStyle(
                     color: ApplePalette.of(context).labelSecondary,
                     fontSize: 12.5,
@@ -13311,27 +16952,35 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       ),
     );
   }
+  /// [showAddEntries] hides the iOS 「添加」 nav button / 「添加订阅」 row when
+  /// the caller already exposes the canonical 「添加资源库」 entry (Settings ›
+  /// 资源库与订阅), so the same page is never reachable twice from Settings.
   Future<void> _showSubscriptionManagerSheet({
     String iosBackLabel = '返回',
+    bool showAddEntries = true,
   }) async {
     final isIos = defaultTargetPlatform == TargetPlatform.iOS;
+    final iosAddEntries = isIos && showAddEntries;
     StateSetter? refreshSubPage;
     await _openIosOrModalPage<void>(
       title: isIos ? '订阅管理' : '订阅源与分组管理中心',
       backLabel: iosBackLabel,
       trailingAction: isIos
-          ? CupertinoButton(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              minimumSize: const Size(36, 36),
-              onPressed: () async {
-                await _showImportConfigDialog(iosBackLabel: '订阅管理');
-                refreshSubPage?.call(() {});
-              },
-              child: const Text(
-                '添加',
-                style: TextStyle(color: AppleColors.systemBlue, fontSize: 16),
-              ),
-            )
+          ? (iosAddEntries
+              ? CupertinoButton(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: const Size(36, 36),
+                  onPressed: () async {
+                    await _showImportConfigDialog(iosBackLabel: '订阅管理');
+                    refreshSubPage?.call(() {});
+                  },
+                  child: const Text(
+                    '添加',
+                    style:
+                        TextStyle(color: AppleColors.systemBlue, fontSize: 16),
+                  ),
+                )
+              : null)
           : Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -13397,13 +17046,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
                   SizedBox(height: 6),
                   Text(
-                    '支持同时导入多个 VOD / M3U / JSON 订阅地址，或一键从剪贴板读取并按分组归类管理。',
+                    isIos
+                        ? (iosAddEntries
+                            ? '支持同时导入多个 VOD / M3U / JSON 订阅地址，并按分组归类管理。'
+                            : '返回上一页点按「添加资源库」，即可导入 VOD / M3U / JSON 订阅并按分组归类管理。')
+                        : '支持同时导入多个 VOD / M3U / JSON 订阅地址，或一键从剪贴板读取并按分组归类管理。',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       color: ApplePalette.of(context).labelSecondary,
                       fontSize: 13,
                     ),
                   ),
+                  if (!isIos || iosAddEntries) ...[
                   const SizedBox(height: 18),
                   Wrap(
                     spacing: 10,
@@ -13427,22 +17081,19 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           }
                         },
                       ),
-                      AppleCapsuleButton(
-                        label: '从剪贴板导入',
-                        icon: CupertinoIcons.doc_on_clipboard,
-                        compact: true,
-                        onPressed: () async {
-                          if (isIos) {
-                            await _quickImportFromClipboard();
-                            if (ctx.mounted) setSheetState(() {});
-                          } else {
+                      if (!isIos)
+                        AppleCapsuleButton(
+                          label: '从剪贴板导入',
+                          icon: CupertinoIcons.doc_on_clipboard,
+                          compact: true,
+                          onPressed: () async {
                             Navigator.of(ctx).pop();
                             _quickImportFromClipboard();
-                          }
-                        },
-                      ),
+                          },
+                        ),
                     ],
                   ),
+                  ],
                 ],
               ),
             );
@@ -13455,9 +17106,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             shrinkWrap: true,
             padding: const EdgeInsets.all(16),
             children: [
-              if (isIos) ...[
+              if (iosAddEntries) ...[
                 IosSettingsGroup(
-                  header: '快捷导入',
+                  header: '添加订阅',
                   children: [
                     IosSettingsRow(
                       icon: CupertinoIcons.plus_app_fill,
@@ -13466,16 +17117,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       showChevron: true,
                       onTap: () async {
                         await _showImportConfigDialog(iosBackLabel: '订阅管理');
-                        if (ctx.mounted) setSheetState(() {});
-                      },
-                    ),
-                    IosSettingsRow(
-                      icon: CupertinoIcons.doc_on_clipboard_fill,
-                      iconColor: AppleColors.systemTeal,
-                      title: '从剪贴板快速导入',
-                      showChevron: true,
-                      onTap: () async {
-                        await _quickImportFromClipboard();
                         if (ctx.mounted) setSheetState(() {});
                       },
                     ),
@@ -13567,6 +17208,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             padding: const EdgeInsets.only(left: 6),
                             minSize: 28,
                             onPressed: () async {
+                              if (_isIosNativeFlow) {
+                                final ok = await _confirmIosDestructiveAction(
+                                  ctx,
+                                  title: '删除订阅「${sub.name}」？',
+                                  message:
+                                      '删除后将移除该订阅下的片源与直播频道，已保存的收藏与观看历史会保留。',
+                                  confirmLabel: '删除',
+                                );
+                                if (!ok || !mounted) return;
+                              }
                               try {
                                 await widget.storage.removeSubscription(sub.id);
                                 if (!mounted) return;
@@ -15479,22 +19130,29 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       return;
                     }
                     if (inPrivacyMode) {
+                      AiService.instance.setPrivacySessionActive(true);
                       setState(() {
                         _privateSessionUnlocked = true;
                         _selectedPrivateSiteKey = s.key;
                         _activeSite = s;
                       });
                     } else {
+                      final wasPrivate = _privateSessionUnlocked;
                       widget.storage.setSelectedSiteKey(s.key);
                       unawaited(CmsClient.retainScriptSessions(
                         (_config?.scriptOwners ?? const <CmsSite>[])
                             .where((site) => !site.isEffectivelyPrivate),
                       ));
+                      AiService.instance.setPrivacySessionActive(false);
+                      if (wasPrivate) {
+                        PosterLoader.clearPrivateCache();
+                      }
                       setState(() {
                         _privateSessionUnlocked = false;
                         _activeSite = s;
                       });
                     }
+                    _syncNativeDockMenuItemsIfMounted();
                     _loadSiteHome();
                   },
                 ),
@@ -15523,98 +19181,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       ),
     );
   }
-  Future<bool> _connectEmby(
-    BuildContext parent,
-    String group,
-    bool isPrivate,
-  ) async {
-    String server = '', username = '', password = '', error = '';
-    bool busy = false;
-    return await _openIosOrModalPage<bool>(
-          hostContext: parent,
-          title: '连接 Emby 媒体库',
-          backLabel: '导入订阅',
-          builder: (sheet) => StatefulBuilder(
-            builder: (ctx, update) => SingleChildScrollView(
-              padding: EdgeInsets.fromLTRB(
-                18,
-                18,
-                18,
-                18 + MediaQuery.viewInsetsOf(ctx).bottom,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextSelectionMouseGuard(
-                    child: CupertinoTextField(
-                      placeholder: '服务器地址（含端口或子路径）',
-                      keyboardType: TextInputType.url,
-                      autocorrect: false,
-                      onChanged: (v) => server = v,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextSelectionMouseGuard(
-                    child: CupertinoTextField(
-                      placeholder: '用户名',
-                      autocorrect: false,
-                      onChanged: (v) => username = v,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextSelectionMouseGuard(
-                    child: CupertinoTextField(
-                      placeholder: '密码',
-                      obscureText: true,
-                      onChanged: (v) => password = v,
-                    ),
-                  ),
-                  if (error.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 10),
-                      child: Text(error),
-                    ),
-                  CupertinoButton(
-                    onPressed: busy
-                        ? null
-                        : () async {
-                            if (server.trim().isEmpty ||
-                                username.trim().isEmpty) {
-                              update(() => error = '请填写服务器地址和用户名');
-                              return;
-                            }
-                            update(() {
-                              busy = true;
-                              error = '';
-                            });
-                            try {
-                              final entry = await EmbyLibrary.login(
-                                server,
-                                username,
-                                password,
-                                group: group.isEmpty ? '默认分组' : group,
-                                isPrivate: isPrivate,
-                              );
-                              if (!ctx.mounted) return;
-                              await widget.storage.upsertSubscriptions([entry]);
-                              if (ctx.mounted) Navigator.of(ctx).pop(true);
-                            } catch (e) {
-                              if (ctx.mounted)
-                                update(() {
-                                  busy = false;
-                                  error = e.toString();
-                                });
-                            }
-                          },
-                    child: Text(busy ? '正在连接…' : '登录并添加'),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ) ??
-        false;
-  }
   Future<void> _showImportConfigDialog({
     String? initialInput,
     String? initialError,
@@ -15622,436 +19188,41 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     bool initialIsPrivate = false,
     String iosBackLabel = '返回',
   }) async {
-    final urlCtrl = TextEditingController(
-      text: initialInput ??
-          (initialIsPrivate ? '' : widget.storage.configOrigin),
-    );
-    final jsonCtrl = TextEditingController();
-    final groupCtrl = TextEditingController(text: initialGroup);
-    bool isPrivate = initialIsPrivate;
-    bool submitting = false;
-    String? errorText = initialError;
-    final showPrivacyToggle =
-        initialIsPrivate || !widget.storage.hasPrivacyConfigured;
-    const presetGroups = ['默认分组', '主力影视', '超清专线', '电视直播', '动漫番剧'];
-    final isIos = defaultTargetPlatform == TargetPlatform.iOS;
+    final allSites = _config?.publicSupportedSites ?? const <CmsSite>[];
     await _openIosOrModalPage<void>(
-      title: initialIsPrivate
-          ? '导入隐私订阅'
-          : (isIos ? '导入订阅资源' : '导入订阅资源（支持分组 / 批量导入）'),
+      title: initialIsPrivate ? '添加隐私资源库' : '添加资源库',
       backLabel: iosBackLabel,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setModalState) {
-          Future<void> handleImport() async {
-            setModalState(() {
-              submitting = true;
-              errorText = null;
-            });
-            try {
-              final urlText = urlCtrl.text.trim();
-              final jsonText = jsonCtrl.text.trim();
-              final selectedGroup = groupCtrl.text.trim().isEmpty
-                  ? '默认分组'
-                  : groupCtrl.text.trim();
-              final effectivePrivate = isPrivate ||
-                  selectedGroup.contains('隐私') ||
-                  selectedGroup.contains('私密');
-              final candidateBackup =
-                  jsonText.isNotEmpty ? jsonText : urlText;
-              if (CmsParser.isBackupPayload(candidateBackup)) {
-                if (OhosRuntime.isOhos) {
-                  await widget.storage.importValidatedLocalBackupJson(
-                    candidateBackup,
-                  );
-                } else {
-                  await widget.storage.importBackupJson(candidateBackup);
-                }
-                if (ctx.mounted) Navigator.of(ctx).pop();
-                _reloadSavedConfig();
-                return;
-              }
-              final entries = await widget.client.resolveBatchSubscriptions(
-                urlInput: urlText,
-                rawTextInput: jsonText,
-                defaultGroup: selectedGroup,
-                isPrivate: effectivePrivate,
-              );
-              await widget.storage.upsertSubscriptions(entries);
-              if (!initialIsPrivate) {
-                _privateSessionUnlocked = false;
-              }
-              if (ctx.mounted) Navigator.of(ctx).pop();
-              _reloadSavedConfig();
-              if (effectivePrivate && !widget.storage.hasPrivacyPassword) {
-                _showSetPrivacyPasswordDialog(
-                  title: '设置隐私访问密码',
-                  subtitle: '请为隐私分组设置访问密码：',
-                );
-              }
-            } catch (e) {
-              setModalState(() {
-                submitting = false;
-                errorText = '导入失败：$e';
-              });
+      builder: (ctx) => AddResourceLibraryView(
+        storage: widget.storage,
+        client: widget.client,
+        initialInput: initialInput,
+        initialError: initialError,
+        initialGroup: initialGroup,
+        initialIsPrivate: initialIsPrivate,
+        loadedSites: allSites,
+        activeGroup: _activeSite?.group ?? '',
+        onOpenCatPawSettings:
+            allSites.any((s) => s.isCatPaw) ? _showCatPawSettings : null,
+        onLibraryAdded: () {
+          if (!initialIsPrivate) {
+            if (_privateSessionUnlocked) {
+              PosterLoader.clearPrivateCache();
             }
+            _privateSessionUnlocked = false;
+            AiService.instance.setPrivacySessionActive(false);
+            _syncNativeDockMenuItemsIfMounted();
           }
-          return SingleChildScrollView(
-            padding: EdgeInsets.fromLTRB(
-              20,
-              20,
-              20,
-              20 + MediaQuery.viewInsetsOf(ctx).bottom,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CupertinoButton(padding: EdgeInsets.zero, child: const Text('连接 Emby 媒体库'),
-                  onPressed: submitting ? null : () async {
-                    final added = await _connectEmby(ctx,groupCtrl.text.trim(),isPrivate);
-                    if (added && ctx.mounted) {
-                      Navigator.of(ctx).pop();
-                      _reloadSavedConfig();
-                    }
-                  }),
-                CupertinoButton(
-                  key: const ValueKey('subscription-pick-local-file'),
-                  padding: EdgeInsets.zero,
-                  onPressed: submitting ? null : () async {
-                    try {
-                      final Uint8List rawBytes;
-                      final String pickedName;
-                      if (OhosRuntime.isOhos) {
-                        final picked = await OhosRuntime.pickDocumentFile(
-                          purpose: OhosDocumentPurpose.subscription,
-                          maxBytes: CmsClient.maxResponseBytes,
-                        );
-                        if (picked == null || !ctx.mounted) return;
-                        rawBytes = picked.bytes;
-                        pickedName = picked.name;
-                      } else {
-                        final picked = await FilePicker.platform.pickFiles(
-                          type: FileType.any,
-                          withData: false,
-                        );
-                        final entry = picked?.files.single;
-                        if (entry == null || !ctx.mounted) return;
-                        pickedName = entry.name;
-                        if (entry.path != null && entry.path!.isNotEmpty) {
-                          final file = File(entry.path!);
-                          if (await file.length() > CmsClient.maxResponseBytes) {
-                            throw const FormatException('文件超过 6 MB');
-                          }
-                          rawBytes = await file.readAsBytes();
-                        } else if (entry.bytes != null) {
-                          if (entry.bytes!.length > CmsClient.maxResponseBytes) {
-                            throw const FormatException('文件超过 6 MB');
-                          }
-                          rawBytes = entry.bytes!;
-                        } else {
-                          return;
-                        }
-                      }
-                      final body =
-                          CmsClient.readSubscriptionFile(rawBytes, pickedName);
-                      if (!ctx.mounted) return;
-                      setModalState(() {
-                        jsonCtrl.text = body;
-                        urlCtrl.clear();
-                        errorText = null;
-                      });
-                    } on FormatException catch (e) {
-                      if (ctx.mounted) {
-                        setModalState(() => errorText = '读取本地订阅失败：${e.message}');
-                      }
-                    } catch (e) {
-                      if (ctx.mounted) {
-                        setModalState(() => errorText = '读取本地订阅失败：$e');
-                      }
-                    }
-                  },
-                  child: const Text('选择本地订阅或 ZIP 配置包'),
-                ),
-                // 1. Group Selector
-                Text(
-                  '订阅分组（可选择预设或直接输入自定义分组名）',
-                  style: TextStyle(
-                    color: ApplePalette.of(context).labelSecondary,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: [
-                    for (final g in presetGroups)
-                      _buildMiniFilterChip(
-                        label: g,
-                        selected: groupCtrl.text.trim() == g,
-                        onTap: () => setModalState(() => groupCtrl.text = g),
-                      ),
-                  ],
-                ),
-                SizedBox(height: 8),
-                TextSelectionMouseGuard(
-                  child: CupertinoTextField(
-                    controller: groupCtrl,
-                    placeholder: '输入自定义分组名称（如：主力4K、少儿专区）',
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
-                    ),
-                    style: TextStyle(
-                      color: ApplePalette.of(context).labelPrimary,
-                      fontSize: 13.5,
-                    ),
-                    placeholderStyle: TextStyle(
-                      color: ApplePalette.of(context).labelTertiary,
-                      fontSize: 13,
-                    ),
-                    onChanged: (_) => setModalState(() {}),
-                    decoration: BoxDecoration(
-                      color: ApplePalette.isDarkOf(context)
-                          ? ApplePalette.of(context).groupedSecondary
-                          : Colors.white,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(
-                        color: ApplePalette.of(context).separator,
-                        width: 0.65,
-                      ),
-                    ),
-                  ),
-                ),
-                SizedBox(height: 14),
-                if (showPrivacyToggle) ...[
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: ApplePalette.isDarkOf(context)
-                          ? ApplePalette.of(context).groupedSecondary
-                          : Colors.white,
-                      borderRadius: BorderRadius.circular(11),
-                      border: Border.all(
-                        color: ApplePalette.of(context).separator,
-                        width: 0.65,
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          CupertinoIcons.lock_shield_fill,
-                          color: AppleColors.systemPurple,
-                          size: 18,
-                        ),
-                        SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            '设为隐私分组',
-                            style: TextStyle(
-                              color: ApplePalette.of(context).labelPrimary,
-                              fontSize: 13.5,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                        CupertinoSwitch(
-                          value: isPrivate,
-                          activeTrackColor: AppleColors.systemPurple,
-                          onChanged: (v) => setModalState(() {
-                            isPrivate = v;
-                            if (v && groupCtrl.text.trim() == '默认分组') {
-                              groupCtrl.text = '隐私分组';
-                            } else if (!v &&
-                                groupCtrl.text.trim() == '隐私分组') {
-                              groupCtrl.text = '默认分组';
-                            }
-                          }),
-                        ),
-                      ],
-                    ),
-                  ),
-                  SizedBox(height: 14),
-                ],
-                // 3. Multi-subscription URLs input
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        '订阅地址（支持多行批量导入 · 兼容 VOD / M3U / JSON / 多仓）',
-                        style: TextStyle(
-                          color: ApplePalette.of(context).labelSecondary,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                    CupertinoButton(
-                      padding: EdgeInsets.zero,
-                      minSize: 26,
-                      onPressed: () async {
-                        final data =
-                            await Clipboard.getData(Clipboard.kTextPlain);
-                        final clip = (data?.text ?? '').trim();
-                        if (clip.isEmpty) return;
-                        if (clip.startsWith('{') ||
-                            clip.startsWith('[') ||
-                            clip.startsWith('#EXTM3U') ||
-                            clip.startsWith('<')) {
-                          jsonCtrl.text = clip;
-                        } else {
-                          urlCtrl.text = clip;
-                        }
-                        setModalState(() => errorText = null);
-                      },
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            CupertinoIcons.doc_on_clipboard,
-                            size: 14,
-                            color: AppleColors.systemBlue,
-                          ),
-                          SizedBox(width: 4),
-                          Text(
-                            '粘贴剪贴板',
-                            style: TextStyle(
-                              color: AppleColors.systemBlue,
-                              fontSize: 13,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                TextSelectionMouseGuard(
-                  child: CupertinoTextField(
-                    controller: urlCtrl,
-                    placeholder:
-                        '每行一个订阅地址（如：https://config.example/config.json）\n支持 JSON单仓/多仓、MacCMS VOD接口、M3U/M3U8/TXT 直播与点播',
-                    maxLines: 4,
-                    minLines: 2,
-                    autocorrect: false,
-                    enableSuggestions: false,
-                    smartQuotesType: SmartQuotesType.disabled,
-                    smartDashesType: SmartDashesType.disabled,
-                    keyboardType: TextInputType.multiline,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 10,
-                    ),
-                    style: TextStyle(
-                      color: ApplePalette.of(context).labelPrimary,
-                      fontSize: 13.5,
-                    ),
-                    placeholderStyle: TextStyle(
-                      color: ApplePalette.of(context).labelTertiary,
-                      fontSize: 12.5,
-                    ),
-                    decoration: BoxDecoration(
-                      color: ApplePalette.isDarkOf(context)
-                          ? ApplePalette.of(context).groupedSecondary
-                          : Colors.white,
-                      borderRadius: BorderRadius.circular(11),
-                      border: Border.all(
-                        color: ApplePalette.of(context).separator,
-                        width: 0.65,
-                      ),
-                    ),
-                  ),
-                ),
-                SizedBox(height: 14),
-                Text(
-                  '或粘贴 JSON / M3U / TXT / JS / PY 配置内容（脚本是否可用取决于运行环境）',
-                  style: TextStyle(
-                    color: ApplePalette.of(context).labelSecondary,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextSelectionMouseGuard(
-                  child: CupertinoTextField(
-                    controller: jsonCtrl,
-                    placeholder:
-                        '{"sites": [...]} 或 #EXTM3U 播放列表 或 频道名,https://live.example/tv.m3u8',
-                    maxLines: 4,
-                    minLines: 2,
-                    autocorrect: false,
-                    enableSuggestions: false,
-                    smartQuotesType: SmartQuotesType.disabled,
-                    smartDashesType: SmartDashesType.disabled,
-                    padding: const EdgeInsets.all(12),
-                    style: TextStyle(
-                      color: ApplePalette.of(context).labelPrimary,
-                      fontSize: 13,
-                    ),
-                    placeholderStyle: TextStyle(
-                      color: ApplePalette.of(context).labelTertiary,
-                      fontSize: 12.5,
-                    ),
-                    decoration: BoxDecoration(
-                      color: ApplePalette.isDarkOf(context)
-                          ? ApplePalette.of(context).groupedSecondary
-                          : Colors.white,
-                      borderRadius: BorderRadius.circular(11),
-                      border: Border.all(
-                        color: ApplePalette.of(context).separator,
-                        width: 0.65,
-                      ),
-                    ),
-                  ),
-                ),
-                if (errorText != null) ...[
-                  const SizedBox(height: 14),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: const Color(0x26FF453A),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(
-                        color: const Color(0x66FF453A),
-                        width: 0.5,
-                      ),
-                    ),
-                    child: Text(
-                      errorText!,
-                      style: const TextStyle(
-                        color: AppleColors.systemRed,
-                        fontSize: 13,
-                        height: 1.4,
-                      ),
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 18),
-                SizedBox(
-                  width: double.infinity,
-                  child: submitting
-                      ? const Center(
-                          child: Padding(
-                            padding: EdgeInsets.symmetric(vertical: 10),
-                            child: CupertinoActivityIndicator(radius: 12),
-                          ),
-                        )
-                      : AppleCapsuleButton(
-                          label: isPrivate ? '保存至隐私隐藏列表' : '导入并启用订阅',
-                          icon: isPrivate
-                              ? CupertinoIcons.lock_fill
-                              : CupertinoIcons.checkmark_circle_fill,
-                          primary: true,
-                          onPressed: handleImport,
-                        ),
-                ),
-              ],
-            ),
+          _reloadSavedConfig();
+        },
+        onImportNotice: (title, message) {
+          if (mounted) {
+            _showAppleNotice(title, message);
+          }
+        },
+        onNeedsPrivacyPassword: () async {
+          _showSetPrivacyPasswordDialog(
+            title: '设置隐私访问密码',
+            subtitle: '请为隐私分组设置访问密码：',
           );
         },
       ),
@@ -16542,7 +19713,7 @@ class _IosBackupRestorePanelState extends State<_IosBackupRestorePanel> {
                   if (!mounted) return;
                   setState(() => _errorText = null);
                   widget.onRestored();
-                  widget.onNotice('恢复成功', '已从备份文本恢复订阅源、收藏与偏好设置。');
+                  widget.onNotice('恢复成功', '已从备份文本恢复订阅源、收藏、观看历史与偏好设置。');
                 } catch (e) {
                   if (mounted) {
                     setState(() => _errorText = '恢复备份失败：$e');

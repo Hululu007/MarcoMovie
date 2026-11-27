@@ -128,6 +128,177 @@ final class FavoritesScreen {
     }
 
     void open(Favorites.Entry e) {
+        if (a.isTvDevice()
+                && a.multiSourceStore != null
+                && a.configStore != null
+                && !a.privateMode) {
+            TvMultiSourceStore.State msState = a.multiSourceStore.readState();
+            if (msState.initialized) {
+                ConfigLibrary lib = new ConfigLibrary(a.configStore.directory);
+                TvMultiSourceStore.SiteResolution res =
+                        a.multiSourceStore.resolveStoredSiteKey(e.site, a.config, lib);
+                if (res.status == TvMultiSourceStore.SiteResolution.STATUS_ENABLED
+                        && res.activeSite != null
+                        && a.available(res.activeSite)) {
+                    a.openListing(res.activeSite, e.video());
+                    return;
+                }
+                if (res.status == TvMultiSourceStore.SiteResolution.STATUS_DISABLED_SUBSCRIPTION
+                        && res.subscription != null) {
+                    final TvMultiSourceStore.SubscriptionRecord sub = res.subscription;
+                    final String targetStableKey = res.stableSiteKey;
+                    new AppDialog.Builder(a)
+                            .setTitle("「" + sub.name + "」当前已停用")
+                            .setMessage("这条收藏来自已停用的订阅源「" + sub.name + "」。可重新启用来源并打开，或选择其他来源搜索。")
+                            .setPositiveButton(
+                                    "启用来源",
+                                    (d, w) -> {
+                                        try {
+                                            a.multiSourceStore.setSubscriptionEnabled(sub.id, true);
+                                            TvMultiSourceStore.EffectiveBuild built =
+                                                    a.multiSourceStore.buildEffectiveConfig(
+                                                            lib,
+                                                            a.prefs.getString(
+                                                                    Prefs.PREFERRED_SITE, ""),
+                                                            (cfg, st) ->
+                                                                    SourceController.available(
+                                                                            a, cfg, st));
+                                            a.applyMultiSourceEffectiveBuild(
+                                                    built, false, 0, 0, "已重新启用「" + sub.name + "」");
+                                            if (a.config != null) {
+                                                for (Cms.Site s : a.config.sites) {
+                                                    if (s != null
+                                                            && targetStableKey.equals(s.key)
+                                                            && a.available(s)) {
+                                                        a.openListing(s, e.video());
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                        } catch (Exception err) {
+                                            a.notice("启用来源失败：" + a.message(err));
+                                        }
+                                    })
+                            .setNeutralButton(
+                                    "选择其他来源",
+                                    (d, w) -> {
+                                        if (e.title != null && !e.title.trim().isEmpty()) {
+                                            a.openSearch(e.title);
+                                        }
+                                    })
+                            .setNegativeButton("保留收藏", null)
+                            .show();
+                    return;
+                }
+                if (res.status == TvMultiSourceStore.SiteResolution.STATUS_DISABLED_SITE
+                        && res.subscription != null) {
+                    final TvMultiSourceStore.SubscriptionRecord sub = res.subscription;
+                    final String rawKey = res.rawSiteKey;
+                    final String targetStableKey = res.stableSiteKey;
+                    new AppDialog.Builder(a)
+                            .setTitle("线路「" + res.siteName + "」已停用")
+                            .setMessage("该收藏对应的线路已单独停用。可重新启用并打开，或从其他来源搜索。")
+                            .setPositiveButton(
+                                    "启用线路",
+                                    (d, w) -> {
+                                        try {
+                                            a.multiSourceStore.setSiteDisabled(
+                                                    sub.id, rawKey, false);
+                                            TvMultiSourceStore.EffectiveBuild built =
+                                                    a.multiSourceStore.buildEffectiveConfig(
+                                                            lib,
+                                                            a.prefs.getString(
+                                                                    Prefs.PREFERRED_SITE, ""),
+                                                            (cfg, st) ->
+                                                                    SourceController.available(
+                                                                            a, cfg, st));
+                                            a.applyMultiSourceEffectiveBuild(
+                                                    built, false, 0, 0, "");
+                                            if (a.config != null) {
+                                                for (Cms.Site s : a.config.sites) {
+                                                    if (s != null
+                                                            && targetStableKey.equals(s.key)
+                                                            && a.available(s)) {
+                                                        a.openListing(s, e.video());
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                        } catch (Exception err) {
+                                            a.notice("启用线路失败：" + a.message(err));
+                                        }
+                                    })
+                            .setNeutralButton(
+                                    "选择其他来源",
+                                    (d, w) -> {
+                                        if (e.title != null && !e.title.trim().isEmpty()) {
+                                            a.openSearch(e.title);
+                                        }
+                                    })
+                            .setNegativeButton("保留收藏", null)
+                            .show();
+                    return;
+                }
+                if (res.status == TvMultiSourceStore.SiteResolution.STATUS_AMBIGUOUS
+                        && !res.candidates.isEmpty()) {
+                    String[] labels = new String[res.candidates.size()];
+                    for (int i = 0; i < res.candidates.size(); i++) {
+                        TvMultiSourceStore.SiteResolution.Candidate c = res.candidates.get(i);
+                        labels[i] =
+                                c.subscription.name
+                                        + " · "
+                                        + c.siteName
+                                        + (c.subscription.enabled ? "" : "（已停用）");
+                    }
+                    new AppDialog.Builder(a)
+                            .setTitle("选择该收藏的来源")
+                            .setMessage("多个订阅存在同名片源，为避免串源，请选择具体来源打开：")
+                            .setItems(
+                                    labels,
+                                    (d, idx) -> {
+                                        TvMultiSourceStore.SiteResolution.Candidate pick =
+                                                res.candidates.get(idx);
+                                        try {
+                                            if (!pick.subscription.enabled) {
+                                                a.multiSourceStore.setSubscriptionEnabled(
+                                                        pick.subscription.id, true);
+                                            }
+                                            if (pick.siteDisabled) {
+                                                a.multiSourceStore.setSiteDisabled(
+                                                        pick.subscription.id,
+                                                        pick.rawSiteKey,
+                                                        false);
+                                            }
+                                            TvMultiSourceStore.EffectiveBuild built =
+                                                    a.multiSourceStore.buildEffectiveConfig(
+                                                            lib,
+                                                            a.prefs.getString(
+                                                                    Prefs.PREFERRED_SITE, ""),
+                                                            (cfg, st) ->
+                                                                    SourceController.available(
+                                                                            a, cfg, st));
+                                            a.applyMultiSourceEffectiveBuild(
+                                                    built, false, 0, 0, "");
+                                            if (a.config != null) {
+                                                for (Cms.Site s : a.config.sites) {
+                                                    if (s != null
+                                                            && pick.stableSiteKey.equals(s.key)
+                                                            && a.available(s)) {
+                                                        a.openListing(s, e.video());
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                        } catch (Exception err) {
+                                            a.notice("打开来源失败：" + a.message(err));
+                                        }
+                                    })
+                            .setNegativeButton("保留收藏", null)
+                            .show();
+                    return;
+                }
+            }
+        }
         Cms.Site found = null;
         if (a.config != null) for (Cms.Site s : a.config.sites) if (s.key.equals(e.site)) found = s;
         if (found == null || !a.available(found)) {

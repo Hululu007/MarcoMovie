@@ -562,7 +562,7 @@ final class SubscriptionManager {
                         bundleAlreadyMerged
                                         && site.group != null
                                         && !site.group.trim().isEmpty()
-                                        && !SourcePicker.DEFAULT_GROUP.equals(site.group.trim())
+                                        && !"默认分组".equals(site.group.trim())
                                 ? site.group.trim()
                                 : pb.groupName;
                 if (!groupNames.contains(resolvedGroup)) groupNames.add(resolvedGroup);

@@ -43,12 +43,29 @@ final class TvQrInputHelper {
         final int y;
         final int pointerEdge;
         final int pointerOffsetPx;
+        final int resolvedWidth;
+        final int resolvedHeight;
+        final boolean needsScroll;
 
         BubblePlacement(int x, int y, int pointerEdge, int pointerOffsetPx) {
+            this(x, y, pointerEdge, pointerOffsetPx, 0, 0, false);
+        }
+
+        BubblePlacement(
+                int x,
+                int y,
+                int pointerEdge,
+                int pointerOffsetPx,
+                int resolvedWidth,
+                int resolvedHeight,
+                boolean needsScroll) {
             this.x = x;
             this.y = y;
             this.pointerEdge = pointerEdge;
             this.pointerOffsetPx = pointerOffsetPx;
+            this.resolvedWidth = resolvedWidth;
+            this.resolvedHeight = resolvedHeight;
+            this.needsScroll = needsScroll;
         }
     }
 
@@ -99,15 +116,20 @@ final class TvQrInputHelper {
 
     private TvQrInputHelper() {}
 
+    static boolean isActive() {
+        ActiveBubble cur = activeBubble;
+        return cur != null && !cur.dismissed && cur.popup != null && cur.popup.isShowing();
+    }
+
     static void dismissActive() {
         ActiveBubble cur = activeBubble;
         if (cur != null) cur.close();
     }
 
     /**
-     * Pure-JVM anchored popover placement math. Prefers extending out to the right when requested
-     * and ample horizontal space exists (e.g. search left column), otherwise extends below the QR
-     * button (flipping above when near the bottom edge), clamped strictly inside screen bounds.
+     * Pure-JVM anchored popover placement math constrained strictly by the real visible window
+     * dimensions {@code screenW × screenH}. Never inflates the screen budget; caps effective bubble
+     * size and sets {@code needsScroll=true} when the requested bubble exceeds available space.
      */
     static BubblePlacement computeBubblePlacement(
             int anchorLeft,
@@ -122,43 +144,57 @@ final class TvQrInputHelper {
             int gapPx,
             int cornerGuardPx,
             boolean preferSide) {
-        int safeW = Math.max(bubbleW + marginPx * 2, screenW);
-        int safeH = Math.max(bubbleH + marginPx * 2, screenH);
+        int realW = Math.max(1, screenW);
+        int realH = Math.max(1, screenH);
+        int effMarginX =
+                realW > marginPx * 2
+                        ? Math.max(0, marginPx)
+                        : Math.max(0, Math.min(marginPx, realW / 16));
+        int effMarginY =
+                realH > marginPx * 2
+                        ? Math.max(0, marginPx)
+                        : Math.max(0, Math.min(marginPx, realH / 16));
+        int maxW = Math.max(1, realW - effMarginX * 2);
+        int maxH = Math.max(1, realH - effMarginY * 2);
+        int effW = Math.max(1, Math.min(Math.max(1, bubbleW), maxW));
+        int effH = Math.max(1, Math.min(Math.max(1, bubbleH), maxH));
+        boolean needsScroll = bubbleW > maxW || bubbleH > maxH;
         int anchorCx = anchorLeft + Math.max(1, anchorW) / 2;
         int anchorCy = anchorTop + Math.max(1, anchorH) / 2;
 
-        if (preferSide && anchorLeft + anchorW + gapPx + bubbleW + marginPx <= safeW) {
-            int x = anchorLeft + anchorW + gapPx;
-            int y = clamp(anchorCy - bubbleH / 3, marginPx, safeH - marginPx - bubbleH);
-            int offsetY =
-                    clamp(
-                            anchorCy - y,
-                            cornerGuardPx,
-                            Math.max(cornerGuardPx, bubbleH - cornerGuardPx));
-            return new BubblePlacement(x, y, EDGE_LEFT, offsetY);
+        if (preferSide && anchorLeft + anchorW + gapPx + effW + effMarginX <= realW) {
+            int x = clamp(anchorLeft + anchorW + gapPx, effMarginX, realW - effMarginX - effW);
+            int y = clamp(anchorCy - effH / 3, effMarginY, realH - effMarginY - effH);
+            int guardY = Math.min(cornerGuardPx, Math.max(0, effH / 2));
+            int offsetY = clamp(anchorCy - y, guardY, Math.max(guardY, effH - guardY));
+            return new BubblePlacement(x, y, EDGE_LEFT, offsetY, effW, effH, needsScroll);
         }
 
-        boolean fitsBelow = anchorTop + anchorH + gapPx + bubbleH + marginPx <= safeH;
-        boolean fitsAbove = anchorTop - gapPx - bubbleH >= marginPx;
+        boolean fitsBelow = anchorTop + anchorH + gapPx + effH + effMarginY <= realH;
+        boolean fitsAbove = anchorTop - gapPx - effH >= effMarginY;
+        boolean fitsRight = anchorLeft + anchorW + gapPx + effW + effMarginX <= realW;
+        if (!fitsBelow && !fitsAbove && fitsRight && !needsScroll) {
+            int x = clamp(anchorLeft + anchorW + gapPx, effMarginX, realW - effMarginX - effW);
+            int y = clamp(anchorCy - effH / 2, effMarginY, realH - effMarginY - effH);
+            int guardY = Math.min(cornerGuardPx, Math.max(0, effH / 2));
+            int offsetY = clamp(anchorCy - y, guardY, Math.max(guardY, effH - guardY));
+            return new BubblePlacement(x, y, EDGE_LEFT, offsetY, effW, effH, needsScroll);
+        }
+
         int edge;
         int y;
-        if (fitsBelow || !fitsAbove) {
+        if (fitsBelow || (!fitsAbove && (realH - (anchorTop + anchorH)) >= anchorTop)) {
             edge = EDGE_TOP;
-            y = clamp(anchorTop + anchorH + gapPx, marginPx, safeH - marginPx - bubbleH);
+            y = clamp(anchorTop + anchorH + gapPx, effMarginY, realH - effMarginY - effH);
         } else {
             edge = EDGE_BOTTOM;
-            y = clamp(anchorTop - gapPx - bubbleH, marginPx, safeH - marginPx - bubbleH);
+            y = clamp(anchorTop - gapPx - effH, effMarginY, realH - effMarginY - effH);
         }
-        // Right-align the bubble with the QR icon button so the text input on the left stays
-        // visible
-        int desiredX = (anchorLeft + anchorW) - bubbleW + Math.min(cornerGuardPx / 2, anchorW / 2);
-        int x = clamp(desiredX, marginPx, safeW - marginPx - bubbleW);
-        int offsetX =
-                clamp(
-                        anchorCx - x,
-                        cornerGuardPx,
-                        Math.max(cornerGuardPx, bubbleW - cornerGuardPx));
-        return new BubblePlacement(x, y, edge, offsetX);
+        int desiredX = (anchorLeft + anchorW) - effW + Math.min(cornerGuardPx / 2, anchorW / 2);
+        int x = clamp(desiredX, effMarginX, realW - effMarginX - effW);
+        int guardX = Math.min(cornerGuardPx, Math.max(0, effW / 2));
+        int offsetX = clamp(anchorCx - x, guardX, Math.max(guardX, effW - guardX));
+        return new BubblePlacement(x, y, edge, offsetX, effW, effH, needsScroll);
     }
 
     private static int clamp(int value, int min, int max) {
@@ -634,21 +670,40 @@ final class TvQrInputHelper {
             TextView[] statusHolder,
             ActiveBubble[] bubbleRef)
             throws Exception {
-        int qrPx = a.dp(146);
-        int qrBoxPx = qrPx + a.dp(14);
-        int bubbleContentW = a.dp(214);
-        int arrowDepth = a.dp(9);
-        int padH = a.dp(14);
-        int padV = a.dp(12);
-        int estBubbleH = a.dp(248) + arrowDepth;
-        int estBubbleW = bubbleContentW + (preferSide ? arrowDepth : 0);
-
         int[] loc = new int[2];
         anchor.getLocationOnScreen(loc);
         int anchorW = anchor.getWidth() > 0 ? anchor.getWidth() : a.dp(40);
         int anchorH = anchor.getHeight() > 0 ? anchor.getHeight() : a.dp(40);
-        int screenW = Math.max(a.windowWidth(), a.getResources().getDisplayMetrics().widthPixels);
-        int screenH = Math.max(a.windowHeight(), a.getResources().getDisplayMetrics().heightPixels);
+        android.graphics.Rect visibleRect = new android.graphics.Rect();
+        if (a.getWindow() != null && a.getWindow().getDecorView() != null) {
+            a.getWindow().getDecorView().getWindowVisibleDisplayFrame(visibleRect);
+        }
+        int screenW =
+                visibleRect.width() > 0
+                        ? Math.min(a.windowWidth(), visibleRect.width())
+                        : Math.max(
+                                a.windowWidth(), a.getResources().getDisplayMetrics().widthPixels);
+        int screenH =
+                visibleRect.height() > 0
+                        ? Math.min(a.windowHeight(), visibleRect.height())
+                        : Math.max(
+                                a.windowHeight(),
+                                a.getResources().getDisplayMetrics().heightPixels);
+        int marginPx = a.dp(14);
+        int availW = Math.max(a.dp(150), screenW - marginPx * 2);
+        int availH = Math.max(a.dp(140), screenH - marginPx * 2);
+        int qrPx =
+                Math.min(
+                        a.dp(146),
+                        Math.max(a.dp(104), Math.min(availW - a.dp(42), availH - a.dp(110))));
+        int qrBoxPx = qrPx + a.dp(14);
+        int bubbleContentW = Math.min(a.dp(224), Math.max(qrBoxPx + a.dp(24), availW - a.dp(12)));
+        int arrowDepth = a.dp(9);
+        int padH = a.dp(14);
+        int padV = a.dp(12);
+        int estBubbleH = qrBoxPx + a.dp(98) + arrowDepth;
+        int estBubbleW = bubbleContentW + (preferSide ? arrowDepth : 0);
+
         BubblePlacement placement =
                 computeBubblePlacement(
                         loc[0],
@@ -659,9 +714,9 @@ final class TvQrInputHelper {
                         estBubbleH,
                         screenW,
                         screenH,
-                        a.dp(16),
+                        marginPx,
                         a.dp(4),
-                        a.dp(28),
+                        a.dp(24),
                         preferSide);
 
         BubbleCardView card =
@@ -713,11 +768,14 @@ final class TvQrInputHelper {
         adLp.topMargin = a.dp(3);
         card.addView(addrView, adLp);
 
-        int popupW = bubbleContentW + (placement.pointerEdge == EDGE_LEFT ? arrowDepth : 0);
+        int popupW =
+                Math.min(
+                        availW,
+                        bubbleContentW + (placement.pointerEdge == EDGE_LEFT ? arrowDepth : 0));
         card.measure(
                 View.MeasureSpec.makeMeasureSpec(popupW, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-        int actualH = Math.max(a.dp(220), card.getMeasuredHeight());
+        int actualH = Math.max(qrBoxPx + a.dp(72), card.getMeasuredHeight());
         BubblePlacement finalPlacement =
                 computeBubblePlacement(
                         loc[0],
@@ -728,9 +786,9 @@ final class TvQrInputHelper {
                         actualH,
                         screenW,
                         screenH,
-                        a.dp(16),
+                        marginPx,
                         a.dp(4),
-                        a.dp(28),
+                        a.dp(24),
                         preferSide);
         card.updatePointer(finalPlacement.pointerEdge, finalPlacement.pointerOffsetPx);
         card.setPadding(
@@ -739,8 +797,29 @@ final class TvQrInputHelper {
                 padH,
                 padV + (finalPlacement.pointerEdge == EDGE_BOTTOM ? arrowDepth : 0));
 
+        View popupContent = card;
+        int resolvedPopupW =
+                finalPlacement.resolvedWidth > 0 ? finalPlacement.resolvedWidth : popupW;
+        int resolvedPopupH =
+                finalPlacement.needsScroll && finalPlacement.resolvedHeight > 0
+                        ? finalPlacement.resolvedHeight
+                        : ViewGroup.LayoutParams.WRAP_CONTENT;
+        if (finalPlacement.needsScroll && finalPlacement.resolvedHeight > 0) {
+            android.widget.Button closeBtn =
+                    a.navButton("关闭", "tv-qr-bubble-close", TvQrInputHelper::dismissActive);
+            closeBtn.setTextSize(12.5f);
+            closeBtn.setMinHeight(a.dp(34));
+            closeBtn.setMinimumHeight(a.dp(34));
+            LinearLayout.LayoutParams cLp = new LinearLayout.LayoutParams(-1, a.dp(34));
+            cLp.topMargin = a.dp(8);
+            card.addView(closeBtn, cLp);
+            TvScrollView sc = new TvScrollView(a);
+            sc.setVerticalScrollBarEnabled(false);
+            sc.addView(card, new android.widget.ScrollView.LayoutParams(resolvedPopupW, -2));
+            popupContent = sc;
+        }
         final PopupWindow popup =
-                new PopupWindow(card, popupW, ViewGroup.LayoutParams.WRAP_CONTENT, true);
+                new PopupWindow(popupContent, resolvedPopupW, resolvedPopupH, true);
         popup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
         popup.setOutsideTouchable(true);
         popup.setFocusable(true);

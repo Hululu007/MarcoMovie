@@ -97,6 +97,25 @@ public final class FastForwardScrubCapsule extends LinearLayout {
         return sign + formatClock(Math.abs(deltaMs));
     }
 
+    public static String formatLightSeekCue(int direction, int targetMs) {
+        return (direction >= 0 ? "快进 " : "快退 ") + formatClock(targetMs);
+    }
+
+    /** Minimalist light cue used when seeking with modern TV controls collapsed: "快进 12:40". */
+    public void showLightCue(int direction, int targetMs) {
+        String cue = formatLightSeekCue(direction, targetMs);
+        if (!cue.equals(lastTimeText)) {
+            lastTimeText = cue;
+            timeLine.setText(cue);
+        }
+        if (detailLine.getVisibility() != View.GONE) {
+            detailLine.setVisibility(View.GONE);
+        }
+        if (getVisibility() != View.VISIBLE) {
+            setVisibility(View.VISIBLE);
+        }
+    }
+
     public void updatePreview(
             int targetMs,
             int durationMs,
@@ -120,9 +139,16 @@ public final class FastForwardScrubCapsule extends LinearLayout {
             lastDetailText = nextDetail;
             detailLine.setText(nextDetail);
         }
+        if (detailLine.getVisibility() != View.VISIBLE) {
+            detailLine.setVisibility(View.VISIBLE);
+        }
         if (getVisibility() != View.VISIBLE) {
             setVisibility(View.VISIBLE);
         }
+    }
+
+    public CharSequence currentCueText() {
+        return timeLine.getText();
     }
 
     public void hide() {

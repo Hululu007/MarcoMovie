@@ -43,7 +43,7 @@ class WoggNetdiskAdapter {
     if (site.type != 3 || site.ext.trim().isEmpty) return false;
     final api = site.api.trim();
     if (!RegExp(
-      r'^csp_(?:wobg|zhizhen|mihdr|muou|shandian|xiaomi|erxiao|ouge|tudou|labi|duoduo|huban|huajuan|xiaopan|kuaiying|qingying|woniu|zhinan|yidong|qiwei|leijing|haimian|panta|yiso)(?:guard)?$',
+      r'^csp_(?:wobg|wanou|panhub|zhizhen|mihdr|muou|shandian|xiaomi|erxiao|ouge|tudou|labi|duoduo|huban|huajuan|xiaopan|kuaiying|qingying|woniu|zhinan|yidong|yidong4k|fengye|fengye4k|fengqi4k|kaka|jike|qiwei|leijing|haimian|panta|yiso)(?:guard)?$',
       caseSensitive: false,
     ).hasMatch(api)) {
       return false;

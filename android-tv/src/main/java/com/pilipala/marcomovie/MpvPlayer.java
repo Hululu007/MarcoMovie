@@ -9,8 +9,14 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.view.Surface;
+
 import androidx.media3.common.C;
+
 import dev.jdtech.mpv.MPVLib;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
@@ -26,19 +32,156 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
-import org.json.JSONArray;
-import org.json.JSONObject;
 
 /**
- * Optional native libmpv playback engine for high-bitrate 4K/HDR, libplacebo tone-mapping,
- * libass styled subtitles, and Anime4K GLSL super-resolution shaders.
+ * Optional native libmpv playback engine for high-bitrate 4K/HDR, libplacebo tone-mapping, libass
+ * styled subtitles, and Anime4K GLSL super-resolution shaders.
  */
 public final class MpvPlayer extends MoviePlayer {
     static final String ANIME4K_ASSET = "shaders/Anime4K_Upscale_CNN_x2_S.glsl";
+    static final long DEFAULT_DESTROY_WAIT_BUDGET_MS = 2500L;
+
+    /** Thrown when an old libmpv destroy exceeds the background wait budget. */
+    public static final class MpvBusyTimeoutException extends IllegalStateException {
+        public MpvBusyTimeoutException(String message) {
+            super(message);
+        }
+    }
+
+    /** Cancellation check without java.util.function so API 23 bytecode stays clean. */
+    interface CancelCheck {
+        boolean isCancelled();
+    }
+
+    /**
+     * Pure-JVM lifecycle coordinator serializing libmpv native singleton creation and async
+     * destruction without ever blocking the Android main thread.
+     */
+    static final class NativeLifecycleCoordinator {
+        private final Object stateLock = new Object();
+        private final Object nativeLock;
+        private boolean active;
+        private boolean destroying;
+        private long generation;
+
+        NativeLifecycleCoordinator(Object nativeLock) {
+            this.nativeLock = nativeLock;
+        }
+
+        long acquireCreateLease(long waitBudgetMs, CancelCheck cancelled)
+                throws MpvBusyTimeoutException, InterruptedException {
+            long budgetNs = TimeUnit.MILLISECONDS.toNanos(Math.max(1L, waitBudgetMs));
+            long deadlineNs = System.nanoTime() + budgetNs;
+            synchronized (stateLock) {
+                while (active || destroying) {
+                    if (cancelled != null && cancelled.isCancelled()) {
+                        throw new InterruptedException("MPV creation cancelled");
+                    }
+                    long remainingNs = deadlineNs - System.nanoTime();
+                    if (remainingNs <= 0L) {
+                        throw new MpvBusyTimeoutException("旧 MPV 实例释放超时，回退兼容内核");
+                    }
+                    long sleepMs =
+                            Math.min(50L, Math.max(1L, TimeUnit.NANOSECONDS.toMillis(remainingNs)));
+                    stateLock.wait(sleepMs);
+                }
+                if (cancelled != null && cancelled.isCancelled()) {
+                    throw new InterruptedException("MPV creation cancelled");
+                }
+                active = true;
+                generation++;
+                return generation;
+            }
+        }
+
+        long tryAcquireCreateLeaseImmediate() throws MpvBusyTimeoutException {
+            synchronized (stateLock) {
+                if (active || destroying) {
+                    throw new MpvBusyTimeoutException("旧 MPV 实例正在释放，避免阻塞主线程");
+                }
+                active = true;
+                generation++;
+                return generation;
+            }
+        }
+
+        void abortCreateLease(long gen) {
+            synchronized (stateLock) {
+                if (active && generation == gen) {
+                    active = false;
+                    stateLock.notifyAll();
+                }
+            }
+        }
+
+        java.util.concurrent.Future<?> scheduleDestroy(
+                long gen, java.util.concurrent.ExecutorService pool, final Runnable nativeDestroy) {
+            synchronized (stateLock) {
+                if (!active || generation != gen) {
+                    return null;
+                }
+                active = false;
+                destroying = true;
+            }
+            return pool.submit(
+                    () -> {
+                        try {
+                            synchronized (nativeLock) {
+                                nativeDestroy.run();
+                            }
+                        } catch (Throwable ignored) {
+                        } finally {
+                            synchronized (stateLock) {
+                                destroying = false;
+                                stateLock.notifyAll();
+                            }
+                        }
+                    });
+        }
+
+        void awaitIdle(long timeoutMs) {
+            long deadlineNs =
+                    System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(10L, timeoutMs));
+            synchronized (stateLock) {
+                while (destroying) {
+                    long remainingNs = deadlineNs - System.nanoTime();
+                    if (remainingNs <= 0L) return;
+                    long sleepMs =
+                            Math.min(50L, Math.max(1L, TimeUnit.NANOSECONDS.toMillis(remainingNs)));
+                    try {
+                        stateLock.wait(sleepMs);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
+            }
+        }
+
+        boolean isActive() {
+            synchronized (stateLock) {
+                return active;
+            }
+        }
+
+        boolean isDestroying() {
+            synchronized (stateLock) {
+                return destroying;
+            }
+        }
+
+        boolean isBusy() {
+            synchronized (stateLock) {
+                return active || destroying;
+            }
+        }
+    }
 
     private static volatile Boolean available;
-    private static MpvPlayer activeInstance;
+    private static volatile MpvPlayer activeInstance;
     private static final Object MPV_NATIVE_LOCK = new Object();
+    private static final NativeLifecycleCoordinator LIFECYCLE =
+            new NativeLifecycleCoordinator(MPV_NATIVE_LOCK);
     private static final java.util.concurrent.ExecutorService MPV_DESTROY_POOL =
             java.util.concurrent.Executors.newSingleThreadExecutor(
                     r -> {
@@ -49,10 +192,11 @@ public final class MpvPlayer extends MoviePlayer {
     private static volatile java.util.concurrent.Future<?> pendingNativeDestroy;
 
     private static void awaitPendingDestroy(long timeoutMs) {
+        LIFECYCLE.awaitIdle(timeoutMs);
         java.util.concurrent.Future<?> pending = pendingNativeDestroy;
         if (pending == null || pending.isDone()) return;
         try {
-            pending.get(Math.max(100L, timeoutMs), TimeUnit.MILLISECONDS);
+            pending.get(Math.max(10L, timeoutMs), TimeUnit.MILLISECONDS);
         } catch (Throwable ignored) {
         }
     }
@@ -270,10 +414,12 @@ public final class MpvPlayer extends MoviePlayer {
     private final SharedPreferences prefs;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final AudioManager audio;
+    private final long lifecycleGen;
     private boolean nativeCreated;
     private boolean initialized;
     private boolean surfaceAttached;
-    private Surface attachedSurface;
+    private volatile Surface attachedSurface;
+    private volatile int attachedSurfaceId;
     private boolean focusHeld;
     private boolean repeatOne;
     private boolean wantPlay;
@@ -283,6 +429,12 @@ public final class MpvPlayer extends MoviePlayer {
     private boolean anime4kActive;
     private boolean hdrToneMappingActive;
     private volatile boolean prepared;
+    private volatile boolean fileLoaded;
+    private volatile boolean voConfigured;
+    private volatile int voConfiguredSurfaceId;
+    private volatile String currentVo = "";
+    private volatile String activeVid = "";
+    private volatile Boolean hasVideoTrack;
     private volatile boolean released;
     private volatile boolean paused = true;
     private volatile boolean eofReached;
@@ -290,6 +442,9 @@ public final class MpvPlayer extends MoviePlayer {
     private volatile int height;
     private volatile double positionSec;
     private volatile double durationSec;
+    private volatile boolean mpvSeeking;
+    private volatile long mpvPendingSeekGen;
+    private volatile boolean mpvSeekEventSeenForPending;
     private volatile String videoCodec = "";
     private volatile String audioCodec = "";
     private volatile String videoGamma = "";
@@ -299,7 +454,8 @@ public final class MpvPlayer extends MoviePlayer {
     private volatile int cacheBufferingState = -1;
     private volatile long cacheSpeedBytesPerSec = -1L;
     private volatile long prepareStarted;
-    private volatile long firstFrameMs = -1;
+    private volatile long fileLoadedMs = -1L;
+    private volatile long firstFrameMs = -1L;
     private Uri mediaUri;
     private Map<String, String> headers = Collections.emptyMap();
     private JSONObject options = new JSONObject();
@@ -374,11 +530,30 @@ public final class MpvPlayer extends MoviePlayer {
                         paused = value;
                     } else if ("eof-reached".equals(property)) {
                         eofReached = value;
+                    } else if ("vo-configured".equals(property)) {
+                        final Surface surf = attachedSurface;
+                        final int surfId = attachedSurfaceId;
+                        final boolean activeVo =
+                                value && surf != null && surf.isValid() && surfId != 0;
+                        voConfigured = activeVo;
+                        voConfiguredSurfaceId = activeVo ? surfId : 0;
+                        if (surf != null && surfId != 0) {
+                            main.post(
+                                    () -> {
+                                        if (!released
+                                                && surf == attachedSurface
+                                                && surfId == attachedSurfaceId) {
+                                            notifyVideoOutputConfigured(surf, activeVo);
+                                        }
+                                    });
+                        }
                     } else if ("paused-for-cache".equals(property)) {
                         pausedForCache = value;
                         if (prepared) {
                             notifyBufferingChanged(value, value ? cacheBufferingState : 100);
                         }
+                    } else if ("seeking".equals(property)) {
+                        mpvSeeking = value;
                     }
                 }
 
@@ -390,6 +565,10 @@ public final class MpvPlayer extends MoviePlayer {
                         videoCodec = text;
                     } else if ("audio-codec-name".equals(property)) {
                         audioCodec = text;
+                    } else if ("current-vo".equals(property)) {
+                        currentVo = text;
+                    } else if ("vid".equals(property)) {
+                        activeVid = text;
                     } else if ("video-params/gamma".equals(property)) {
                         boolean wasHdr = isHdrGammaOrCodec(videoGamma, videoCodec);
                         videoGamma = text;
@@ -426,6 +605,11 @@ public final class MpvPlayer extends MoviePlayer {
                         main.post(MpvPlayer.this::syncVideoDimensions);
                     } else if (eventId == MPVLib.MPV_EVENT_END_FILE) {
                         main.post(MpvPlayer.this::handleEndFile);
+                    } else if (eventId == MPVLib.MPV_EVENT_SEEK) {
+                        mpvSeeking = true;
+                        mpvSeekEventSeenForPending = true;
+                    } else if (eventId == MPVLib.MPV_EVENT_PLAYBACK_RESTART) {
+                        main.post(MpvPlayer.this::handlePlaybackRestart);
                     }
                 }
             };
@@ -436,36 +620,92 @@ public final class MpvPlayer extends MoviePlayer {
         super.notifyBufferingChanged(buffering, percent);
     }
 
+    public static MpvPlayer createWithBudget(Context host, long waitBudgetMs, CancelCheck cancelled)
+            throws InterruptedException {
+        if (!isAvailable()) {
+            throw new IllegalStateException("libmpv native library unavailable");
+        }
+        MpvPlayer previous = activeInstance;
+        if (previous != null) {
+            previous.release();
+        }
+        long leaseGen;
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            leaseGen = LIFECYCLE.tryAcquireCreateLeaseImmediate();
+        } else {
+            leaseGen = LIFECYCLE.acquireCreateLease(waitBudgetMs, cancelled);
+        }
+        try {
+            return new MpvPlayer(host, leaseGen, cancelled);
+        } catch (RuntimeException err) {
+            LIFECYCLE.abortCreateLease(leaseGen);
+            throw err;
+        }
+    }
+
     public MpvPlayer(Context host) {
+        this(host, acquireLeaseForDirectConstructor());
+    }
+
+    private static long acquireLeaseForDirectConstructor() {
+        if (!isAvailable()) {
+            throw new IllegalStateException("libmpv native library unavailable");
+        }
+        MpvPlayer previous = activeInstance;
+        if (previous != null) {
+            previous.release();
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return LIFECYCLE.tryAcquireCreateLeaseImmediate();
+        }
+        try {
+            return LIFECYCLE.acquireCreateLease(DEFAULT_DESTROY_WAIT_BUDGET_MS, null);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("MPV creation interrupted", e);
+        }
+    }
+
+    private MpvPlayer(Context host, long leaseGen) {
+        this(host, leaseGen, null);
+    }
+
+    private MpvPlayer(Context host, long leaseGen, final CancelCheck cancelled) {
         super(host, false);
         this.context = host.getApplicationContext();
         this.prefs = this.context.getSharedPreferences(Prefs.FILE, 0);
         this.audio = (AudioManager) this.context.getSystemService(Context.AUDIO_SERVICE);
+        this.lifecycleGen = leaseGen;
         if (!isAvailable()) {
+            LIFECYCLE.abortCreateLease(leaseGen);
             throw new IllegalStateException("libmpv native library unavailable");
-        }
-        if (Looper.myLooper() != Looper.getMainLooper()) {
-            awaitPendingDestroy(8000L);
         }
         final java.util.concurrent.atomic.AtomicBoolean abandoned =
                 new java.util.concurrent.atomic.AtomicBoolean(false);
         try {
             onMain(
                     () -> {
-                        if (abandoned.get()) return null;
-                        if (activeInstance != null && activeInstance != MpvPlayer.this) {
-                            activeInstance.releaseInternal();
+                        if (abandoned.get() || (cancelled != null && cancelled.isCancelled())) {
+                            released = true;
+                            markBaseReleased();
+                            LIFECYCLE.abortCreateLease(lifecycleGen);
+                            return null;
                         }
-                        awaitPendingDestroy(2500L);
                         activeInstance = MpvPlayer.this;
                         initNativeMpv();
-                        if (abandoned.get()) {
+                        if (abandoned.get() || (cancelled != null && cancelled.isCancelled())) {
                             releaseInternal();
                         }
                         return null;
                     });
+            if (released && cancelled != null && cancelled.isCancelled()) {
+                throw new IllegalStateException("MPV creation cancelled");
+            }
         } catch (RuntimeException err) {
             abandoned.set(true);
+            if (!nativeCreated) {
+                LIFECYCLE.abortCreateLease(lifecycleGen);
+            }
             throw err;
         }
     }
@@ -560,6 +800,10 @@ public final class MpvPlayer extends MoviePlayer {
                 MPVLib.observeProperty("paused-for-cache", MPVLib.MPV_FORMAT_FLAG);
                 MPVLib.observeProperty("cache-buffering-state", MPVLib.MPV_FORMAT_INT64);
                 MPVLib.observeProperty("cache-speed", MPVLib.MPV_FORMAT_INT64);
+                MPVLib.observeProperty("vo-configured", MPVLib.MPV_FORMAT_FLAG);
+                MPVLib.observeProperty("current-vo", MPVLib.MPV_FORMAT_STRING);
+                MPVLib.observeProperty("vid", MPVLib.MPV_FORMAT_STRING);
+                MPVLib.observeProperty("seeking", MPVLib.MPV_FORMAT_FLAG);
             } catch (Throwable error) {
                 releaseInternal();
                 if (error instanceof RuntimeException) throw (RuntimeException) error;
@@ -599,8 +843,38 @@ public final class MpvPlayer extends MoviePlayer {
                 });
     }
 
+    private void syncVoConfiguredState() {
+        if (released || !initialized) return;
+        Surface surf = attachedSurface;
+        int surfId = attachedSurfaceId;
+        if (surf == null || !surf.isValid() || surfId == 0) {
+            voConfigured = false;
+            voConfiguredSurfaceId = 0;
+            return;
+        }
+        try {
+            Boolean voFlag = MPVLib.getPropertyBoolean("vo-configured");
+            String voName = MPVLib.getPropertyString("current-vo");
+            if (voName != null) currentVo = voName;
+            boolean activeVo =
+                    Boolean.TRUE.equals(voFlag)
+                            && currentVo != null
+                            && !currentVo.isEmpty()
+                            && !"null".equalsIgnoreCase(currentVo);
+            boolean changed =
+                    (activeVo != voConfigured) || (activeVo && voConfiguredSurfaceId != surfId);
+            voConfigured = activeVo;
+            voConfiguredSurfaceId = activeVo ? surfId : 0;
+            if (changed) {
+                notifyVideoOutputConfigured(surf, activeVo);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void syncVideoDimensions() {
         if (released || !initialized) return;
+        syncVoConfiguredState();
         Integer w = MPVLib.getPropertyInt("dwidth");
         Integer h = MPVLib.getPropertyInt("dheight");
         if (w == null || w <= 0) w = MPVLib.getPropertyInt("width");
@@ -612,13 +886,47 @@ public final class MpvPlayer extends MoviePlayer {
         }
     }
 
+    private boolean detectMpvHasVideoTrack() {
+        if (width > 0 && height > 0) return true;
+        if (!videoCodec.isEmpty()) return true;
+        if (activeVid != null
+                && !activeVid.isEmpty()
+                && !"no".equalsIgnoreCase(activeVid)
+                && !"false".equalsIgnoreCase(activeVid)) {
+            return true;
+        }
+        return !mpvTracks(C.TRACK_TYPE_VIDEO).isEmpty();
+    }
+
     private void handleFileLoaded() {
         if (released || !initialized) return;
+        fileLoaded = true;
         prepared = true;
-        if (prepareStarted > 0 && firstFrameMs < 0) {
-            firstFrameMs = SystemClock.elapsedRealtime() - prepareStarted;
+        if (prepareStarted > 0 && fileLoadedMs < 0) {
+            fileLoadedMs = Math.max(0L, SystemClock.elapsedRealtime() - prepareStarted);
         }
+        // MPV_EVENT_FILE_LOADED only means demuxer opened the media, NOT that a frame rendered on
+        // the TV Surface. Keep firstFrameMs at -1 and mark video output as OUTPUT_UNCONFIRMED.
         syncVideoDimensions();
+        try {
+            String vidProp = MPVLib.getPropertyString("vid");
+            if (vidProp != null) activeVid = vidProp;
+        } catch (Throwable ignored) {
+        }
+        boolean hasVideo = detectMpvHasVideoTrack();
+        hasVideoTrack = Boolean.valueOf(hasVideo);
+        notifyFileOpened();
+        notifyVideoTrackPresence(hasVideo);
+        if (hasVideo) {
+            notifyVideoOutputUnconfirmed("mpv_file_loaded_output_unconfirmed");
+            Surface surf = attachedSurface;
+            if (surf != null
+                    && surf.isValid()
+                    && voConfigured
+                    && voConfiguredSurfaceId == attachedSurfaceId) {
+                notifyVideoOutputConfigured(surf, true);
+            }
+        }
         try {
             if (Math.abs(speed - 1.0f) > 0.01f) {
                 MPVLib.setPropertyDouble("speed", (double) speed);
@@ -721,9 +1029,15 @@ public final class MpvPlayer extends MoviePlayer {
                             MPVLib.detachSurface();
                             surfaceAttached = false;
                             attachedSurface = null;
+                            attachedSurfaceId = 0;
+                            voConfigured = false;
+                            voConfiguredSurfaceId = 0;
                         }
-                        MPVLib.attachSurface(surface);
+                        voConfigured = false;
+                        voConfiguredSurfaceId = 0;
                         attachedSurface = surface;
+                        attachedSurfaceId = System.identityHashCode(surface);
+                        MPVLib.attachSurface(surface);
                         surfaceAttached = true;
                         MPVLib.setPropertyString("vo", configuredVo);
                     } else if (surfaceAttached) {
@@ -731,6 +1045,9 @@ public final class MpvPlayer extends MoviePlayer {
                         MPVLib.detachSurface();
                         surfaceAttached = false;
                         attachedSurface = null;
+                        attachedSurfaceId = 0;
+                        voConfigured = false;
+                        voConfiguredSurfaceId = 0;
                     }
                     return null;
                 });
@@ -866,10 +1183,17 @@ public final class MpvPlayer extends MoviePlayer {
                     checkState();
                     if (mediaUri == null) throw new IllegalStateException("No media item");
                     prepared = false;
+                    resetSeekClockState();
+                    mpvSeeking = false;
+                    mpvPendingSeekGen = 0L;
+                    mpvSeekEventSeenForPending = false;
+                    fileLoaded = false;
+                    hasVideoTrack = null;
                     eofReached = false;
                     positionSec = 0;
                     durationSec = 0;
-                    firstFrameMs = -1;
+                    fileLoadedMs = -1L;
+                    firstFrameMs = -1L;
                     prepareStarted = SystemClock.elapsedRealtime();
 
                     String userAgent = defaultUserAgent(context);
@@ -951,12 +1275,55 @@ public final class MpvPlayer extends MoviePlayer {
                 });
     }
 
+    private void handlePlaybackRestart() {
+        if (released || !initialized) return;
+        Boolean stillSeeking = null;
+        try {
+            stillSeeking = MPVLib.getPropertyBoolean("seeking");
+        } catch (Throwable ignored) {
+        }
+        if (Boolean.TRUE.equals(stillSeeking)) return;
+        mpvSeeking = false;
+        Double actual = null;
+        try {
+            actual = MPVLib.getPropertyDouble("time-pos");
+        } catch (Throwable ignored) {
+        }
+        if (actual != null && actual >= 0.0) {
+            positionSec = actual;
+        }
+        long pendingGen = mpvPendingSeekGen;
+        if (pendingGen > completedSeekGeneration()) {
+            int actualMs = getCurrentPosition();
+            int targetMs = lastSeekTargetMs();
+            int preMs = lastSeekPrePosMs();
+            boolean zeroDistanceNoOpSeek =
+                    targetMs >= 0
+                            && preMs >= 0
+                            && Math.abs(targetMs - preMs) <= 250
+                            && Math.abs(actualMs - targetMs) <= 250;
+            if (mpvSeekEventSeenForPending || zeroDistanceNoOpSeek) {
+                confirmSeekCompleted(pendingGen);
+                observeSeekPosition(actualMs);
+            }
+        }
+    }
+
+    @Override
+    boolean isSeekInFlight() {
+        return super.isSeekInFlight() || mpvSeeking;
+    }
+
     @Override
     public void seekTo(int ms) {
         onMain(
                 () -> {
                     checkState();
-                    double seconds = Math.max(0, ms) / 1000.0;
+                    int clamped = Math.max(0, ms);
+                    int prePos = getCurrentPosition();
+                    mpvSeekEventSeenForPending = false;
+                    mpvPendingSeekGen = beginSeek(clamped, prePos);
+                    double seconds = clamped / 1000.0;
                     MPVLib.command(
                             new String[] {
                                 "seek", String.format(Locale.ROOT, "%.3f", seconds), "absolute"
@@ -1052,12 +1419,54 @@ public final class MpvPlayer extends MoviePlayer {
                 width, height, videoCodec, audioCodec, videoGamma, hwdecCurrent, anime4kActive);
     }
 
+    public boolean isVoConfigured() {
+        return !released && voConfigured;
+    }
+
+    public boolean isVoConfiguredForSurface(Surface surface) {
+        if (released || !initialized || surface == null || !surface.isValid()) return false;
+        int targetId = System.identityHashCode(surface);
+        if (surface != attachedSurface || targetId != attachedSurfaceId) return false;
+        if (voConfigured && voConfiguredSurfaceId == targetId) return true;
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            syncVoConfiguredState();
+        }
+        return voConfigured && voConfiguredSurfaceId == targetId;
+    }
+
+    public long getFileLoadedMs() {
+        return fileLoadedMs;
+    }
+
+    @Override
+    public Boolean hasConfirmedVideoTrack() {
+        return hasVideoTrack;
+    }
+
+    @Override
+    public boolean hasRenderedFirstFrameOnCurrentSurface() {
+        // libmpv on Android exposes vo-configured, not a per-surface first-frame presentation
+        // event.
+        return false;
+    }
+
+    @Override
+    public String videoOutputStateName() {
+        if (Boolean.FALSE.equals(hasVideoTrack)) return "AUDIO_ONLY";
+        if (fileLoaded) {
+            return voConfigured ? "OUTPUT_UNCONFIRMED" : "VO_UNCONFIGURED";
+        }
+        return "NONE";
+    }
+
     @Override
     public JSONObject decoderDiagnostics() {
         JSONObject info = new JSONObject();
         try {
             info.put("engine", "mpv");
             info.put("vo", configuredVo);
+            info.put("current_vo", currentVo);
+            info.put("vo_configured", voConfigured);
             info.put("hwdec", hwdecCurrent.isEmpty() ? configuredHwdec : hwdecCurrent);
             info.put("video_decoder", hwdecCurrent.isEmpty() ? configuredHwdec : hwdecCurrent);
             info.put("audio_decoder", audioCodec);
@@ -1067,7 +1476,12 @@ public final class MpvPlayer extends MoviePlayer {
             info.put("height", height);
             info.put("anime4k", anime4kActive);
             info.put("hdr_tone_mapping", hdrToneMappingActive);
+            info.put("file_loaded_ms", fileLoadedMs);
             info.put("first_frame_ms", firstFrameMs);
+            info.put("output_state", videoOutputStateName());
+            if (hasVideoTrack != null) {
+                info.put("has_video_track", hasVideoTrack.booleanValue());
+            }
         } catch (Exception ignored) {
         }
         return info;
@@ -1249,6 +1663,9 @@ public final class MpvPlayer extends MoviePlayer {
             if (surfaceAttached) {
                 surfaceAttached = false;
                 attachedSurface = null;
+                attachedSurfaceId = 0;
+                voConfigured = false;
+                voConfiguredSurfaceId = 0;
                 try {
                     MPVLib.setPropertyString("vo", "null");
                 } catch (Throwable ignored) {
@@ -1266,17 +1683,19 @@ public final class MpvPlayer extends MoviePlayer {
             nativeCreated = false;
             // Offload blocking native MPVLib.destroy() off the Android UI thread (prevents ANR
             // when libmpv is waiting on a stalled demuxer socket), while serializing against the
-            // next MPVLib.create() via MPV_NATIVE_LOCK + pendingNativeDestroy.
+            // next MPVLib.create() via LIFECYCLE + MPV_NATIVE_LOCK + pendingNativeDestroy.
             pendingNativeDestroy =
-                    MPV_DESTROY_POOL.submit(
+                    LIFECYCLE.scheduleDestroy(
+                            lifecycleGen,
+                            MPV_DESTROY_POOL,
                             () -> {
-                                synchronized (MPV_NATIVE_LOCK) {
-                                    try {
-                                        MPVLib.destroy();
-                                    } catch (Throwable ignored) {
-                                    }
+                                try {
+                                    MPVLib.destroy();
+                                } catch (Throwable ignored) {
                                 }
                             });
+        } else {
+            LIFECYCLE.abortCreateLease(lifecycleGen);
         }
     }
 

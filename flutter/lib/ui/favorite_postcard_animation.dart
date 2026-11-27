@@ -52,6 +52,7 @@ class FavoritePostcardFlightOverlay {
     String year = '',
     Uint8List? cachedBytes,
     Rect? originRect,
+    bool isPrivate = false,
     @visibleForTesting FavoritePostcardStyle? styleOverride,
   }) async {
     final overlay = Overlay.maybeOf(context, rootOverlay: true);
@@ -61,8 +62,15 @@ class FavoritePostcardFlightOverlay {
     _activeEntry = null;
 
     final style = _pickNextStyle(styleOverride);
-    final bytes = cachedBytes ??
-        PosterLoader.peekMemory(posterUrl, title: title, year: year);
+    final bytes = (cachedBytes != null && cachedBytes.isNotEmpty)
+        ? cachedBytes
+        : PosterLoader.peekMemory(
+            posterUrl,
+            title: isPrivate ? '' : title,
+            year: isPrivate ? '' : year,
+            preferHd: !isPrivate,
+            isPrivate: isPrivate,
+          );
 
     final islandMeta =
         await IosLiquidGlassBridge.triggerFavoriteDynamicIslandFeedback(
@@ -79,6 +87,7 @@ class FavoritePostcardFlightOverlay {
         year: year,
         cachedBytes: bytes,
         originRect: originRect,
+        isPrivate: isPrivate,
         islandMeta: islandMeta,
         style: style,
         onFinished: () {
@@ -102,6 +111,7 @@ class _FavoritePostcardAnimationWidget extends StatefulWidget {
   final String year;
   final Uint8List? cachedBytes;
   final Rect? originRect;
+  final bool isPrivate;
   final Map<String, dynamic>? islandMeta;
   final FavoritePostcardStyle style;
   final VoidCallback onFinished;
@@ -112,6 +122,7 @@ class _FavoritePostcardAnimationWidget extends StatefulWidget {
     required this.year,
     required this.cachedBytes,
     required this.originRect,
+    required this.isPrivate,
     required this.islandMeta,
     required this.style,
     required this.onFinished,
@@ -300,6 +311,7 @@ class _FavoritePostcardAnimationWidgetState
                           posterUrl: widget.posterUrl,
                           year: widget.year,
                           cachedBytes: widget.cachedBytes,
+                          isPrivate: widget.isPrivate,
                           developWash: developWash,
                           style: widget.style,
                         ),
@@ -315,6 +327,7 @@ class _FavoritePostcardAnimationWidgetState
                     posterUrl: widget.posterUrl,
                     year: widget.year,
                     cachedBytes: widget.cachedBytes,
+                    isPrivate: widget.isPrivate,
                   ),
               ],
             );
@@ -397,6 +410,7 @@ class _BrandedPostcardCard extends StatelessWidget {
   final String posterUrl;
   final String year;
   final Uint8List? cachedBytes;
+  final bool isPrivate;
   final double developWash;
   final FavoritePostcardStyle style;
 
@@ -406,6 +420,7 @@ class _BrandedPostcardCard extends StatelessWidget {
     required this.posterUrl,
     required this.year,
     required this.cachedBytes,
+    required this.isPrivate,
     required this.developWash,
     required this.style,
   });
@@ -434,8 +449,9 @@ class _BrandedPostcardCard extends StatelessWidget {
           )
         : PosterImage(
             url: posterUrl,
-            title: title,
-            year: year,
+            title: isPrivate ? '' : title,
+            year: isPrivate ? '' : year,
+            isPrivate: isPrivate,
             fit: BoxFit.cover,
             fadeIn: false,
             placeholder: placeholder,
@@ -1204,6 +1220,7 @@ class _DynamicIslandFeedbackPill extends StatelessWidget {
   final String posterUrl;
   final String year;
   final Uint8List? cachedBytes;
+  final bool isPrivate;
 
   const _DynamicIslandFeedbackPill({
     super.key,
@@ -1213,6 +1230,7 @@ class _DynamicIslandFeedbackPill extends StatelessWidget {
     required this.posterUrl,
     required this.year,
     required this.cachedBytes,
+    required this.isPrivate,
   });
 
   @override
@@ -1283,8 +1301,9 @@ class _DynamicIslandFeedbackPill extends StatelessWidget {
                           )
                         : PosterImage(
                             url: posterUrl,
-                            title: title,
-                            year: year,
+                            title: isPrivate ? '' : title,
+                            year: isPrivate ? '' : year,
+                            isPrivate: isPrivate,
                             fit: BoxFit.cover,
                             fadeIn: false,
                             placeholder: thumbPlaceholder,

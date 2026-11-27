@@ -717,11 +717,12 @@ class WindowsSettingsRegion extends InheritedWidget {
 bool usesWindowsSettings(BuildContext context) => usesWindowsAppearance(context) &&
     context.dependOnInheritedWidgetOfExactType<WindowsSettingsRegion>() != null;
 
-Color settingsInk(BuildContext context) =>
-    usesWindowsAppearance(context) ? winInk(context) : AppleColors.labelPrimary;
+Color settingsInk(BuildContext context) => usesWindowsAppearance(context)
+    ? winInk(context)
+    : ApplePalette.of(context).labelPrimary;
 Color settingsMuted(BuildContext context) => usesWindowsAppearance(context)
     ? winMuted(context)
-    : AppleColors.labelSecondary;
+    : ApplePalette.of(context).labelSecondary;
 
 /// Shared Windows settings surfaces, including secondary routes and account forms.
 class WinSettingsGroup extends StatelessWidget {

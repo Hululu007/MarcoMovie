@@ -10,7 +10,7 @@ import 'package:marco_movie/core/models.dart';
 import 'package:marco_movie/core/storage_service.dart';
 import 'package:marco_movie/ui/adaptive_shell.dart';
 import 'package:marco_movie/ui/apple_theme.dart';
-import 'package:marco_movie/ui/macos_official_notice.dart';
+import 'package:marco_movie/ui/onboarding/onboarding_prefs.dart';
 import 'package:marco_movie/ui/player_screen.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -40,8 +40,8 @@ void main() {
 
     setUp(() async {
       SharedPreferences.setMockInitialValues({
-        MacosOfficialNoticePrefs.acknowledgedVersionKey:
-            MacosOfficialNoticePrefs.currentVersion,
+        OnboardingPrefs.officialChannelNoticeVersionKey:
+            OnboardingPrefs.currentOfficialChannelNoticeVersion,
       });
       storage = await StorageService.init();
       await storage.saveConfig(
@@ -272,8 +272,8 @@ void main() {
 
     setUp(() async {
       SharedPreferences.setMockInitialValues({
-        MacosOfficialNoticePrefs.acknowledgedVersionKey:
-            MacosOfficialNoticePrefs.currentVersion,
+        OnboardingPrefs.officialChannelNoticeVersionKey:
+            OnboardingPrefs.currentOfficialChannelNoticeVersion,
       });
       storage = await StorageService.init();
     });

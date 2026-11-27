@@ -25,7 +25,11 @@ class _StubDetailClient extends CmsClient {
   _StubDetailClient(this.detailVideo);
 
   @override
-  Future<CmsVideo> fetchDetail(CmsSite site, CmsVideo fallback) async {
+  Future<CmsVideo> fetchDetail(
+    CmsSite site,
+    CmsVideo fallback, {
+    bool forceRefresh = false,
+  }) async {
     return detailVideo;
   }
 }

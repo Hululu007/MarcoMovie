@@ -470,6 +470,257 @@ public final class CastSearchAndPickerChecks {
         }
     }
 
+    private static void testCastServiceShutdownLifecycle() throws Exception {
+        final java.util.concurrent.CountDownLatch workersEntered =
+                new java.util.concurrent.CountDownLatch(2);
+        final java.util.concurrent.CountDownLatch releaseWorkers =
+                new java.util.concurrent.CountDownLatch(1);
+        final java.util.concurrent.atomic.AtomicInteger onClosedCount =
+                new java.util.concurrent.atomic.AtomicInteger(0);
+        final java.util.concurrent.atomic.AtomicBoolean blockWorkers =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+
+        CastService.Bridge bridge =
+                new CastService.Bridge() {
+                    @Override
+                    public void openMedia(
+                            String url, String title, Map<String, String> headers, int startMs) {}
+
+                    @Override
+                    public void pause() {}
+
+                    @Override
+                    public void resume() {}
+
+                    @Override
+                    public void stop() {}
+
+                    @Override
+                    public void seekTo(int positionMs) {}
+
+                    @Override
+                    public void setSpeed(float speed) {}
+
+                    @Override
+                    public void setVolumePercent(int percent) {}
+
+                    @Override
+                    public int getVolumePercent() {
+                        return 50;
+                    }
+
+                    @Override
+                    public void setMuted(boolean muted) {}
+
+                    @Override
+                    public boolean isMuted() {
+                        return false;
+                    }
+
+                    @Override
+                    public String transportState() {
+                        if (blockWorkers.get()) {
+                            workersEntered.countDown();
+                            long deadline = System.nanoTime() + 3_000_000_000L;
+                            while (releaseWorkers.getCount() > 0 && System.nanoTime() < deadline) {
+                                try {
+                                    releaseWorkers.await(
+                                            200, java.util.concurrent.TimeUnit.MILLISECONDS);
+                                } catch (InterruptedException ignored) {
+                                    // Keep workers occupied until test releases them so queued
+                                    // sockets must be closed by CastService.close() drain path.
+                                }
+                            }
+                        }
+                        return "STOPPED";
+                    }
+
+                    @Override
+                    public int positionMs() {
+                        return 0;
+                    }
+
+                    @Override
+                    public int durationMs() {
+                        return 0;
+                    }
+
+                    @Override
+                    public void onClosed() {
+                        onClosedCount.incrementAndGet();
+                    }
+                };
+
+        int boundPort;
+        CastService cast =
+                new CastService(
+                        "uuid-r18-shutdown",
+                        "Marco R18 Cast",
+                        "127.0.0.1",
+                        bridge,
+                        false,
+                        new InetSocketAddress("127.0.0.1", 0));
+        boundPort = cast.httpPort();
+        String host = "127.0.0.1:" + boundPort;
+
+        // 1. Verify 2-worker pool shape preserved + normal request completes cleanly.
+        check(
+                cast.httpPool.getCorePoolSize() == 2
+                        && cast.httpPool.getMaximumPoolSize() == 2
+                        && cast.httpPool.allowsCoreThreadTimeOut(),
+                "R18 P2 CastService keeps 2-worker background thread pool with core timeout");
+        String normalResp =
+                rawHttp(
+                        boundPort,
+                        "GET /dlna/device.xml HTTP/1.1\r\nHost: "
+                                + host
+                                + "\r\nConnection: close\r\n\r\n");
+        check(
+                normalResp.startsWith("HTTP/1.1 200 ")
+                        && normalResp.contains("<friendlyName>Marco R18 Cast</friendlyName>"),
+                "R18 P2 CastService normal HTTP request completes cleanly");
+
+        // 2. Occupy both worker threads via DLNA GetTransportInfo (calls bridge.transportState()),
+        // enqueue 3 pending accepted sockets, then close().
+        blockWorkers.set(true);
+        String transportSoap =
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+                        + "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">"
+                        + "<s:Body><u:GetTransportInfo xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">"
+                        + "<InstanceID>0</InstanceID></u:GetTransportInfo></s:Body></s:Envelope>";
+        byte[] transportBytes = transportSoap.getBytes(StandardCharsets.UTF_8);
+        String statusReq =
+                "POST /dlna/control/AVTransport HTTP/1.1\r\nHost: "
+                        + host
+                        + "\r\nSOAPAction: \"urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo\""
+                        + "\r\nContent-Type: text/xml\r\nContent-Length: "
+                        + transportBytes.length
+                        + "\r\nConnection: close\r\n\r\n"
+                        + transportSoap;
+        List<java.net.Socket> activeClients = new java.util.ArrayList<>();
+        List<java.net.Socket> queuedClients = new java.util.ArrayList<>();
+        try {
+            for (int i = 0; i < 2; i++) {
+                java.net.Socket s = new java.net.Socket("127.0.0.1", boundPort);
+                s.setSoTimeout(2000);
+                s.getOutputStream().write(statusReq.getBytes(StandardCharsets.UTF_8));
+                s.getOutputStream().flush();
+                activeClients.add(s);
+            }
+            boolean bothBusy = workersEntered.await(3, java.util.concurrent.TimeUnit.SECONDS);
+            check(bothBusy, "R18 P2 CastService occupied both HTTP workers before queuing");
+
+            String deviceReq =
+                    "GET /dlna/device.xml HTTP/1.1\r\nHost: "
+                            + host
+                            + "\r\nConnection: close\r\n\r\n";
+            for (int i = 0; i < 3; i++) {
+                java.net.Socket q = new java.net.Socket("127.0.0.1", boundPort);
+                q.setSoTimeout(1500);
+                q.getOutputStream().write(deviceReq.getBytes(StandardCharsets.UTF_8));
+                q.getOutputStream().flush();
+                queuedClients.add(q);
+            }
+            long qDeadline = System.nanoTime() + 2_000_000_000L;
+            while (cast.httpPool.getQueue().size() < 3 && System.nanoTime() < qDeadline) {
+                Thread.sleep(10);
+            }
+            check(
+                    cast.httpPool.getQueue().size() == 3,
+                    "R18 P2 CastService queued 3 pending accepted connections (got "
+                            + cast.httpPool.getQueue().size()
+                            + ")");
+
+            // Stop service while both workers are STILL blocked; queued sockets must close
+            // promptly!
+            cast.close();
+            int closedQueued = 0;
+            for (java.net.Socket q : queuedClients) {
+                try {
+                    int b = q.getInputStream().read();
+                    if (b == -1) closedQueued++;
+                } catch (java.net.SocketTimeoutException timeout) {
+                    // Hung socket = leak!
+                } catch (java.io.IOException reset) {
+                    closedQueued++;
+                }
+            }
+            check(
+                    closedQueued == queuedClients.size(),
+                    "R18 P2 CastService close() releases all queued accepted sockets ("
+                            + closedQueued
+                            + "/"
+                            + queuedClients.size()
+                            + ")");
+
+            // 3. Duplicate close() is strictly idempotent (onClosed fires once, no exception).
+            cast.close();
+            cast.close();
+            check(
+                    onClosedCount.get() == 1 && cast.httpPool.isShutdown(),
+                    "R18 P2 CastService duplicate close() is idempotent (onClosed="
+                            + onClosedCount.get()
+                            + ")");
+
+            // 4. Reject after stop: wait briefly for background closer to close httpSocket, then
+            // verify new connections fail (never accepted/served).
+            long sockDeadline = System.nanoTime() + 2_000_000_000L;
+            while (!cast.httpSocket.isClosed() && System.nanoTime() < sockDeadline) {
+                Thread.sleep(10);
+            }
+            check(
+                    cast.httpSocket.isClosed(),
+                    "R18 P2 CastService background closer closed httpSocket");
+            boolean rejectedAfterStop = false;
+            try (java.net.Socket after = new java.net.Socket()) {
+                after.connect(new InetSocketAddress("127.0.0.1", boundPort), 500);
+                after.setSoTimeout(500);
+                int r = after.getInputStream().read();
+                if (r == -1) rejectedAfterStop = true;
+            } catch (java.io.IOException expected) {
+                rejectedAfterStop = true;
+            }
+            check(rejectedAfterStop, "R18 P2 CastService rejects connections after close()");
+        } finally {
+            releaseWorkers.countDown();
+            for (java.net.Socket s : queuedClients) {
+                try {
+                    s.close();
+                } catch (Exception ignored) {
+                }
+            }
+            for (java.net.Socket s : activeClients) {
+                try {
+                    s.close();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+
+        // 5. Re-enable on the exact same port after previous CastService closed.
+        blockWorkers.set(false);
+        try (CastService restarted =
+                new CastService(
+                        "uuid-r18-restarted",
+                        "Marco R18 Restarted",
+                        "127.0.0.1",
+                        bridge,
+                        false,
+                        new InetSocketAddress("127.0.0.1", boundPort))) {
+            String resp2 =
+                    rawHttp(
+                            restarted.httpPort(),
+                            "GET /dlna/device.xml HTTP/1.1\r\nHost: 127.0.0.1:"
+                                    + restarted.httpPort()
+                                    + "\r\nConnection: close\r\n\r\n");
+            check(
+                    restarted.httpPort() == boundPort
+                            && resp2.startsWith("HTTP/1.1 200 ")
+                            && resp2.contains("<friendlyName>Marco R18 Restarted</friendlyName>"),
+                    "R18 P2 CastService re-enables cleanly on the same port after close()");
+        }
+    }
+
     private static void testWallpaperUploadServer() throws Exception {
         java.util.concurrent.atomic.AtomicReference<byte[]> receivedBytes =
                 new java.util.concurrent.atomic.AtomicReference<>();
@@ -658,6 +909,7 @@ public final class CastSearchAndPickerChecks {
         testSearchInputServer();
         testWallpaperUploadServer();
         testCastServiceDlnaAndWeb();
+        testCastServiceShutdownLifecycle();
         System.out.println(
                 "PASS " + passed + " Cast, Search QR, Wallpaper QR & SourcePicker checks");
     }

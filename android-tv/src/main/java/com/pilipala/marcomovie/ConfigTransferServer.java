@@ -150,7 +150,7 @@ final class ConfigTransferServer implements Closeable {
     void serve(Socket client) {
         try (Socket s = client) {
             s.setSoTimeout(20000);
-            InputStream in = s.getInputStream();
+            InputStream in = new BufferedInputStream(s.getInputStream(), 4096);
             OutputStream out = s.getOutputStream();
             InetAddress peer = s.getInetAddress();
             if (!isAllowedLanPeer(peer)) {

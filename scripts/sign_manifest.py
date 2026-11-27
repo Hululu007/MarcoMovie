@@ -232,6 +232,155 @@ def sign_manifest_file(manifest_path: Path, key_file: Path) -> str:
     return sig_b64
 
 
+AI_LAB_TOKEN_PREFIX = "MMAILAB1."
+AI_LAB_SIGN_DOMAIN = b"marco-ai-lab-v1:"
+
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(text: str) -> bytes:
+    padded = text + ("=" * ((4 - len(text) % 4) % 4))
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def normalize_ai_lab_platform_name(raw: str) -> str:
+    p = (raw or "").strip().lower()
+    if p in ("android-mobile", "mobile"):
+        return "android"
+    if p in ("win", "pc"):
+        return "windows"
+    if p in ("iphone", "ipad"):
+        return "ios"
+    if p in ("mac", "osx"):
+        return "macos"
+    return p
+
+
+def normalize_ai_lab_platforms(raw: str) -> str:
+    import re as _re
+
+    text = (raw or "all").strip().lower()
+    if text in ("", "all", "*"):
+        return "all"
+    seen: list[str] = []
+    for part in _re.split(r"[,;/\s]+", text):
+        p = normalize_ai_lab_platform_name(part)
+        if not p:
+            continue
+        if p in ("all", "*"):
+            return "all"
+        if p not in ("android", "ios", "windows", "macos"):
+            raise ValueError(
+                f"Unknown platform '{p}' (expected all, android, ios, windows, macos)"
+            )
+        if p not in seen:
+            seen.append(p)
+    if not seen or set(seen) >= {"android", "ios", "windows"}:
+        return "all"
+    return ",".join(seen)
+
+
+def matches_ai_lab_platform(plat_claim: str, target_platform: str | None) -> bool:
+    import re as _re
+
+    if not target_platform:
+        return True
+    target = normalize_ai_lab_platform_name(target_platform)
+    if target in ("", "all", "*"):
+        return True
+    raw = (plat_claim or "all").strip().lower()
+    if raw in ("", "all", "*"):
+        return True
+    parts = [p for p in _re.split(r"[,;/\s]+", raw) if p]
+    if not parts:
+        return True
+    for part in parts:
+        if part in ("all", "*"):
+            return True
+        if normalize_ai_lab_platform_name(part) == target:
+            return True
+    return False
+
+
+def issue_ai_lab_token(
+    key_file: Path,
+    *,
+    days: int = 0,
+    tag: str = "beta",
+    plat: str = "all",
+    shared: bool = False,
+    exp_oauth: bool = False,
+    min_vc: int = 0,
+    nonce: str | None = None,
+    now_epoch: int | None = None,
+) -> str:
+    """Issues a unified cross-platform offline Ed25519 AI Lab passcode (`MMAILAB1.<payload>.<sig>`)."""
+    import secrets as _secrets
+    import time as _time
+
+    seed = _read_32byte_key_file(key_file, "Private key")
+    iat = int(_time.time()) if now_epoch is None else int(now_epoch)
+    exp = 0 if days <= 0 else iat + int(days) * 86400
+    payload_obj: dict[str, object] = {
+        "exp": exp,
+        "iat": iat,
+        "plat": normalize_ai_lab_platforms(plat),
+        "tag": tag.strip() or "beta",
+        "v": 1,
+    }
+    if shared:
+        payload_obj["shared"] = True
+    if exp_oauth:
+        payload_obj["exp_oauth"] = True
+    if min_vc > 0:
+        payload_obj["min_vc"] = int(min_vc)
+    if nonce is not None:
+        if nonce.strip():
+            payload_obj["n"] = nonce.strip()
+    else:
+        payload_obj["n"] = _secrets.token_hex(3)
+    payload_bytes = canonicalize_json(payload_obj).encode("utf-8")
+    sig = sign(seed, AI_LAB_SIGN_DOMAIN + payload_bytes)
+    return f"{AI_LAB_TOKEN_PREFIX}{_b64url_encode(payload_bytes)}.{_b64url_encode(sig)}"
+
+
+def verify_ai_lab_token(
+    token_text: str,
+    pub: bytes,
+    *,
+    now_epoch: int | None = None,
+    platform: str | None = None,
+) -> dict | None:
+    import re as _re
+    import time as _time
+
+    collapsed = "".join((token_text or "").split())
+    m = _re.search(r"MMAILAB1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)", collapsed)
+    if not m:
+        return None
+    try:
+        payload_bytes = _b64url_decode(m.group(1))
+        sig = _b64url_decode(m.group(2))
+        if len(sig) != 64:
+            return None
+        if not verify(pub, AI_LAB_SIGN_DOMAIN + payload_bytes, sig):
+            return None
+        claims = json.loads(payload_bytes.decode("utf-8"))
+        if not isinstance(claims, dict) or claims.get("v") != 1:
+            return None
+        if not matches_ai_lab_platform(str(claims.get("plat", "all")), platform):
+            return None
+        exp = int(claims.get("exp", 0))
+        now_sec = int(_time.time()) if now_epoch is None else int(now_epoch)
+        if exp > 0 and now_sec > exp:
+            return None
+        return claims
+    except Exception:
+        return None
+
+
 def verify_manifest_file(manifest_path: Path, pub: bytes) -> bool:
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -284,6 +433,35 @@ def self_test() -> None:
             manifest_file, pub
         ), "Outer wrapper tampering unexpectedly passed"
 
+        tok = issue_ai_lab_token(
+            key_file,
+            days=30,
+            tag="selftest",
+            plat="android,windows",
+            shared=True,
+            exp_oauth=True,
+            now_epoch=1700000000,
+        )
+        claims = verify_ai_lab_token(
+            f"解锁口令：{tok[:24]}\n{tok[24:]}",
+            pub,
+            now_epoch=1700001000,
+            platform="windows",
+        )
+        assert (
+            claims is not None
+            and claims["tag"] == "selftest"
+            and claims.get("shared") is True
+            and claims.get("exp_oauth") is True
+            and isinstance(claims.get("n"), str)
+            and len(claims["n"]) > 0
+        ), "AI Lab token verify failed"
+        assert (
+            verify_ai_lab_token(tok, pub, now_epoch=1700001000, platform="ios") is None
+        ), "Wrong platform AI Lab token unexpectedly passed"
+        assert verify_ai_lab_token(tok, pub, now_epoch=1700000000 + 31 * 86400) is None, "Expired AI Lab token passed"
+        assert verify_ai_lab_token(tok[:-2] + "AA", pub, now_epoch=1700001000) is None, "Tampered AI Lab token passed"
+
     print("ALL ED25519 MANIFEST SELF-TESTS PASSED!")
 
 
@@ -329,6 +507,68 @@ def main():
     verify_cmd.add_argument(
         "--pub-key-file",
         help=f"Path to public key file (or set {PUBKEY_FILE_ENV})",
+    )
+
+    ai_issue_cmd = sub.add_parser(
+        "issue-ai-lab-token",
+        help="Issue an offline Ed25519-signed AI Lab unlock passcode (MMAILAB1...)",
+    )
+    ai_issue_cmd.add_argument(
+        "-k",
+        "--key-file",
+        help=f"Path to offline Ed25519 private key seed file (or set {KEY_FILE_ENV})",
+    )
+    ai_issue_cmd.add_argument(
+        "--days",
+        type=int,
+        default=0,
+        help="Validity duration in days (0 = permanent passcode)",
+    )
+    ai_issue_cmd.add_argument(
+        "--tag",
+        default="PILIPALA",
+        help="Cohort or label embedded in signed claims",
+    )
+    ai_issue_cmd.add_argument(
+        "--plat",
+        "--platforms",
+        dest="plat",
+        default="all",
+        help="Target platform(s): all, windows, ios, android, or comma-separated (e.g. windows,ios)",
+    )
+    ai_issue_cmd.add_argument(
+        "--shared",
+        action="store_true",
+        help="Mark passcode as a shared channel code",
+    )
+    ai_issue_cmd.add_argument(
+        "--exp-oauth",
+        "--experimental-oauth",
+        dest="exp_oauth",
+        action="store_true",
+        help="Allow experimental OAuth capabilities in signed claims",
+    )
+    ai_issue_cmd.add_argument(
+        "--min-vc",
+        dest="min_vc",
+        type=int,
+        default=0,
+        help="Optional minimum client version code (0 = no restriction)",
+    )
+
+    ai_verify_cmd = sub.add_parser(
+        "verify-ai-lab-token",
+        help="Verify an offline Ed25519-signed AI Lab unlock passcode",
+    )
+    ai_verify_cmd.add_argument("token", help="MMAILAB1... passcode string")
+    ai_verify_cmd.add_argument("--pub-key", help="64-char hex Ed25519 public key")
+    ai_verify_cmd.add_argument("--pub-key-file", help="Path to Ed25519 public key file")
+    ai_verify_cmd.add_argument(
+        "--plat",
+        "--platform",
+        dest="platform",
+        default=None,
+        help="Optional platform to check against (windows / ios / android)",
     )
 
     args = parser.parse_args()
@@ -381,6 +621,37 @@ def main():
             print("PASS: Manifest Ed25519 signature is valid.")
             sys.exit(0)
         print("FAIL: Manifest Ed25519 signature is INVALID!", file=sys.stderr)
+        sys.exit(1)
+
+    if args.command == "issue-ai-lab-token":
+        try:
+            key_file = resolve_private_key_file(args.key_file)
+            tok = issue_ai_lab_token(
+                key_file,
+                days=args.days,
+                tag=args.tag,
+                plat=args.plat,
+                shared=args.shared,
+                exp_oauth=args.exp_oauth,
+                min_vc=args.min_vc,
+            )
+            print(tok)
+            sys.exit(0)
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    if args.command == "verify-ai-lab-token":
+        try:
+            pub = resolve_public_key_bytes(args.pub_key, args.pub_key_file)
+            claims = verify_ai_lab_token(args.token, pub, platform=args.platform)
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if claims is not None:
+            print(f"PASS: Valid AI Lab token (claims={json.dumps(claims, ensure_ascii=False)})")
+            sys.exit(0)
+        print("FAIL: Invalid or expired AI Lab token!", file=sys.stderr)
         sys.exit(1)
 
     parser.print_help()

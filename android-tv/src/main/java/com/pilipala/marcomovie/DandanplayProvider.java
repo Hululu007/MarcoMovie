@@ -440,6 +440,51 @@ public final class DandanplayProvider implements DanmuProvider {
     // DanmuProvider 3-Stage Protocol
     // -------------------------------------------------------------------------
 
+    private static final class OriginMatchOutcome {
+        final List<Candidate> candidates;
+        final IOException error;
+        final boolean succeeded;
+
+        OriginMatchOutcome(List<Candidate> candidates, IOException error, boolean succeeded) {
+            this.candidates = candidates == null ? Collections.<Candidate>emptyList() : candidates;
+            this.error = error;
+            this.succeeded = succeeded;
+        }
+    }
+
+    private static int errorPriority(IOException e) {
+        if (e == null) return 0;
+        if (e instanceof HttpStatusException) {
+            int code = ((HttpStatusException) e).statusCode;
+            if (code == 401 || code == 403) return 4;
+            if (code == 429) return 3;
+            return 2;
+        }
+        return 1;
+    }
+
+    private static final ExecutorService MATCH_POOL = createMatchPool();
+
+    private static ExecutorService createMatchPool() {
+        java.util.concurrent.ThreadPoolExecutor pool =
+                new java.util.concurrent.ThreadPoolExecutor(
+                        4,
+                        4,
+                        20L,
+                        java.util.concurrent.TimeUnit.SECONDS,
+                        new java.util.concurrent.LinkedBlockingQueue<Runnable>(),
+                        new java.util.concurrent.ThreadFactory() {
+                            @Override
+                            public Thread newThread(Runnable r) {
+                                Thread t = new Thread(r, "dandan-match");
+                                t.setDaemon(true);
+                                return t;
+                            }
+                        });
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
+    }
+
     @Override
     public List<Candidate> matchOrSearch(final MatchQuery query, final CancellationToken token)
             throws IOException {
@@ -447,56 +492,90 @@ public final class DandanplayProvider implements DanmuProvider {
         if (configuredOrigins.isEmpty() || query == null) {
             return Collections.emptyList();
         }
-        final int threads = Math.min(maxConcurrency, configuredOrigins.size());
-        ExecutorService pool = Executors.newFixedThreadPool(threads);
-        List<Future<List<Candidate>>> futures = new ArrayList<>();
+        final ExecutorService pool = MATCH_POOL;
+        List<Future<OriginMatchOutcome>> futures = new ArrayList<>();
         try {
             for (final String origin : configuredOrigins) {
                 futures.add(
                         pool.submit(
-                                new Callable<List<Candidate>>() {
+                                new Callable<OriginMatchOutcome>() {
                                     @Override
-                                    public List<Candidate> call() {
+                                    public OriginMatchOutcome call() {
                                         try {
-                                            return matchOrSearchSingleOrigin(origin, query, token);
-                                        } catch (Exception ignored) {
-                                            return Collections.emptyList();
+                                            return new OriginMatchOutcome(
+                                                    matchOrSearchSingleOrigin(origin, query, token),
+                                                    null,
+                                                    true);
+                                        } catch (CancelledException cancelled) {
+                                            return new OriginMatchOutcome(null, cancelled, false);
+                                        } catch (IOException ioErr) {
+                                            return new OriginMatchOutcome(null, ioErr, false);
+                                        } catch (Exception other) {
+                                            return new OriginMatchOutcome(
+                                                    null, new IOException("弹幕匹配异常", other), false);
                                         }
                                     }
                                 }));
             }
             List<Candidate> merged = new ArrayList<>();
             Set<String> seenBoundIds = new LinkedHashSet<>();
-            for (Future<List<Candidate>> future : futures) {
+            boolean anySucceeded = false;
+            IOException prioritizedError = null;
+            for (Future<OriginMatchOutcome> future : futures) {
                 if (token != null && token.isCancelled()) {
                     future.cancel(true);
                     continue;
                 }
                 try {
-                    List<Candidate> part = future.get();
-                    for (Candidate c : part) {
-                        if (seenBoundIds.add(c.boundEpisodeId)) {
-                            merged.add(c);
+                    OriginMatchOutcome outcome = future.get();
+                    if (outcome == null) continue;
+                    if (outcome.error instanceof CancelledException) {
+                        throw (CancelledException) outcome.error;
+                    }
+                    if (outcome.succeeded) {
+                        anySucceeded = true;
+                        for (Candidate c : outcome.candidates) {
+                            if (seenBoundIds.add(c.boundEpisodeId)) {
+                                merged.add(c);
+                            }
+                        }
+                    } else if (outcome.error != null) {
+                        if (prioritizedError == null
+                                || errorPriority(outcome.error) > errorPriority(prioritizedError)) {
+                            prioritizedError = outcome.error;
                         }
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     throw new CancelledException("matchOrSearch interrupted");
-                } catch (ExecutionException ignored) {
+                } catch (ExecutionException e) {
+                    if (prioritizedError == null) {
+                        prioritizedError = new IOException("弹幕匹配执行失败", e.getCause());
+                    }
                 }
             }
             if (token != null) token.throwIfCancelled();
-            Collections.sort(
-                    merged,
-                    new Comparator<Candidate>() {
-                        @Override
-                        public int compare(Candidate a, Candidate b) {
-                            return Double.compare(b.confidence, a.confidence);
-                        }
-                    });
-            return merged;
+            if (!merged.isEmpty()) {
+                Collections.sort(
+                        merged,
+                        new Comparator<Candidate>() {
+                            @Override
+                            public int compare(Candidate a, Candidate b) {
+                                return Double.compare(b.confidence, a.confidence);
+                            }
+                        });
+                return merged;
+            }
+            if (!anySucceeded && prioritizedError != null) {
+                throw prioritizedError;
+            }
+            return Collections.emptyList();
         } finally {
-            pool.shutdownNow();
+            for (Future<OriginMatchOutcome> f : futures) {
+                if (f != null && !f.isDone()) {
+                    f.cancel(true);
+                }
+            }
         }
     }
 
@@ -513,29 +592,67 @@ public final class DandanplayProvider implements DanmuProvider {
                 if (picked != null) {
                     return Collections.singletonList(picked);
                 }
+            } catch (CancelledException e) {
+                throw e;
+            } catch (HttpStatusException e) {
+                if (e.statusCode != 404 && e.statusCode != 405) {
+                    throw e;
+                }
             } catch (IOException ignored) {
             }
         }
-        List<Candidate> matched = tryMatchEndpoint(origin, query, token);
+        List<Candidate> matched;
+        try {
+            matched = tryMatchEndpoint(origin, query, token);
+        } catch (HttpStatusException e) {
+            if (e.statusCode == 404 || e.statusCode == 405) {
+                matched = Collections.emptyList();
+            } else {
+                throw e;
+            }
+        }
         if (!matched.isEmpty()) return matched;
         return trySearchEpisodesEndpoint(origin, query, token);
     }
 
-    private static Candidate pickBoundAnimeEpisode(List<Candidate> episodes, MatchQuery query) {
+    static Candidate pickBoundAnimeEpisode(List<Candidate> episodes, MatchQuery query) {
         if (episodes == null || episodes.isEmpty()) return null;
-        if (query == null || query.episodeIndex <= 0) {
-            return episodes.get(0);
+        if (query == null) return null;
+        if (query.isMovie) {
+            for (Candidate c : episodes) {
+                if (c == null) continue;
+                if (isSpecialEpisodeTitle(c.episodeTitle)) continue;
+                int candEp = extractEpisodeNum(c.episodeTitle);
+                if (candEp <= 1) {
+                    return c;
+                }
+            }
+            return null;
         }
-        for (Candidate c : episodes) {
-            if (c != null && extractSimpleEpisodeNum(c.episodeTitle) == query.episodeIndex) {
-                return c;
+        int reqEp = effectiveRequestedEpisode(query);
+        boolean querySpecial = isSpecialEpisodeTitle(query.episodeTitle);
+        if (reqEp > 0) {
+            for (Candidate c : episodes) {
+                if (c == null) continue;
+                boolean candSpecial = isSpecialEpisodeTitle(c.episodeTitle);
+                if (candSpecial && !querySpecial) continue;
+                int candEp = extractEpisodeNum(c.episodeTitle);
+                if (candEp == reqEp) {
+                    return c;
+                }
+            }
+            return null;
+        }
+        String reqTitleNorm = normalizeCompact(query.episodeTitle);
+        if (!reqTitleNorm.isEmpty()) {
+            for (Candidate c : episodes) {
+                if (c == null) continue;
+                if (reqTitleNorm.equals(normalizeCompact(c.episodeTitle))) {
+                    return c;
+                }
             }
         }
-        int idx = query.episodeIndex - 1;
-        if (idx >= 0 && idx < episodes.size()) {
-            return episodes.get(idx);
-        }
-        return episodes.get(0);
+        return null;
     }
 
     private List<Candidate> tryMatchEndpoint(
@@ -566,8 +683,13 @@ public final class DandanplayProvider implements DanmuProvider {
                 String epId = stringifyId(m.opt("episodeId"));
                 if (epId.isEmpty()) continue;
                 String animeId = stringifyId(m.opt("animeId"));
-                String animeTitle = m.optString("animeTitle", query.title);
-                String epTitle = m.optString("episodeTitle", query.episodeTitle);
+                String animeTitle = m.optString("animeTitle", "");
+                // Never substitute query.episodeTitle as server evidence when server omits it.
+                String epTitle = m.optString("episodeTitle", "");
+                String rawEpNum = stringifyId(m.opt("episodeNumber"));
+                if (!isCandidateCompatible(query, animeId, animeTitle, epTitle, rawEpNum, exact)) {
+                    continue;
+                }
                 double conf =
                         m.has("confidence")
                                 ? m.optDouble("confidence", exact ? 1.0 : 0.85)
@@ -576,7 +698,7 @@ public final class DandanplayProvider implements DanmuProvider {
                         new Candidate(
                                 origin,
                                 animeId,
-                                animeTitle,
+                                animeTitle.isEmpty() ? query.title : animeTitle,
                                 encodeBoundEpisodeId(origin, epId),
                                 epTitle,
                                 conf));
@@ -595,8 +717,9 @@ public final class DandanplayProvider implements DanmuProvider {
                 new StringBuilder(origin)
                         .append("/api/v2/search/episodes?anime=")
                         .append(percentEncode(cleanTitle));
-        if (query.episodeIndex > 0) {
-            url.append("&episode=").append(query.episodeIndex);
+        int reqEp = effectiveRequestedEpisode(query);
+        if (!query.isMovie && reqEp > 0) {
+            url.append("&episode=").append(reqEp);
         }
         String response = executeHttp(origin, url.toString(), "GET", null, token);
         try {
@@ -617,11 +740,16 @@ public final class DandanplayProvider implements DanmuProvider {
                     String epId = stringifyId(ep.opt("episodeId"));
                     if (epId.isEmpty()) continue;
                     String epTitle = ep.optString("episodeTitle", "");
+                    String rawEpNum = stringifyId(ep.opt("episodeNumber"));
+                    if (!isCandidateCompatible(
+                            query, animeId, animeTitle, epTitle, rawEpNum, false)) {
+                        continue;
+                    }
                     double scoredConf =
                             scoreSearchCandidate(
                                     cleanTitle,
-                                    query.seasonNumber,
-                                    query.episodeIndex,
+                                    effectiveRequestedSeason(query),
+                                    reqEp,
                                     animeTitle,
                                     epTitle);
                     out.add(
@@ -672,13 +800,15 @@ public final class DandanplayProvider implements DanmuProvider {
                 String epId = stringifyId(ep.opt("episodeId"));
                 if (epId.isEmpty()) continue;
                 String epTitle = ep.optString("episodeTitle", "");
+                String rawEpNum = stringifyId(ep.opt("episodeNumber"));
+                String labeledTitle = enrichServerEpisodeTitle(epTitle, rawEpNum);
                 out.add(
                         new Candidate(
                                 normOrigin,
                                 animeId.trim(),
                                 animeTitle,
                                 encodeBoundEpisodeId(normOrigin, epId),
-                                epTitle,
+                                labeledTitle,
                                 1.0));
             }
             return out;
@@ -1133,8 +1263,9 @@ public final class DandanplayProvider implements DanmuProvider {
                 try {
                     String id = stringifyId(o.has("cid") ? o.opt("cid") : o.opt("id"));
                     long timeMs;
-                    if (o.has("timeMs")) {
-                        timeMs = o.optLong("timeMs", -1L);
+                    if (o.has("timeMs") && !o.isNull("timeMs")) {
+                        double msVal = o.optDouble("timeMs", Double.NaN);
+                        timeMs = Double.isNaN(msVal) ? -1L : Math.round(msVal);
                     } else {
                         timeMs = Math.round(o.optDouble("time", o.optDouble("t", 0.0)) * 1000.0);
                     }
@@ -1250,30 +1381,335 @@ public final class DandanplayProvider implements DanmuProvider {
         return t + seasonPrefix;
     }
 
+    private static final Pattern SEASON_EP_PAT =
+            Pattern.compile(
+                    "(?i)(?:s|season\\s*)0*(\\d{1,2})\\s*[._\\-\\s]*e(?:p)?\\.?\\s*0*(\\d{1,4})(?:$|[^0-9])");
+    private static final Pattern SEASON_TAG_PAT =
+            Pattern.compile(
+                    "(?i)(?:第\\s*0*(\\d{1,2})\\s*季|第\\s*([一二三四五六七八九十两兩]{1,3})\\s*季|season\\s*0*(\\d{1,2})|(?:^|[^a-z0-9])s0*(\\d{1,2})(?:$|[^a-z0-9]))");
+    private static final Pattern SPECIAL_PAT =
+            Pattern.compile(
+                    "(?i)(?:第\\s*0+\\s*[集话話回期]|(?:^|[^a-z0-9])ep?\\.?\\s*0+(?:$|[^0-9])|(?:^|[^a-z0-9])s00e?\\d*(?:$|[^a-z0-9])|(?:^|[^a-z0-9])(?:sp|ova|oad|pv|cm|op|ed|ncop|nced|extra|bonus|trailer|preview|making)(?:\\s*\\d{0,3})(?:$|[^a-z0-9])|预告|先导|花絮|番外|特别篇|特典|总集篇|总集|幕后|彩蛋|片花|小剧场|抢先看)");
+    private static final Pattern CN_ARABIC_EP_PAT =
+            Pattern.compile("第\\s*0*(\\d{1,4})\\s*[集话話回期篇章]");
+    private static final Pattern CN_NUM_EP_PAT =
+            Pattern.compile("第\\s*([一二三四五六七八九十百千零〇两兩]{1,6})\\s*[集话話回期篇章]");
+    private static final Pattern EXPLICIT_EP_PAT =
+            Pattern.compile(
+                    "(?i)(?:^|[^a-z0-9])(?:episode|ep|e)\\.?\\s*0*(\\d{1,4})(?:$|[^a-z0-9])");
+    private static final Pattern BRACKET_EP_PAT =
+            Pattern.compile("[\\[【(（]\\s*(?:第)?0*(\\d{1,4})(?:\\s*[集话話])?\\s*[\\]】)）]");
+    private static final Pattern LOOSE_EP_PAT = Pattern.compile("(?<![0-9])0*(\\d{1,4})(?![0-9])");
+    private static final Pattern TECH_NOISE_PAT =
+            Pattern.compile(
+                    "(?i)(?:\\d{3,4}\\s*[xX×]\\s*\\d{3,4}|(?:2160|1440|1080|720|576|480|360)[pi]|(?:2k|4k|8k)|(?:8|10|12)\\s*bit|(?:24|25|30|48|50|60|120)\\s*(?:fps|帧|hz)|h\\.?265|h\\.?264|x\\.?265|x\\.?264|5\\.1|7\\.1|2\\.0|(?:19[4-9]\\d|20[0-3]\\d))");
+
     private static boolean containsSeasonTag(String title) {
         if (title == null) return false;
-        String lower = title.toLowerCase(Locale.ROOT);
-        return lower.matches(".*(?:第\\s*[0-9一二三四五六七八九十]+\\s*季|season\\s*\\d+|\\bs0*\\d{1,2}\\b).*");
+        return SEASON_TAG_PAT.matcher(title).find();
     }
 
-    private static int extractSimpleEpisodeNum(String raw) {
+    private static int parseChineseSmallNumber(String raw) {
+        if (raw == null || raw.isEmpty()) return -1;
+        String s = raw.trim();
+        if ("两".equals(s) || "兩".equals(s)) return 2;
+        int total = 0;
+        int cur = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            int d = -1;
+            switch (c) {
+                case '零':
+                case '〇':
+                    d = 0;
+                    break;
+                case '一':
+                    d = 1;
+                    break;
+                case '二':
+                case '两':
+                case '兩':
+                    d = 2;
+                    break;
+                case '三':
+                    d = 3;
+                    break;
+                case '四':
+                    d = 4;
+                    break;
+                case '五':
+                    d = 5;
+                    break;
+                case '六':
+                    d = 6;
+                    break;
+                case '七':
+                    d = 7;
+                    break;
+                case '八':
+                    d = 8;
+                    break;
+                case '九':
+                    d = 9;
+                    break;
+                case '十':
+                    total += (cur == 0 ? 1 : cur) * 10;
+                    cur = 0;
+                    continue;
+                case '百':
+                    total += (cur == 0 ? 1 : cur) * 100;
+                    cur = 0;
+                    continue;
+                case '千':
+                    total += (cur == 0 ? 1 : cur) * 1000;
+                    cur = 0;
+                    continue;
+                default:
+                    return -1;
+            }
+            cur = d;
+        }
+        total += cur;
+        return total > 0 ? total : -1;
+    }
+
+    static boolean isSpecialEpisodeTitle(String raw) {
+        if (raw == null || raw.trim().isEmpty()) return false;
+        return SPECIAL_PAT.matcher(raw.trim()).find();
+    }
+
+    static int extractSeasonNum(String raw) {
         if (raw == null || raw.trim().isEmpty()) return -1;
-        java.util.regex.Matcher m =
-                java.util.regex.Pattern.compile(
-                                "(?i)(?:第\\s*0*(\\d{1,4})\\s*[集话話回期]|(?:^|[^a-z0-9])ep?\\.?\\s*0*(\\d{1,4})(?:$|[^a-z0-9])|(?:^|[^0-9])0*(\\d{1,4})(?:$|[^0-9]))")
-                        .matcher(raw);
-        if (m.find()) {
-            String g =
-                    m.group(1) != null
-                            ? m.group(1)
-                            : (m.group(2) != null ? m.group(2) : m.group(3));
+        Matcher se = SEASON_EP_PAT.matcher(raw);
+        if (se.find()) {
             try {
-                int v = Integer.parseInt(g);
+                int v = Integer.parseInt(se.group(1));
                 return v > 0 ? v : -1;
             } catch (NumberFormatException ignored) {
             }
         }
+        Matcher m = SEASON_TAG_PAT.matcher(raw);
+        if (m.find()) {
+            if (m.group(2) != null) return parseChineseSmallNumber(m.group(2));
+            String g =
+                    m.group(1) != null
+                            ? m.group(1)
+                            : (m.group(3) != null ? m.group(3) : m.group(4));
+            if (g != null) {
+                try {
+                    int v = Integer.parseInt(g);
+                    return v > 0 ? v : -1;
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
         return -1;
+    }
+
+    static int extractEpisodeNum(String raw) {
+        if (raw == null || raw.trim().isEmpty()) return -1;
+        String trimmed = raw.trim();
+        if (isSpecialEpisodeTitle(trimmed)) return -1;
+        Matcher se = SEASON_EP_PAT.matcher(trimmed);
+        if (se.find()) {
+            try {
+                int v = Integer.parseInt(se.group(2));
+                if (v > 0) return v;
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        Matcher cnA = CN_ARABIC_EP_PAT.matcher(trimmed);
+        if (cnA.find()) {
+            try {
+                int v = Integer.parseInt(cnA.group(1));
+                if (v > 0) return v;
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        Matcher cnN = CN_NUM_EP_PAT.matcher(trimmed);
+        if (cnN.find()) {
+            int v = parseChineseSmallNumber(cnN.group(1));
+            if (v > 0) return v;
+        }
+        String cleaned =
+                SEASON_TAG_PAT
+                        .matcher(TECH_NOISE_PAT.matcher(trimmed).replaceAll(" "))
+                        .replaceAll(" ");
+        Matcher exp = EXPLICIT_EP_PAT.matcher(cleaned);
+        if (exp.find()) {
+            try {
+                int v = Integer.parseInt(exp.group(1));
+                if (v > 0) return v;
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        Matcher br = BRACKET_EP_PAT.matcher(cleaned);
+        if (br.find()) {
+            try {
+                int v = Integer.parseInt(br.group(1));
+                if (v > 0 && v <= 2000) return v;
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        Matcher loose = LOOSE_EP_PAT.matcher(cleaned);
+        int found = -1;
+        int count = 0;
+        while (loose.find()) {
+            try {
+                int v = Integer.parseInt(loose.group(1));
+                if (v > 0 && v <= 2000) {
+                    found = v;
+                    count++;
+                }
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return count == 1 ? found : -1;
+    }
+
+    private static int extractServerEpisodeNum(String epTitle, String rawEpNum) {
+        if (rawEpNum != null && !rawEpNum.isEmpty()) {
+            if (isSpecialEpisodeTitle(rawEpNum)) return -1;
+            try {
+                int v = Integer.parseInt(rawEpNum);
+                if (v > 0) return v;
+            } catch (NumberFormatException ignored) {
+                int parsed = extractEpisodeNum(rawEpNum);
+                if (parsed > 0) return parsed;
+            }
+        }
+        return extractEpisodeNum(epTitle);
+    }
+
+    private static String enrichServerEpisodeTitle(String epTitle, String rawEpNum) {
+        String title = epTitle == null ? "" : epTitle.trim();
+        if (rawEpNum == null || rawEpNum.trim().isEmpty()) return title;
+        String num = rawEpNum.trim();
+        if (extractEpisodeNum(title) > 0 || isSpecialEpisodeTitle(title)) {
+            return title;
+        }
+        if (num.matches("\\d+")) {
+            return title.isEmpty() ? ("第" + num + "集") : ("第" + num + "集 " + title);
+        }
+        return title.isEmpty() ? num : (num + " " + title);
+    }
+
+    private static int effectiveRequestedEpisode(MatchQuery query) {
+        if (query == null || query.isMovie) return 0;
+        if (query.episodeIndex > 0) return query.episodeIndex;
+        return extractEpisodeNum(query.episodeTitle);
+    }
+
+    private static int effectiveRequestedSeason(MatchQuery query) {
+        if (query == null || query.isMovie) return -1;
+        if (query.seasonNumber > 0) return query.seasonNumber;
+        int s = extractSeasonNum(query.episodeTitle);
+        if (s > 0) return s;
+        return extractSeasonNum(query.title);
+    }
+
+    private static String normalizeCompact(String raw) {
+        if (raw == null) return "";
+        return raw.toLowerCase(Locale.ROOT).replaceAll("[\\s\\p{Punct}·•—–：:，,。！？【】（）《》「」『』]+", "");
+    }
+
+    private static String stripSeasonCompact(String raw) {
+        if (raw == null) return "";
+        String stripped = SEASON_TAG_PAT.matcher(cleanTitle(raw)).replaceAll(" ");
+        return normalizeCompact(stripped);
+    }
+
+    private static boolean isMotionComic(String title) {
+        if (title == null) return false;
+        String l = title.toLowerCase(Locale.ROOT);
+        return l.contains("动态漫画") || l.contains("动态漫");
+    }
+
+    static boolean isCandidateCompatible(
+            MatchQuery query,
+            String candAnimeId,
+            String candAnimeTitle,
+            String candEpTitle,
+            String rawEpNum,
+            boolean exactMatchFlag) {
+        if (query == null) return false;
+
+        // 1. Respect bound anime ID if user/system bound a specific anime.
+        boolean matchesBoundAnime = false;
+        if (!query.boundAnimeId.isEmpty()) {
+            if (candAnimeId != null && !candAnimeId.isEmpty()) {
+                if (!query.boundAnimeId.equals(candAnimeId)) {
+                    return false;
+                }
+                matchesBoundAnime = true;
+            }
+        }
+
+        // 2. Reject explicit work-form mismatch (e.g. regular anime vs motion comic).
+        if (!matchesBoundAnime
+                && candAnimeTitle != null
+                && !candAnimeTitle.isEmpty()
+                && !query.title.isEmpty()
+                && isMotionComic(query.title) != isMotionComic(candAnimeTitle)) {
+            return false;
+        }
+
+        // 3. Validate season compatibility (e.g. S1 vs S2 both having E02).
+        int reqSeason = effectiveRequestedSeason(query);
+        if (!query.isMovie && reqSeason > 0) {
+            int candSeason = extractSeasonNum(candEpTitle);
+            if (candSeason <= 0) candSeason = extractSeasonNum(candAnimeTitle);
+            if (candSeason > 0 && candSeason != reqSeason) {
+                return false;
+            }
+            if (reqSeason >= 2 && candSeason <= 0 && !matchesBoundAnime) {
+                String qBase = stripSeasonCompact(query.title);
+                String cBase = stripSeasonCompact(candAnimeTitle);
+                if (!qBase.isEmpty() && qBase.equals(cBase)) {
+                    return false;
+                }
+            }
+        }
+
+        // 4. Validate episode / movie / special compatibility strictly from server evidence.
+        boolean candSpecial =
+                isSpecialEpisodeTitle(candEpTitle)
+                        || (rawEpNum != null
+                                && !rawEpNum.isEmpty()
+                                && isSpecialEpisodeTitle(rawEpNum));
+        int candEp = candSpecial ? -1 : extractServerEpisodeNum(candEpTitle, rawEpNum);
+
+        if (query.isMovie) {
+            if (candSpecial) return false;
+            if (candEp > 1) return false;
+            return true;
+        }
+
+        boolean querySpecial = isSpecialEpisodeTitle(query.episodeTitle);
+        int reqEp = effectiveRequestedEpisode(query);
+        if (reqEp > 0) {
+            if (candSpecial && !querySpecial) return false;
+            // Missing/unknown server episode number is NOT sufficient evidence for automatic match.
+            if (candEp <= 0) return false;
+            if (candEp != reqEp) return false;
+            return true;
+        }
+
+        // Unnumbered / special episode query: require explicit title or special agreement.
+        if (querySpecial) {
+            if (!candSpecial) return false;
+            String qNorm = normalizeCompact(query.episodeTitle);
+            String cNorm = normalizeCompact(candEpTitle);
+            return !qNorm.isEmpty()
+                    && !cNorm.isEmpty()
+                    && (cNorm.contains(qNorm) || qNorm.contains(cNorm));
+        }
+        String qNorm = normalizeCompact(query.episodeTitle);
+        String cNorm = normalizeCompact(candEpTitle);
+        if (!qNorm.isEmpty() && !cNorm.isEmpty()) {
+            return cNorm.equals(qNorm);
+        }
+        return exactMatchFlag && !candSpecial;
     }
 
     static double scoreSearchCandidate(
@@ -1284,12 +1720,12 @@ public final class DandanplayProvider implements DanmuProvider {
             String candEpTitle) {
         String qLower = cleanQueryTitle == null ? "" : cleanQueryTitle.toLowerCase(Locale.ROOT);
         String cLower = candAnimeTitle == null ? "" : candAnimeTitle.toLowerCase(Locale.ROOT);
-        boolean qMotion = qLower.contains("动态漫画") || qLower.contains("动态漫");
-        boolean cMotion = cLower.contains("动态漫画") || cLower.contains("动态漫");
+        boolean qMotion = isMotionComic(qLower);
+        boolean cMotion = isMotionComic(cLower);
         double score = 0.55;
         if (qMotion != cMotion) score -= 0.30;
-        String qNorm = qLower.replaceAll("[\\s\\p{Punct}·•—–：:，,。！？【】（）《》]+", "");
-        String cNorm = cLower.replaceAll("[\\s\\p{Punct}·•—–：:，,。！？【】（）《》]+", "");
+        String qNorm = normalizeCompact(qLower);
+        String cNorm = normalizeCompact(cLower);
         if (!qNorm.isEmpty() && !cNorm.isEmpty()) {
             if (qNorm.equals(cNorm)) score += 0.25;
             else if (cNorm.contains(qNorm) || qNorm.contains(cNorm)) {
@@ -1298,19 +1734,15 @@ public final class DandanplayProvider implements DanmuProvider {
                 score -= 0.10;
             }
         }
-        if (querySeason > 1) {
-            String sPattern =
-                    ".*(?:第\\s*0*"
-                            + querySeason
-                            + "\\s*季|season\\s*0*"
-                            + querySeason
-                            + "|\\bs0*"
-                            + querySeason
-                            + "\\b).*";
-            if (cLower.matches(sPattern)) score += 0.12;
+        int candSeason = extractSeasonNum(candEpTitle);
+        if (candSeason <= 0) candSeason = extractSeasonNum(candAnimeTitle);
+        if (querySeason > 1 && candSeason == querySeason) {
+            score += 0.12;
+        } else if (querySeason == 1 && (candSeason == 1 || candSeason <= 0)) {
+            score += 0.05;
         }
         if (queryEp > 0 && candEpTitle != null && !candEpTitle.trim().isEmpty()) {
-            int candEp = extractSimpleEpisodeNum(candEpTitle);
+            int candEp = extractEpisodeNum(candEpTitle);
             if (candEp == queryEp) score += 0.10;
             else if (candEp > 0) score -= 0.15;
         }

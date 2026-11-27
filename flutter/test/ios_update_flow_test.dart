@@ -124,6 +124,38 @@ void main() {
     expect(calls, 1);
   });
 
+  test('iOS 14 compat update saves with ios14 filename and prunes older ios14 IPAs',
+      () async {
+    final dir = await Directory.systemTemp.createTemp('marco-ios14-update-test-');
+    addTearDown(() => dir.delete(recursive: true));
+    final stale = File('${dir.path}/MarcoMovie-0.7.4-ios14-unsigned.ipa');
+    await stale.writeAsBytes(utf8.encode('old ios14 ipa'));
+    final ios14Bytes = utf8.encode('verified ios14 IPA fixture');
+    final ios14Release = AppUpdate(
+      '0.7.5',
+      'iOS 14 compat notes',
+      null,
+      sha256.convert(ios14Bytes).toString(),
+      ios14Bytes.length,
+      Uri.parse(
+        'https://github.com/Pilipala9919/MarcoMovie/releases/download/ios-v0.7.5/MarcoMovie-0.7.5-ios14-unsigned.ipa',
+      ),
+    );
+    expect(ios14Release.isIos14Compat, isTrue);
+    final client = MockClient((request) async {
+      expect(request.url, ios14Release.iosUrl);
+      return http.Response.bytes(ios14Bytes, 200);
+    });
+    final saved = await ios14Release.downloadIos(
+      directory: dir,
+      cancellation: UpdateCancellation(),
+      client: client,
+    );
+    expect(saved.uri.pathSegments.last, 'MarcoMovie-0.7.5-ios14-unsigned.ipa');
+    expect(await saved.readAsBytes(), ios14Bytes);
+    expect(await stale.exists(), isFalse);
+  });
+
   for (final kind in ['truncated', 'corrupt', 'oversized', 'length', 'http']) {
     test('$kind package is never exposed and staging files are removed',
         () async {

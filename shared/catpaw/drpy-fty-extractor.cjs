@@ -5255,20 +5255,42 @@ function extractFty(bytes, adapter, rawExtension) {
         spec = specs[0];
       }
       const resolveMethodLiteral = (clsName, keyName, methodName, unit) => {
-        const methodList = dex.extractMethodLiterals(clsName, methodName);
-        if (!methodList || !methodList.length) fail();
-        const exactHits = methodList.map(m => m.atUnit.get(unit)).filter(v => v !== undefined);
-        if (exactHits.length === 1 && exactHits[0].length > 0) return exactHits[0];
-        const allLits = methodList.flatMap(m => m.list.map(x => x.value)).filter(Boolean);
-        if (keyName === 'filtersJson') {
-          const hits = allLits.filter(v => v.startsWith('{') && v.includes('"key"') && v.includes('"value"'));
-          if (hits.length === 1) return hits[0];
-        } else if (keyName === 'keyHex') {
-          const hits = allLits.filter(v => /^[0-9a-f]{32,128}$/i.test(v));
-          if (hits.length === 1) return hits[0];
-        } else if (keyName.endsWith('Url') || keyName === 'origin' || keyName === 'referer' || keyName === 'jsonBase') {
-          const hits = allLits.filter(v => /^https?:\/\//i.test(v));
-          if (hits.length === 1) return hits[0];
+        const allMethods = dex.extractAllClassLiterals(clsName) || [];
+        const methodList = allMethods.filter(m => m.name === methodName);
+        if (methodList.length) {
+          const exactHits = methodList.map(m => m.atUnit.get(unit)).filter(v => v !== undefined);
+          if (exactHits.length === 1 && exactHits[0].length > 0) return exactHits[0];
+        }
+        const pickFrom = methods => {
+          const lits = methods.flatMap(m => m.list).filter(x => x.value && x.value.length > 0);
+          const nearest = arr => {
+            if (!arr.length) return undefined;
+            const uniq = [...new Set(arr.map(x => x.value))];
+            if (uniq.length === 1) return uniq[0];
+            arr.sort((a, b) => Math.abs(a.unit - unit) - Math.abs(b.unit - unit));
+            return arr[0].value;
+          };
+          if (keyName === 'filtersJson') {
+            const hits = lits.filter(x => x.value.startsWith('{') && x.value.includes('"key"') && x.value.includes('"value"'));
+            if (hits.length) return nearest(hits);
+          } else if (keyName === 'keyHex') {
+            const hits = lits.filter(x => /^[0-9a-f]{32,128}$/i.test(x.value));
+            if (hits.length) return nearest(hits);
+          } else if (keyName === 'apiUa' || keyName === 'browserUa') {
+            const hits = lits.filter(x => /^(?:Mozilla\/|okhttp\/|Dalvik\/)/i.test(x.value));
+            if (hits.length) return nearest(hits);
+          } else if (keyName.endsWith('Url') || keyName === 'origin' || keyName === 'referer' || keyName === 'jsonBase' || keyName.startsWith('fallbackApi') || keyName.startsWith('headUrl')) {
+            const hits = lits.filter(x => /^https?:\/\//i.test(x.value));
+            if (hits.length) return nearest(hits);
+          }
+          return undefined;
+        };
+        const hitInMethod = methodList.length ? pickFrom(methodList) : undefined;
+        if (hitInMethod !== undefined) return hitInMethod;
+        const hitInClass = pickFrom(allMethods);
+        if (hitInClass !== undefined) return hitInClass;
+        if (keyName === 'apiUa' || keyName === 'browserUa') {
+          return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
         }
         fail();
       };

@@ -857,6 +857,148 @@ https://depot.example/config.json
     expect(restoredStorage.hlsAdStripEnabled, isFalse);
     expect(restoredStorage.diskCacheMaxMb, 1024);
   });
+
+  test('preserves stable source line IDs even when friendly display names collide', () {
+    const vodRaw = '''
+{
+  "code": 1,
+  "list": [
+    {
+      "vod_id": "501",
+      "vod_name": "同名标识影片",
+      "vod_play_from": "alpha_m3u8\$\$\$beta_m3u8",
+      "vod_play_url": "第01集\$https://cdn.example/a.m3u8\$\$\$第01集\$https://cdn.example/b.m3u8"
+    }
+  ]
+}
+''';
+    final listing = CmsParser.parseListing(vodRaw);
+    expect(listing.videos, hasLength(1));
+    final lines = listing.videos.single.lines;
+    expect(lines, hasLength(2));
+    expect(lines[0].name, '超清直连');
+    expect(lines[1].name, '超清直连');
+    expect(lines[0].id, 'alpha_m3u8');
+    expect(lines[1].id, 'beta_m3u8');
+
+    const appV2Raw = '''
+{
+  "code": 1,
+  "data": {
+    "list": [
+      {
+        "vod_id": "502",
+        "vod_name": "结构化线路影片",
+        "vod_url_with_player": [
+          {"code": "src_a", "name": "极速线路", "url": "第01集\$https://cdn.example/1.mp4"},
+          {"code": "src_b", "name": "极速线路", "url": "第01集\$https://cdn.example/2.mp4"}
+        ]
+      }
+    ]
+  }
+}
+''';
+    final appV2Lines = CmsParser.parseListing(appV2Raw).videos.single.lines;
+    expect(appV2Lines, hasLength(2));
+    expect(appV2Lines[0].name, '极速线路');
+    expect(appV2Lines[1].name, '极速线路');
+    expect(appV2Lines[0].id, 'src_a');
+    expect(appV2Lines[1].id, 'src_b');
+
+    const macCmsPlayListRaw = '''
+{
+  "code": 1,
+  "list": [
+    {
+      "vod_id": "503",
+      "vod_name": "MacCMS位置sid测试",
+      "vod_play_list": {
+        "1": {
+          "sid": 1,
+          "from": "stable_from_a",
+          "player_info": {"from": "stable_from_a", "show": "高清线路"},
+          "urls": {"1": {"name": "第01集", "url": "https://cdn.example/a.mp4"}}
+        },
+        "2": {
+          "sid": 2,
+          "from": "stable_from_b",
+          "player_info": {"from": "stable_from_b", "show": "高清线路"},
+          "urls": {"1": {"name": "第01集", "url": "https://cdn.example/b.mp4"}}
+        }
+      }
+    }
+  ]
+}
+''';
+    final macLines =
+        CmsParser.parseListing(macCmsPlayListRaw).videos.single.lines;
+    expect(macLines, hasLength(2));
+    expect(macLines[0].id, 'stable_from_a');
+    expect(macLines[1].id, 'stable_from_b');
+  });
+
+  test('XML listing skips commented videos while preserving CDATA payloads', () {
+    const onlyCommentedXml = '''
+<rss version="5.1">
+  <list page="1" pagecount="1">
+    <!--<video><id>10</id><name>旧影片</name><dl><dd flag="main">E1\$https://media.example/old.mp4</dd></dl></video>-->
+  </list>
+</rss>
+''';
+    final emptyParsed = CmsParser.parseXmlListing(onlyCommentedXml, strict: true);
+    expect(emptyParsed.videoElementCount, 0);
+    expect(emptyParsed.listing.videos, isEmpty);
+    expect(CmsParser.parseListing(onlyCommentedXml).videos, isEmpty);
+
+    const commentedAndNewXml = '''
+<rss version="5.1">
+  <list page="1" pagecount="1">
+    <!--<video><id>10</id><name>旧影片</name><dl><dd flag="main">E1\$https://media.example/old.mp4</dd></dl></video>-->
+    <video>
+      <id>10</id>
+      <name><![CDATA[新影片]]></name>
+      <dl>
+        <!--<dd flag="legacy">E1\$https://media.example/legacy.mp4</dd>-->
+        <dd flag="main"><![CDATA[E1\$https://media.example/new.mp4?token=1&keep=<!--literal-->]]></dd>
+      </dl>
+    </video>
+  </list>
+</rss>
+''';
+    final activeParsed =
+        CmsParser.parseXmlListing(commentedAndNewXml, strict: true);
+    expect(activeParsed.videoElementCount, 1);
+    expect(activeParsed.listing.videos, hasLength(1));
+    expect(activeParsed.listing.videos.single.title, '新影片');
+    expect(activeParsed.listing.videos.single.lines, hasLength(1));
+    expect(
+      activeParsed.listing.videos.single.lines.single.episodes.single.url,
+      'https://media.example/new.mp4?token=1&keep=<!--literal-->',
+    );
+
+    // Round5 Item 3: strict mode rejects non-whitespace text outside root,
+    // while allowing whitespace and valid XML comments outside root.
+    expect(
+      () => CmsParser.parseXmlListing(
+        '<rss><list/></rss>\nWarning: upstream connection refused',
+        strict: true,
+      ),
+      throwsFormatException,
+    );
+    expect(
+      () => CmsParser.parseXmlListing(
+        '<!-- ok -->garbage<rss><list/></rss>',
+        strict: true,
+      ),
+      throwsFormatException,
+    );
+    final commentsAroundRoot = CmsParser.parseXmlListing(
+      '\n<!-- begin -->\n<rss><list/></rss>\n<!-- end --> \n',
+      strict: true,
+    );
+    expect(commentsAroundRoot.videoElementCount, 0);
+    expect(commentsAroundRoot.listing.videos, isEmpty);
+  });
 }
 
 Uint8List _testHexToBytes(String hex) {

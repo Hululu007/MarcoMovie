@@ -405,6 +405,16 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
                         ),
                       ],
                     ),
+                    if (release != null && release.isIos14Compat) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        '已自动匹配 iOS 14.0+ 兼容版安装包',
+                        style: TextStyle(
+                          color: ApplePalette.of(context).labelSecondary,
+                          fontSize: 12.5,
+                        ),
+                      ),
+                    ],
                     if (busy) ...[
                       const SizedBox(height: 12),
                       LinearProgressIndicator(
@@ -506,6 +516,16 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
                   color: ApplePalette.of(context).labelPrimary,
                   fontSize: 23,
                   fontWeight: FontWeight.w700)),
+          if (release.isIos14Compat) ...[
+            const SizedBox(height: 4),
+            Text(
+              '已自动匹配 iOS 14.0+ 兼容版安装包',
+              style: TextStyle(
+                color: ApplePalette.of(context).labelSecondary,
+                fontSize: 13,
+              ),
+            ),
+          ],
           const SizedBox(height: 8),
         ],
         if (busy) ...[
@@ -550,6 +570,12 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
               icon: CupertinoIcons.globe,
               onPressed: () =>
                   _open(Uri.parse('https://marcotv.wlj9919.top/movie/'))),
+          AppleCapsuleButton(
+              key: const ValueKey('ios-update-sheet-donate-btn'),
+              label: '支持开发者',
+              icon: CupertinoIcons.heart_fill,
+              onPressed: () =>
+                  _open(Uri.parse('https://marcotv.wlj9919.top/movie/#donate'))),
           if (release != null && !busy && (!_validVersion(_version) || _newer || _saved)) ...[
             AppleCapsuleButton(
                 label: _saved ? '检查已下载 IPA' : '仅下载 IPA',

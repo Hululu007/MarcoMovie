@@ -264,12 +264,20 @@ class VerticalBrightnessEndEvent extends TouchGestureEvent {
 
 class VerticalVolumeUpdateEvent extends TouchGestureEvent {
   final double volume;
-  const VerticalVolumeUpdateEvent({required this.volume});
+  final double delta;
+  const VerticalVolumeUpdateEvent({
+    required this.volume,
+    this.delta = 0.0,
+  });
 }
 
 class VerticalVolumeEndEvent extends TouchGestureEvent {
   final double volume;
-  const VerticalVolumeEndEvent({required this.volume});
+  final double delta;
+  const VerticalVolumeEndEvent({
+    required this.volume,
+    this.delta = 0.0,
+  });
 }
 
 class SpeedBoostStartEvent extends TouchGestureEvent {
@@ -361,6 +369,7 @@ class PlayerGestureStateMachine {
   double _startVolume = 1.0;
   double _currentBrightness = 1.0;
   double _currentVolume = 1.0;
+  double _currentVolumeDelta = 0.0;
   bool _canLongPressSpeed = false;
 
   // Horizontal seek preview state.
@@ -686,10 +695,12 @@ class PlayerGestureStateMachine {
           ];
         } else {
           _state = TouchGestureState.verticalVolume;
-          final nextV = _computeVerticalValue(_startVolume, dy, 0.0, 1.0);
+          final delta = _computeVerticalDelta(dy);
+          final nextV = (_startVolume + delta).clamp(0.0, 1.0);
           _currentVolume = nextV;
+          _currentVolumeDelta = delta;
           return <TouchGestureEvent>[
-            VerticalVolumeUpdateEvent(volume: nextV),
+            VerticalVolumeUpdateEvent(volume: nextV, delta: delta),
           ];
         }
       }
@@ -716,10 +727,12 @@ class PlayerGestureStateMachine {
     }
 
     if (_state == TouchGestureState.verticalVolume) {
-      final nextV = _computeVerticalValue(_startVolume, dy, 0.0, 1.0);
+      final delta = _computeVerticalDelta(dy);
+      final nextV = (_startVolume + delta).clamp(0.0, 1.0);
       _currentVolume = nextV;
+      _currentVolumeDelta = delta;
       return <TouchGestureEvent>[
-        VerticalVolumeUpdateEvent(volume: nextV),
+        VerticalVolumeUpdateEvent(volume: nextV, delta: delta),
       ];
     }
 
@@ -897,8 +910,12 @@ class PlayerGestureStateMachine {
 
     if (_state == TouchGestureState.verticalVolume) {
       final v = _currentVolume;
+      final delta = _currentVolumeDelta;
+      _currentVolumeDelta = 0.0;
       _state = _restingState;
-      return <TouchGestureEvent>[VerticalVolumeEndEvent(volume: v)];
+      return <TouchGestureEvent>[
+        VerticalVolumeEndEvent(volume: v, delta: delta),
+      ];
     }
 
     if (_state == TouchGestureState.longPressSpeed) {
@@ -981,7 +998,9 @@ class PlayerGestureStateMachine {
       case TouchGestureState.verticalBrightness:
         events.add(VerticalBrightnessEndEvent(brightness: _currentBrightness));
       case TouchGestureState.verticalVolume:
-        events.add(VerticalVolumeEndEvent(volume: _currentVolume));
+        final delta = _currentVolumeDelta;
+        _currentVolumeDelta = 0.0;
+        events.add(VerticalVolumeEndEvent(volume: _currentVolume, delta: delta));
       case TouchGestureState.longPressSpeed:
       case TouchGestureState.speedLockReady:
         restoredSpeed = _resolvedRestoreSpeed;
@@ -1108,14 +1127,18 @@ class PlayerGestureStateMachine {
     return (_startPositionMs + deltaMs).round().clamp(0, _durationMs);
   }
 
+  double _computeVerticalDelta(double dyDownward) {
+    final height = _viewportHeight.clamp(220.0, 2000.0);
+    return -dyDownward / (height * 0.72);
+  }
+
   double _computeVerticalValue(
     double startValue,
     double dyDownward,
     double minVal,
     double maxVal,
   ) {
-    final height = _viewportHeight.clamp(220.0, 2000.0);
-    final delta = -dyDownward / (height * 0.72);
+    final delta = _computeVerticalDelta(dyDownward);
     return (startValue + delta).clamp(minVal, maxVal);
   }
 }

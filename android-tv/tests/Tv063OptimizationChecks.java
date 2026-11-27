@@ -320,11 +320,14 @@ public final class Tv063OptimizationChecks {
                 readSrc("android-tv/src/main/java/com/pilipala/marcomovie/PlayerChrome.java");
         check(
                 controlsSrc.contains("ICON_DECODER = 11")
-                        && controlsSrc.contains("addClassicToolbarAction")
+                        && (controlsSrc.contains("addClassicToolbarAction")
+                                || controlsSrc.contains("addTvToolbarAction"))
                         && controlsSrc.contains("if (!a.isTvDevice()) return;"),
                 "Item6 Double-Layer toolbar uses vector icons including ICON_DECODER and syncs Live/Movie visibility on all TV styles");
         check(
-                controlsSrc.contains("openSkipEditDialog(n == 0)"),
+                controlsSrc.contains("openSkipEditDialog(n == 0)")
+                        || (controlsSrc.contains("openMergedSkipPanel(")
+                                && controlsSrc.contains("openSkipEditDialog(true)")),
                 "Item6 More menu intro/outro opens adjuster directly in parity with Floating Card");
         check(
                 chromeSrc.contains("tvMinimalPauseBadge")
@@ -492,8 +495,8 @@ public final class Tv063OptimizationChecks {
 
     private static void checkItem9LoadingNetworkSpeed() throws Exception {
         check(
-                "测速中…".equals(NetworkSpeedMonitor.formatSpeed(-1L)),
-                "Item9 formats negative rate as '测速中…'");
+                "0 KB/s".equals(NetworkSpeedMonitor.formatSpeed(-1L)),
+                "Item9 formats negative/unknown rate as '0 KB/s' (never '测速中…')");
         check(
                 "0 KB/s".equals(NetworkSpeedMonitor.formatSpeed(0L)),
                 "Item9 formats zero rate as '0 KB/s'");

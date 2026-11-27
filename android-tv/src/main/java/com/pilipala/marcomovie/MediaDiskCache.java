@@ -118,6 +118,9 @@ public final class MediaDiskCache {
             return false;
         }
         String lower = url.split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
+        if (lower.contains("/proxy/play") || lower.contains("/proxy/")) {
+            return false;
+        }
         if (lower.endsWith(".mpd") || lower.endsWith(".m3u8") || lower.endsWith(".m3u")) {
             return false;
         }

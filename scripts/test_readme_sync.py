@@ -18,6 +18,7 @@ class TestReadmeSync(unittest.TestCase):
         (self.root / "android-tv").mkdir(parents=True, exist_ok=True)
         (self.root / "android-mobile").mkdir(parents=True, exist_ok=True)
         (self.root / "lite").mkdir(parents=True, exist_ok=True)
+        (self.root / "macos").mkdir(parents=True, exist_ok=True)
         (self.root / "flutter").mkdir(parents=True, exist_ok=True)
 
         (self.root / "android-tv/edition-versions.json").write_text(
@@ -29,10 +30,12 @@ class TestReadmeSync(unittest.TestCase):
         (self.root / "lite/edition-versions.json").write_text(
             json.dumps({"android-lite": {"versionName": "0.5.4", "versionCode": 54}}, indent=2), encoding="utf-8"
         )
+        (self.root / "macos/edition-versions.json").write_text(
+            json.dumps({"macos": {"versionName": "0.5.15", "buildNumber": 65}}, indent=2), encoding="utf-8"
+        )
 
         self.flutter_versions = {
             "windows": {"versionName": "0.5.18", "buildNumber": 68},
-            "macos": {"versionName": "0.5.15", "buildNumber": 65},
             "ios": {"versionName": "0.5.25", "buildNumber": 75},
             "appletv": {"versionName": "0.1.0", "buildNumber": 1},
             "harmonyos": {"versionName": "0.1.0", "buildNumber": 1000001},

@@ -6,11 +6,13 @@ import android.app.AlertDialog;
 import android.app.UiModeManager;
 import android.content.Context;
 import android.content.DialogInterface;
+import android.content.Intent;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.media.AudioManager;
+import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.os.Handler;
@@ -75,6 +77,24 @@ public final class LiteActivity extends Activity {
     static final int COLOR_MUTED = 0xff9e9ea8;
     static final int EPISODE_GROUP_SIZE = 40;
     static final long OSD_AUTO_HIDE_MS = 4500L;
+    static final String PREF_OFFICIAL_NOTICE_SEEN = "first_launch_official_notice_seen_v1";
+    public static final String AUTHOR_SOCIAL_HANDLE = "PILIPALA来信";
+    public static final String AUTHOR_SOCIAL_PLATFORMS = "小红书、B站、抖音、公众号、视频号";
+    public static final String AUTHOR_SOCIAL_DISPLAY =
+            AUTHOR_SOCIAL_HANDLE + "（" + AUTHOR_SOCIAL_PLATFORMS + "）";
+    public static final String OFFICIAL_SITE_DISPLAY = "marcotv.wlj9919.top";
+    public static final String OFFICIAL_SITE_URL = "https://marcotv.wlj9919.top";
+    public static final String OFFICIAL_GROUP_URL = "https://marcotv.wlj9919.top/movie/#group";
+    public static final String OFFICIAL_WARNING_TEXT =
+            "下载软件请认准官网地址，以防不明渠道软件添加病毒等不良内容。";
+    public static final String OFFICIAL_NOTICE_TITLE = "欢迎使用 Marco Movie Lite";
+    public static final String OFFICIAL_NOTICE_MESSAGE =
+            "作者各社媒账号名：\n"
+                    + AUTHOR_SOCIAL_DISPLAY
+                    + "\n\nMarco官网："
+                    + OFFICIAL_SITE_DISPLAY
+                    + "\n\n"
+                    + OFFICIAL_WARNING_TEXT;
 
     final Handler ui = new Handler();
     final ThreadPoolExecutor io =
@@ -112,6 +132,7 @@ public final class LiteActivity extends Activity {
     Runnable pendingSlowPrepareTask;
     AlertDialog activeInPlayerDialog;
     AlertDialog activeRecordSourceDialog;
+    AlertDialog activeOfficialNoticeDialog;
     PlaybackSession activeSession;
     PlaybackSession lastSuspendedSession;
     int playbackSessionSeq;
@@ -883,6 +904,7 @@ public final class LiteActivity extends Activity {
         if (isWebdavConfigured() && getPreferences(0).getBoolean("webdav_auto", true)) {
             runBackgroundWebdavSync(true);
         }
+        maybeShowFirstLaunchOfficialNotice();
     }
 
     int dp(int n) {
@@ -1053,6 +1075,22 @@ public final class LiteActivity extends Activity {
         }
     }
 
+    void dismissActiveOfficialNoticeDialog() {
+        if (activeOfficialNoticeDialog != null) {
+            try {
+                if (activeOfficialNoticeDialog.isShowing()) {
+                    activeOfficialNoticeDialog.dismiss();
+                }
+            } catch (Throwable ignored) {
+            }
+            activeOfficialNoticeDialog = null;
+        }
+    }
+
+    public static boolean shouldShowFirstLaunchOfficialNotice(boolean alreadySeen) {
+        return !alreadySeen;
+    }
+
     void base(String title) {
         epoch++;
         ui.removeCallbacks(clockTick);
@@ -1060,6 +1098,7 @@ public final class LiteActivity extends Activity {
         cancelSlowPrepareTimer();
         dismissActiveInPlayerDialog();
         dismissActiveRecordSourceDialog();
+        dismissActiveOfficialNoticeDialog();
         cancelWork();
         closePairing();
         release();
@@ -1196,6 +1235,14 @@ public final class LiteActivity extends Activity {
                 new Runnable() {
                     public void run() {
                         configure();
+                    }
+                });
+        addNavPill(
+                navRow,
+                "设置",
+                new Runnable() {
+                    public void run() {
+                        settingsPage();
                     }
                 });
         header.addView(navScroll, new LinearLayout.LayoutParams(-2, -2));
@@ -1790,6 +1837,15 @@ public final class LiteActivity extends Activity {
                                 }
                             }));
         }
+        quickBtns.add(
+                makeActionButton(
+                        "设置与联系反馈",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                settingsPage();
+                            }
+                        }));
         addGridViews(page, quickBtns, isTvOrLandscape() ? 3 : 2, 46);
 
         List<LiteStore.HistoryEntry> history = LiteStore.getHistory(this);
@@ -3692,12 +3748,373 @@ public final class LiteActivity extends Activity {
                     }
                 });
         button(
+                "设置与联系反馈（社媒 / 官网交流群）",
+                new Runnable() {
+                    public void run() {
+                        settingsPage();
+                    }
+                });
+        button(
                 "返回片库",
                 new Runnable() {
                     public void run() {
                         home();
                     }
                 });
+    }
+
+    String appVersionLabel() {
+        try {
+            android.content.pm.PackageInfo info =
+                    getPackageManager().getPackageInfo(getPackageName(), 0);
+            if (info != null && info.versionName != null && info.versionName.trim().length() > 0) {
+                return "v" + info.versionName.trim();
+            }
+        } catch (Throwable ignored) {
+        }
+        return "v0.5.10";
+    }
+
+    void markOfficialNoticeSeen() {
+        getPreferences(0).edit().putBoolean(PREF_OFFICIAL_NOTICE_SEEN, true).commit();
+    }
+
+    void maybeShowFirstLaunchOfficialNotice() {
+        if (dead || isFinishing()) return;
+        boolean seen = getPreferences(0).getBoolean(PREF_OFFICIAL_NOTICE_SEEN, false);
+        if (!shouldShowFirstLaunchOfficialNotice(seen)) return;
+        showOfficialNoticeDialog(true);
+    }
+
+    void showOfficialNoticeDialog(final boolean persistSeen) {
+        if (dead || isFinishing()) return;
+        dismissActiveOfficialNoticeDialog();
+        AlertDialog.Builder builder =
+                new AlertDialog.Builder(this)
+                        .setTitle(OFFICIAL_NOTICE_TITLE)
+                        .setMessage(OFFICIAL_NOTICE_MESSAGE)
+                        .setPositiveButton(
+                                "我知道了",
+                                new DialogInterface.OnClickListener() {
+                                    public void onClick(DialogInterface dialog, int which) {
+                                        if (persistSeen) markOfficialNoticeSeen();
+                                        if (activeOfficialNoticeDialog == dialog) {
+                                            activeOfficialNoticeDialog = null;
+                                        }
+                                    }
+                                })
+                        .setNeutralButton(
+                                "查看官网与交流群",
+                                new DialogInterface.OnClickListener() {
+                                    public void onClick(DialogInterface dialog, int which) {
+                                        if (persistSeen) markOfficialNoticeSeen();
+                                        if (activeOfficialNoticeDialog == dialog) {
+                                            activeOfficialNoticeDialog = null;
+                                        }
+                                        settingsPage();
+                                    }
+                                })
+                        .setOnCancelListener(
+                                new DialogInterface.OnCancelListener() {
+                                    public void onCancel(DialogInterface dialog) {
+                                        if (persistSeen) markOfficialNoticeSeen();
+                                        if (activeOfficialNoticeDialog == dialog) {
+                                            activeOfficialNoticeDialog = null;
+                                        }
+                                    }
+                                });
+        try {
+            activeOfficialNoticeDialog = builder.show();
+        } catch (Throwable ignored) {
+            activeOfficialNoticeDialog = null;
+        }
+    }
+
+    Bitmap renderQrBitmap(String content, int sizePx) {
+        try {
+            BitMatrix matrix =
+                    new MultiFormatWriter()
+                            .encode(content, BarcodeFormat.QR_CODE, sizePx, sizePx);
+            Bitmap bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.RGB_565);
+            for (int y = 0; y < sizePx; y++) {
+                for (int x = 0; x < sizePx; x++) {
+                    bitmap.setPixel(x, y, matrix.get(x, y) ? 0xff000000 : 0xffffffff);
+                }
+            }
+            return bitmap;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    void openOfficialLinkOrQr(final String title, final String url, final String hint) {
+        if (dead || isFinishing()) return;
+        dismissActiveOfficialNoticeDialog();
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setGravity(Gravity.CENTER_HORIZONTAL);
+        content.setPadding(dp(18), dp(14), dp(18), dp(10));
+
+        if (hint != null && hint.length() > 0) {
+            TextView hintView = text(hint, 14);
+            hintView.setTextColor(COLOR_TEXT);
+            hintView.setGravity(Gravity.CENTER);
+            content.addView(hintView, new LinearLayout.LayoutParams(-1, -2));
+        }
+
+        Bitmap qrBitmap = renderQrBitmap(url, 320);
+        if (qrBitmap != null) {
+            LinearLayout qrBox = new LinearLayout(this);
+            qrBox.setBackgroundColor(0xffffffff);
+            qrBox.setPadding(dp(8), dp(8), dp(8), dp(8));
+            ImageView qrView = new ImageView(this);
+            qrView.setImageBitmap(qrBitmap);
+            qrBox.addView(qrView, new LinearLayout.LayoutParams(dp(190), dp(190)));
+            LinearLayout.LayoutParams qrLp = new LinearLayout.LayoutParams(-2, -2);
+            qrLp.setMargins(0, dp(10), 0, dp(10));
+            content.addView(qrBox, qrLp);
+        }
+
+        TextView urlView = text(url, 14);
+        urlView.setTextColor(0xff7ec8ff);
+        urlView.setGravity(Gravity.CENTER);
+        content.addView(urlView, new LinearLayout.LayoutParams(-1, -2));
+        scroll.addView(content);
+
+        AlertDialog.Builder builder =
+                new AlertDialog.Builder(this)
+                        .setTitle(title)
+                        .setView(scroll)
+                        .setPositiveButton(
+                                "浏览器打开",
+                                new DialogInterface.OnClickListener() {
+                                    public void onClick(DialogInterface dialog, int which) {
+                                        if (activeOfficialNoticeDialog == dialog) {
+                                            activeOfficialNoticeDialog = null;
+                                        }
+                                        try {
+                                            Intent intent =
+                                                    new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                                            startActivity(intent);
+                                        } catch (Throwable ex) {
+                                            if (status != null) {
+                                                status.setText(
+                                                        "当前设备未安装可用浏览器，请手机扫码或手动访问：" + url);
+                                            }
+                                        }
+                                    }
+                                })
+                        .setNegativeButton(
+                                "关闭",
+                                new DialogInterface.OnClickListener() {
+                                    public void onClick(DialogInterface dialog, int which) {
+                                        if (activeOfficialNoticeDialog == dialog) {
+                                            activeOfficialNoticeDialog = null;
+                                        }
+                                    }
+                                })
+                        .setOnCancelListener(
+                                new DialogInterface.OnCancelListener() {
+                                    public void onCancel(DialogInterface dialog) {
+                                        if (activeOfficialNoticeDialog == dialog) {
+                                            activeOfficialNoticeDialog = null;
+                                        }
+                                    }
+                                });
+        try {
+            activeOfficialNoticeDialog = builder.show();
+        } catch (Throwable ignored) {
+            activeOfficialNoticeDialog = null;
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    void settingsPage() {
+        base("设置与联系反馈");
+        currentPageKind = "settings";
+        status.setText("Marco Movie Lite " + appVersionLabel() + " · 联系反馈作者、官方渠道与播放设置");
+
+        addSectionHeader("联系反馈作者与官方渠道");
+        LinearLayout infoCard = new LinearLayout(this);
+        infoCard.setOrientation(LinearLayout.VERTICAL);
+        infoCard.setPadding(dp(16), dp(12), dp(16), dp(12));
+        GradientDrawable cardBg = new GradientDrawable();
+        cardBg.setColor(COLOR_CARD);
+        cardBg.setCornerRadius(dp(12));
+        cardBg.setStroke(dp(1), COLOR_BORDER);
+        infoCard.setBackgroundDrawable(cardBg);
+
+        TextView socialTitle = text("联系反馈作者（各社媒账号名）", 14);
+        socialTitle.setTextColor(COLOR_MUTED);
+        socialTitle.setPadding(0, dp(2), 0, dp(2));
+        infoCard.addView(socialTitle);
+
+        TextView socialValue = text(AUTHOR_SOCIAL_DISPLAY, 16);
+        socialValue.setTypeface(null, Typeface.BOLD);
+        socialValue.setPadding(0, dp(2), 0, dp(8));
+        infoCard.addView(socialValue);
+
+        TextView siteLine = text("Marco官网：" + OFFICIAL_SITE_DISPLAY, 15);
+        siteLine.setPadding(0, dp(2), 0, dp(4));
+        infoCard.addView(siteLine);
+
+        TextView groupLine = text("官网交流群链接：" + OFFICIAL_GROUP_URL, 14);
+        groupLine.setTextColor(0xff7ec8ff);
+        groupLine.setPadding(0, dp(2), 0, dp(8));
+        infoCard.addView(groupLine);
+
+        TextView warnLine = text(OFFICIAL_WARNING_TEXT, 14);
+        warnLine.setTextColor(0xffffd166);
+        warnLine.setPadding(0, dp(2), 0, dp(2));
+        infoCard.addView(warnLine);
+
+        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(-1, -2);
+        cardLp.setMargins(dp(4), dp(4), dp(4), dp(8));
+        page.addView(infoCard, cardLp);
+
+        List<View> contactBtns = new ArrayList<View>();
+        contactBtns.add(
+                makeActionButton(
+                        "官网交流群链接",
+                        true,
+                        new Runnable() {
+                            public void run() {
+                                openOfficialLinkOrQr(
+                                        "官网交流群链接",
+                                        OFFICIAL_GROUP_URL,
+                                        "手机扫码即可打开官网交流群页面，或点击“浏览器打开”。");
+                            }
+                        }));
+        contactBtns.add(
+                makeActionButton(
+                        "打开 Marco 官网",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                openOfficialLinkOrQr(
+                                        "Marco 官网",
+                                        OFFICIAL_SITE_URL,
+                                        "手机扫码访问 Marco 官网获取正版更新，或点击“浏览器打开”。");
+                            }
+                        }));
+        contactBtns.add(
+                makeActionButton(
+                        "查看首次启动官方声明",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                showOfficialNoticeDialog(false);
+                            }
+                        }));
+        addGridViews(page, contactBtns, isTvOrLandscape() ? 3 : 2, 46);
+
+        addSectionHeader("播放与系统设置");
+        List<View> settingBtns = new ArrayList<View>();
+        int proxyMode = getPreferences(0).getInt("proxy_mode", LiteMediaProxy.MODE_AUTO);
+        settingBtns.add(
+                makeActionButton(
+                        "HTTPS代理：" + proxyModeLabel(proxyMode),
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                int next =
+                                        (getPreferences(0)
+                                                        .getInt(
+                                                                "proxy_mode",
+                                                                LiteMediaProxy.MODE_AUTO)
+                                                + 1)
+                                                % 3;
+                                getPreferences(0).edit().putInt("proxy_mode", next).commit();
+                                settingsPage();
+                            }
+                        }));
+        if (PlayerFactory.hasCandidate()) {
+            settingBtns.add(
+                    makeActionButton(
+                            getPreferences(0).getBoolean("experimental_decoder", false)
+                                    ? "解码：IJK 实验版"
+                                    : "解码：系统",
+                            false,
+                            new Runnable() {
+                                public void run() {
+                                    getPreferences(0)
+                                            .edit()
+                                            .putBoolean(
+                                                    "experimental_decoder",
+                                                    !getPreferences(0)
+                                                            .getBoolean(
+                                                                    "experimental_decoder", false))
+                                            .commit();
+                                    settingsPage();
+                                }
+                            }));
+        }
+        settingBtns.add(
+                makeActionButton(
+                        "手机扫码配置",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                configure();
+                            }
+                        }));
+        settingBtns.add(
+                makeActionButton(
+                        "多端网络同步",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                syncPage();
+                            }
+                        }));
+        settingBtns.add(
+                makeActionButton(
+                        "无线投屏",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                castPage();
+                            }
+                        }));
+        if (!sites.isEmpty()) {
+            settingBtns.add(
+                    makeActionButton(
+                            "管理线路",
+                            false,
+                            new Runnable() {
+                                public void run() {
+                                    manageSites();
+                                }
+                            }));
+        }
+        settingBtns.add(
+                makeActionButton(
+                        "重置观看历史",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                confirmResetWatchHistory(
+                                        "重置观看历史？",
+                                        null,
+                                        new Runnable() {
+                                            public void run() {
+                                                status.setText("已重置观看历史，本地损坏备份已继续保留。");
+                                            }
+                                        });
+                            }
+                        }));
+        settingBtns.add(
+                makeActionButton(
+                        "返回片库",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                home();
+                            }
+                        }));
+        addGridViews(page, settingBtns, isTvOrLandscape() ? 3 : 2, 46);
     }
 
     boolean isWebdavConfigured() {
@@ -8653,6 +9070,7 @@ public final class LiteActivity extends Activity {
         cancelSlowPrepareTimer();
         dismissActiveInPlayerDialog();
         dismissActiveRecordSourceDialog();
+        dismissActiveOfficialNoticeDialog();
         cancelWork();
         closePairing();
         stopCastServer();

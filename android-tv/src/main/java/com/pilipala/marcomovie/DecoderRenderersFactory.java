@@ -10,12 +10,19 @@ import androidx.media3.common.C;
 import androidx.media3.common.ColorInfo;
 import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
+import androidx.media3.common.audio.AudioProcessor;
+import androidx.media3.common.util.Util;
+import androidx.media3.decoder.ffmpeg.FfmpegLibrary;
 import androidx.media3.exoplayer.DecoderReuseEvaluation;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlaybackException;
 import androidx.media3.exoplayer.FormatHolder;
 import androidx.media3.exoplayer.Renderer;
 import androidx.media3.exoplayer.RendererCapabilities;
+import androidx.media3.exoplayer.audio.AudioRendererEventListener;
+import androidx.media3.exoplayer.audio.AudioSink;
+import androidx.media3.exoplayer.audio.DefaultAudioSink;
+import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer;
 import androidx.media3.exoplayer.mediacodec.MediaCodecAdapter;
 import androidx.media3.exoplayer.mediacodec.MediaCodecInfo;
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector;
@@ -63,6 +70,240 @@ final class DecoderRenderersFactory extends DefaultRenderersFactory {
                 || lower.contains("ffmpeg")
                 || lower.contains("libvpx")
                 || lower.contains("dav1d");
+    }
+
+    /**
+     * Cinema/surround audio codecs (Dolby AC-3/E-AC-3/Atmos, DTS/DTS-HD/DTS:X, TrueHD) that AOSP
+     * does not decode natively and that many TV vendor OMX codecs (e.g. {@code
+     * OMX.amlogic.audio.decoder.ac3/eac3} on Xiaomi/Amlogic TVs) silently output as all-zero PCM
+     * when driven through standard Media3 AudioTrack PCM playback.
+     */
+    static boolean isCinemaAudioMime(String mime) {
+        if (mime == null || mime.isEmpty()) return false;
+        return MimeTypes.AUDIO_AC3.equals(mime)
+                || MimeTypes.AUDIO_E_AC3.equals(mime)
+                || MimeTypes.AUDIO_E_AC3_JOC.equals(mime)
+                || MimeTypes.AUDIO_DTS.equals(mime)
+                || MimeTypes.AUDIO_DTS_HD.equals(mime)
+                || MimeTypes.AUDIO_DTS_EXPRESS.equals(mime)
+                || MimeTypes.AUDIO_DTS_X.equals(mime)
+                || MimeTypes.AUDIO_TRUEHD.equals(mime);
+    }
+
+    static boolean isSilentOrUnreliableVendorAudioCodec(String codecName, String mime) {
+        if (codecName == null || codecName.isEmpty()) return false;
+        String lower = codecName.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("omx.amlogic.audio.") || lower.startsWith("c2.amlogic.audio.")) {
+            return true;
+        }
+        if (isCinemaAudioMime(mime)
+                && !lower.startsWith("omx.google.")
+                && !lower.startsWith("c2.android.")) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Optional package-private AudioProcessor hook for real-sink PCM verification on test devices.
+     * Always {@code null} during normal production playback.
+     */
+    static volatile AudioProcessor diagnosticAudioProcessor;
+
+    /**
+     * Returns whether bundled {@code FfmpegAudioRenderer} can actually handle {@code format}
+     * instead of returning {@code FORMAT_UNSUPPORTED_DRM} or {@code FORMAT_UNSUPPORTED_SUBTYPE}.
+     *
+     * <p>Encrypted tracks ({@code format.cryptoType != C.CRYPTO_TYPE_NONE} or non-null {@code
+     * drmInitData}) ALWAYS return {@code false}, even when {@code requiresSecureDecoder} is {@code
+     * false} (e.g. Widevine L3 / ClearKey), so platform decoders remain intact for DRM playback.
+     */
+    static boolean canFfmpegHandleAudioFormat(
+            Format format,
+            String queriedMime,
+            boolean requiresSecureDecoder,
+            boolean tunneling,
+            boolean ffmpegAvailable,
+            boolean ffmpegSupportsMime,
+            boolean sinkSupportsPcm) {
+        if (format == null
+                || requiresSecureDecoder
+                || tunneling
+                || !ffmpegAvailable
+                || !ffmpegSupportsMime
+                || !sinkSupportsPcm) {
+            return false;
+        }
+        if (format.cryptoType != C.CRYPTO_TYPE_NONE || format.drmInitData != null) {
+            return false;
+        }
+        String effectiveMime =
+                (queriedMime != null && !queriedMime.isEmpty())
+                        ? queriedMime
+                        : format.sampleMimeType;
+        return effectiveMime != null && effectiveMime.startsWith("audio/");
+    }
+
+    /**
+     * Format-aware audio decoder filter: drops silent/unreliable vendor OMX audio decoders ONLY
+     * when {@link #canFfmpegHandleAudioFormat} confirms the bundled FFmpeg renderer can decode
+     * this exact clear track to a supported PCM sink format.
+     */
+    static List<MediaCodecInfo> filterAudioDecodersForFormat(
+            Format format,
+            String queriedMime,
+            List<MediaCodecInfo> raw,
+            boolean requiresSecureDecoder,
+            boolean tunneling,
+            boolean ffmpegAvailable,
+            boolean ffmpegSupportsMime,
+            boolean sinkSupportsPcm) {
+        if (!canFfmpegHandleAudioFormat(
+                format,
+                queriedMime,
+                requiresSecureDecoder,
+                tunneling,
+                ffmpegAvailable,
+                ffmpegSupportsMime,
+                sinkSupportsPcm)) {
+            return raw;
+        }
+        String effectiveMime =
+                (queriedMime != null && !queriedMime.isEmpty())
+                        ? queriedMime
+                        : format.sampleMimeType;
+        return filterAudioDecodersForFfmpegFallback(effectiveMime, raw, tunneling, true);
+    }
+
+    /**
+     * Filters out vendor OMX/Codec2 audio decoders known to emit silent all-zero PCM on Android TV
+     * devices whenever the bundled FFmpeg audio extension can decode {@code mime} cleanly to PCM.
+     */
+    static List<MediaCodecInfo> filterAudioDecodersForFfmpegFallback(
+            String mime, List<MediaCodecInfo> raw, boolean tunneling, boolean ffmpegSupportsMime) {
+        if (tunneling
+                || !ffmpegSupportsMime
+                || mime == null
+                || !mime.startsWith("audio/")
+                || raw == null
+                || raw.isEmpty()) {
+            return raw;
+        }
+        List<MediaCodecInfo> filtered = new ArrayList<>(raw.size());
+        for (MediaCodecInfo codec : raw) {
+            if (codec != null && !isSilentOrUnreliableVendorAudioCodec(codec.name, mime)) {
+                filtered.add(codec);
+            }
+        }
+        return filtered;
+    }
+
+    @Override
+    protected AudioSink buildAudioSink(
+            Context context, boolean enableFloatOutput, boolean enableAudioTrackPlaybackParams) {
+        AudioProcessor diag = diagnosticAudioProcessor;
+        if (diag == null) {
+            return super.buildAudioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams);
+        }
+        return new DefaultAudioSink.Builder(context)
+                .setEnableFloatOutput(enableFloatOutput)
+                .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                .setAudioProcessors(new AudioProcessor[] {diag})
+                .build();
+    }
+
+    @Override
+    protected void buildAudioRenderers(
+            Context context,
+            int extensionRendererMode,
+            MediaCodecSelector mediaCodecSelector,
+            boolean enableDecoderFallback,
+            AudioSink audioSink,
+            Handler eventHandler,
+            AudioRendererEventListener eventListener,
+            ArrayList<Renderer> out) {
+        super.buildAudioRenderers(
+                context,
+                extensionRendererMode,
+                mediaCodecSelector,
+                enableDecoderFallback,
+                audioSink,
+                eventHandler,
+                eventListener,
+                out);
+        final boolean ffmpegExtensionEnabled = extensionRendererMode != EXTENSION_RENDERER_MODE_OFF;
+        MediaCodecAudioRenderer drmAwareAudioRenderer =
+                new MediaCodecAudioRenderer(
+                        context,
+                        getCodecAdapterFactory(),
+                        mediaCodecSelector,
+                        enableDecoderFallback,
+                        eventHandler,
+                        eventListener,
+                        audioSink) {
+                    private MediaCodecSelector wrapForFormat(
+                            final MediaCodecSelector delegate, final Format format) {
+                        return (mime, secure, tunneling) -> {
+                            List<MediaCodecInfo> raw =
+                                    delegate.getDecoderInfos(mime, secure, tunneling);
+                            boolean sinkSupportsPcm =
+                                    format != null
+                                            && (audioSink.supportsFormat(
+                                                            Util.getPcmFormat(
+                                                                    C.ENCODING_PCM_16BIT,
+                                                                    format.channelCount,
+                                                                    format.sampleRate))
+                                                    || audioSink.supportsFormat(
+                                                            Util.getPcmFormat(
+                                                                    C.ENCODING_PCM_FLOAT,
+                                                                    format.channelCount,
+                                                                    format.sampleRate)));
+                            boolean ffmpegAvail =
+                                    ffmpegExtensionEnabled && FfmpegLibrary.isAvailable();
+                            String checkMime =
+                                    (format != null
+                                                    && format.sampleMimeType != null
+                                                    && !format.sampleMimeType.isEmpty())
+                                            ? format.sampleMimeType
+                                            : mime;
+                            boolean ffmpegSupports =
+                                    ffmpegAvail
+                                            && FfmpegLibrary.supportsFormat(checkMime)
+                                            && FfmpegLibrary.supportsFormat(mime);
+                            return filterAudioDecodersForFormat(
+                                    format,
+                                    mime,
+                                    raw,
+                                    secure,
+                                    tunneling,
+                                    ffmpegAvail,
+                                    ffmpegSupports,
+                                    sinkSupportsPcm);
+                        };
+                    }
+
+                    @Override
+                    protected int supportsFormat(MediaCodecSelector selector, Format format)
+                            throws MediaCodecUtil.DecoderQueryException {
+                        return super.supportsFormat(wrapForFormat(selector, format), format);
+                    }
+
+                    @Override
+                    protected List<MediaCodecInfo> getDecoderInfos(
+                            MediaCodecSelector selector,
+                            Format format,
+                            boolean requiresSecureDecoder)
+                            throws MediaCodecUtil.DecoderQueryException {
+                        return super.getDecoderInfos(
+                                wrapForFormat(selector, format), format, requiresSecureDecoder);
+                    }
+                };
+        for (int i = 0; i < out.size(); i++) {
+            if (out.get(i) instanceof MediaCodecAudioRenderer) {
+                out.set(i, drmAwareAudioRenderer);
+                break;
+            }
+        }
     }
 
     private static boolean isDolbyVisionConfigRecord(byte[] buf) {

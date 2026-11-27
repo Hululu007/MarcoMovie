@@ -1,6 +1,9 @@
 import 'dart:async';
+import '../core/curated_discovery.dart';
 import '../core/emby_library.dart';
+import '../core/media_library_connectors.dart';
 import '../core/catpaw_host.dart';
+import '../core/ohos_runtime.dart';
 import '../core/series_scraper.dart';
 import 'dart:collection';
 import 'dart:convert';
@@ -10,6 +13,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
+import 'package:path_provider/path_provider.dart';
 
 /// Real per-episode metadata resolved from open domestic encyclopedias & media APIs
 /// (360 Baike `tvplot`, Bilibili PGC `media_bangumi`/`media_ft`, and Bangumi `/v0/episodes`).
@@ -121,14 +125,22 @@ class PosterLoader {
       'buvid3=58D32EBE-894C-69EE-AE53-607BE1EC3CC597728infoc; b_nut=1793900397';
   static const int _maxImageBytes = 15 * 1024 * 1024;
   static const int _maxMemoryBytes = 112 * 1024 * 1024;
+  static const int _maxPrivateMemoryBytes = 32 * 1024 * 1024;
+  static const int _defaultMaxDiskBytes = 100 * 1024 * 1024;
   static const int _maxConcurrent = 32;
 
-  static final HttpClient _client = HttpClient()
+  static final HttpClient _defaultClient = HttpClient()
     ..connectionTimeout = const Duration(milliseconds: 3200)
     ..idleTimeout = const Duration(seconds: 25)
     ..maxConnectionsPerHost = 18
     ..userAgent = null
     ..autoUncompress = true;
+
+  @visibleForTesting
+  static HttpClient Function()? debugHttpClientFactory;
+
+  static HttpClient get _client =>
+      debugHttpClientFactory?.call() ?? _defaultClient;
 
   /// Increments whenever any poster image bytes are written into [_memory].
   /// Active [PosterImage] widgets listen to this notifier so scrolling lists
@@ -142,6 +154,10 @@ class PosterLoader {
   static final LinkedHashMap<String, Uint8List> _memory =
       LinkedHashMap<String, Uint8List>();
   static int _memoryBytes = 0;
+  static final LinkedHashMap<String, Uint8List> _privateMemory =
+      LinkedHashMap<String, Uint8List>();
+  static int _privateMemoryBytes = 0;
+  static final Map<String, Future<Uint8List>> _inflightPrivate = {};
   static final Map<String, Set<VoidCallback>> _keyListeners = {};
   static final Map<String, String> _cleanTitleMemo = {};
   static final Map<String, Future<Uint8List>> _inflight = {};
@@ -173,10 +189,85 @@ class PosterLoader {
   static final Map<int, bool> _clearDimensionCache = LruMap(500);
   static int _active = 0;
   static final Queue<Completer<void>> _waiters = Queue<Completer<void>>();
+  static const int _maxScrapeConcurrent = 6;
+  static int _activeScrape = 0;
+  static final Queue<Completer<void>> _scrapeWaiters =
+      Queue<Completer<void>>();
   static Directory? _diskDir;
+  static Future<Directory?>? _diskInitFuture;
   static bool _diskReady = false;
+  static bool _startupDiskPruned = false;
   static bool _legacyDiskCleaned = false;
+  static int _diskWritesSincePrune = 0;
+  static int _privateCacheEpoch = 0;
+  static Future<void>? _pruneInFlight;
   static final math.Random _rng = math.Random();
+
+  @visibleForTesting
+  static Directory? debugDiskDirOverride;
+
+  @visibleForTesting
+  static int debugDiskMaxBytesOverride = 0;
+
+  @visibleForTesting
+  static Future<Uint8List> Function(String url)? debugPrivateFetcherOverride;
+
+  @visibleForTesting
+  static int get privateMemoryCount => _privateMemory.length;
+
+  @visibleForTesting
+  static int get publicMemoryCount => _memory.length;
+
+  static int get _effectiveMaxDiskBytes =>
+      debugDiskMaxBytesOverride > 0
+          ? debugDiskMaxBytesOverride
+          : _defaultMaxDiskBytes;
+
+  @visibleForTesting
+  static void resetDiskCacheConfigForTest() {
+    debugDiskDirOverride = null;
+    debugDiskMaxBytesOverride = 0;
+    debugPrivateFetcherOverride = null;
+    _diskDir = null;
+    _diskInitFuture = null;
+    _diskReady = false;
+    _startupDiskPruned = false;
+    _diskWritesSincePrune = 0;
+    _pruneInFlight = null;
+  }
+
+  /// Clears ONLY the memory-only private poster bucket and advances
+  /// `_privateCacheEpoch` so any late in-flight private fetch can never
+  /// repopulate `_privateMemory` after Privacy Space is locked.
+  static void clearPrivateCache() {
+    _privateCacheEpoch++;
+    _privateMemory.clear();
+    _privateMemoryBytes = 0;
+    _inflightPrivate.clear();
+    _keyListeners.removeWhere((k, _) => k.startsWith('private:'));
+    cacheRevision.value++;
+  }
+
+  static void _rememberPrivate(String key, Uint8List bytes) {
+    if (key.isEmpty) return;
+    final old = _privateMemory.remove(key);
+    if (old != null) _privateMemoryBytes -= old.length;
+    _privateMemory[key] = bytes;
+    _privateMemoryBytes += bytes.length;
+    while (_privateMemoryBytes > _maxPrivateMemoryBytes &&
+        _privateMemory.isNotEmpty) {
+      final oldestKey = _privateMemory.keys.first;
+      final removed = _privateMemory.remove(oldestKey);
+      if (removed != null) _privateMemoryBytes -= removed.length;
+    }
+    final keyCallbacks = _keyListeners[key];
+    if (keyCallbacks != null && keyCallbacks.isNotEmpty) {
+      for (final cb in List<VoidCallback>.of(keyCallbacks)) {
+        cb();
+      }
+    }
+    cacheRevision.value++;
+  }
 
   static void addKeyListener(String key, VoidCallback listener) {
     if (key.isEmpty) return;
@@ -210,10 +301,48 @@ class PosterLoader {
     return '${mb.toStringAsFixed(1)} MB (${_memory.length} 张)';
   }
 
-  /// Clears both in-memory LRU cache and on-disk temporary poster files.
+  /// Computes a Retina-sharp, quantized target decode width (`cacheWidth`) on
+  /// iOS / iPadOS so scrolling 120 Hz poster grids (`highRes: true`) never
+  /// decode and upload raw 2000×3000 (~24 MB RGBA) textures for 125pt cards,
+  /// while preserving crisp 3× Retina quality (`allowUpscaling: false`).
+  @visibleForTesting
+  static int? resolveIosDecodeWidth({
+    required double maxWidth,
+    required double maxHeight,
+    required double devicePixelRatio,
+    required bool isHeroOrStrictHd,
+    bool isLandscape = false,
+  }) {
+    final hasFiniteW = maxWidth.isFinite && maxWidth > 0;
+    final hasFiniteH = maxHeight.isFinite && maxHeight > 0;
+    if (!hasFiniteW && !hasFiniteH) {
+      return isHeroOrStrictHd ? 1440 : 720;
+    }
+    final dpr = devicePixelRatio.clamp(1.0, 3.0);
+    final aspectCoverFactor = isLandscape ? 1.78 : 0.72;
+    double effectiveLogicalW = hasFiniteW ? maxWidth : (maxHeight * aspectCoverFactor);
+    if (hasFiniteH && maxHeight * aspectCoverFactor > effectiveLogicalW) {
+      effectiveLogicalW = maxHeight * aspectCoverFactor;
+    }
+    final rawPx = (effectiveLogicalW * dpr).ceil();
+    if (isLandscape) {
+      final bucket = ((rawPx + 239) ~/ 240) * 240;
+      return bucket.clamp(480, 1920);
+    }
+    if (isHeroOrStrictHd || effectiveLogicalW >= 260) {
+      final bucket = ((rawPx + 239) ~/ 240) * 240;
+      return bucket.clamp(720, 1680);
+    }
+    final bucket = ((rawPx + 179) ~/ 180) * 180;
+    return bucket.clamp(360, 1080);
+  }
+
+  /// Clears both in-memory LRU cache, private poster memory bucket, and
+  /// on-disk rebuildable poster cache files.
   static Future<void> clearCache() async {
     _memory.clear();
     _memoryBytes = 0;
+    clearPrivateCache();
     _cleanTitleMemo.clear();
     _titleCoverUrlsCache.clear();
     _landscapeCoverUrlsCache.clear();
@@ -233,25 +362,90 @@ class PosterLoader {
     _clearDimensionCache.clear();
     cacheRevision.value++;
     metadataRevision.value++;
-    for (final folder in const [
-      'marco_poster_cache_v6',
-      'marco_poster_cache_v5',
-      'marco_poster_cache_v4',
-    ]) {
-      try {
-        final dir = Directory(
-          '${Directory.systemTemp.path}${Platform.pathSeparator}$folder',
+    final isTestEnv = !kIsWeb && Platform.environment.containsKey('FLUTTER_TEST');
+    if (isTestEnv) {
+      // Under Flutter tests, ONLY clear the active test cache root (explicit
+      // `debugDiskDirOverride`, active `_diskDir`, or this process's PID-scoped
+      // test folder) so unrelated legacy `marco_poster_cache_v*` directories in
+      // TEMP/TMP are never touched.
+      final testDirs = <Directory>[
+        if (debugDiskDirOverride != null) debugDiskDirOverride!,
+        if (_diskDir != null) _diskDir!,
+      ];
+      if (testDirs.isEmpty) {
+        testDirs.add(
+          Directory(
+            '${Directory.systemTemp.path}${Platform.pathSeparator}marco_poster_cache_v7_test_$pid',
+          ),
         );
-        if (await dir.exists()) {
-          await for (final entity in dir.list()) {
-            if (entity is File) {
-              try {
-                await entity.delete();
-              } catch (_) {}
+      }
+      final seenPaths = <String>{};
+      for (final dir in testDirs) {
+        if (!seenPaths.add(dir.path)) continue;
+        try {
+          if (await dir.exists()) {
+            await for (final entity in dir.list()) {
+              if (entity is File) {
+                try {
+                  await entity.delete();
+                } catch (_) {}
+              }
             }
           }
-        }
+        } catch (_) {}
+      }
+      return;
+    }
+    final candidateRoots = <String>{Directory.systemTemp.path};
+    if (_diskDir != null) {
+      candidateRoots.add(_diskDir!.parent.path);
+    }
+    if (debugDiskDirOverride != null) {
+      candidateRoots.add(debugDiskDirOverride!.parent.path);
+    }
+    if (!kIsWeb) {
+      try {
+        final caches = await getApplicationCacheDirectory();
+        candidateRoots.add(caches.path);
       } catch (_) {}
+      try {
+        final support = await getApplicationSupportDirectory();
+        candidateRoots.add(support.path);
+      } catch (_) {}
+    }
+    for (final root in candidateRoots) {
+      for (final folder in const [
+        'marco_poster_cache_v7',
+        'marco_poster_cache_v6',
+        'marco_poster_cache_v5',
+        'marco_poster_cache_v4',
+      ]) {
+        try {
+          final dir = Directory('$root${Platform.pathSeparator}$folder');
+          if (await dir.exists()) {
+            await for (final entity in dir.list()) {
+              if (entity is File) {
+                try {
+                  await entity.delete();
+                } catch (_) {}
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    }
+  }
+
+  /// Warms direct poster image URLs into memory and persistent disk cache
+  /// without triggering multi-site title scraping.
+  static void prefetchUrls(Iterable<String> urls, {int limit = 16}) {
+    var count = 0;
+    for (final raw in urls) {
+      if (count >= limit) break;
+      final u = raw.trim();
+      if (u.isEmpty || _isKnownDeadPosterHost(u)) continue;
+      count++;
+      unawaited(load(u).then<void>((_) {}, onError: (_) {}));
     }
   }
 
@@ -263,11 +457,10 @@ class PosterLoader {
     if (u.startsWith('http://lain.bgm.tv/')) {
       u = u.replaceFirst('http://', 'https://');
     }
-    if (u.contains('lain.bgm.tv/pic/cover/')) {
-      u = u.replaceFirst(
-        RegExp(r'/pic/cover/[csgm]/'),
-        '/pic/cover/l/',
-      );
+    if (u.contains('lain.bgm.tv/')) {
+      u = u
+          .replaceFirst(RegExp(r'/r/\d+/pic/cover/'), '/pic/cover/')
+          .replaceFirst(RegExp(r'/pic/cover/[csgm]/'), '/pic/cover/l/');
     } else if (u.contains('doubanio.com')) {
       if (u.contains('qnmob3-sign.doubanio.com') &&
           u.contains('/view/photo/large/public/')) {
@@ -291,12 +484,14 @@ class PosterLoader {
       if (u.endsWith('.webp')) {
         u = '${u.substring(0, u.length - 5)}.jpg';
       }
-    } else if (u.contains('hdslb.com') || u.contains('biliimg.com')) {
+    } else if (u.contains('hdslb.com') ||
+        u.contains('biliimg.com') ||
+        u.contains('meituan.net')) {
       if (u.startsWith('http://')) {
         u = u.replaceFirst('http://', 'https://');
       }
       final atResize = RegExp(
-        r'@(?:\d+[wh]|[^/?#]+\.(?:webp|jpg|jpeg|png|avif)).*$',
+        r'@(?:\d+[wh]|[^/?#]+\.(?:webp|jpg|jpeg|png|avif)|[^/?#]*[wh]_[^/?#]*).*$',
         caseSensitive: false,
       ).firstMatch(u);
       if (atResize != null) {
@@ -327,6 +522,25 @@ class PosterLoader {
           u = u.substring(0, qIdx);
         }
       }
+    }
+    return u;
+  }
+
+  /// Upgrades any Douban photo poster URL (`/s_ratio_poster/`, `/m_ratio_poster/`,
+  /// `/l_ratio_poster/`, `/sqxs/`, `/lpic/`) to the uncropped full-resolution
+  /// `/view/photo/l/` variant (typically `1080x1527`–`1080x1919`) for full-bleed
+  /// Retina Hero billboards.
+  @visibleForTesting
+  static String upgradeDoubanToOriginalLarge(String rawUrl) {
+    var u = upgradeUrlToHd(rawUrl);
+    if (!u.contains('doubanio.com')) return u;
+    u = u
+        .replaceFirst('/view/photo/l_ratio_poster/', '/view/photo/l/')
+        .replaceFirst('/view/photo/m_ratio_poster/', '/view/photo/l/')
+        .replaceFirst('/view/photo/s_ratio_poster/', '/view/photo/l/')
+        .replaceFirst('/view/photo/lpic/', '/view/photo/l/');
+    if (u.endsWith('.webp')) {
+      u = '${u.substring(0, u.length - 5)}.jpg';
     }
     return u;
   }
@@ -494,7 +708,11 @@ class PosterLoader {
     if (cNorm.isEmpty || tNorm.isEmpty) return false;
     if (cNorm == tNorm) return true;
 
-    if (tNorm.length >= 4 && (cNorm.startsWith(tNorm) || tNorm.startsWith(cNorm))) {
+    if (tNorm.length >= 4 &&
+        (cNorm.startsWith(tNorm) ||
+            tNorm.startsWith(cNorm) ||
+            cNorm.endsWith(tNorm) ||
+            tNorm.endsWith(cNorm))) {
       final shorter = cNorm.length < tNorm.length ? cNorm.length : tNorm.length;
       final longer = cNorm.length > tNorm.length ? cNorm.length : tNorm.length;
       if (shorter / longer >= 0.72) return true;
@@ -696,6 +914,197 @@ class PosterLoader {
       return cmp != 0 ? cmp : a.order.compareTo(b.order);
     });
     return (id: candidates.first.id, isTv: candidates.first.isTv);
+  }
+
+  /// Extracts verified `/movie/subject/{id}` candidates from Douban mobile web
+  /// search HTML (`https://m.douban.com/search/?query=...&type=movie`), strictly
+  /// filtering out `/book/subject/` and `/group/` sections and requiring work
+  /// title verification via [_isSameWorkTitle].
+  @visibleForTesting
+  static List<({String id, String title, String coverUrl})>
+      parseDoubanMobileSearchEntries(String html, String rawTitle) {
+    final cleanTitle = _cleanTitle(rawTitle);
+    if (html.isEmpty || cleanTitle.isEmpty) return const [];
+    final out = <({String id, String title, String coverUrl})>[];
+    final seenIds = <String>{};
+    final anchorRe = RegExp(
+      r'<a\b[^>]*href="/movie/subject/(\d+)/?"[^>]*>([\s\S]*?)</a>',
+      caseSensitive: false,
+    );
+    final titleRe = RegExp(
+      r'<span\b[^>]*class="subject-title"[^>]*>([^<]+)</span>',
+      caseSensitive: false,
+    );
+    final imgRe = RegExp(
+      r'<img\b[^>]*src="(https?://[^"]+)"',
+      caseSensitive: false,
+    );
+    for (final m in anchorRe.allMatches(html)) {
+      final sid = (m.group(1) ?? '').trim();
+      if (sid.isEmpty || !seenIds.add(sid)) continue;
+      final inner = m.group(2) ?? '';
+      final rawItemTitle = (titleRe.firstMatch(inner)?.group(1) ?? '')
+          .replaceAll('&amp;', '&')
+          .replaceAll('&quot;', '"')
+          .replaceAll('&#39;', "'")
+          .replaceAll('&lt;', '<')
+          .replaceAll('&gt;', '>')
+          .trim();
+      if (rawItemTitle.isEmpty || !_isSameWorkTitle(rawItemTitle, cleanTitle)) {
+        continue;
+      }
+      final rawImg = (imgRe.firstMatch(inner)?.group(1) ?? '').trim();
+      final coverUrl =
+          (rawImg.startsWith('http') && !isPersonOrAvatarImageUrl(rawImg))
+              ? upgradeDoubanToOriginalLarge(rawImg)
+              : '';
+      out.add((id: sid, title: rawItemTitle, coverUrl: coverUrl));
+      if (out.length >= 6) break;
+    }
+    return out;
+  }
+
+  /// Resolves a verified Douban subject `{id, isTv}` and uncropped 1080p/2K
+  /// `/view/photo/l/` poster URLs using Douban mobile web search + Rexxar
+  /// subject detail verification when `subject_suggest` returns `[]` or
+  /// `rexxar/search` returns 403.
+  static Future<({String id, bool isTv, List<String> coverUrls})?>
+      _resolveDoubanMobileSearchSubject(
+    String cleanTitle, {
+    required int? targetYear,
+    required String bidCookie,
+  }) async {
+    final variants = _queryVariantsForTitle(cleanTitle);
+    final queries = variants.isNotEmpty ? variants.take(2) : <String>[cleanTitle];
+    List<({String id, String title, String coverUrl})> matched = const [];
+    for (final qv in queries) {
+      final html = await _getRatingTextUrl(
+        Uri.parse(
+          'https://m.douban.com/search/?query=${Uri.encodeQueryComponent(qv)}&type=movie',
+        ),
+        headers: {
+          'User-Agent': _mobileSafariUa,
+          'Referer': 'https://m.douban.com/',
+          'Cookie': bidCookie,
+          'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+        },
+        timeout: const Duration(milliseconds: 2800),
+      );
+      if (html == null || html.isEmpty) continue;
+      matched = parseDoubanMobileSearchEntries(html, cleanTitle);
+      if (matched.isNotEmpty) break;
+    }
+    if (matched.isEmpty) return null;
+
+    Future<({String id, bool isTv, int? year, String detailCover, int order})?>
+        probeDetail(
+      ({String id, String title, String coverUrl}) entry,
+      int order,
+    ) async {
+      final detailHeaders = {
+        'User-Agent': _mobileSafariUa,
+        'Referer': 'https://m.douban.com/movie/subject/${entry.id}/',
+        'Cookie': bidCookie,
+        'Accept': 'application/json, text/plain, */*',
+      };
+      for (final kind in const ['movie', 'tv']) {
+        final body = await _getRatingTextUrl(
+          Uri.parse('https://m.douban.com/rexxar/api/v2/$kind/${entry.id}'),
+          headers: detailHeaders,
+          timeout: const Duration(milliseconds: 2400),
+        );
+        if (body == null || body.isEmpty) continue;
+        try {
+          final decoded = jsonDecode(body);
+          if (decoded is! Map) continue;
+          final dTitle = (decoded['title'] ?? '').toString().trim();
+          if (dTitle.isNotEmpty && !_isSameWorkTitle(dTitle, cleanTitle)) {
+            return null;
+          }
+          final dYear = int.tryParse((decoded['year'] ?? '').toString().trim());
+          final dType = (decoded['type'] ?? kind).toString().toLowerCase();
+          final pic = decoded['pic'];
+          final rawLarge = (pic is Map
+                  ? (pic['large'] ?? pic['normal'] ?? '')
+                  : (decoded['cover_url'] ?? ''))
+              .toString()
+              .trim();
+          final detailCover =
+              (rawLarge.startsWith('http') && !isPersonOrAvatarImageUrl(rawLarge))
+                  ? upgradeDoubanToOriginalLarge(rawLarge)
+                  : '';
+          return (
+            id: entry.id,
+            isTv: dType == 'tv',
+            year: dYear,
+            detailCover: detailCover,
+            order: order,
+          );
+        } catch (_) {}
+      }
+      return null;
+    }
+
+    final toCheck = matched.take(3).toList(growable: false);
+    final details = await Future.wait([
+      for (var i = 0; i < toCheck.length; i++) probeDetail(toCheck[i], i),
+    ]);
+
+    ({String id, bool isTv, int score, int order, String detailCover, String searchCover})?
+        best;
+    for (var i = 0; i < toCheck.length; i++) {
+      final entry = toCheck[i];
+      final detail = details[i];
+      final candYear = detail?.year;
+      var score = 10;
+      if (targetYear != null) {
+        if (candYear != null) {
+          final diff = (candYear - targetYear).abs();
+          if (diff >= 2) continue;
+          score = diff == 0 ? 100 : 50;
+        } else {
+          score = 5;
+        }
+      } else if (candYear != null) {
+        score = 20;
+      }
+      final cand = (
+        id: entry.id,
+        isTv: detail?.isTv ?? false,
+        score: score,
+        order: i,
+        detailCover: detail?.detailCover ?? '',
+        searchCover: entry.coverUrl,
+      );
+      if (best == null ||
+          cand.score > best.score ||
+          (cand.score == best.score && cand.order < best.order)) {
+        best = cand;
+      }
+    }
+
+    if (best == null) {
+      // Only fall back to the first search match when we have no target year
+      // or detail lookup failed for every candidate.
+      if (targetYear != null && details.any((d) => d != null)) {
+        return null;
+      }
+      final first = matched.first;
+      return (
+        id: first.id,
+        isTv: false,
+        coverUrls: first.coverUrl.isNotEmpty
+            ? <String>[first.coverUrl]
+            : const <String>[],
+      );
+    }
+
+    final urls = <String>[];
+    if (best.detailCover.isNotEmpty) urls.add(best.detailCover);
+    if (best.searchCover.isNotEmpty && !urls.contains(best.searchCover)) {
+      urls.add(best.searchCover);
+    }
+    return (id: best.id, isTv: best.isTv, coverUrls: urls);
   }
 
   /// Extracts the highest-scoring verified Douban `{id, isTv, coverUrl}` from
@@ -1078,8 +1487,8 @@ class PosterLoader {
     if (dims != null) {
       final isVerticalHeroHd =
           dims.height >= dims.width * 1.05 &&
-          dims.width >= 640 &&
-          dims.height >= 900;
+          dims.width >= 720 &&
+          dims.height >= 1000;
       final isUltraHighRes = dims.width >= 1200 && dims.height >= 900;
       final ok = isVerticalHeroHd || isUltraHighRes;
       _heroHdDimensionCache[fp] = ok;
@@ -1109,8 +1518,20 @@ class PosterLoader {
     String title = '',
     String year = '',
     bool preferHd = false,
+    bool isPrivate = false,
   }) {
-    if (EmbyLibrary.isImage(rawUrl)) return _memory[rawUrl];
+    if (isPrivate) {
+      final privKey = 'private:${rawUrl.trim()}';
+      final hit = _privateMemory.remove(privKey);
+      if (hit != null) {
+        _privateMemory[privKey] = hit;
+      }
+      return hit;
+    }
+    if (EmbyLibrary.isImage(rawUrl) ||
+        ExternalMediaLibrary.isPrivateImage(rawUrl)) {
+      return _memory[rawUrl];
+    }
     final clean = _cleanTitle(title);
     final targetYear = _extractTargetYear(title, year);
     final wantMc = _isMotionComicTitle(title);
@@ -1197,8 +1618,43 @@ class PosterLoader {
     String raw, {
     String title = '',
     String year = '',
+    bool isPrivate = false,
   }) {
-    if (EmbyLibrary.isImage(raw)) {
+    if (isPrivate) {
+      final trimmed = raw.trim();
+      if (trimmed.isEmpty) {
+        return Future<Uint8List>.error(const FormatException('空私密海报地址'));
+      }
+      final privKey = 'private:$trimmed';
+      final cached = _privateMemory[privKey];
+      if (cached != null) return SynchronousFuture<Uint8List>(cached);
+      final pendingPriv = _inflightPrivate[privKey];
+      if (pendingPriv != null) return pendingPriv;
+      final capturedEpoch = _privateCacheEpoch;
+      late final Future<Uint8List> fut;
+      fut = () async {
+        final fetcher = debugPrivateFetcherOverride;
+        final bytes = fetcher != null
+            ? await fetcher(trimmed)
+            : await _tryPrimaryUrlAttempts(
+                trimmed,
+                maxAttempts: 2,
+                perAttemptTimeout: const Duration(milliseconds: 4500),
+              );
+        if (capturedEpoch != _privateCacheEpoch) {
+          throw StateError('私密空间已锁定，已丢弃迟到的私密海报响应');
+        }
+        _rememberPrivate(privKey, bytes);
+        return bytes;
+      }().whenComplete(() {
+        if (identical(_inflightPrivate[privKey], fut)) {
+          _inflightPrivate.remove(privKey);
+        }
+      });
+      _inflightPrivate[privKey] = fut;
+      return fut;
+    }
+    if (EmbyLibrary.isImage(raw) || ExternalMediaLibrary.isPrivateImage(raw)) {
       final cached = _memory[raw];
       if (cached != null) return SynchronousFuture(cached);
       return _inflight.putIfAbsent(raw, () => _fetch(raw, const {}, timeout: const Duration(seconds: 8))
@@ -1317,10 +1773,12 @@ class PosterLoader {
       }
 
       // Stage 1: Official verified film/TV poster databases (Douban official
-      // poster gallery + l_ratio_poster, Bangumi, Baidu Baike, Bilibili PGC).
+      // mobile web search + /view/photo/l/ + l_ratio_poster, Bangumi, Baidu
+      // Baike, Bilibili PGC). Also prioritize direct uncropped Douban `/l/`
+      // upgrade when the CMS already supplied a Douban photo URL.
       final resolvedYear =
           year.isNotEmpty ? year : (targetYear?.toString() ?? '');
-      final verifiedUrls = await _resolveCoverUrlsByTitle(
+      final rawVerifiedUrls = await _resolveCoverUrlsByTitle(
         rawTitle,
         year: resolvedYear,
         forceRefreshHd: true,
@@ -1328,6 +1786,25 @@ class PosterLoader {
         includeDoubanPosterGallery: strictHero,
         wantMotionComic: wantMc,
       );
+      final verifiedUrls = <String>[];
+      final seenProbeUrls = <String>{};
+      if (strictHero && hasValidCmsUrl && rawUrl.contains('doubanio.com')) {
+        final directLarge = upgradeDoubanToOriginalLarge(rawUrl);
+        if (directLarge.startsWith('http') &&
+            !isPersonOrAvatarImageUrl(directLarge) &&
+            seenProbeUrls.add(directLarge)) {
+          verifiedUrls.add(directLarge);
+        }
+      }
+      for (final u in rawVerifiedUrls) {
+        final candidate =
+            strictHero && u.contains('doubanio.com')
+                ? upgradeDoubanToOriginalLarge(u)
+                : u;
+        if (seenProbeUrls.add(candidate)) {
+          verifiedUrls.add(candidate);
+        }
+      }
 
       Uint8List? bestBytes;
       int bestScore = 0;
@@ -1360,7 +1837,7 @@ class PosterLoader {
             final isSharp = strictHero
                 ? (await isHeroHdPoster(bestBytes!) &&
                     (bestDims == null ||
-                        (bestDims.width >= 720 && bestDims.height >= 1000)))
+                        (bestDims.width >= 960 && bestDims.height >= 1320)))
                 : await isTrueHdPoster(bestBytes!);
             if (isSharp) {
               return true;
@@ -2059,6 +2536,17 @@ class PosterLoader {
           );
           if (found != null) {
             subject = (id: found.id, isTv: found.isTv);
+          }
+        }
+        if (subject == null) {
+          final mobileMatched = await _resolveDoubanMobileSearchSubject(
+            cleanTitle,
+            targetYear: targetYear,
+            bidCookie: bidCookie,
+          );
+          if (mobileMatched != null) {
+            subject = (id: mobileMatched.id, isTv: mobileMatched.isTv);
+            _doubanSubjectIdCache[scoped] = subject;
           }
         }
         if (subject != null) {
@@ -2898,6 +3386,7 @@ class PosterLoader {
   /// 3. Bangumi Official Open API (`api.bgm.tv/v0/episodes`)
   static Future<Map<int, EpisodeRealMeta>> fetchSeriesEpisodeMetadata(
     String rawTitle, {
+    bool forceRefresh = false,
     String year = '',
     bool? wantMotionComic,
   }) {
@@ -2909,6 +3398,12 @@ class PosterLoader {
     final wantMc = wantMotionComic ?? _isMotionComicTitle(rawTitle);
     final scoped = _scopedTitleToken(clean, targetYear, isMotionComic: wantMc);
     final epCacheKey = _episodeCacheKey(clean, wantMc);
+    if (forceRefresh) {
+      _seriesEpisodeMetaCache.remove(epCacheKey);
+      _seriesEpisodeMetaCache.remove(clean);
+      _inflightEpisodeMeta.remove(scoped);
+      _inflightEpisodeMeta.remove(clean);
+    }
     final cached = _seriesEpisodeMetaCache[epCacheKey];
     if (cached != null && cached.isNotEmpty) {
       return SynchronousFuture<Map<int, EpisodeRealMeta>>(cached);
@@ -3826,6 +4321,36 @@ class PosterLoader {
       }
     }
 
+    await _acquireScrape();
+    try {
+      return await _resolveCoverUrlsByTitleGuarded(
+        rawTitle,
+        cleanTitle: cleanTitle,
+        targetYear: targetYear,
+        wantMc: wantMc,
+        scopedKey: scopedKey,
+        year: year,
+        forceRefreshHd: forceRefreshHd,
+        verifiedOnly: verifiedOnly,
+        includeDoubanPosterGallery: includeDoubanPosterGallery,
+      );
+    } finally {
+      _releaseScrape();
+    }
+  }
+
+  static Future<List<String>> _resolveCoverUrlsByTitleGuarded(
+    String rawTitle, {
+    required String cleanTitle,
+    required int? targetYear,
+    required bool wantMc,
+    required String scopedKey,
+    required String year,
+    bool forceRefreshHd = false,
+    required bool verifiedOnly,
+    required bool includeDoubanPosterGallery,
+  }) async {
+
     final primaryHdResults = <String>[];
     final murlHdResults = <String>[];
     final bingOipFallbackResults = <String>[];
@@ -3866,8 +4391,9 @@ class PosterLoader {
     await Future.wait([
       // Source 1: Bangumi Official Open API (`api.bgm.tv/search/subject/...`) — 1080p/2K `images.large`
       () async {
+        var bangumiFound = false;
         for (final qv in variants.take(2)) {
-          if (primaryHdResults.isNotEmpty) break;
+          if (bangumiFound) break;
           HttpClientRequest? req;
           try {
             final q = Uri.encodeQueryComponent(wantMc ? '$qv 动态漫画' : qv);
@@ -3876,16 +4402,16 @@ class PosterLoader {
             );
             req = await _client
                 .getUrl(uri)
-                .timeout(const Duration(milliseconds: 2600));
+                .timeout(const Duration(milliseconds: 3200));
             req.headers.set('User-Agent', _desktopChromeUa);
             req.headers.set('Accept', 'application/json');
             final resp =
-                await req.close().timeout(const Duration(milliseconds: 2600));
+                await req.close().timeout(const Duration(milliseconds: 3200));
             if (resp.statusCode >= 200 && resp.statusCode < 300) {
               final body = await utf8.decoder
                   .bind(resp)
                   .join()
-                  .timeout(const Duration(milliseconds: 2600));
+                  .timeout(const Duration(milliseconds: 3200));
               final decoded = jsonDecode(body);
               if (decoded is Map && decoded['list'] is List) {
                 final list = decoded['list'] as List;
@@ -3929,6 +4455,7 @@ class PosterLoader {
                       final large = (images['large'] ?? '').toString().trim();
                       if (large.startsWith('http')) {
                         addPrimaryHd(large);
+                        bangumiFound = true;
                       }
                     }
                     if (summary.length >= 16 &&
@@ -4114,6 +4641,35 @@ class PosterLoader {
         );
         if (matched != null && matched.coverUrl.isNotEmpty) {
           addPrimaryHd(matched.coverUrl);
+        }
+
+        // Primary resilient fallback: Douban mobile web search (`m.douban.com/search`)
+        // + Rexxar subject detail (`m.douban.com/rexxar/api/v2/{movie|tv}/{id}`),
+        // which stays reachable even when `subject_suggest` returns `[]` or
+        // `rexxar/search` returns 403, delivering uncropped 1080p/2K `/view/photo/l/`
+        // official vertical posters.
+        if (_doubanSubjectIdCache[scopedKey] == null) {
+          final mobileMatched = await _resolveDoubanMobileSearchSubject(
+            cleanTitle,
+            targetYear: targetYear,
+            bidCookie: bidCookie,
+          );
+          if (mobileMatched != null) {
+            _doubanSubjectIdCache[scopedKey] = (
+              id: mobileMatched.id,
+              isTv: mobileMatched.isTv,
+            );
+            for (final cover in mobileMatched.coverUrls.reversed) {
+              final preferred = includeDoubanPosterGallery
+                  ? upgradeDoubanToOriginalLarge(cover)
+                  : upgradeUrlToHd(cover);
+              if (preferred.startsWith('http') &&
+                  !isPersonOrAvatarImageUrl(preferred) &&
+                  seen.add(preferred)) {
+                primaryHdResults.insert(0, preferred);
+              }
+            }
+          }
         }
 
         // Official Douban Poster Gallery (`type=R`): delivers true 1080p/2K
@@ -4343,75 +4899,84 @@ class PosterLoader {
     final primary = variants.isNotEmpty ? variants.first : cleanTitle;
     if (primary.isEmpty) return const [];
     final yearToken = targetYear != null ? '$targetYear ' : '';
-    final queryStr = wantMotionComic
-        ? '"$primary" 动态漫画 ${yearToken}官方海报 竖版 -节气 -模板 -素材 -主播'
-        : '"$primary" $yearToken官方海报 竖版 电视剧 电影 -动态漫画 -动态漫 -节气 -二十四节气 -模板 -素材 -主播 -成语';
-    final query = Uri.encodeQueryComponent(queryStr);
-    final uri = Uri.parse(
-      'https://cn.bing.com/images/async?q=$query&first=0&count=16&qft=+filterui:aspect-tall+filterui:imagesize-large',
-    );
+    final queries = <String>[
+      wantMotionComic
+          ? '"$primary" 动态漫画 ${yearToken}官方海报 竖版 -节气 -模板 -素材 -主播'
+          : '"$primary" $yearToken官方海报 竖版 电视剧 电影 -动态漫画 -动态漫 -节气 -二十四节气 -模板 -素材 -主播 -成语',
+      if (yearToken.isNotEmpty)
+        wantMotionComic
+            ? '"$primary" 动态漫画 官方海报 竖版 -节气 -模板 -素材 -主播'
+            : '"$primary" 官方海报 竖版 -动态漫画 -动态漫 -模板 -素材 -节气 -二十四节气 -主播',
+    ];
     final out = <String>[];
     final seen = <String>{};
-    HttpClientRequest? req;
-    try {
-      req = await _client
-          .getUrl(uri)
-          .timeout(const Duration(milliseconds: 2600));
-      req.headers.set('User-Agent', _desktopChromeUa);
-      req.headers.set('Referer', 'https://cn.bing.com/');
-      req.headers.set(
-        'Accept',
-        'text/html,application/xhtml+xml,*/*;q=0.8',
+    for (final rawQuery in queries) {
+      if (out.length >= 6) break;
+      final query = Uri.encodeQueryComponent(rawQuery);
+      final uri = Uri.parse(
+        'https://cn.bing.com/images/async?q=$query&first=0&count=16&qft=+filterui:aspect-tall+filterui:imagesize-large',
       );
-      final resp =
-          await req.close().timeout(const Duration(milliseconds: 2600));
-      if (resp.statusCode >= 200 && resp.statusCode < 300) {
-        final html = await utf8.decoder
-            .bind(resp)
-            .join()
+      HttpClientRequest? req;
+      try {
+        req = await _client
+            .getUrl(uri)
             .timeout(const Duration(milliseconds: 2600));
-        final cardMatches = RegExp(
-          r'm=(?:"|&quot;)(\{[^"]*?\})(?:"|&quot;)',
-        ).allMatches(html);
-        for (final cm in cardMatches) {
-          final cardJsonAttr = cm.group(1) ?? '';
-          final tMatch = RegExp(
-            r't&quot;:&quot;([^&]{2,100})&quot;',
-          ).firstMatch(cardJsonAttr);
-          final rawCap = (tMatch?.group(1) ?? '').trim();
-          if (_isNonEntertainmentBingCaption(rawCap) ||
-              _isNonEntertainmentBingCaption(cardJsonAttr)) {
-            continue;
-          }
-          if (strictCaptionOnly &&
-              !matchesBingPosterCaption(
-                rawCap,
-                cleanTitle,
-                targetYear: targetYear,
-                wantMotionComic: wantMotionComic,
-              )) {
-            continue;
-          }
-          final mm = RegExp(
-            r'murl&quot;:&quot;(https?://[^&"\x27]+?)&quot;',
-          ).firstMatch(cardJsonAttr);
-          if (mm != null) {
-            final hd = upgradeUrlToHd(mm.group(1)!);
-            if (hd.startsWith('http') &&
-                !isPersonOrAvatarImageUrl(hd) &&
-                seen.add(hd)) {
-              out.add(hd);
-              if (out.length >= 6) break;
+        req.headers.set('User-Agent', _desktopChromeUa);
+        req.headers.set('Referer', 'https://cn.bing.com/');
+        req.headers.set(
+          'Accept',
+          'text/html,application/xhtml+xml,*/*;q=0.8',
+        );
+        final resp =
+            await req.close().timeout(const Duration(milliseconds: 2600));
+        if (resp.statusCode >= 200 && resp.statusCode < 300) {
+          final html = await utf8.decoder
+              .bind(resp)
+              .join()
+              .timeout(const Duration(milliseconds: 2600));
+          final cardMatches = RegExp(
+            r'm=(?:"|&quot;)(\{[^"]*?\})(?:"|&quot;)',
+          ).allMatches(html);
+          for (final cm in cardMatches) {
+            final cardJsonAttr = cm.group(1) ?? '';
+            final tMatch = RegExp(
+              r't&quot;:&quot;([^&]{2,100})&quot;',
+            ).firstMatch(cardJsonAttr);
+            final rawCap = (tMatch?.group(1) ?? '').trim();
+            if (_isNonEntertainmentBingCaption(rawCap) ||
+                _isNonEntertainmentBingCaption(cardJsonAttr)) {
+              continue;
+            }
+            if (strictCaptionOnly &&
+                !matchesBingPosterCaption(
+                  rawCap,
+                  cleanTitle,
+                  targetYear: targetYear,
+                  wantMotionComic: wantMotionComic,
+                )) {
+              continue;
+            }
+            final mm = RegExp(
+              r'murl&quot;:&quot;(https?://[^&"\x27]+?)&quot;',
+            ).firstMatch(cardJsonAttr);
+            if (mm != null) {
+              final hd = upgradeUrlToHd(mm.group(1)!);
+              if (hd.startsWith('http') &&
+                  !isPersonOrAvatarImageUrl(hd) &&
+                  seen.add(hd)) {
+                out.add(hd);
+                if (out.length >= 6) break;
+              }
             }
           }
+        } else {
+          await resp.drain<void>();
         }
-      } else {
-        await resp.drain<void>();
+      } catch (_) {
+        try {
+          req?.abort();
+        } catch (_) {}
       }
-    } catch (_) {
-      try {
-        req?.abort();
-      } catch (_) {}
     }
     return out;
   }
@@ -4430,7 +4995,27 @@ class PosterLoader {
   static void _release() {
     _active--;
     if (_waiters.isNotEmpty) {
-      _waiters.removeLast().complete();
+      // Strictly FIFO (`removeFirst`) so top-of-screen visible Hero & first-shelf
+      // posters finish first instead of starving behind offscreen bottom cards.
+      _waiters.removeFirst().complete();
+    }
+  }
+
+  static Future<void> _acquireScrape() async {
+    if (_activeScrape < _maxScrapeConcurrent) {
+      _activeScrape++;
+      return;
+    }
+    final waiter = Completer<void>();
+    _scrapeWaiters.add(waiter);
+    await waiter.future;
+    _activeScrape++;
+  }
+
+  static void _releaseScrape() {
+    _activeScrape--;
+    if (_scrapeWaiters.isNotEmpty) {
+      _scrapeWaiters.removeFirst().complete();
     }
   }
 
@@ -4441,7 +5026,15 @@ class PosterLoader {
     String title = '',
     String year = '',
     bool asHd = false,
+    bool isPrivate = false,
   }) {
+    if (isPrivate) {
+      final trimmed = rawUrl.trim();
+      if (trimmed.isNotEmpty) {
+        _rememberPrivate('private:$trimmed', bytes);
+      }
+      return;
+    }
     final u = upgradeUrlToHd(rawUrl);
     if (u.isNotEmpty && !_isKnownDeadPosterHost(u)) {
       _remember(u, bytes);
@@ -4565,6 +5158,23 @@ class PosterLoader {
           'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
         });
       }
+      if (url.contains('/view/photo/l/public/')) {
+        final ratioUrl = uri
+            .replace(
+              host: 'img3.doubanio.com',
+              scheme: 'https',
+              path: uri.path.replaceFirst(
+                '/view/photo/l/public/',
+                '/view/photo/l_ratio_poster/public/',
+              ),
+            )
+            .toString();
+        add(ratioUrl, const {
+          'User-Agent': _desktopChromeUa,
+          'Referer': 'https://movie.douban.com/',
+          'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+        });
+      }
       if (url.contains('/l_ratio_poster/')) {
         final mUrl = uri
             .replace(
@@ -4671,8 +5281,14 @@ class PosterLoader {
     HttpClientRequest? request;
     try {
       if (CatPawHost.matches(url)) url = (await CatPawHost.instance.resolve(url)).toString();
-      final privateImage = EmbyLibrary.isImage(url);
-      final scopedHeaders = privateImage ? await EmbyLibrary.imageHeaders(url) : const <String,String>{};
+      final isEmbyImg = EmbyLibrary.isImage(url);
+      final isExtImg = !isEmbyImg && ExternalMediaLibrary.isPrivateImage(url);
+      final privateImage = isEmbyImg || isExtImg;
+      final scopedHeaders = isEmbyImg
+          ? await EmbyLibrary.imageHeaders(url)
+          : (isExtImg
+              ? await ExternalMediaLibrary.imageHeaders(url)
+              : const <String, String>{});
       request = await _client.getUrl(Uri.parse(url).removeFragment()).timeout(timeout);
       request.followRedirects = !privateImage;
       request.maxRedirects = 6;
@@ -4730,22 +5346,78 @@ class PosterLoader {
     return false;
   }
 
-  static Future<File?> _diskFileFor(String key) async {
-    if (!_diskReady) {
-      _diskReady = true;
-      try {
-        final dir = Directory(
-          '${Directory.systemTemp.path}${Platform.pathSeparator}marco_poster_cache_v6',
-        );
-        if (!await dir.exists()) await dir.create(recursive: true);
-        _diskDir = dir;
-      } catch (_) {
-        _diskDir = null;
+  static Future<Directory?> _ensureDiskDir() {
+    if (debugDiskDirOverride != null) {
+      final dir = debugDiskDirOverride!;
+      if (_diskReady && _diskDir?.path == dir.path && _startupDiskPruned) {
+        return SynchronousFuture<Directory?>(dir);
       }
-      if (!_legacyDiskCleaned) {
+      return _diskInitFuture ??= () async {
+        if (!await dir.exists()) {
+          await dir.create(recursive: true);
+        }
+        _diskDir = dir;
+        _diskReady = true;
+        if (!_startupDiskPruned) {
+          _startupDiskPruned = true;
+          await _pruneDiskCacheIfNeeded(dir);
+        }
+        return dir;
+      }();
+    }
+    if (_diskReady) return SynchronousFuture<Directory?>(_diskDir);
+    return _diskInitFuture ??= () async {
+      Directory? resolved;
+      final isFlutterTest =
+          !kIsWeb && Platform.environment.containsKey('FLUTTER_TEST');
+      if (!kIsWeb && !isFlutterTest) {
+        // Store rebuildable public posters in `Library/Caches` (never
+        // iCloud-backed `Application Support`) so OS purge and our byte cap
+        // keep storage strictly bounded.
+        try {
+          final caches = await getApplicationCacheDirectory().timeout(
+            const Duration(milliseconds: 1200),
+          );
+          final cacheDir = Directory(
+            '${caches.path}${Platform.pathSeparator}marco_poster_cache_v7',
+          );
+          if (!await cacheDir.exists()) {
+            await cacheDir.create(recursive: true);
+          }
+          resolved = cacheDir;
+        } catch (_) {}
+      }
+      if (resolved == null) {
+        try {
+          final tempDir = (!kIsWeb && !isFlutterTest)
+              ? await getTemporaryDirectory()
+                  .timeout(const Duration(milliseconds: 800))
+              : Directory.systemTemp;
+          final folderName = isFlutterTest
+              ? 'marco_poster_cache_v7_test_${pid}'
+              : 'marco_poster_cache_v7';
+          final fallbackDir = Directory(
+            '${tempDir.path}${Platform.pathSeparator}$folderName',
+          );
+          if (!await fallbackDir.exists()) {
+            await fallbackDir.create(recursive: true);
+          }
+          resolved = fallbackDir;
+        } catch (_) {}
+      }
+      _diskDir = resolved;
+      _diskReady = true;
+      // Enforce the 100 MiB cache cap on cold start so repeated short runs
+      // with < 24 writes per launch still reclaim oversized disk cache!
+      if (resolved != null && !_startupDiskPruned) {
+        _startupDiskPruned = true;
+        unawaited(_pruneDiskCacheIfNeeded(resolved));
+      }
+      if (!kIsWeb && !isFlutterTest && !_legacyDiskCleaned) {
         _legacyDiskCleaned = true;
         unawaited(() async {
           for (final legacy in const [
+            'marco_poster_cache_v6',
             'marco_poster_cache_v5',
             'marco_poster_cache_v4',
           ]) {
@@ -4758,10 +5430,27 @@ class PosterLoader {
               }
             } catch (_) {}
           }
+          try {
+            final support = await getApplicationSupportDirectory().timeout(
+              const Duration(milliseconds: 1200),
+            );
+            final legacySupportDir = Directory(
+              '${support.path}${Platform.pathSeparator}marco_poster_cache_v6',
+            );
+            if (await legacySupportDir.exists()) {
+              await legacySupportDir.delete(recursive: true);
+            }
+          } catch (_) {}
         }());
       }
-    }
-    final dir = _diskDir;
+      return resolved;
+    }();
+  }
+
+  static Future<File?> _diskFileFor(String key) async {
+    final dir = (debugDiskDirOverride == null && _diskReady)
+        ? _diskDir
+        : await _ensureDiskDir();
     if (dir == null) return null;
     return File('${dir.path}${Platform.pathSeparator}${_fnv1a64(key)}.img');
   }
@@ -4771,7 +5460,89 @@ class PosterLoader {
       final tmp = File('${file.path}.tmp');
       await tmp.writeAsBytes(bytes, flush: true);
       await tmp.rename(file.path);
+      _diskWritesSincePrune++;
+      if (debugDiskMaxBytesOverride > 0 || _diskWritesSincePrune >= 24) {
+        _diskWritesSincePrune = 0;
+        await _pruneDiskCacheIfNeeded(file.parent);
+      }
     } catch (_) {}
+  }
+
+  /// Evicts oldest-modified `.img` files from the public poster disk cache
+  /// whenever total size exceeds the configured byte cap (`100 MiB` default).
+  @visibleForTesting
+  static Future<int> enforceDiskCacheCapNow() async {
+    final dir = await _ensureDiskDir();
+    if (dir == null) return 0;
+    await _pruneDiskCacheIfNeeded(dir);
+    var remaining = 0;
+    try {
+      await for (final entity in dir.list()) {
+        if (entity is File && entity.path.endsWith('.img')) {
+          remaining += (await entity.stat()).size;
+        }
+      }
+    } catch (_) {}
+    return remaining;
+  }
+
+  @visibleForTesting
+  static Future<void> writePublicDiskEntryForTest(
+    String key,
+    Uint8List bytes, {
+    DateTime? modifiedAt,
+  }) async {
+    final file = await _diskFileFor(key);
+    if (file == null) return;
+    await file.writeAsBytes(bytes, flush: true);
+    if (modifiedAt != null) {
+      await file.setLastModified(modifiedAt);
+    }
+    await _pruneDiskCacheIfNeeded(file.parent);
+  }
+
+  static Future<void> _pruneDiskCacheIfNeeded(Directory dir) async {
+    if (_pruneInFlight != null) {
+      await _pruneInFlight;
+      return;
+    }
+    final op = () async {
+      try {
+        if (!await dir.exists()) return;
+        final cap = _effectiveMaxDiskBytes;
+        final entries = <({File file, int size, DateTime modified})>[];
+        var totalBytes = 0;
+        await for (final entity in dir.list()) {
+          if (entity is! File || !entity.path.endsWith('.img')) continue;
+          try {
+            final stat = await entity.stat();
+            totalBytes += stat.size;
+            entries.add((
+              file: entity,
+              size: stat.size,
+              modified: stat.modified,
+            ));
+          } catch (_) {}
+        }
+        if (totalBytes <= cap) return;
+        entries.sort((a, b) => a.modified.compareTo(b.modified));
+        for (final entry in entries) {
+          if (totalBytes <= cap) break;
+          try {
+            await entry.file.delete();
+            totalBytes -= entry.size;
+          } catch (_) {}
+        }
+      } catch (_) {}
+    }();
+    _pruneInFlight = op;
+    try {
+      await op;
+    } finally {
+      if (identical(_pruneInFlight, op)) {
+        _pruneInFlight = null;
+      }
+    }
   }
 
   static String _fnv1a64(String input) {
@@ -4858,6 +5629,8 @@ class PosterImage extends StatefulWidget {
   final bool highRes;
   final bool strictHighRes;
   final bool forBackdrop;
+  final bool isPrivate;
+  final bool deferTitleScrape;
   final ValueChanged<Uint8List>? onBytesLoaded;
 
   const PosterImage({
@@ -4872,6 +5645,8 @@ class PosterImage extends StatefulWidget {
     this.highRes = false,
     this.strictHighRes = false,
     this.forBackdrop = false,
+    this.isPrivate = false,
+    this.deferTitleScrape = false,
     this.onBytesLoaded,
   });
 
@@ -4887,15 +5662,52 @@ class _PosterImageState extends State<PosterImage>
   int _retryCount = 0;
   Timer? _retryTimer;
   List<String> _subscribedKeys = const [];
+  bool _listeningWarmupDefer = false;
 
-  bool get _wantsHd => widget.highRes || widget.strictHighRes;
+  bool get _wantsHd => !widget.isPrivate && (widget.highRes || widget.strictHighRes);
+
+  /// Only curated discovery seed cards (`deferTitleScrape: true`) defer
+  /// posterless title-scraping while curated disk warmup/refresh is in flight.
+  /// Ordinary CMS cards (`deferTitleScrape: false`) NEVER stall.
+  bool get _shouldDeferPosterlessScrape =>
+      !widget.isPrivate &&
+      widget.url.trim().isEmpty &&
+      widget.title.trim().isNotEmpty &&
+      widget.deferTitleScrape &&
+      CuratedDiscoveryService.shouldDeferPosterlessSeedScrape;
+
+  void _syncWarmupDeferListener() {
+    final need = _shouldDeferPosterlessScrape && _bytes == null;
+    if (need && !_listeningWarmupDefer) {
+      _listeningWarmupDefer = true;
+      CuratedDiscoveryService.warmupRevision.addListener(_onWarmupDeferTick);
+    } else if (!need && _listeningWarmupDefer) {
+      _listeningWarmupDefer = false;
+      CuratedDiscoveryService.warmupRevision.removeListener(_onWarmupDeferTick);
+    }
+  }
+
+  void _onWarmupDeferTick() {
+    if (!mounted) return;
+    if (!_shouldDeferPosterlessScrape) {
+      _syncWarmupDeferListener();
+      if (_bytes == null) {
+        _fetchBytes();
+      }
+    }
+  }
 
   @override
   bool get wantKeepAlive => _bytes != null;
 
   List<String> _computeSubscribedKeys() {
     final raw = widget.url.trim();
-    if (EmbyLibrary.isImage(raw)) return [raw];
+    if (widget.isPrivate) {
+      return raw.isEmpty ? const [] : <String>['private:$raw'];
+    }
+    if (EmbyLibrary.isImage(raw) || ExternalMediaLibrary.isPrivateImage(raw)) {
+      return [raw];
+    }
     final clean = PosterLoader._cleanTitle(widget.title);
     final scoped = PosterLoader._scopedTitleToken(
       clean,
@@ -4939,7 +5751,8 @@ class _PosterImageState extends State<PosterImage>
     super.didUpdateWidget(oldWidget);
     final sameIdentity = oldWidget.url.trim() == widget.url.trim() &&
         oldWidget.title.trim() == widget.title.trim() &&
-        oldWidget.year.trim() == widget.year.trim();
+        oldWidget.year.trim() == widget.year.trim() &&
+        oldWidget.isPrivate == widget.isPrivate;
     if (!sameIdentity) {
       _retryTimer?.cancel();
       _retryCount = 0;
@@ -4947,6 +5760,12 @@ class _PosterImageState extends State<PosterImage>
       _resubscribeKeys();
       _initLoad();
       return;
+    }
+    if (oldWidget.deferTitleScrape != widget.deferTitleScrape && _bytes == null) {
+      _syncWarmupDeferListener();
+      if (!_shouldDeferPosterlessScrape) {
+        _fetchBytes();
+      }
     }
     if (oldWidget.highRes != widget.highRes ||
         oldWidget.strictHighRes != widget.strictHighRes) {
@@ -4964,6 +5783,10 @@ class _PosterImageState extends State<PosterImage>
 
   @override
   void dispose() {
+    if (_listeningWarmupDefer) {
+      _listeningWarmupDefer = false;
+      CuratedDiscoveryService.warmupRevision.removeListener(_onWarmupDeferTick);
+    }
     for (final k in _subscribedKeys) {
       PosterLoader.removeKeyListener(k, _onKeyCacheUpdated);
     }
@@ -4980,6 +5803,7 @@ class _PosterImageState extends State<PosterImage>
         title: widget.title,
         year: widget.year,
         preferHd: _wantsHd,
+        isPrivate: widget.isPrivate,
       );
       if (hit != null) {
         setState(() {
@@ -4990,7 +5814,7 @@ class _PosterImageState extends State<PosterImage>
       }
       return;
     }
-    if (_wantsHd && widget.title.trim().isNotEmpty) {
+    if (!widget.isPrivate && _wantsHd && widget.title.trim().isNotEmpty) {
       final hdHit = PosterLoader.peekHdMemory(
         widget.title,
         rawUrl: widget.url,
@@ -4999,10 +5823,15 @@ class _PosterImageState extends State<PosterImage>
       if (hdHit != null && !identical(hdHit, _bytes)) {
         setState(() {
           _bytes = hdHit;
-          _hasVerifiedHd = true;
+          if (!widget.strictHighRes) {
+            _hasVerifiedHd = true;
+          }
         });
         updateKeepAlive();
         _notifyBytes(hdHit);
+        if (widget.strictHighRes && !widget.forBackdrop) {
+          unawaited(_verifyAndUpgradeIfLowRes(hdHit, widget.title.trim()));
+        }
       }
     }
   }
@@ -5017,30 +5846,35 @@ class _PosterImageState extends State<PosterImage>
   }
 
   void _initLoad() {
-    final immediateHd = _wantsHd && widget.title.trim().isNotEmpty
+    final effectiveTitle = widget.isPrivate ? '' : widget.title.trim();
+    final effectiveYear = widget.isPrivate ? '' : widget.year.trim();
+    final immediateHd = !widget.isPrivate && _wantsHd && effectiveTitle.isNotEmpty
         ? PosterLoader.peekHdMemory(
-            widget.title,
+            effectiveTitle,
             rawUrl: widget.url,
-            year: widget.year,
+            year: effectiveYear,
           )
         : null;
     final immediate = immediateHd ??
         PosterLoader.peekMemory(
           widget.url,
-          title: widget.title,
-          year: widget.year,
-          preferHd: _wantsHd,
+          title: effectiveTitle,
+          year: effectiveYear,
+          preferHd: !widget.isPrivate && _wantsHd,
+          isPrivate: widget.isPrivate,
         );
     if (immediate != null) {
       _bytes = immediate;
       _loadedSync = true;
       _hasVerifiedHd = immediateHd != null;
+      _syncWarmupDeferListener();
       updateKeepAlive();
       _notifyBytes(immediate);
-      if (_wantsHd &&
+      if (!widget.isPrivate &&
+          _wantsHd &&
           !widget.forBackdrop &&
-          widget.title.trim().isNotEmpty) {
-        unawaited(_verifyAndUpgradeIfLowRes(immediate, widget.title.trim()));
+          effectiveTitle.isNotEmpty) {
+        unawaited(_verifyAndUpgradeIfLowRes(immediate, effectiveTitle));
       }
       return;
     }
@@ -5048,12 +5882,18 @@ class _PosterImageState extends State<PosterImage>
     _loadedSync = false;
     _hasVerifiedHd = false;
     updateKeepAlive();
-    _fetchBytes();
-    if (widget.strictHighRes &&
-        !widget.forBackdrop &&
-        widget.title.trim().isNotEmpty &&
-        !EmbyLibrary.isImage(widget.url)) {
-      unawaited(_tryUpgradeToHd(widget.title.trim(), null));
+    _syncWarmupDeferListener();
+    if (!_shouldDeferPosterlessScrape) {
+      _fetchBytes();
+      if (!widget.isPrivate &&
+          _wantsHd &&
+          widget.strictHighRes &&
+          !widget.forBackdrop &&
+          effectiveTitle.isNotEmpty &&
+          !EmbyLibrary.isImage(widget.url) &&
+          !ExternalMediaLibrary.isPrivateImage(widget.url)) {
+        unawaited(_tryUpgradeToHd(effectiveTitle, null));
+      }
     }
   }
 
@@ -5082,7 +5922,11 @@ class _PosterImageState extends State<PosterImage>
     String requestedTitle,
     Uint8List? currentBytes,
   ) async {
-    if (EmbyLibrary.isImage(widget.url)) return;
+    if (widget.isPrivate ||
+        EmbyLibrary.isImage(widget.url) ||
+        ExternalMediaLibrary.isPrivateImage(widget.url)) {
+      return;
+    }
     try {
       final hdBytes = await PosterLoader.loadHdByTitle(
         requestedTitle,
@@ -5116,20 +5960,29 @@ class _PosterImageState extends State<PosterImage>
   }
 
   Future<void> _fetchBytes() async {
-    if (widget.url.trim().isEmpty && widget.title.trim().isEmpty) return;
     final requestedUrl = widget.url.trim();
-    final requestedTitle = widget.title.trim();
-    final requestedYear = widget.year.trim();
+    final requestedTitle = widget.isPrivate ? '' : widget.title.trim();
+    final requestedYear = widget.isPrivate ? '' : widget.year.trim();
+    final requestedPrivate = widget.isPrivate;
+    if (requestedPrivate && requestedUrl.isEmpty) return;
+    if (requestedUrl.isEmpty && requestedTitle.isEmpty) return;
+    if (_shouldDeferPosterlessScrape) {
+      _syncWarmupDeferListener();
+      return;
+    }
     try {
       final data = await PosterLoader.load(
         requestedUrl,
         title: requestedTitle,
         year: requestedYear,
+        isPrivate: requestedPrivate,
       );
       if (!mounted) return;
       if (widget.url.trim() != requestedUrl ||
-          widget.title.trim() != requestedTitle ||
-          widget.year.trim() != requestedYear) {
+          widget.isPrivate != requestedPrivate ||
+          (!requestedPrivate &&
+              (widget.title.trim() != requestedTitle ||
+                  widget.year.trim() != requestedYear))) {
         return;
       }
       // Never let a lower-resolution CMS fetch overwrite an already-verified HD poster.
@@ -5150,7 +6003,8 @@ class _PosterImageState extends State<PosterImage>
       if (_wantsHd &&
           !widget.forBackdrop &&
           requestedTitle.isNotEmpty &&
-          !EmbyLibrary.isImage(requestedUrl)) {
+          !EmbyLibrary.isImage(requestedUrl) &&
+          !ExternalMediaLibrary.isPrivateImage(requestedUrl)) {
         unawaited(_verifyAndUpgradeIfLowRes(_bytes ?? data, requestedTitle));
       }
     } catch (_) {
@@ -5158,6 +6012,7 @@ class _PosterImageState extends State<PosterImage>
       if (_wantsHd &&
           requestedTitle.isNotEmpty &&
           !EmbyLibrary.isImage(requestedUrl) &&
+          !ExternalMediaLibrary.isPrivateImage(requestedUrl) &&
           _bytes == null) {
         unawaited(_tryUpgradeToHd(requestedTitle, null));
       }
@@ -5177,7 +6032,58 @@ class _PosterImageState extends State<PosterImage>
     super.build(context);
     final bytes = _bytes;
     if (bytes == null) {
-      return widget.placeholder;
+      if (widget.forBackdrop || widget.strictHighRes) {
+        return widget.placeholder;
+      }
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final enoughSpace = constraints.maxWidth.isFinite &&
+              constraints.maxHeight.isFinite &&
+              constraints.maxWidth >= 68 &&
+              constraints.maxHeight >= 88;
+          if (!enoughSpace) return widget.placeholder;
+          return Stack(
+            fit: StackFit.passthrough,
+            children: [
+              widget.placeholder,
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    key: const Key('poster-loading-sheen'),
+                    decoration: const BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          Color(0xFF1F222C),
+                          Color(0xFF151821),
+                          Color(0xFF0E1017),
+                        ],
+                        stops: [0.0, 0.52, 1.0],
+                      ),
+                    ),
+                    child: Center(
+                      child: Container(
+                        width: 34,
+                        height: 34,
+                        decoration: const BoxDecoration(
+                          color: Color(0x16FFFFFF),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          IconData(0xf662, fontFamily: 'CupertinoIcons', fontPackage: 'cupertino_icons'),
+                          size: 16,
+                          color: Color(0x52FFFFFF),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      );
     }
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -5210,13 +6116,23 @@ class _PosterImageState extends State<PosterImage>
             child: backdropImg,
           );
         }
+        final isIosPoster = !kIsWeb &&
+            !OhosRuntime.isOhos &&
+            defaultTargetPlatform == TargetPlatform.iOS;
         final dpr = (MediaQuery.maybeDevicePixelRatioOf(context) ?? 2.0)
             .clamp(1.25, 3.0);
         final isLargeSurface = _wantsHd ||
             (constraints.maxWidth.isFinite && constraints.maxWidth >= 210) ||
             (constraints.maxHeight.isFinite && constraints.maxHeight >= 260);
         int? cacheWidth;
-        if (!isLargeSurface &&
+        if (isIosPoster) {
+          cacheWidth = PosterLoader.resolveIosDecodeWidth(
+            maxWidth: constraints.maxWidth,
+            maxHeight: constraints.maxHeight,
+            devicePixelRatio: dpr,
+            isHeroOrStrictHd: widget.strictHighRes,
+          );
+        } else if (!isLargeSurface &&
             constraints.maxWidth.isFinite &&
             constraints.maxWidth > 0) {
           final effectiveWidth = constraints.maxHeight.isFinite &&
@@ -5226,7 +6142,7 @@ class _PosterImageState extends State<PosterImage>
           final px = (effectiveWidth * dpr).ceil();
           cacheWidth = ((px + 179) ~/ 180) * 180;
         }
-        final ImageProvider provider = isLargeSurface
+        final ImageProvider provider = (!isIosPoster && isLargeSurface)
             ? MemoryImage(bytes)
             : ResizeImage.resizeIfNeeded(
                 cacheWidth,
@@ -5241,8 +6157,11 @@ class _PosterImageState extends State<PosterImage>
           height: constraints.maxHeight.isFinite ? constraints.maxHeight : null,
           gaplessPlayback: true,
           isAntiAlias: true,
-          filterQuality:
-              isLargeSurface ? FilterQuality.high : FilterQuality.medium,
+          filterQuality: isIosPoster
+              ? (widget.strictHighRes
+                    ? FilterQuality.high
+                    : FilterQuality.medium)
+              : (isLargeSurface ? FilterQuality.high : FilterQuality.medium),
           errorBuilder: (_, __, ___) => widget.placeholder,
         );
         if (_loadedSync || !widget.fadeIn) {
@@ -5281,6 +6200,9 @@ class EpisodeStillImage extends StatefulWidget {
   final bool? wantMotionComic;
   final String fallbackPosterUrl;
   final Widget placeholder;
+  /// When `true`, disables public episode still/metadata scraping and keeps the
+  /// fallback poster strictly inside the private memory-only bucket.
+  final bool isPrivate;
 
   const EpisodeStillImage({
     super.key,
@@ -5291,6 +6213,7 @@ class EpisodeStillImage extends StatefulWidget {
     this.year = '',
     this.realEpisodeNumber,
     this.wantMotionComic,
+    this.isPrivate = false,
   });
 
   @override
@@ -5318,7 +6241,8 @@ class _EpisodeStillImageState extends State<EpisodeStillImage>
         oldWidget.year != widget.year ||
         oldWidget.episodeIndex != widget.episodeIndex ||
         oldWidget.realEpisodeNumber != widget.realEpisodeNumber ||
-        oldWidget.wantMotionComic != widget.wantMotionComic) {
+        oldWidget.wantMotionComic != widget.wantMotionComic ||
+        oldWidget.isPrivate != widget.isPrivate) {
       _stillUrl = null;
       _resolveStill();
     }
@@ -5342,6 +6266,7 @@ class _EpisodeStillImageState extends State<EpisodeStillImage>
   }
 
   void _pickFromCaches() {
+    if (widget.isPrivate) return;
     final title = widget.seriesTitle.trim();
     if (title.isEmpty) return;
     final wantMc =
@@ -5376,6 +6301,7 @@ class _EpisodeStillImageState extends State<EpisodeStillImage>
   }
 
   Future<void> _resolveStill() async {
+    if (widget.isPrivate) return;
     _pickFromCaches();
     if (_stillUrl != null && _stillUrl!.isNotEmpty) return;
     final title = widget.seriesTitle.trim();
@@ -5406,14 +6332,15 @@ class _EpisodeStillImageState extends State<EpisodeStillImage>
         -0.72 + ((widget.episodeIndex * 3) % 7) * 0.22; // -0.72 .. +0.60
     final fallbackPosterWidget = PosterImage(
       url: widget.fallbackPosterUrl,
-      title: widget.seriesTitle,
-      year: widget.year,
+      title: widget.isPrivate ? '' : widget.seriesTitle,
+      year: widget.isPrivate ? '' : widget.year,
       fit: BoxFit.cover,
       alignment: Alignment(0.0, alignY),
       highRes: false,
+      isPrivate: widget.isPrivate,
       placeholder: widget.placeholder,
     );
-    if (still != null && still.isNotEmpty) {
+    if (!widget.isPrivate && still != null && still.isNotEmpty) {
       return PosterImage(
         key: ValueKey(
           'still_${widget.seriesTitle}_${widget.episodeIndex}_$still',
@@ -5422,6 +6349,7 @@ class _EpisodeStillImageState extends State<EpisodeStillImage>
         title: '',
         fit: BoxFit.cover,
         highRes: false,
+        isPrivate: widget.isPrivate,
         placeholder: fallbackPosterWidget,
       );
     }
@@ -5462,6 +6390,9 @@ class LandscapePosterImage extends StatefulWidget {
   final bool preferredDoubanIsTv;
   /// Explicit work-form disambiguation (`true` = 动态漫画, `false` = regular).
   final bool? wantMotionComic;
+  /// When `true`, keeps all loaded images strictly in private memory cache and
+  /// disables external lookup and public disk writes.
+  final bool isPrivate;
 
   const LandscapePosterImage({
     super.key,
@@ -5472,6 +6403,7 @@ class LandscapePosterImage extends StatefulWidget {
     this.fit = BoxFit.cover,
     this.alignment = const Alignment(0.0, -0.2),
     this.allowExternalLookup = true,
+    this.isPrivate = false,
     this.onBytesLoaded,
     this.onLandscapeStatusChanged,
     this.blurPortraitFallback = false,
@@ -5498,7 +6430,7 @@ class _LandscapePosterImageState extends State<LandscapePosterImage>
   bool get wantKeepAlive => _landscapeBytes != null;
 
   String _computeKey() {
-    if (!widget.allowExternalLookup) return '';
+    if (widget.isPrivate || !widget.allowExternalLookup) return '';
     final prefBackdrop =
         PosterLoader.upgradeUrlToHd(widget.preferredBackdropUrl);
     if (prefBackdrop.isNotEmpty) {
@@ -5544,6 +6476,7 @@ class _LandscapePosterImageState extends State<LandscapePosterImage>
         oldWidget.title.trim() != widget.title.trim() ||
         oldWidget.year.trim() != widget.year.trim() ||
         oldWidget.allowExternalLookup != widget.allowExternalLookup ||
+        oldWidget.isPrivate != widget.isPrivate ||
         oldWidget.preferredBackdropUrl.trim() !=
             widget.preferredBackdropUrl.trim() ||
         oldWidget.preferredDoubanId.trim() != widget.preferredDoubanId.trim() ||
@@ -5631,7 +6564,8 @@ class _LandscapePosterImageState extends State<LandscapePosterImage>
     _fallbackBytes = null;
     final hasPreferred = widget.preferredBackdropUrl.trim().isNotEmpty ||
         widget.preferredDoubanId.trim().isNotEmpty;
-    if (!widget.allowExternalLookup ||
+    if (widget.isPrivate ||
+        !widget.allowExternalLookup ||
         (widget.title.trim().isEmpty && !hasPreferred)) {
       _landscapeBytes = null;
       _loadedSync = false;
@@ -5696,15 +6630,45 @@ class _LandscapePosterImageState extends State<LandscapePosterImage>
     super.build(context);
     final bytes = _landscapeBytes;
     if (bytes != null) {
-      final img = Image(
-        image: MemoryImage(bytes),
-        fit: widget.fit,
-        alignment: widget.alignment,
-        gaplessPlayback: true,
-        isAntiAlias: true,
-        filterQuality: FilterQuality.high,
-        errorBuilder: (_, __, ___) => _buildFallback(),
-      );
+      final isIosPoster = !kIsWeb &&
+          !OhosRuntime.isOhos &&
+          defaultTargetPlatform == TargetPlatform.iOS;
+      final Widget img = isIosPoster
+          ? LayoutBuilder(
+              builder: (ctx, constraints) {
+                final dpr = (MediaQuery.maybeDevicePixelRatioOf(ctx) ?? 2.0)
+                    .clamp(1.25, 3.0);
+                final cacheW = PosterLoader.resolveIosDecodeWidth(
+                  maxWidth: constraints.maxWidth,
+                  maxHeight: constraints.maxHeight,
+                  devicePixelRatio: dpr,
+                  isHeroOrStrictHd: true,
+                  isLandscape: true,
+                );
+                return Image(
+                  image: ResizeImage.resizeIfNeeded(
+                    cacheW,
+                    null,
+                    MemoryImage(bytes),
+                  ),
+                  fit: widget.fit,
+                  alignment: widget.alignment,
+                  gaplessPlayback: true,
+                  isAntiAlias: true,
+                  filterQuality: FilterQuality.medium,
+                  errorBuilder: (_, __, ___) => _buildFallback(),
+                );
+              },
+            )
+          : Image(
+              image: MemoryImage(bytes),
+              fit: widget.fit,
+              alignment: widget.alignment,
+              gaplessPlayback: true,
+              isAntiAlias: true,
+              filterQuality: FilterQuality.high,
+              errorBuilder: (_, __, ___) => _buildFallback(),
+            );
       if (_loadedSync) return img;
       return TweenAnimationBuilder<double>(
         tween: Tween<double>(begin: 0.0, end: 1.0),
@@ -5726,11 +6690,12 @@ class _LandscapePosterImageState extends State<LandscapePosterImage>
   Widget _buildFallback() {
     final basePoster = PosterImage(
       url: widget.url,
-      title: widget.allowExternalLookup ? widget.title : '',
-      year: widget.year,
+      title: (!widget.isPrivate && widget.allowExternalLookup) ? widget.title : '',
+      year: widget.isPrivate ? '' : widget.year,
+      isPrivate: widget.isPrivate,
       fit: widget.fit,
       alignment: widget.alignment,
-      highRes: true,
+      highRes: !widget.isPrivate,
       forBackdrop: widget.blurPortraitFallback,
       placeholder: widget.placeholder,
       onBytesLoaded: _onFallbackBytesLoaded,

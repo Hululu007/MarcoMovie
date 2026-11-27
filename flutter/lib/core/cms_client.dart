@@ -4,7 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
@@ -17,6 +17,7 @@ import 'js_source_host.dart';
 import 'python_source_assets.dart';
 import 'python_source_host.dart';
 import 'emby_library.dart';
+import 'media_library_connectors.dart';
 import 'checksum_source.dart';
 import 'catpaw_host.dart';
 import 'drpy_source.dart';
@@ -30,6 +31,7 @@ import 'doh_resolver.dart';
 import 'source_playback.dart';
 import 'source_verification.dart';
 import 'models.dart';
+import 'personal_netdisk_library.dart';
 import 'quark_drive.dart';
 import 'quark_account.dart';
 import 'resilient_http_client.dart';
@@ -270,6 +272,20 @@ class CmsClient {
 
   Future<String> _cloudCredential(String provider) async =>
       (await StorageService.init()).netdiskCredential(provider);
+
+  Future<PersonalCloudLibrary> _openPersonalCloudLibrary(CmsSite site) async {
+    final storage = await StorageService.init();
+    final cloudClient = PersonalCloudDriveClient(
+      credentialReader: _cloudCredential,
+      credentialWriter: (provider, value) =>
+          storage.setNetdiskCredential(provider, value),
+      quarkAccounts: storage.quarkAccounts,
+      quarkClient: _quark,
+      httpClient: _http,
+      isCancelled: _sourceCancelled,
+    );
+    return PersonalCloudLibrary.open(site, client: cloudClient);
+  }
 
   Future<List<CmsEpisode>> _listCloudShare(String rawUrl) async {
     final url =
@@ -1382,8 +1398,10 @@ class CmsClient {
 
   String _wrapJsEpisodeIds(String raw, {String scheme = 'mmjs'}) {
     final doc = jsonDecode(raw);
-    if (doc is! Map || doc['list'] is! List) return raw;
-    for (final item in (doc['list'] as List).whereType<Map>()) {
+    if (doc is! Map<String, dynamic>) return raw;
+    final rawList = CmsParser.extractRawVideoList(doc);
+    if (rawList is! List) return raw;
+    for (final item in rawList.whereType<Map>()) {
       final urls = item['vod_play_url'];
       if (urls is! String || urls.isEmpty) continue;
       final flags = (item['vod_play_from'] ?? '').toString().split(r'$$$');
@@ -1456,6 +1474,15 @@ class CmsClient {
       return (categories, listing);
     }
     if (site.isEmby) return (await EmbyLibrary.open(site)).home();
+    if (PersonalCloudLibrary.isSupportedSite(site)) {
+      final lib = await _openPersonalCloudLibrary(site);
+      try {
+        return await lib.home();
+      } finally {
+        lib.close();
+      }
+    }
+    if (site.isExternalMediaLibrary) return ExternalMediaLibrary.home(site);
     if (_usesJs(site)) {
       final raw = await _callJs(site, 'home', [false]);
       final categories = CmsParser.parseCategories(raw);
@@ -1594,6 +1621,17 @@ class CmsClient {
       );
     }
     if (site.isEmby) return (await EmbyLibrary.open(site)).list(categoryId, '', page);
+    if (PersonalCloudLibrary.isSupportedSite(site)) {
+      final lib = await _openPersonalCloudLibrary(site);
+      try {
+        return await lib.list(categoryId, '', page);
+      } finally {
+        lib.close();
+      }
+    }
+    if (site.isExternalMediaLibrary) {
+      return ExternalMediaLibrary.list(site, categoryId, '', page);
+    }
     if (_usesJs(site)) {
       final wogg = WoggSource.supports(site);
       String normalizeWoggArea(String raw) => switch (raw.trim()) {
@@ -1781,6 +1819,17 @@ class CmsClient {
       return CmsParser.parseListing(_wrapJsEpisodeIds(raw, scheme: 'mmt4'));
     }
     if (site.isEmby) return (await EmbyLibrary.open(site)).list('', keyword, page);
+    if (PersonalCloudLibrary.isSupportedSite(site)) {
+      final lib = await _openPersonalCloudLibrary(site);
+      try {
+        return await lib.list('', keyword, page);
+      } finally {
+        lib.close();
+      }
+    }
+    if (site.isExternalMediaLibrary) {
+      return ExternalMediaLibrary.list(site, '', keyword, page);
+    }
     if (_usesJs(site)) {
       return CmsParser.parseListing(await _callJs(site, 'search', [keyword, false, page]));
     }
@@ -1814,8 +1863,11 @@ class CmsClient {
   /// subscriptions, or recover a same-site sibling card on a netdisk source
   /// when an edition card's shares have all been cancelled upstream.
   Future<(CmsSite, CmsVideo)> playableDetail(
-    CmsSite source, CmsVideo item, Iterable<CmsSite> candidates,
-  ) async {
+    CmsSite source,
+    CmsVideo item,
+    Iterable<CmsSite> candidates, {
+    bool forceRefresh = false,
+  }) async {
     String normTitleOf(String raw) =>
         raw.trim().toLowerCase().replaceAll(RegExp(r'[\s·:：,，.。!！?？\-_—()（）\[\]【】《》]+'), '');
 
@@ -1829,12 +1881,17 @@ class CmsClient {
         !CspBridge.isMyDriveSite(source);
 
     try {
-      fetchedDetail = await fetchDetail(source, item);
+      fetchedDetail = await fetchDetail(
+        source,
+        item,
+        forceRefresh: forceRefresh,
+      );
       if (fetchedDetail.lines.any((l) => l.episodes.isNotEmpty)) {
         return (source, fetchedDetail);
       }
     } on FormatException catch (e, st) {
       final isDeadShareMsg = e.message.contains('分享链接已失效') ||
+          e.message.contains('已取消或已失效') ||
           e.message.contains('原网盘分享暂不可用') ||
           e.message.contains('网盘暂不支持');
       if (canTrySameSiteSibling &&
@@ -1882,7 +1939,11 @@ class CmsClient {
             for (final sib in siblings) {
               if (_sourceCancelled()) break;
               try {
-                final sibDetail = await fetchDetail(source, sib);
+                final sibDetail = await fetchDetail(
+                  source,
+                  sib,
+                  forceRefresh: forceRefresh,
+                );
                 if (sibDetail.lines.any((l) => l.episodes.isNotEmpty)) {
                   final note =
                       '当前版本原分享已失效，已自动加载同站可用片源「${sibDetail.title.isEmpty ? sib.title : sibDetail.title}」';
@@ -1981,7 +2042,11 @@ class CmsClient {
                 .toList();
         for (final found in [...exactMatches, ...normMatches]) {
           if (detail.year.isNotEmpty && found.year.isNotEmpty && found.year != detail.year) continue;
-          final video = await fetchDetail(site, found);
+          final video = await fetchDetail(
+            site,
+            found,
+            forceRefresh: forceRefresh,
+          );
           if (detail.year.isNotEmpty && video.year.isNotEmpty && video.year != detail.year) continue;
           final videoTitle = video.title.trim();
           final titleMatches = videoTitle == title ||
@@ -2080,9 +2145,122 @@ class CmsClient {
   }
 
   static const Duration _detailCacheTtl = Duration(minutes: 5);
+  static const Duration _detailEmptyCacheTtl = Duration(minutes: 5);
   static const int _maxDetailCacheEntries = 48;
-  final Map<String, ({CmsVideo video, DateTime expiresAt})> _detailCache = {};
-  final Map<String, Future<CmsVideo>> _detailInFlight = {};
+  final Map<String, ({CmsVideo video, DateTime expiresAt, bool needsRefresh})>
+      _detailCache = {};
+  final Map<String, Map<String, List<CmsEpisode>>> _detailShareCache = {};
+  final Map<String, DateTime> _detailEmptyCache = {};
+  // Bounded TTL marker for videos whose previously playable share(s) were
+  // confirmed withdrawn/empty while another share still awaits retry (leaving
+  // zero preservable episodes). Unlike `_detailEmptyCache`, this does NOT mark
+  // the video as authoritatively delisted, yet still forces ordinary re-entry
+  // and DetailScreen to bypass stale embedded card lines and re-query upstream.
+  final Map<String, DateTime> _detailPendingRetryCache = {};
+  final Map<String, ({Future<CmsVideo> future, bool forceRefresh, int reqId})>
+      _detailInFlight = {};
+  // Tracks latest request ownership strictly while at least one request for a
+  // cache key is in flight; entries are removed immediately when activeCount
+  // drops to 0 so memory stays bounded to active requests only.
+  final Map<String, ({int activeCount, int latestRequestId})>
+      _detailFlightTracker = {};
+  int _nextDetailRequestId = 0;
+  int _detailCacheGeneration = 0;
+
+  @visibleForTesting
+  DateTime Function()? debugClock;
+
+  DateTime _now() => debugClock?.call() ?? DateTime.now();
+
+  @visibleForTesting
+  int get debugTrackedDetailFlightCount => _detailFlightTracker.length;
+
+  @visibleForTesting
+  int get debugDetailCacheSize => _detailCache.length;
+
+  @visibleForTesting
+  int get debugDetailEmptyCacheSize => _detailEmptyCache.length;
+
+  bool isM3uVodSite(CmsSite site) =>
+      site.isM3uVodApi || _resolveAdapterSite(site).isM3uVodApi;
+
+  bool hasAuthoritativeEmptyDetail(CmsSite site, CmsVideo video) {
+    if (video.id.trim().isEmpty || isM3uVodSite(site)) {
+      return false;
+    }
+    final cacheKey = _detailCacheKey(site, video);
+    final expiresAt = _detailEmptyCache[cacheKey];
+    if (expiresAt == null) return false;
+    if (_now().isBefore(expiresAt)) {
+      return true;
+    }
+    _detailEmptyCache.remove(cacheKey);
+    return false;
+  }
+
+  /// True when [video] contains cloud-share episodes (either already-expanded
+  /// `mmwogg://quark` / `mmcloud://...` or unexpanded share links) that must
+  /// be verified against a fresh cache or upstream before being shown as
+  /// playable. Excludes owned drive items (`mmquark://owned?`).
+  static bool hasUnverifiedCloudLines(CmsVideo video) => video.lines.any(
+        (line) => line.episodes.any(
+          (ep) =>
+              (ep.cloudProvider != null &&
+                  !ep.url.startsWith('mmquark://owned?')) ||
+              _isExpandableCloudShare(ep.url),
+        ),
+      );
+
+  /// Returns a fresh, non-degraded cached detail video if one is currently
+  /// valid in `_detailCache`, or `null` when absent, expired, or marked
+  /// `needsRefresh`.
+  CmsVideo? peekFreshCachedDetail(CmsSite site, CmsVideo video) {
+    if (video.id.trim().isEmpty) return null;
+    final cacheKey = _detailCacheKey(site, video);
+    final cached = _detailCache[cacheKey];
+    if (cached == null) return null;
+    if (!_now().isBefore(cached.expiresAt)) {
+      _detailCache.remove(cacheKey);
+      _detailShareCache.remove(cacheKey);
+      return null;
+    }
+    if (cached.needsRefresh) return null;
+    return cached.video;
+  }
+
+  bool hasPendingDetailRetry(CmsSite site, CmsVideo video) {
+    if (video.id.trim().isEmpty || isM3uVodSite(site)) {
+      return false;
+    }
+    final cacheKey = _detailCacheKey(site, video);
+    final expiresAt = _detailPendingRetryCache[cacheKey];
+    if (expiresAt == null) return false;
+    if (_now().isBefore(expiresAt)) {
+      return true;
+    }
+    _detailPendingRetryCache.remove(cacheKey);
+    return false;
+  }
+
+  void _recordAuthoritativeEmpty(String cacheKey) {
+    if (!_detailEmptyCache.containsKey(cacheKey) &&
+        _detailEmptyCache.length >= _maxDetailCacheEntries) {
+      _detailEmptyCache.remove(_detailEmptyCache.keys.first);
+    } else {
+      _detailEmptyCache.remove(cacheKey);
+    }
+    _detailEmptyCache[cacheKey] = _now().add(_detailEmptyCacheTtl);
+  }
+
+  void _recordPendingRetry(String cacheKey) {
+    if (!_detailPendingRetryCache.containsKey(cacheKey) &&
+        _detailPendingRetryCache.length >= _maxDetailCacheEntries) {
+      _detailPendingRetryCache.remove(_detailPendingRetryCache.keys.first);
+    } else {
+      _detailPendingRetryCache.remove(cacheKey);
+    }
+    _detailPendingRetryCache[cacheKey] = _now().add(_detailEmptyCacheTtl);
+  }
 
   String _detailCacheKey(CmsSite site, CmsVideo fallback) => jsonEncode([
         JsSourceHost.generation,
@@ -2100,7 +2278,11 @@ class CmsClient {
       ]);
 
   void clearDetailCache() {
+    _detailCacheGeneration++;
     _detailCache.clear();
+    _detailShareCache.clear();
+    _detailEmptyCache.clear();
+    _detailPendingRetryCache.clear();
   }
 
   Future<void> prefetchDetail(CmsSite site, CmsVideo fallback) async {
@@ -2115,30 +2297,69 @@ class CmsClient {
     } catch (_) {}
   }
 
-  Future<CmsVideo> fetchDetail(CmsSite site, CmsVideo fallback) async {
+  Future<CmsVideo> fetchDetail(
+    CmsSite site,
+    CmsVideo fallback, {
+    bool forceRefresh = false,
+  }) async {
     _requireSourceAdapter(site);
     if (fallback.id.trim().isEmpty) {
-      return _fetchDetailUncached(site, fallback);
+      return _fetchDetailUncached(
+        site,
+        fallback,
+        forceRefresh: forceRefresh,
+      );
     }
     final cacheKey = _detailCacheKey(site, fallback);
-    final now = DateTime.now();
+    final now = _now();
+    var hasRecentEmpty = false;
+    final emptyExpiresAt = _detailEmptyCache[cacheKey];
+    if (emptyExpiresAt != null) {
+      if (now.isBefore(emptyExpiresAt)) {
+        hasRecentEmpty = true;
+        // Refresh LRU position
+        _detailEmptyCache.remove(cacheKey);
+        _detailEmptyCache[cacheKey] = emptyExpiresAt;
+      } else {
+        _detailEmptyCache.remove(cacheKey);
+      }
+    }
+    var hasPendingRetry = false;
+    final retryExpiresAt = _detailPendingRetryCache[cacheKey];
+    if (retryExpiresAt != null) {
+      if (now.isBefore(retryExpiresAt)) {
+        hasPendingRetry = true;
+        _detailPendingRetryCache.remove(cacheKey);
+        _detailPendingRetryCache[cacheKey] = retryExpiresAt;
+      } else {
+        _detailPendingRetryCache.remove(cacheKey);
+      }
+    }
+    ({CmsVideo video, DateTime expiresAt, bool needsRefresh})? preservedCached;
     final cached = _detailCache[cacheKey];
     if (cached != null) {
       if (now.isBefore(cached.expiresAt)) {
-        // Refresh LRU position
+        preservedCached = cached;
+        if (!forceRefresh && !cached.needsRefresh) {
+          // Refresh LRU position
+          _detailCache.remove(cacheKey);
+          _detailCache[cacheKey] = cached;
+          return _mergeDetail(cached.video, fallback);
+        }
+      } else {
         _detailCache.remove(cacheKey);
-        _detailCache[cacheKey] = cached;
-        return _mergeDetail(cached.video, fallback);
+        _detailShareCache.remove(cacheKey);
       }
-      _detailCache.remove(cacheKey);
     }
 
     final existingFlight = _detailInFlight[cacheKey];
     final callerAbort = Zone.current[_cancelKey] as Completer<void>?;
-    if (existingFlight != null) {
+    final canJoinExisting = existingFlight != null &&
+        (!forceRefresh || existingFlight.forceRefresh);
+    if (canJoinExisting) {
       try {
         final joined = await Future.any([
-          existingFlight,
+          existingFlight.future,
           if (callerAbort != null)
             callerAbort.future.then<CmsVideo>(
               (_) => throw StateError('片源加载已取消'),
@@ -2148,28 +2369,179 @@ class CmsClient {
       } on StateError {
         if (callerAbort?.isCompleted == true) rethrow;
         // Primary caller was cancelled; fall through to start a fresh fetch.
+      } on http.RequestAbortedException {
+        if (callerAbort?.isCompleted == true) rethrow;
       }
     }
 
+    final cacheGen = _detailCacheGeneration;
+    final reqId = ++_nextDetailRequestId;
+    final prevTracker = _detailFlightTracker[cacheKey];
+    _detailFlightTracker[cacheKey] = (
+      activeCount: (prevTracker?.activeCount ?? 0) + 1,
+      latestRequestId: reqId,
+    );
+
+    final shouldBypassFallbackLines = hasRecentEmpty ||
+        hasPendingRetry ||
+        (preservedCached?.needsRefresh == true);
+    final prevShareSnapshot = _detailShareCache[cacheKey] != null
+        ? Map<String, List<CmsEpisode>>.of(_detailShareCache[cacheKey]!)
+        : null;
+
+    late final ({Future<CmsVideo> future, bool forceRefresh, int reqId})
+        flightEntry;
     final flight = () async {
-      final fetched = await _fetchDetailUncached(site, fallback);
-      final expanded = await _expandMmShareLines(fetched);
-      if (expanded.lines.any((l) => l.episodes.isNotEmpty)) {
-        if (_detailCache.length >= _maxDetailCacheEntries) {
-          _detailCache.remove(_detailCache.keys.first);
+      try {
+        final CmsVideo fetched;
+        try {
+          fetched = await _fetchDetailUncached(
+            site,
+            fallback,
+            forceRefresh: forceRefresh,
+            bypassFallbackLines: shouldBypassFallbackLines,
+          );
+        } catch (error) {
+          if (!forceRefresh &&
+              preservedCached != null &&
+              preservedCached.needsRefresh &&
+              (error is FormatException ||
+                  error is TimeoutException ||
+                  error is http.ClientException)) {
+            return _mergeDetail(preservedCached.video, fallback);
+          }
+          rethrow;
         }
-        _detailCache[cacheKey] = (
-          video: expanded,
-          expiresAt: DateTime.now().add(_detailCacheTtl),
+        final expandResult = await _expandMmShareLines(
+          fetched,
+          previousShareEpisodes: prevShareSnapshot,
         );
+        final expanded = expandResult.video;
+        final hasPlayable = expanded.lines.any((l) => l.episodes.isNotEmpty);
+        final tracker = _detailFlightTracker[cacheKey];
+        final isLatest = cacheGen == _detailCacheGeneration &&
+            tracker != null &&
+            tracker.latestRequestId == reqId;
+
+        // Pure transient / incomplete cloud-share failure with no healthy
+        // refreshed lines and no share authoritatively removed from the
+        // playable set: keep existing playable cache (marked needsRefresh so
+        // later re-entry retries) and do NOT mark authoritatively delisted.
+        // When another share WAS confirmed withdrawn/empty (`clearedShares`
+        // non-empty), update the cached detail to drop the withdrawn share
+        // while keeping the retryable share's preserved episodes.
+        if (!expandResult.hasFreshHealthyLines &&
+            expandResult.hasTransientErrors &&
+            !(expandResult.clearedShares.isNotEmpty && hasPlayable)) {
+          if (isLatest) {
+            if (expandResult.clearedShares.isNotEmpty) {
+              final existingShares = _detailShareCache[cacheKey];
+              if (existingShares != null) {
+                for (final share in expandResult.clearedShares) {
+                  existingShares.remove(share);
+                }
+                if (existingShares.isEmpty) {
+                  _detailShareCache.remove(cacheKey);
+                }
+              }
+              // No remaining playable episodes after removing withdrawn shares:
+              // evict stale cached detail so withdrawn shares never reappear,
+              // and record a pending-retry marker so ordinary re-entry from a
+              // stale card ignores withdrawn lines and re-queries upstream
+              // without writing an authoritative-empty marker.
+              _detailCache.remove(cacheKey);
+              if (!site.isM3uVodApi && !_resolveAdapterSite(site).isM3uVodApi) {
+                _recordPendingRetry(cacheKey);
+              }
+            } else {
+              final currentCached = _detailCache[cacheKey];
+              if (currentCached != null) {
+                _detailCache[cacheKey] = (
+                  video: hasPlayable ? expanded : currentCached.video,
+                  expiresAt: currentCached.expiresAt,
+                  needsRefresh: true,
+                );
+              }
+            }
+          }
+          if (!forceRefresh &&
+              expandResult.clearedShares.isEmpty &&
+              preservedCached != null) {
+            return hasPlayable
+                ? expanded
+                : _mergeDetail(preservedCached.video, fallback);
+          }
+          throw FormatException(
+            expandResult.firstTransientError ?? '网盘分享读取失败',
+          );
+        }
+
+        if (isLatest) {
+          if (hasPlayable) {
+            _detailEmptyCache.remove(cacheKey);
+            _detailPendingRetryCache.remove(cacheKey);
+            if (expandResult.updatedShares.isNotEmpty ||
+                expandResult.clearedShares.isNotEmpty) {
+              final shareMap =
+                  _detailShareCache.putIfAbsent(cacheKey, () => {});
+              shareMap.addAll(expandResult.updatedShares);
+              for (final share in expandResult.clearedShares) {
+                shareMap.remove(share);
+              }
+              if (shareMap.isEmpty) {
+                _detailShareCache.remove(cacheKey);
+              }
+            }
+            if (!_detailCache.containsKey(cacheKey) &&
+                _detailCache.length >= _maxDetailCacheEntries) {
+              final oldestKey = _detailCache.keys.first;
+              _detailCache.remove(oldestKey);
+              _detailShareCache.remove(oldestKey);
+            } else {
+              _detailCache.remove(cacheKey);
+            }
+            _detailCache[cacheKey] = (
+              video: expanded,
+              expiresAt: _now().add(_detailCacheTtl),
+              needsRefresh: expandResult.hasTransientErrors ||
+                  expandResult.hasIncompleteListing,
+            );
+          } else {
+            // Authoritative empty/delisted response (or confirmed withdrawn
+            // cloud share with no remaining healthy lines): evict stale
+            // playable cache and record a bounded TTL empty marker so
+            // re-entering from a card carrying stale embedded lines re-verifies
+            // upstream instead of resurrecting withdrawn episodes.
+            _detailCache.remove(cacheKey);
+            _detailShareCache.remove(cacheKey);
+            _detailPendingRetryCache.remove(cacheKey);
+            if (!site.isM3uVodApi && !_resolveAdapterSite(site).isM3uVodApi) {
+              _recordAuthoritativeEmpty(cacheKey);
+            }
+          }
+        }
+        return expanded;
+      } finally {
+        final current = _detailFlightTracker[cacheKey];
+        if (current != null) {
+          final remaining = current.activeCount - 1;
+          if (remaining <= 0) {
+            _detailFlightTracker.remove(cacheKey);
+          } else {
+            _detailFlightTracker[cacheKey] = (
+              activeCount: remaining,
+              latestRequestId: current.latestRequestId,
+            );
+          }
+        }
       }
-      return expanded;
     }();
-    _detailInFlight[cacheKey] = flight;
+    flightEntry = (future: flight, forceRefresh: forceRefresh, reqId: reqId);
+    _detailInFlight[cacheKey] = flightEntry;
     try {
       return await flight;
     } finally {
-      if (identical(_detailInFlight[cacheKey], flight)) {
+      if (identical(_detailInFlight[cacheKey], flightEntry)) {
         _detailInFlight.remove(cacheKey);
       }
     }
@@ -2181,11 +2553,70 @@ class CmsClient {
         ResilientHttpClient.cloudProviderForShare(trimmed) != null;
   }
 
-  Future<CmsVideo> _expandMmShareLines(CmsVideo video) async {
+  static ({_CloudShareOutcomeKind kind, String message})
+      _classifyCloudShareError(Object error) {
+    final withdrawnMsgRe = RegExp(r'已失效|已取消|不存在|已删除|分享链接已失效');
+    return switch (error) {
+      QuarkDriveException e => (
+          kind: (e.code == 'share_expired' || e.code == 'archive_only')
+              ? _CloudShareOutcomeKind.withdrawn
+              : _CloudShareOutcomeKind.transientError,
+          message: e.message,
+        ),
+      AliShareException e => (
+          kind: withdrawnMsgRe.hasMatch(e.message)
+              ? _CloudShareOutcomeKind.withdrawn
+              : _CloudShareOutcomeKind.transientError,
+          message: e.message,
+        ),
+      QuarkAccountException e => (
+          kind: _CloudShareOutcomeKind.transientError,
+          message: e.message,
+        ),
+      FormatException e => (
+          kind: withdrawnMsgRe.hasMatch(e.message)
+              ? _CloudShareOutcomeKind.withdrawn
+              : _CloudShareOutcomeKind.transientError,
+          message: e.message,
+        ),
+      TimeoutException _ => (
+          kind: _CloudShareOutcomeKind.transientError,
+          message: '网盘分享读取超时',
+        ),
+      _ => (
+          kind: _CloudShareOutcomeKind.transientError,
+          message: '网盘分享读取失败',
+        ),
+    };
+  }
+
+  Future<
+      ({
+        CmsVideo video,
+        bool hasFreshHealthyLines,
+        bool hasTransientErrors,
+        bool hasIncompleteListing,
+        String? firstTransientError,
+        Map<String, List<CmsEpisode>> updatedShares,
+        Set<String> clearedShares,
+      })> _expandMmShareLines(
+    CmsVideo video, {
+    Map<String, List<CmsEpisode>>? previousShareEpisodes,
+  }) async {
     final hasMmShare = video.lines.any(
       (line) => line.episodes.any((ep) => _isExpandableCloudShare(ep.url)),
     );
-    if (!hasMmShare) return video;
+    if (!hasMmShare) {
+      return (
+        video: video,
+        hasFreshHealthyLines: video.lines.any((l) => l.episodes.isNotEmpty),
+        hasTransientErrors: false,
+        hasIncompleteListing: false,
+        firstTransientError: null,
+        updatedShares: const <String, List<CmsEpisode>>{},
+        clearedShares: const <String>{},
+      );
+    }
 
     String canonicalShareOf(String epUrl) {
       final trimmed = epUrl.trim();
@@ -2207,13 +2638,27 @@ class CmsClient {
         }
       }
     }
-    if (allUniqueShares.isEmpty) return video;
+    if (allUniqueShares.isEmpty) {
+      return (
+        video: video,
+        hasFreshHealthyLines: video.lines.any((l) => l.episodes.isNotEmpty),
+        hasTransientErrors: false,
+        hasIncompleteListing: false,
+        firstTransientError: null,
+        updatedShares: const <String, List<CmsEpisode>>{},
+        clearedShares: const <String>{},
+      );
+    }
 
     var preferredOrder = const ['quark', 'uc', 'baidu', 'ali'];
+    var prioritizeLoggedIn = true;
+    var hasCustomOrder = false;
     final loggedInProviders = <String>{};
     try {
       final storage = await StorageService.init();
       preferredOrder = storage.driveOrder;
+      prioritizeLoggedIn = storage.prioritizeLoggedInDrives;
+      hasCustomOrder = storage.hasCustomDriveOrder;
       if (storage.quarkCookie.trim().isNotEmpty) loggedInProviders.add('quark');
       if (storage.ucCookie.trim().isNotEmpty) loggedInProviders.add('uc');
       if (storage.baiduCookie.trim().isNotEmpty) loggedInProviders.add('baidu');
@@ -2227,12 +2672,15 @@ class CmsClient {
       if (provider == null) return 100;
       final orderIdx = preferredOrder.indexOf(provider);
       final rank = orderIdx < 0 ? 50 : orderIdx;
+      if (!prioritizeLoggedIn || loggedInProviders.isEmpty) {
+        return rank;
+      }
       return loggedInProviders.contains(provider) ? rank : 10 + rank;
     }
 
     final indexedShares = allUniqueShares.indexed.toList()
       ..sort((a, b) {
-        if (loggedInProviders.isNotEmpty) {
+        if (loggedInProviders.isNotEmpty || hasCustomOrder) {
           final cmp = sharePriority(a.$2).compareTo(sharePriority(b.$2));
           if (cmp != 0) return cmp;
         }
@@ -2242,7 +2690,8 @@ class CmsClient {
         indexedShares.take(10).map((entry) => entry.$2).toList(growable: false);
 
     final resolvedByShare = <String, List<CmsEpisode>>{};
-    final errorsByShare = <String, String>{};
+    final errorsByShare =
+        <String, ({_CloudShareOutcomeKind kind, String message})>{};
     final parentAbort = Zone.current[_cancelKey] as Completer<void>?;
     final activeTokens = <Completer<void>>{};
     final parentSub = parentAbort?.future.asStream().listen((_) {
@@ -2267,14 +2716,7 @@ class CmsClient {
           });
           resolvedByShare[shareUrl] = eps;
         } catch (error) {
-          errorsByShare[shareUrl] = switch (error) {
-            AliShareException e => e.message,
-            QuarkDriveException e => e.message,
-            QuarkAccountException e => e.message,
-            FormatException e => e.message,
-            TimeoutException _ => '网盘分享读取超时',
-            _ => '网盘分享读取失败',
-          };
+          errorsByShare[shareUrl] = _classifyCloudShareError(error);
         } finally {
           if (!token.isCompleted) token.complete();
           activeTokens.remove(token);
@@ -2287,21 +2729,38 @@ class CmsClient {
         for (var i = 0; i < 3 && i < shareUrls.length; i++) shareWorker(),
       ]);
     } finally {
-      await parentSub?.cancel();
+      if (parentSub != null) {
+        unawaited(parentSub.cancel());
+      }
       for (final token in activeTokens.toList()) {
         if (!token.isCompleted) token.complete();
       }
     }
 
+    if (_sourceCancelled()) {
+      throw StateError('片源加载已取消');
+    }
+
     final expandedLines = <CmsLine>[];
     final warnings = <String>[...video.sourceWarnings];
+    final updatedShares = <String, List<CmsEpisode>>{};
+    final clearedShares = <String>{};
+    var hasFreshHealthyLines = false;
+    var hasTransientErrors = false;
+    var hasIncompleteListing = false;
+    String? firstTransientError;
+
     for (final line in video.lines) {
       if (!line.episodes.any((ep) => _isExpandableCloudShare(ep.url))) {
         expandedLines.add(line);
+        if (line.episodes.isNotEmpty) {
+          hasFreshHealthyLines = true;
+        }
         continue;
       }
       final passthroughEps = <CmsEpisode>[];
-      final resolvedShareGroups = <List<CmsEpisode>>[];
+      final resolvedShareGroups =
+          <({String shareId, List<CmsEpisode> episodes})>[];
       for (final ep in line.episodes) {
         if (!_isExpandableCloudShare(ep.url)) {
           passthroughEps.add(ep);
@@ -2309,36 +2768,71 @@ class CmsClient {
         }
         final rawShare = canonicalShareOf(ep.url);
         final resolved = resolvedByShare[rawShare];
+        final shareErr = errorsByShare[rawShare];
         if (resolved != null && resolved.isNotEmpty) {
-          resolvedShareGroups.add(resolved);
-        } else if (errorsByShare.containsKey(rawShare)) {
-          final msg = '${line.name}：${errorsByShare[rawShare]}';
+          resolvedShareGroups.add((shareId: rawShare, episodes: resolved));
+          updatedShares[rawShare] = List<CmsEpisode>.unmodifiable(resolved);
+          hasFreshHealthyLines = true;
+          if (resolved.any((e) => e.playbackSession['listingWarning'] != null)) {
+            hasIncompleteListing = true;
+          }
+        } else if (shareErr != null) {
+          final msg = '${line.name}：${shareErr.message}';
           if (!warnings.contains(msg)) warnings.add(msg);
+          if (shareErr.kind == _CloudShareOutcomeKind.withdrawn) {
+            clearedShares.add(rawShare);
+          } else {
+            hasTransientErrors = true;
+            firstTransientError ??= msg;
+            final preserved = previousShareEpisodes?[rawShare];
+            if (preserved != null && preserved.isNotEmpty) {
+              resolvedShareGroups.add((shareId: rawShare, episodes: preserved));
+            }
+          }
         } else if (resolved != null && resolved.isEmpty) {
+          clearedShares.add(rawShare);
           final msg = '${line.name}：该网盘分享目录为空，暂无可播放视频';
           if (!warnings.contains(msg)) warnings.add(msg);
         }
       }
+      if (passthroughEps.isNotEmpty) {
+        hasFreshHealthyLines = true;
+      }
+      String stableShareLineId(String shareId) {
+        final baseId = line.id.trim();
+        if (shareId.isEmpty) return baseId;
+        return baseId.isNotEmpty ? '$baseId|$shareId' : shareId;
+      }
+
       if (resolvedShareGroups.length == 1 && passthroughEps.isEmpty) {
+        final only = resolvedShareGroups.single;
         expandedLines.add(
-          CmsLine(name: line.name, episodes: resolvedShareGroups.single),
+          CmsLine(
+            id: stableShareLineId(only.shareId),
+            name: line.name,
+            episodes: only.episodes,
+          ),
         );
       } else if (resolvedShareGroups.length > 1 && passthroughEps.isEmpty) {
         for (var idx = 0; idx < resolvedShareGroups.length; idx++) {
+          final group = resolvedShareGroups[idx];
           expandedLines.add(
             CmsLine(
+              id: stableShareLineId(group.shareId),
               name: '${line.name} ${idx + 1}',
-              episodes: resolvedShareGroups[idx],
+              episodes: group.episodes,
             ),
           );
         }
       } else {
         final combined = <CmsEpisode>[
           ...passthroughEps,
-          for (final g in resolvedShareGroups) ...g,
+          for (final g in resolvedShareGroups) ...g.episodes,
         ];
         if (combined.isNotEmpty) {
-          expandedLines.add(CmsLine(name: line.name, episodes: combined));
+          expandedLines.add(
+            CmsLine(id: line.id, name: line.name, episodes: combined),
+          );
         }
       }
     }
@@ -2366,24 +2860,37 @@ class CmsClient {
         ..addAll(indexedLines.map((e) => e.$2));
     }
 
-    return CmsVideo(
-      id: video.id,
-      title: video.title,
-      poster: video.poster,
-      remarks: video.remarks,
-      year: video.year,
-      area: video.area,
-      actor: video.actor,
-      description: video.description,
-      tag: video.tag,
-      doubanScore: video.doubanScore,
-      rtScore: video.rtScore,
-      lines: expandedLines,
-      sourceWarnings: warnings,
+    return (
+      video: CmsVideo(
+        id: video.id,
+        title: video.title,
+        poster: video.poster,
+        remarks: video.remarks,
+        year: video.year,
+        area: video.area,
+        actor: video.actor,
+        description: video.description,
+        tag: video.tag,
+        doubanScore: video.doubanScore,
+        rtScore: video.rtScore,
+        lines: expandedLines,
+        sourceWarnings: warnings,
+      ),
+      hasFreshHealthyLines: hasFreshHealthyLines,
+      hasTransientErrors: hasTransientErrors,
+      hasIncompleteListing: hasIncompleteListing,
+      firstTransientError: firstTransientError,
+      updatedShares: updatedShares,
+      clearedShares: clearedShares,
     );
   }
 
-  Future<CmsVideo> _fetchDetailUncached(CmsSite site, CmsVideo fallback) async {
+  Future<CmsVideo> _fetchDetailUncached(
+    CmsSite site,
+    CmsVideo fallback, {
+    bool forceRefresh = false,
+    bool bypassFallbackLines = false,
+  }) async {
     site = _resolveAdapterSite(site);
     if (fallback.id.startsWith('mmquark://owned?')) {
       return _mergeDetail(CmsVideo(id: fallback.id, title: fallback.title,
@@ -2393,31 +2900,56 @@ class CmsClient {
     }
     if (_usesSpiderGateway(site)) {
       final raw = await _callSpiderGateway(site, 'detail', {'id': fallback.id});
-      final listing = CmsParser.parseListing(_wrapJsEpisodeIds(raw, scheme: 'mmgw'));
-      return listing.videos.isEmpty ? fallback : _mergeDetail(listing.videos.first, fallback);
+      return _parseCmsDetailResponse(
+        raw,
+        fallback,
+        wrapScheme: 'mmgw',
+        allowXml: false,
+      );
     }
     if (_isHttpT4(site)) {
       final raw = await _callT4(site, {'ac': 'detail', 'ids': fallback.id});
-      final listing = CmsParser.parseListing(_wrapJsEpisodeIds(raw, scheme: 'mmt4'));
-      return listing.videos.isEmpty ? fallback : _mergeDetail(listing.videos.first, fallback);
+      return _parseCmsDetailResponse(
+        raw,
+        fallback,
+        wrapScheme: 'mmt4',
+        allowXml: false,
+      );
     }
     if (site.isCatPaw) {
       if (CspBridge.isDoubanSite(site)) return fallback;
       final raw = await _getText(_appendQuery(site.api, {'ac':'detail','ids':fallback.id}).toString());
-      final listing = CmsParser.parseListing(_wrapJsEpisodeIds(raw,scheme:'mmpaw'));
-      return listing.videos.isEmpty ? fallback : _mergeDetail(listing.videos.first, fallback);
+      return _parseCmsDetailResponse(
+        raw,
+        fallback,
+        wrapScheme: 'mmpaw',
+        allowXml: false,
+      );
     }
     if (site.isEmby) return (await EmbyLibrary.open(site)).detail(fallback.id);
+    if (PersonalCloudLibrary.isSupportedSite(site)) {
+      final lib = await _openPersonalCloudLibrary(site);
+      try {
+        return await lib.detail(fallback);
+      } finally {
+        lib.close();
+      }
+    }
+    if (site.isExternalMediaLibrary) {
+      return ExternalMediaLibrary.detail(site, fallback);
+    }
     if (_usesJs(site)) {
       final raw = await _callJs(site, 'detail', [fallback.id,
         if (WoggSource.supports(site)) ...[fallback.title, fallback.year],
       ]);
-      final listing = CmsParser.parseListing(WoggSource.supports(site) ? raw : _wrapJsEpisodeIds(raw));
       // Old versions could cache a different provider under this source. Empty
       // plugin responses must not revive those cached playback lines.
-      return _mergeDetail(listing.videos.isEmpty
-          ? CmsVideo(id: fallback.id, title: fallback.title)
-          : listing.videos.first, fallback);
+      return _parseCmsDetailResponse(
+        raw,
+        fallback,
+        wrapScheme: WoggSource.supports(site) ? null : 'mmjs',
+        allowXml: false,
+      );
     }
     if (site.isM3uVodApi) {
       return fallback;
@@ -2425,7 +2957,19 @@ class CmsClient {
     if (CspBridge.canHandleSite(site)) {
       return CspBridge.fetchDetail(site, fallback, _getText);
     }
-    if (fallback.lines.isNotEmpty) return fallback;
+    // Previously expanded cloud-share episodes (`mmwogg://quark`,
+    // `mmcloud://...`) come from an earlier detail expansion rather than a
+    // direct CMS playback line. Once the detail cache has expired or been
+    // evicted (e.g. after share withdrawal + pending retry TTL), never short-
+    // circuit on those stale episodes without re-querying upstream CMS + drive.
+    final hasExpandedCloudLines = fallback.lines.any(
+      (line) => line.episodes.any((ep) => ep.cloudProvider != null),
+    );
+    if (((!forceRefresh && !bypassFallbackLines && !hasExpandedCloudLines) ||
+            fallback.id.trim().isEmpty) &&
+        fallback.lines.isNotEmpty) {
+      return fallback;
+    }
     final raw = await _getText(
       _appendQuery(
         site.api,
@@ -2437,9 +2981,183 @@ class CmsClient {
       ).toString(),
       headers: site.headers,
     );
-    final listing = CmsParser.parseListing(raw);
-    if (listing.videos.isEmpty) return fallback;
-    return _mergeDetail(listing.videos.first, fallback);
+    return _parseCmsDetailResponse(raw, fallback);
+  }
+
+  static final RegExp _negatedErrorMsgRe = RegExp(
+    r'\b(?:no|zero|0|without)\s+(?:error|errors|err|fail(?:ure)?s?|faults?|issues?)\b|(?:没有|无|零)\s*(?:错误|异常|失败|报错)',
+    caseSensitive: false,
+  );
+
+  static final RegExp _errorStatusMsgRe = RegExp(
+    r'(?:error|fail(?:ed|ure)?|unavailable|timeout|timed\s*out|expired|retry|exception|denied|forbidden|unauthorized|invalid|busy|maintenance|overload|rate\s*limit|too\s*many|bad\s*gateway|not\s*found|blocked|throttl|corrupt|broken|malformed|login\s*required|please\s*log\s*in|sign\s*in|错误|失败|异常|超时|繁忙|频繁|不可用|暂不可|无法|维护|非法|拒绝|禁止|未授权|限流|无权|有误|稍后再试|稍后重试|请重试|失效|过期|请先登录|需要登录|未登录|请登录)',
+    caseSensitive: false,
+  );
+
+  static final RegExp _explicitSuccessEmptyMsgRe = RegExp(
+    r'^(?:ok|success|succeeded|no\s+errors?|0\s+errors?|成功|操作成功|请求成功|获取(?:详情|数据)?成功|无错误)$',
+    caseSensitive: false,
+  );
+
+  static bool _isErrorStatusMessage(String rawMsg) {
+    final trimmed = rawMsg.trim();
+    if (trimmed.isEmpty) return false;
+    final stripped = trimmed.replaceAll(_negatedErrorMsgRe, '').trim();
+    if (stripped.isEmpty) return false;
+    return _errorStatusMsgRe.hasMatch(stripped);
+  }
+
+  static bool _isTruthyErrorField(Object? errField) {
+    if (errField == null || errField == false) return false;
+    if (errField is num) return errField != 0;
+    if (errField is List) return errField.isNotEmpty;
+    if (errField is Map) return errField.isNotEmpty;
+    final lower = errField.toString().trim().toLowerCase();
+    if (lower.isEmpty ||
+        lower == '0' ||
+        lower == 'false' ||
+        lower == 'none' ||
+        lower == 'null' ||
+        lower == 'ok' ||
+        lower == 'success') {
+      return false;
+    }
+    return true;
+  }
+
+  static void _validateCmsJsonEnvelope(
+    Map<String, dynamic> decoded, {
+    required bool hasVideos,
+  }) {
+    if (decoded['ok'] == false ||
+        decoded['success'] == false ||
+        decoded['code'] == false) {
+      throw const FormatException('片源返回了业务失败状态');
+    }
+    final errField = decoded['error'];
+    if (_isTruthyErrorField(errField)) {
+      throw FormatException('片源返回错误：${errField.toString().trim()}');
+    }
+    final statusStr = decoded['status'] is String
+        ? (decoded['status'] as String).trim().toLowerCase()
+        : '';
+    if (statusStr == 'error' || statusStr == 'fail' || statusStr == 'failed') {
+      throw const FormatException('片源返回了错误状态');
+    }
+
+    final rawMsg = (decoded['msg'] ??
+            decoded['message'] ??
+            decoded['errmsg'] ??
+            decoded['err_msg'] ??
+            '')
+        .toString()
+        .trim();
+    final hasCode = decoded.containsKey('code') && decoded['code'] != null;
+    int? parsedCode;
+    if (hasCode) {
+      final rawCode = decoded['code'];
+      final int? codeNum = rawCode is num
+          ? rawCode.toInt()
+          : int.tryParse(rawCode.toString().trim());
+      parsedCode = codeNum;
+      if (codeNum == null) {
+        final codeStr = rawCode.toString().trim().toLowerCase();
+        if (codeStr != 'ok' && codeStr != 'success') {
+          throw FormatException('片源返回了异常状态码：$rawCode');
+        }
+      } else if (codeNum < 0 ||
+          codeNum >= 400 ||
+          (codeNum != 0 && codeNum != 1 && codeNum != 200)) {
+        throw FormatException(
+          rawMsg.isNotEmpty
+              ? '片源返回错误($codeNum)：$rawMsg'
+              : '片源返回错误状态码($codeNum)',
+        );
+      }
+    }
+    // When valid video entries were parsed and no explicit failure flag/code
+    // triggered above, accept the response without relying on message whitelists
+    // (covers e.g. `code: 0, msg: "No error"` or `code: 0, msg: "获取详情成功"`).
+    if (hasVideos) {
+      return;
+    }
+    if (_isErrorStatusMessage(rawMsg)) {
+      throw FormatException('片源临时异常：$rawMsg');
+    }
+    // In MacCMS JSON protocols `code == 0` is a failure code, whereas some
+    // custom JSON APIs use `code == 0` for success. When `list` is empty, treat
+    // `code == 0` as ambiguous and preserve previous playable data unless the
+    // envelope explicitly confirms success.
+    if (parsedCode == 0) {
+      final explicitlyConfirmedSuccess = decoded['ok'] == true ||
+          decoded['success'] == true ||
+          statusStr == 'ok' ||
+          statusStr == 'success' ||
+          _explicitSuccessEmptyMsgRe.hasMatch(rawMsg);
+      if (!explicitlyConfirmedSuccess) {
+        throw FormatException(
+          rawMsg.isNotEmpty
+              ? '片源返回业务提示：$rawMsg'
+              : '片源返回状态码(0)且缺少有效详情数据',
+        );
+      }
+    }
+  }
+
+  CmsVideo _parseCmsDetailResponse(
+    String raw,
+    CmsVideo fallback, {
+    String? wrapScheme,
+    bool allowXml = true,
+  }) {
+    final trimmed = raw.trimLeft();
+    if (trimmed.isEmpty) {
+      throw const FormatException('片源返回了空响应');
+    }
+    if (trimmed.startsWith('<')) {
+      if (!allowXml) {
+        throw const FormatException('片源返回了网页或非 JSON 详情数据');
+      }
+      final parsedXml = CmsParser.parseXmlListing(trimmed, strict: true);
+      if (parsedXml.listing.videos.isNotEmpty) {
+        return _mergeDetail(parsedXml.listing.videos.first, fallback);
+      }
+      if (parsedXml.videoElementCount > 0) {
+        throw const FormatException('片源返回的 XML 详情项损坏');
+      }
+      return _mergeDetail(
+        CmsVideo(id: fallback.id, title: fallback.title),
+        fallback,
+      );
+    }
+    final cleaned = CmsParser.stripJsonComments(raw);
+    final decoded = jsonDecode(cleaned);
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('片源返回了无效的详情格式');
+    }
+    final rawList = CmsParser.extractRawVideoList(decoded);
+    if (rawList is! List) {
+      _validateCmsJsonEnvelope(decoded, hasVideos: false);
+      throw const FormatException('片源未返回有效的详情列表');
+    }
+    final payloadForListing = wrapScheme != null && rawList.isNotEmpty
+        ? _wrapJsEpisodeIds(cleaned, scheme: wrapScheme)
+        : raw;
+    final listing = CmsParser.parseListing(payloadForListing);
+    final hasPlayableVideos = listing.videos.any(
+      (v) => v.lines.any((l) => l.episodes.isNotEmpty),
+    );
+    _validateCmsJsonEnvelope(decoded, hasVideos: hasPlayableVideos);
+    if (listing.videos.isNotEmpty) {
+      return _mergeDetail(listing.videos.first, fallback);
+    }
+    if (rawList.isNotEmpty) {
+      throw const FormatException('片源返回的详情列表项损坏');
+    }
+    return _mergeDetail(
+      CmsVideo(id: fallback.id, title: fallback.title),
+      fallback,
+    );
   }
   static final RegExp _pollutedTitleSuffixRe = RegExp(
     r'^[\s·\-—:：]*(?:更新至|更至|更新到|连载至|全\s*\d+\s*[集期话]|共\s*\d+\s*[集期话]|已完结|完结).*$',
@@ -3054,6 +3772,19 @@ class CmsClient {
     if (site.isEmby && episode.url.startsWith('mmemby://play?')) {
       return (await EmbyLibrary.open(site)).resolve(episode);
     }
+    if (PersonalCloudLibrary.isSupportedSite(site) &&
+        PersonalCloudLibrary.isPlayableScheme(episode.url)) {
+      final lib = await _openPersonalCloudLibrary(site);
+      try {
+        return await lib.resolve(episode);
+      } finally {
+        lib.close();
+      }
+    }
+    if (site.isExternalMediaLibrary &&
+        ExternalMediaLibrary.isPlayableScheme(episode.url)) {
+      return ExternalMediaLibrary.resolve(site, episode);
+    }
     if (_usesJs(site) && episode.isScriptEpisode) {
       final params = Uri.parse(episode.url).queryParameters;
       final raw = jsonDecode(await _callJs(site, 'play', [params['flag'], params['id'], []]));
@@ -3353,4 +4084,9 @@ class CmsClient {
     pump();
     return controller.stream;
   }
+}
+
+enum _CloudShareOutcomeKind {
+  withdrawn,
+  transientError,
 }

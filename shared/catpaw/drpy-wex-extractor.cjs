@@ -3400,19 +3400,248 @@ function readWexDexCached(bytes, profile) {
     wexDexCache.set(artifactSha, dex);
     return dex;
   }
-  let native;
+  let dex = null;
+  let hasGuardPayload = false;
+  let guardPayload = null;
   try {
-    native = zipMember(bytes, 'assets/wexguard_v8.so', budget);
-  } catch (_) {
-    throw Error('guard_artifact_unsupported');
+    guardPayload = zipMember(bytes, 'assets/wexshinidie.guard', budget);
+    hasGuardPayload = true;
+  } catch (_) {}
+  if (hasGuardPayload) {
+    let knownNative = false;
+    try {
+      const native = zipMember(bytes, 'assets/wexguard_v8.so', budget);
+      knownNative = native.length === 48680 && WEX_NATIVE_SHAS.has(sha(native));
+    } catch (_) {}
+    try {
+      dex = new Dex(zipMember(unwrapWexGuard(guardPayload), 'classes.dex', budget));
+    } catch (error) {
+      if (!knownNative) throw Error('guard_artifact_unsupported');
+      throw error;
+    }
+  } else {
+    try {
+      dex = new Dex(zipMember(bytes, 'classes.dex', budget));
+    } catch (_) {
+      throw Error('guard_artifact_unsupported');
+    }
   }
-  if (native.length !== 48680 || !WEX_NATIVE_SHAS.has(sha(native))) {
-    throw Error('guard_artifact_unsupported');
-  }
-  const dex = new Dex(zipMember(unwrapWexGuard(zipMember(bytes, 'assets/wexshinidie.guard', budget)), 'classes.dex', budget));
   if (wexDexCache.size >= 2) wexDexCache.delete(wexDexCache.keys().next().value);
   wexDexCache.set(artifactSha, dex);
   return dex;
+}
+
+const DEFAULT_WEX_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const WEX_REMOTE_MERGE_CLS = 'Lcom/github/catvod/spider/merge/b0/b;';
+const WEX_REMOTE_KEYS = new Set([
+  'apiTxt0', 'apiTxt1', 'apiTxt2', 'apiTxt3',
+  'itemTxt0', 'itemTxt1', 'itemTxt2',
+  'remoteAesKey', 'remoteAesIv', 'mySiteSuffix', 'remoteUa'
+]);
+
+function isUaLiteral(v) {
+  return typeof v === 'string' && /^(?:Mozilla\/|okhttp\/|Dalvik\/)/i.test(v) && v.length >= 10 && v.length <= 512;
+}
+
+function isAesKeyIvLiteral(v) {
+  if (typeof v !== 'string') return false;
+  if (v.length !== 16 && v.length !== 24 && v.length !== 32) return false;
+  if (/^https?:\/\//i.test(v) || /\s/.test(v)) return false;
+  if (/^(?:AES\/|DES\/|RSA\/|Hmac|SHA-|MD5|UTF-8|ISO-|GBK|Content-Type|User-Agent|Authorization)/i.test(v)) return false;
+  return /^[\x21-\x7e]+$/.test(v);
+}
+
+function findAesPairInMethods(methods) {
+  const candidates = [];
+  for (const m of methods) {
+    const vals = m.list.map(x => x.value);
+    const hasCipherHint = vals.some(v => /AES\/CBC|AES\/ECB|SecretKeySpec|IvParameterSpec|PKCS[57]Padding/i.test(v));
+    for (let i = 0; i + 1 < m.list.length; i++) {
+      const a = m.list[i], b = m.list[i + 1];
+      if (b.unit - a.unit <= 8 && isAesKeyIvLiteral(a.value) && isAesKeyIvLiteral(b.value) && (a.value.length === 16 || a.value.length === 32) && b.value.length === 16) {
+        candidates.push({ key: a.value, iv: b.value, score: (hasCipherHint ? 10 : 0) + (a.value === b.value ? 1 : 2) });
+      }
+    }
+  }
+  candidates.sort((x, y) => y.score - x.score);
+  return candidates.length ? candidates[0] : null;
+}
+
+function findWexRemoteHelper(dex, preferredCls) {
+  const tryClass = clsName => {
+    const methods = dex.extractAllClassLiterals(clsName);
+    if (!methods || !methods.length) return null;
+    const clinit = methods.find(m => m.name === '<clinit>');
+    const clinitUrls = clinit ? clinit.list.map(x => x.value).filter(v => /^https?:\/\//i.test(v)) : [];
+    const aesPair = findAesPairInMethods(methods);
+    if (clinitUrls.length >= 2 || aesPair) {
+      return { clsName, methods, clinitUrls, aesPair };
+    }
+    return null;
+  };
+  if (preferredCls && dex.classMethods(preferredCls)) {
+    const hit = tryClass(preferredCls);
+    if (hit) return hit;
+  }
+  const mergeClasses = dex.classNames().filter(c => c.startsWith('Lcom/github/catvod/spider/merge/'));
+  let best = null;
+  let bestScore = -1;
+  for (const clsName of mergeClasses) {
+    if (clsName === preferredCls) continue;
+    const clinitList = dex.extractMethodLiterals(clsName, '<clinit>');
+    if (!clinitList || !clinitList.length) continue;
+    const urls = clinitList[0].list.map(x => x.value).filter(v => /^https?:\/\//i.test(v));
+    if (urls.length < 2) continue;
+    const info = tryClass(clsName);
+    if (!info) continue;
+    const txtUrls = urls.filter(u => /\.(?:txt|json)(?:[?#]|$)/i.test(u) || /\/(?:api|item)/i.test(u)).length;
+    const score = txtUrls * 4 + urls.length + (info.aesPair ? 15 : 0);
+    if (score > bestScore) {
+      bestScore = score;
+      best = info;
+    }
+  }
+  return best;
+}
+
+function resolveWexRemoteLiterals(dex, helper, extraSpec) {
+  const out = {};
+  if (!helper) return out;
+  const byMethod = new Map();
+  for (const m of helper.methods) {
+    if (!byMethod.has(m.name)) byMethod.set(m.name, []);
+    byMethod.get(m.name).push(m);
+  }
+  const exactAt = (methodName, unit) => {
+    const ms = byMethod.get(methodName);
+    if (!ms || !ms.length) return undefined;
+    const hits = ms.map(m => m.atUnit.get(unit)).filter(v => v !== undefined);
+    return hits.length === 1 ? hits[0] : undefined;
+  };
+  const allUrls = helper.clinitUrls;
+  const itemUrls = allUrls.filter(u => /item/i.test(u));
+  const apiUrls = allUrls.filter(u => !/item/i.test(u));
+  const effectiveApiUrls = apiUrls.length ? apiUrls : allUrls.slice(0, 4);
+  const effectiveItemUrls = itemUrls.length ? itemUrls : (allUrls.length > 4 ? allUrls.slice(4) : allUrls);
+
+  for (const [k, [, methodName, , unit]] of Object.entries(extraSpec)) {
+    if (!WEX_REMOTE_KEYS.has(k)) continue;
+    const exact = exactAt(methodName, unit);
+    if (k.startsWith('apiTxt')) {
+      const idx = Number(k.slice(6));
+      if (typeof exact === 'string' && /^https?:\/\//i.test(exact)) out[k] = exact;
+      else out[k] = effectiveApiUrls[idx] || '';
+    } else if (k.startsWith('itemTxt')) {
+      const idx = Number(k.slice(7));
+      if (typeof exact === 'string' && /^https?:\/\//i.test(exact)) out[k] = exact;
+      else out[k] = effectiveItemUrls[idx] || '';
+    } else if (k === 'remoteAesKey') {
+      if (isAesKeyIvLiteral(exact)) out[k] = exact;
+      else out[k] = helper.aesPair ? helper.aesPair.key : '';
+    } else if (k === 'remoteAesIv') {
+      if (isAesKeyIvLiteral(exact)) out[k] = exact;
+      else out[k] = helper.aesPair ? helper.aesPair.iv : '';
+    } else if (k === 'remoteUa') {
+      if (isUaLiteral(exact)) {
+        out[k] = exact;
+      } else {
+        const uaHit = helper.methods.flatMap(m => m.list.map(x => x.value)).find(isUaLiteral);
+        out[k] = uaHit || DEFAULT_WEX_UA;
+      }
+    } else if (k === 'mySiteSuffix') {
+      if (typeof exact === 'string' && exact.length > 0 && exact.length <= 128 && !/^https?:\/\//i.test(exact)) {
+        out[k] = exact;
+      } else {
+        const suffixHit = helper.methods
+          .flatMap(m => m.list.map(x => x.value))
+          .find(v => /^\/[a-zA-Z0-9_./-]{2,64}(?:\.json|\.txt)?$/i.test(v) && /site|config|my/i.test(v));
+        out[k] = suffixHit || '';
+      }
+    }
+  }
+  return out;
+}
+
+function resolveWexLiteralFallback(dex, clsName, keyName, methodName, unit, allMethodsCache) {
+  const getAll = () => {
+    if (!allMethodsCache.has(clsName)) {
+      allMethodsCache.set(clsName, dex.extractAllClassLiterals(clsName) || []);
+    }
+    return allMethodsCache.get(clsName);
+  };
+  const allMethods = getAll();
+  const namedMethods = allMethods.filter(m => m.name === methodName);
+
+  // 1. Exact (methodName, unit) match when method exists.
+  if (namedMethods.length) {
+    const exactHits = namedMethods.map(m => m.atUnit.get(unit)).filter(v => v !== undefined);
+    if (exactHits.length === 1 && exactHits[0].length > 0) return exactHits[0];
+  }
+
+  const pickBySemantics = (methods, allowRelaxed) => {
+    const lits = methods.flatMap(m => m.list.map(x => ({ ...x, method: m.name }))).filter(x => x.value && x.value.length > 0);
+    const uniqVals = arr => [...new Set(arr.map(x => x.value))];
+    const nearest = arr => {
+      if (!arr.length) return undefined;
+      const u = uniqVals(arr);
+      if (u.length === 1) return u[0];
+      arr.sort((a, b) => Math.abs(a.unit - unit) - Math.abs(b.unit - unit));
+      return arr[0].value;
+    };
+
+    if (keyName === 'filtersJson') {
+      const hits = lits.filter(x => x.value.startsWith('{') && x.value.includes('"key"') && x.value.includes('"value"'));
+      if (hits.length) return nearest(hits);
+    }
+    if (keyName === 'userAgent' || keyName === 'playUserAgent' || keyName === 'apiUa' || keyName === 'playUa') {
+      const hits = lits.filter(x => isUaLiteral(x.value));
+      if (hits.length) return nearest(hits);
+    }
+    if (/^(?:host|site)(\d+)$/.test(keyName)) {
+      const idx = Number(keyName.match(/(\d+)$/)[1]);
+      const urls = uniqVals(lits.filter(x => /^https?:\/\//i.test(x.value)));
+      if (urls[idx]) return urls[idx];
+    }
+    if (keyName === 'defaultHost' || keyName === 'originUrl' || keyName === 'apiBase' ||
+        keyName === 'referer' || keyName === 'refererUrl' || keyName === 'apiReferer' ||
+        keyName === 'playReferer' || keyName === 'defaultRef' || keyName === 'playOrigin' ||
+        keyName === 'defaultPic' || keyName.endsWith('Url') || keyName.endsWith('Base') ||
+        keyName.endsWith('Prefix') || keyName.endsWith('Api')) {
+      const urls = lits.filter(x => /^https?:\/\//i.test(x.value));
+      if (urls.length) return nearest(urls);
+    }
+    if (keyName === 'aesKey' || keyName === 'aesIv' || keyName === 'aesIvDefault' ||
+        keyName === 'playerAesIv' || keyName === 'xxteaKey') {
+      const hits = lits.filter(x => isAesKeyIvLiteral(x.value));
+      if (hits.length) return nearest(hits);
+    }
+    if (keyName === 'siteKey' || keyName === 'siteKeyAlt') {
+      const ignore = new Set(['User-Agent', 'Referer', 'Cookie', 'Origin', 'Accept', 'Content-Type', 'UTF-8', 'utf-8', 'GET', 'POST', 'http', 'https', 'null', 'true', 'false']);
+      const hits = lits.filter(x => /^[a-zA-Z][a-zA-Z0-9_-]{1,23}$/.test(x.value) && !ignore.has(x.value));
+      if (hits.length) return nearest(hits);
+    }
+    if (allowRelaxed && lits.length) {
+      return nearest(lits);
+    }
+    return undefined;
+  };
+
+  // 2. Semantic match inside the expected methodName.
+  if (namedMethods.length) {
+    const hit = pickBySemantics(namedMethods, true);
+    if (hit !== undefined) return hit;
+  }
+
+  // 3. Semantic match across all methods of the class (handles ProGuard renaming 1-2 char methods
+  //    or moving constants between <init>/<clinit>/helper).
+  const classHit = pickBySemantics(allMethods, false);
+  if (classHit !== undefined) return classHit;
+
+  // 4. Safe defaults for optional UA fields so renamed helper methods don't break playback.
+  if (keyName === 'userAgent' || keyName === 'playUserAgent' || keyName === 'apiUa' || keyName === 'playUa') {
+    return DEFAULT_WEX_UA;
+  }
+  return undefined;
 }
 
 function extractWex(bytes, adapter, rawExtension) {
@@ -3452,22 +3681,44 @@ function extractWex(bytes, adapter, rawExtension) {
     try {
       const dex = readWexDexCached(bytes, null);
       if (!dex.classMethods(spec.cls)) throw Error('guard_artifact_unsupported');
-      const extractUnique = (clsName, methodName, unit) => {
-        const list = dex.extractMethodLiterals(clsName, methodName);
-        if (!list || !list.length) fail();
-        const hits = list.map(m => m.atUnit.get(unit)).filter(v => v !== undefined);
-        if (hits.length !== 1) fail();
-        return hits[0];
-      };
+      const allMethodsCache = new Map();
       if (spec.literals) {
         for (const [k, [methodName, , unit]] of Object.entries(spec.literals)) {
-          extracted[k] = extractUnique(spec.cls, methodName, unit);
+          const val = resolveWexLiteralFallback(dex, spec.cls, k, methodName, unit, allMethodsCache);
+          if (val === undefined) {
+            if ((k === 'defaultHost' || k === 'originUrl') && (extText || Object.keys(extObj).length)) {
+              extracted[k] = '';
+            } else {
+              fail();
+            }
+          } else {
+            extracted[k] = val;
+          }
         }
       }
       if (spec.extraLiterals) {
+        const hasRemoteKeys = Object.keys(spec.extraLiterals).some(k => WEX_REMOTE_KEYS.has(k));
+        let remoteValues = {};
+        if (hasRemoteKeys) {
+          const helper = findWexRemoteHelper(dex, WEX_REMOTE_MERGE_CLS);
+          if (helper) {
+            remoteValues = resolveWexRemoteLiterals(dex, helper, spec.extraLiterals);
+          }
+        }
         for (const [k, [clsName, methodName, , unit]] of Object.entries(spec.extraLiterals)) {
-          if (!dex.classMethods(clsName)) fail();
-          extracted[k] = extractUnique(clsName, methodName, unit);
+          if (WEX_REMOTE_KEYS.has(k)) {
+            extracted[k] = remoteValues[k] !== undefined ? remoteValues[k] : (k === 'remoteUa' ? DEFAULT_WEX_UA : '');
+            continue;
+          }
+          let val;
+          if (dex.classMethods(clsName)) {
+            val = resolveWexLiteralFallback(dex, clsName, k, methodName, unit, allMethodsCache);
+          }
+          if (val === undefined) {
+            val = resolveWexLiteralFallback(dex, spec.cls, k, methodName, unit, allMethodsCache);
+          }
+          if (val === undefined) fail();
+          extracted[k] = val;
         }
       }
     } catch (error) {

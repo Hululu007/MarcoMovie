@@ -4707,8 +4707,12 @@ final class MobileShell {
             String k = key == null ? "" : key;
             String t = title == null ? "" : title;
             if (k.contains("settings-appearance")) return ICON_APPEARANCE;
+            if (k.contains("settings-subtitle-danmu")
+                    || k.contains("setting-danmu")
+                    || t.contains("弹幕")) return ICON_SUBTITLE;
             if (k.contains("settings-playback")) return ICON_PLAYBACK;
-            if (k.contains("settings-data")) return ICON_SOURCES;
+            if (k.contains("settings-data-sync")) return ICON_BACKUP_SAFE;
+            if (k.contains("settings-sources") || k.contains("settings-data")) return ICON_SOURCES;
             if (k.contains("settings-updates")) return ICON_UPDATE_CLOUD;
             if (k.contains("settings-cloud-sync") || t.contains("同步")) return ICON_NETDISK;
             if (k.contains("settings-accounts") || t.contains("网盘")) return ICON_NETDISK;

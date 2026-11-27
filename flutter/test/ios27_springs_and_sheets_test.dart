@@ -429,6 +429,7 @@ void main() {
                         PosterExpandRoute<void>(
                           initialSourceRect: PosterExpandRoute.captureRect(ctx)!,
                           sourceCardId: 'zoom-card-1',
+                          enableVerticalPullDismiss: true,
                           builder: (_) => const Scaffold(
                             key: ValueKey('zoom-detail-page'),
                             body: Center(child: Text('Zoom Detail')),

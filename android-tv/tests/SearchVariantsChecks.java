@@ -136,7 +136,7 @@ public final class SearchVariantsChecks {
                 SearchVariants.run(
                         "斗罗大陆2",
                         mergedTerms,
-                        t -> false,
+                        t -> t.contains("斗罗大陆"),
                         term -> {
                             calls[0]++;
                             if ("斗罗大陆2".equals(term)) {
@@ -161,7 +161,7 @@ public final class SearchVariantsChecks {
                 SearchVariants.run(
                         "斗罗大陆2",
                         mergedTerms,
-                        t -> false,
+                        t -> t.contains("斗罗大陆"),
                         term -> {
                             calls[0]++;
                             Cms.Video primary = video("anime_direct", "斗罗大陆2：绝世唐门");

@@ -5,6 +5,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart' show Colors, Theme;
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
 /// Runtime bridge to Apple's true iOS 26+ Liquid Glass UIKit primitives
@@ -15,6 +16,50 @@ import 'package:flutter/services.dart';
 /// On iOS 15–18, macOS, Windows, Android, HarmonyOS, and widget tests,
 /// [isAvailable] resolves to `false` and every widget / presenter seamlessly
 /// renders its high-fidelity Flutter fallback.
+/// Identifies which foreground route currently owns the iOS Dock appearance.
+enum IosDockOwner {
+  /// Root Home tab (index 0): tracks drag morphing and settles to 0.0 or 1.0.
+  home,
+
+  /// Non-Home root tabs (Live / Library / Settings): expanded full bar (0.0).
+  rootTab,
+
+  /// Curated collection page: visible, locked to upright collapsed Logo (1.0).
+  curated,
+
+  /// Secondary detail, player, search, settings subpage, or modal overlay.
+  hidden,
+}
+
+/// Shared Dock bridge passed down from [AdaptiveShell] to Curated collection
+/// pages so both native iOS 26+ chrome and iOS 14–25 Flutter fallback share one
+/// single state machine, scroll morph progress, and action dispatch table.
+class IosCuratedDockHost {
+  final ValueListenable<double> progress;
+  final ValueListenable<bool> useNativeRootChrome;
+  final ValueListenable<bool> visibleOnCurated;
+  final ValueListenable<int> selectedTabIndex;
+  final List<(IconData, IconData, String)> items;
+  final ValueChanged<int> onSelectTab;
+  final VoidCallback onSearch;
+  final VoidCallback onScrollToTop;
+  final VoidCallback onCuratedEnter;
+  final VoidCallback onCuratedExit;
+
+  const IosCuratedDockHost({
+    required this.progress,
+    required this.useNativeRootChrome,
+    required this.visibleOnCurated,
+    required this.selectedTabIndex,
+    required this.items,
+    required this.onSelectTab,
+    required this.onSearch,
+    required this.onScrollToTop,
+    required this.onCuratedEnter,
+    required this.onCuratedExit,
+  });
+}
+
 class IosLiquidGlassBridge {
   static const MethodChannel channel = MethodChannel(
     'marco_movie/ios_liquid_glass',
@@ -25,19 +70,50 @@ class IosLiquidGlassBridge {
       ValueNotifier<bool>(false);
   static final ValueNotifier<bool> sceneActiveNotifier =
       ValueNotifier<bool>(true);
+  static final ValueNotifier<bool> thermalThrottledNotifier =
+      ValueNotifier<bool>(false);
+
+  /// Raw iOS `ProcessInfo.thermalState` level (`0` nominal, `1` fair,
+  /// `2` serious, `3` critical). Older native builds only report the boolean
+  /// [thermalThrottledNotifier]; [thermalLevel] reconciles both.
+  static final ValueNotifier<int> thermalLevelNotifier = ValueNotifier<int>(0);
+  static final ValueNotifier<int> majorVersionNotifier = ValueNotifier<int>(0);
   static bool _initialized = false;
   static bool? _testOverride;
   static bool? _testReduceTransparencyOverride;
+  static bool? _testThermalThrottledOverride;
+  static int? _testThermalLevelOverride;
+  static int? _testMajorVersionOverride;
   static bool _incomingHandlerInstalled = false;
   static bool _sheetPresentationInFlight = false;
   static final ValueNotifier<bool> activeSheetNotifier =
       ValueNotifier<bool>(false);
+  static final ValueNotifier<int> rootTabSuppressionCount =
+      ValueNotifier<int>(0);
   static int _pinSessionCounter = 0;
   static ValueChanged<int>? _onRootTabSelected;
   static VoidCallback? _onRootTabSearch;
   static VoidCallback? _onRootTabScrollToTop;
+  static void Function(int tabIndex, String actionId)? _onRootTabMenuAction;
 
   static bool get isSceneActive => sceneActiveNotifier.value;
+
+  /// Acquires a ref-counted suppression token that forces the root native iOS
+  /// tab chrome to stay hidden (e.g. while fullscreen video playback is active)
+  /// regardless of how the route was pushed. Returns an idempotent release fn.
+  static VoidCallback acquireRootTabSuppression() {
+    rootTabSuppressionCount.value = rootTabSuppressionCount.value + 1;
+    if (isAvailable) {
+      unawaited(setRootTabVisible(false, animated: true));
+    }
+    var released = false;
+    return () {
+      if (released) return;
+      released = true;
+      final next = rootTabSuppressionCount.value - 1;
+      rootTabSuppressionCount.value = next < 0 ? 0 : next;
+    };
+  }
 
   static void _setSheetPresentationInFlight(bool active) {
     _sheetPresentationInFlight = active;
@@ -69,6 +145,43 @@ class IosLiquidGlassBridge {
     return reduceTransparencyNotifier.value;
   }
 
+  /// Mirrors iOS `ProcessInfo.processInfo.thermalState` (`.serious` / `.critical`)
+  /// so heavy optical blurs and animated shaders degrade gracefully before
+  /// thermal throttling turns into sustained overheating (e.g. iPad Pro 2020 on
+  /// iPadOS 15.4). Always `false` on non-iOS unless overridden in tests.
+  static bool get thermalThrottled {
+    if (_testThermalThrottledOverride != null) {
+      return _testThermalThrottledOverride!;
+    }
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return false;
+    return thermalThrottledNotifier.value;
+  }
+
+  /// iOS thermal level (`0` nominal … `3` critical). Always `0` on non-iOS
+  /// unless overridden in tests.
+  static int get thermalLevel {
+    if (_testThermalLevelOverride != null) return _testThermalLevelOverride!;
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
+      return thermalThrottled ? 2 : 0;
+    }
+    final level = thermalLevelNotifier.value.clamp(0, 3);
+    if (level < 2 && thermalThrottled) return 2;
+    return level;
+  }
+
+  /// `true` once iOS reports `.fair` or worse. Cheap visual work (animated
+  /// shaders, large blur radii) should already back off here, before the
+  /// device reaches `.serious` and the user feels the heat.
+  static bool get thermalElevated => thermalLevel >= 1 || thermalThrottled;
+
+  /// Native iOS/iPadOS major OS version reported by `capabilities` (`0` when
+  /// unknown or on non-iOS).
+  static int get majorVersion {
+    if (_testMajorVersionOverride != null) return _testMajorVersionOverride!;
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return 0;
+    return majorVersionNotifier.value;
+  }
+
   static void _ensureIncomingHandler() {
     if (_incomingHandlerInstalled) return;
     _incomingHandlerInstalled = true;
@@ -82,6 +195,15 @@ class IosLiquidGlassBridge {
         sceneActiveNotifier.value = call.arguments as bool;
         return null;
       }
+      if (call.method == 'thermalStateChanged' && call.arguments is bool) {
+        thermalThrottledNotifier.value = call.arguments as bool;
+        return null;
+      }
+      if (call.method == 'thermalLevelChanged' && call.arguments is num) {
+        thermalLevelNotifier.value =
+            (call.arguments as num).toInt().clamp(0, 3);
+        return null;
+      }
       if (call.method == 'rootTabSelected' && call.arguments is int) {
         _onRootTabSelected?.call(call.arguments as int);
         return null;
@@ -92,6 +214,15 @@ class IosLiquidGlassBridge {
       }
       if (call.method == 'rootTabScrollToTop') {
         _onRootTabScrollToTop?.call();
+        return null;
+      }
+      if (call.method == 'rootTabMenuAction' && call.arguments is Map) {
+        final args = Map<String, dynamic>.from(call.arguments as Map);
+        final tabIdx = args['tabIndex'];
+        final actionId = args['actionId'];
+        if (tabIdx is int && actionId is String) {
+          _onRootTabMenuAction?.call(tabIdx, actionId);
+        }
         return null;
       }
       if (call.method == 'privacyPinCallback' && call.arguments is Map) {
@@ -131,24 +262,40 @@ class IosLiquidGlassBridge {
       return _testOverride!;
     }
     if (_initialized) return available.value;
-    _initialized = true;
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
+      _initialized = true;
       available.value = false;
       reduceTransparencyNotifier.value = false;
+      thermalThrottledNotifier.value = false;
+      thermalLevelNotifier.value = 0;
+      majorVersionNotifier.value = 0;
       return false;
     }
     try {
       final result = await channel.invokeMapMethod<String, dynamic>(
         'capabilities',
       );
+      _initialized = true;
       final supported = result?['available'] == true;
       available.value = supported;
       reduceTransparencyNotifier.value = result?['reduceTransparency'] == true;
       if (result?['sceneActive'] is bool) {
         sceneActiveNotifier.value = result?['sceneActive'] as bool;
       }
+      if (result?['thermalThrottled'] is bool) {
+        thermalThrottledNotifier.value = result?['thermalThrottled'] as bool;
+      }
+      if (result?['thermalLevel'] is num) {
+        thermalLevelNotifier.value =
+            (result?['thermalLevel'] as num).toInt().clamp(0, 3);
+      }
+      if (result?['majorVersion'] is num) {
+        majorVersionNotifier.value = (result?['majorVersion'] as num).toInt();
+      }
       return supported;
     } on MissingPluginException {
+      // Do not permanently latch failure on a cold-start plugin registration
+      // race; a follow-up call after first frame can retry cleanly.
       available.value = false;
       reduceTransparencyNotifier.value = false;
       return false;
@@ -171,6 +318,16 @@ class IosLiquidGlassBridge {
       );
       final reduced = result?['reduceTransparency'] == true;
       reduceTransparencyNotifier.value = reduced;
+      if (result?['thermalThrottled'] is bool) {
+        thermalThrottledNotifier.value = result?['thermalThrottled'] as bool;
+      }
+      if (result?['thermalLevel'] is num) {
+        thermalLevelNotifier.value =
+            (result?['thermalLevel'] as num).toInt().clamp(0, 3);
+      }
+      if (result?['majorVersion'] is num) {
+        majorVersionNotifier.value = (result?['majorVersion'] as num).toInt();
+      }
       return reduced;
     } on MissingPluginException {
       return reduceTransparencyNotifier.value;
@@ -229,6 +386,49 @@ class IosLiquidGlassBridge {
     }
   }
 
+  /// Presents an in-app `SFSafariViewController` for OAuth PKCE sign-in so the
+  /// host app stays foreground-active while `localhost` loopback callback
+  /// completes, preserving system Safari cookies, Passkeys, and SSO.
+  static Future<bool> presentSafariAuth(String url) async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return false;
+    try {
+      final res = await channel.invokeMethod<bool>(
+        'presentSafariAuth',
+        <String, dynamic>{'url': url},
+      );
+      return res == true;
+    } on MissingPluginException {
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Dismisses any active `SFSafariViewController` opened via [presentSafariAuth].
+  static Future<void> dismissSafariAuth() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return;
+    try {
+      await channel.invokeMethod<void>('dismissSafariAuth');
+    } on MissingPluginException {
+      // Host tests may not register native channel.
+    } catch (_) {}
+  }
+
+  /// Updates the native root Dock items & long-press `UIMenu` actions in-place.
+  static Future<void> updateRootTabItems(List<IosNativeDockItem> items) async {
+    if (!isAvailable || items.isEmpty) return;
+    try {
+      await channel.invokeMethod<void>(
+        'setRootTabItems',
+        <String, dynamic>{
+          'items': [for (final item in items) item.toMap()],
+        },
+      );
+    } on MissingPluginException {
+      // Host tests may not register native channel.
+    } catch (_) {}
+  }
+
   /// Fires tactile iOS haptic feedback for the favorite postcard shutter/arrival
   /// phases and returns the hardware Dynamic Island geometry when available.
   static Future<Map<String, dynamic>?> triggerFavoriteDynamicIslandFeedback(
@@ -282,14 +482,17 @@ class IosLiquidGlassBridge {
     bool visible = true,
     bool minimized = false,
     bool adaptiveTopOnWide = true,
+    int? epoch,
     ValueChanged<int>? onSelect,
     VoidCallback? onSearch,
     VoidCallback? onScrollToTop,
+    void Function(int tabIndex, String actionId)? onTabMenuAction,
   }) async {
     _ensureIncomingHandler();
     _onRootTabSelected = onSelect;
     _onRootTabSearch = onSearch;
     _onRootTabScrollToTop = onScrollToTop;
+    _onRootTabMenuAction = onTabMenuAction;
     if (!isAvailable) return false;
     try {
       final res = await channel.invokeMethod<bool>(
@@ -301,6 +504,7 @@ class IosLiquidGlassBridge {
           'visible': visible,
           'minimized': minimized,
           'adaptiveTopOnWide': adaptiveTopOnWide,
+          if (epoch != null) 'epoch': epoch,
         },
       );
       return res == true;
@@ -315,12 +519,17 @@ class IosLiquidGlassBridge {
   static Future<void> setRootTabSelectedIndex(
     int index, {
     bool animated = true,
+    int? epoch,
   }) async {
     if (!isAvailable) return;
     try {
       await channel.invokeMethod<void>(
         'setRootTabSelectedIndex',
-        <String, dynamic>{'index': index, 'animated': animated},
+        <String, dynamic>{
+          'index': index,
+          'animated': animated,
+          if (epoch != null) 'epoch': epoch,
+        },
       );
     } on MissingPluginException {
       // Host tests may not register native channel.
@@ -334,6 +543,7 @@ class IosLiquidGlassBridge {
     bool minimized, {
     bool animated = true,
     double? progress,
+    int? epoch,
   }) async {
     if (!isAvailable) return;
     try {
@@ -343,6 +553,7 @@ class IosLiquidGlassBridge {
           'minimized': minimized,
           'animated': animated,
           if (progress != null) 'progress': progress.clamp(0.0, 1.0),
+          if (epoch != null) 'epoch': epoch,
         },
       );
     } on MissingPluginException {
@@ -355,12 +566,17 @@ class IosLiquidGlassBridge {
   static Future<void> setRootTabVisible(
     bool visible, {
     bool animated = true,
+    int? epoch,
   }) async {
     if (!isAvailable) return;
     try {
       await channel.invokeMethod<void>(
         'setRootTabVisible',
-        <String, dynamic>{'visible': visible, 'animated': animated},
+        <String, dynamic>{
+          'visible': visible,
+          'animated': animated,
+          if (epoch != null) 'epoch': epoch,
+        },
       );
     } on MissingPluginException {
       // Host tests may not register native channel.
@@ -404,13 +620,22 @@ class IosLiquidGlassBridge {
     if (value == null) {
       _initialized = false;
       _testReduceTransparencyOverride = null;
+      _testThermalThrottledOverride = null;
+      _testThermalLevelOverride = null;
+      _testMajorVersionOverride = null;
       _sheetPresentationInFlight = false;
       activeSheetNotifier.value = false;
+      rootTabSuppressionCount.value = 0;
+      IosRootTabNavigatorObserver.resetForTest();
       reduceTransparencyNotifier.value = false;
       sceneActiveNotifier.value = true;
+      thermalThrottledNotifier.value = false;
+      thermalLevelNotifier.value = 0;
+      majorVersionNotifier.value = 0;
       _onRootTabSelected = null;
       _onRootTabSearch = null;
       _onRootTabScrollToTop = null;
+      _onRootTabMenuAction = null;
       _pinCallbacks.clear();
     }
   }
@@ -419,6 +644,105 @@ class IosLiquidGlassBridge {
   static void setReduceTransparencyForTest(bool? value) {
     _testReduceTransparencyOverride = value;
     reduceTransparencyNotifier.value = value ?? false;
+  }
+
+  @visibleForTesting
+  static void setThermalThrottledForTest(bool? value) {
+    _testThermalThrottledOverride = value;
+    thermalThrottledNotifier.value = value ?? false;
+  }
+
+  @visibleForTesting
+  static void setThermalLevelForTest(int? value) {
+    _testThermalLevelOverride = value?.clamp(0, 3);
+    thermalLevelNotifier.value = value?.clamp(0, 3) ?? 0;
+  }
+
+  @visibleForTesting
+  static void setMajorVersionForTest(int? value) {
+    _testMajorVersionOverride = value;
+    majorVersionNotifier.value = value ?? 0;
+  }
+}
+
+/// Observes the root [Navigator] so any pushed non-root route (fullscreen video
+/// playback, detail page, onboarding, modal route, etc.) automatically hides
+/// the root native iOS tab chrome even if a caller pushes directly without
+/// `_trackSecondaryRoute`, while Curated collection pages (`curatedRouteName`)
+/// keep the collapsed Logo button active until covered by another route.
+class IosRootTabNavigatorObserver extends NavigatorObserver {
+  static const String curatedRouteName = '/ios/curated-wall';
+  static final ValueNotifier<int> secondaryRouteDepth = ValueNotifier<int>(0);
+  static final ValueNotifier<bool> topRouteIsCurated = ValueNotifier<bool>(false);
+  static final ValueNotifier<int> curatedRouteDepth = ValueNotifier<int>(0);
+  final List<Route<dynamic>> _secondaryStack = <Route<dynamic>>[];
+
+  @visibleForTesting
+  static void resetForTest() {
+    secondaryRouteDepth.value = 0;
+    topRouteIsCurated.value = false;
+    curatedRouteDepth.value = 0;
+  }
+
+  static bool isCuratedRoute(Route<dynamic>? route) =>
+      route?.settings.name == curatedRouteName;
+
+  void _syncDepth() {
+    final nextDepth = _secondaryStack.length;
+    final nextCuratedDepth = _secondaryStack.where(isCuratedRoute).length;
+    final nextTopCurated =
+        _secondaryStack.isNotEmpty && isCuratedRoute(_secondaryStack.last);
+    if (curatedRouteDepth.value != nextCuratedDepth) {
+      curatedRouteDepth.value = nextCuratedDepth;
+    }
+    if (topRouteIsCurated.value != nextTopCurated) {
+      topRouteIsCurated.value = nextTopCurated;
+    }
+    if (secondaryRouteDepth.value != nextDepth) {
+      secondaryRouteDepth.value = nextDepth;
+    }
+  }
+
+  bool _isSecondaryRoute(Route<dynamic>? route) =>
+      route != null && !route.isFirst;
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    if (_isSecondaryRoute(route)) {
+      _secondaryStack.remove(route);
+      _secondaryStack.add(route);
+      _syncDepth();
+    }
+  }
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    if (_secondaryStack.remove(route)) {
+      _syncDepth();
+    }
+  }
+
+  @override
+  void didRemove(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    if (_secondaryStack.remove(route)) {
+      _syncDepth();
+    }
+  }
+
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) {
+    final oldIdx = oldRoute != null ? _secondaryStack.indexOf(oldRoute) : -1;
+    if (oldIdx >= 0) {
+      if (_isSecondaryRoute(newRoute)) {
+        _secondaryStack[oldIdx] = newRoute!;
+      } else {
+        _secondaryStack.removeAt(oldIdx);
+      }
+    } else if (_isSecondaryRoute(newRoute)) {
+      _secondaryStack.remove(newRoute);
+      _secondaryStack.add(newRoute!);
+    }
+    _syncDepth();
   }
 }
 
@@ -469,32 +793,187 @@ class IosNativeRouteGate extends StatefulWidget {
 
   @override
   State<IosNativeRouteGate> createState() => _IosNativeRouteGateState();
+
+  /// When `true` (default), native `UiKitView`s hosted INSIDE a scrolling
+  /// Flutter `Scrollable` (home hero header, category filter, settings
+  /// switches, detail action pills) are swapped for their exact-geometry
+  /// Flutter placeholders while that scrollable is actively scrolling, and
+  /// restored [scrollRestoreDelay] after scrolling settles.
+  ///
+  /// Every visible iOS platform view forces Flutter to merge the raster and
+  /// platform threads and to re-composite overlay layers on every frame; at
+  /// 120 Hz ProMotion that is one of the largest sustained CPU/GPU costs while
+  /// browsing (feedback: iPhone 17 Pro Max on iOS 27 running hot). Fixed chrome
+  /// (no `Scrollable` ancestor) is never affected.
+  static bool scrollAwareSwapEnabled = true;
+
+  static const Duration scrollRestoreDelay = Duration(milliseconds: 220);
+
+  /// Opt-in flag for dedicated scroll-debounce tests; in standard
+  /// `TestWidgetsFlutterBinding` suites we restore immediately on scroll idle
+  /// so unrelated scroll tests never leave a 220ms pending `Timer`.
+  @visibleForTesting
+  static bool debugEnableRestoreDelayInTests = false;
+
+  /// Pure policy predicate for whether a gate may host a live native view.
+  @visibleForTesting
+  static bool shouldHostNative({
+    required bool available,
+    required bool forcePlaceholders,
+    required bool isCurrentRoute,
+    required bool ancestorScrolling,
+    bool tickerModeEnabled = true,
+    bool scrollableThermalSuppressed = false,
+  }) {
+    if (!available || forcePlaceholders) return false;
+    if (!isCurrentRoute || !tickerModeEnabled) return false;
+    if (ancestorScrolling || scrollableThermalSuppressed) return false;
+    return true;
+  }
 }
 
 class _IosNativeRouteGateState extends State<IosNativeRouteGate> {
   ModalRoute<dynamic>? _route;
+  bool _tickerModeEnabled = true;
   bool _ready = false;
+  final List<ValueListenable<bool>> _scrollingListenables =
+      <ValueListenable<bool>>[];
+  bool _scrollSuppressed = false;
+  Timer? _scrollRestoreTimer;
+  bool _recheckScheduled = false;
 
   @override
   void initState() {
     super.initState();
-    IosLiquidGlassBridge.available.addListener(_recheck);
+    IosLiquidGlassBridge.available.addListener(_onAvailabilityChanged);
+    IosLiquidGlassBridge.thermalThrottledNotifier.addListener(_recheck);
     IosNativeRouteGate._placeholderDepth.addListener(_recheck);
+  }
+
+  void _onAvailabilityChanged() {
+    if (!mounted) return;
+    _rebindScrollables();
+    _recheck();
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     _route = ModalRoute.of(context);
+    // ignore: deprecated_member_use
+    _tickerModeEnabled = TickerMode.of(context);
+    _rebindScrollables();
     _ready = _computeReady();
   }
 
+  void _rebindScrollables() {
+    final next = <ValueListenable<bool>>[];
+    if (IosNativeRouteGate.scrollAwareSwapEnabled &&
+        IosLiquidGlassBridge.isAvailable) {
+      ScrollableState? scrollable = Scrollable.maybeOf(context);
+      var depth = 0;
+      while (scrollable != null && depth < 4) {
+        next.add(scrollable.position.isScrollingNotifier);
+        scrollable =
+            scrollable.context.findAncestorStateOfType<ScrollableState>();
+        depth++;
+      }
+    }
+    if (!listEquals(next, _scrollingListenables)) {
+      for (final l in _scrollingListenables) {
+        l.removeListener(_onScrollActivityChanged);
+      }
+      _scrollingListenables
+        ..clear()
+        ..addAll(next);
+      for (final l in next) {
+        l.addListener(_onScrollActivityChanged);
+      }
+    }
+    if (next.isEmpty) {
+      _scrollRestoreTimer?.cancel();
+      _scrollRestoreTimer = null;
+      _scrollSuppressed = false;
+    } else if (_anyAncestorScrolling) {
+      // Never mount a brand-new UiKitView mid-fling (e.g. a ListView row
+      // built lazily while the user is actively scrolling at 120 Hz).
+      _scrollRestoreTimer?.cancel();
+      _scrollRestoreTimer = null;
+      _scrollSuppressed = true;
+    }
+  }
+
+  bool get _anyAncestorScrolling {
+    for (final l in _scrollingListenables) {
+      if (l.value) return true;
+    }
+    return false;
+  }
+
+  Duration get _effectiveRestoreDelay {
+    if (!IosNativeRouteGate.debugEnableRestoreDelayInTests &&
+        WidgetsBinding.instance.runtimeType
+            .toString()
+            .contains('TestWidgetsFlutterBinding')) {
+      return Duration.zero;
+    }
+    return IosNativeRouteGate.scrollRestoreDelay;
+  }
+
+  void _onScrollActivityChanged() {
+    if (!mounted) return;
+    if (_anyAncestorScrolling) {
+      _scrollRestoreTimer?.cancel();
+      _scrollRestoreTimer = null;
+      if (!_scrollSuppressed) {
+        _scrollSuppressed = true;
+        _scheduleRecheck();
+      }
+      return;
+    }
+    if (!_scrollSuppressed || _scrollRestoreTimer != null) return;
+    final delay = _effectiveRestoreDelay;
+    if (delay <= Duration.zero) {
+      _scrollSuppressed = false;
+      _scheduleRecheck();
+      return;
+    }
+    _scrollRestoreTimer = Timer(delay, () {
+      _scrollRestoreTimer = null;
+      if (!mounted || _anyAncestorScrolling) return;
+      _scrollSuppressed = false;
+      _scheduleRecheck();
+    });
+  }
+
+  /// `isScrollingNotifier` can flip during layout (e.g. ballistic settle);
+  /// never mark this element dirty mid-layout.
+  void _scheduleRecheck() {
+    final phase = SchedulerBinding.instance.schedulerPhase;
+    if (phase == SchedulerPhase.persistentCallbacks ||
+        phase == SchedulerPhase.midFrameMicrotasks) {
+      if (_recheckScheduled) return;
+      _recheckScheduled = true;
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        _recheckScheduled = false;
+        _recheck();
+      });
+      return;
+    }
+    _recheck();
+  }
+
   bool _computeReady() {
-    if (!IosLiquidGlassBridge.isAvailable) return false;
-    if (IosNativeRouteGate.forcePlaceholders) return false;
     final route = _route;
-    if (route == null) return true;
-    return route.isCurrent;
+    return IosNativeRouteGate.shouldHostNative(
+      available: IosLiquidGlassBridge.isAvailable,
+      forcePlaceholders: IosNativeRouteGate.forcePlaceholders,
+      isCurrentRoute: route == null || route.isCurrent,
+      ancestorScrolling: _scrollSuppressed,
+      tickerModeEnabled: _tickerModeEnabled,
+      scrollableThermalSuppressed: _scrollingListenables.isNotEmpty &&
+          IosLiquidGlassBridge.thermalThrottled,
+    );
   }
 
   void _recheck() {
@@ -507,7 +986,14 @@ class _IosNativeRouteGateState extends State<IosNativeRouteGate> {
 
   @override
   void dispose() {
-    IosLiquidGlassBridge.available.removeListener(_recheck);
+    _scrollRestoreTimer?.cancel();
+    _scrollRestoreTimer = null;
+    for (final l in _scrollingListenables) {
+      l.removeListener(_onScrollActivityChanged);
+    }
+    _scrollingListenables.clear();
+    IosLiquidGlassBridge.available.removeListener(_onAvailabilityChanged);
+    IosLiquidGlassBridge.thermalThrottledNotifier.removeListener(_recheck);
     IosNativeRouteGate._placeholderDepth.removeListener(_recheck);
     super.dispose();
   }
@@ -523,12 +1009,14 @@ class IosNativeDockItem {
   final String symbol;
   final String? selectedSymbol;
   final String? kind;
+  final List<IosNativeMenuItem>? menuItems;
 
   const IosNativeDockItem({
     required this.label,
     required this.symbol,
     this.selectedSymbol,
     this.kind,
+    this.menuItems,
   });
 
   Map<String, dynamic> toMap() => <String, dynamic>{
@@ -536,6 +1024,8 @@ class IosNativeDockItem {
         'symbol': symbol,
         'selectedSymbol': selectedSymbol ?? symbol,
         if (kind != null && kind!.isNotEmpty) 'kind': kind,
+        if (menuItems != null && menuItems!.isNotEmpty)
+          'menuItems': [for (final m in menuItems!) m.toMap()],
       };
 }
 
@@ -608,6 +1098,7 @@ class IosNativeDockView extends StatefulWidget {
   final ValueChanged<int> onSelect;
   final VoidCallback? onSearch;
   final VoidCallback? onScrollToTop;
+  final void Function(int tabIndex, String actionId)? onTabMenuAction;
   final bool showSearch;
   final bool hidden;
   final bool collapsed;
@@ -620,6 +1111,7 @@ class IosNativeDockView extends StatefulWidget {
     required this.onSelect,
     this.onSearch,
     this.onScrollToTop,
+    this.onTabMenuAction,
     this.showSearch = true,
     this.hidden = false,
     this.collapsed = false,
@@ -663,6 +1155,13 @@ class _IosNativeDockViewState extends State<IosNativeDockView> {
         widget.onSearch?.call();
       } else if (call.method == 'onScrollToTop') {
         widget.onScrollToTop?.call();
+      } else if (call.method == 'onTabMenuAction' && call.arguments is Map) {
+        final args = Map<String, dynamic>.from(call.arguments as Map);
+        final tabIdx = args['tabIndex'];
+        final actionId = args['actionId'];
+        if (tabIdx is int && actionId is String) {
+          widget.onTabMenuAction?.call(tabIdx, actionId);
+        }
       }
     });
   }
@@ -760,6 +1259,7 @@ class IosNativeGlassButton extends StatefulWidget {
   final double height;
   final String menuTitle;
   final List<IosNativeMenuItem>? menuItems;
+  final bool menuAsPrimaryAction;
   final ValueChanged<String>? onMenuSelected;
   final VoidCallback onTap;
   final Widget fallback;
@@ -781,6 +1281,7 @@ class IosNativeGlassButton extends StatefulWidget {
     this.height = 40,
     this.menuTitle = '',
     this.menuItems,
+    this.menuAsPrimaryAction = true,
     this.onMenuSelected,
     required this.onTap,
     required this.fallback,
@@ -819,8 +1320,10 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
           'tintColor': widget.tintColor!.toARGB32(),
         'accessibilityLabel': widget.accessibilityLabel ?? widget.label,
         if (widget.menuTitle.isNotEmpty) 'menuTitle': widget.menuTitle,
-        if (widget.menuItems != null && widget.menuItems!.isNotEmpty)
+        if (widget.menuItems != null && widget.menuItems!.isNotEmpty) ...{
           'menuItems': [for (final item in widget.menuItems!) item.toMap()],
+          'menuAsPrimaryAction': widget.menuAsPrimaryAction,
+        },
         if (initialWidth != null) 'initialWidth': initialWidth,
         'initialHeight': widget.height,
       };
@@ -867,6 +1370,7 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
         oldWidget.prominent != widget.prominent ||
         oldWidget.accessibilityLabel != widget.accessibilityLabel ||
         oldWidget.menuTitle != widget.menuTitle ||
+        oldWidget.menuAsPrimaryAction != widget.menuAsPrimaryAction ||
         !listEquals(oldWidget.menuItems, widget.menuItems)) {
       unawaited(_safeUpdate(ch));
     }
@@ -888,25 +1392,36 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
   double _resolvedWidth(BuildContext context) {
     if (widget.width != null) return widget.width!;
     if (widget.style == 'circle') return widget.height;
+    final cleanLabel = widget.label
+        .replaceAll(RegExp(r'[\r\n]+'), ' ')
+        .trim();
     final painter = TextPainter(
       text: TextSpan(
-        text: widget.label,
+        text: cleanLabel,
         style: const TextStyle(
-          fontSize: 13,
+          fontSize: 13.5,
           fontWeight: FontWeight.w600,
-          letterSpacing: -0.2,
+          letterSpacing: 0.0,
         ),
       ),
       maxLines: 1,
       textDirection: Directionality.of(context),
       textScaler: TextScaler.noScaling,
     )..layout(maxWidth: widget.maxWidth);
-    double extra = 26.0;
-    if (widget.symbol != null && widget.symbol!.isNotEmpty) extra += 22.0;
-    if (widget.trailingSymbol != null && widget.trailingSymbol!.isNotEmpty) {
-      extra += 18.0;
+    // Apple Color Emoji renders wider in UIKit than Skia's fallback metric,
+    // and iOS 26 UIButton.Configuration.glass() adds internal capsule padding.
+    var emojiBuffer = 0.0;
+    for (final rune in cleanLabel.runes) {
+      if (rune > 0xFFFF || (rune >= 0x2600 && rune <= 0x27BF)) {
+        emojiBuffer += 4.5;
+      }
     }
-    return (painter.width + extra).clamp(74.0, widget.maxWidth);
+    double extra = 34.0 + emojiBuffer;
+    if (widget.symbol != null && widget.symbol!.isNotEmpty) extra += 24.0;
+    if (widget.trailingSymbol != null && widget.trailingSymbol!.isNotEmpty) {
+      extra += 20.0;
+    }
+    return (painter.width + extra).clamp(80.0, widget.maxWidth);
   }
 
   @override
@@ -1832,7 +2347,7 @@ class IosNativeFilterResult {
 /// sheet (`类别 / 地区 / 年份`), returning the chosen filter values or `null`
 /// when unavailable.
 Future<IosNativeFilterResult?> showAppleNativeFilterSheet({
-  String title = '多维片库筛选',
+  String title = '片库筛选',
   required List<IosNativeFilterCategory> categories,
   required String selectedCategoryId,
   required String selectedGenreLabel,

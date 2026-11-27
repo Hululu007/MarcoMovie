@@ -413,7 +413,7 @@ void main() {
   );
 
   testWidgets(
-    'Home source and depot native UIMenus include ALL routes without a 20-item cap and group multi-group sources',
+    'Home top-right native buttons separate tap vs long-press menus (current-group sites, all depots, config center)',
     (tester) async {
       IosLiquidGlassBridge.setAvailableForTest(true);
       tester.view.physicalSize = const Size(390, 844);
@@ -425,7 +425,7 @@ void main() {
       final sitesJson = List.generate(
         28,
         (i) =>
-            '{"key":"s$i","name":"线路 $i","type":1,"api":"https://s$i.example/api","group":"${i < 14 ? '主线路' : '备用线路'}"}',
+            '{"key":"s$i","name":"线路 $i","type":1,"api":"https://s$i.example/api","group":"${i < 22 ? '主线路' : '备用线路'}"}',
       ).join(',');
       final depotsJson = List.generate(
         25,
@@ -453,7 +453,7 @@ void main() {
               v.viewType == 'marco_movie/ios26_glass_button' &&
               (v.creationParams as Map<dynamic, dynamic>)['menuItems'] != null)
           .toList();
-      expect(menuButtons.length, greaterThanOrEqualTo(1));
+      expect(menuButtons.length, greaterThanOrEqualTo(3));
 
       final sourceButton = menuButtons.firstWhere(
         (v) =>
@@ -461,17 +461,28 @@ void main() {
                 .first['id'] ==
             '__all__',
       );
+      final sourceParams = sourceButton.creationParams as Map<dynamic, dynamic>;
+      expect(sourceParams['menuAsPrimaryAction'], isFalse);
       final sourceItems =
-          ((sourceButton.creationParams as Map)['menuItems'] as List)
-              .cast<Map<dynamic, dynamic>>();
-      // 1 search/manage entry + all 28 routes (no 20-item truncation)
-      expect(sourceItems.length, 29);
-      // Verify multi-group section titles are propagated.
-      final sectionTitles = sourceItems
-          .map((m) => m['sectionTitle'])
-          .where((t) => t != null)
-          .toSet();
-      expect(sectionTitles.length, greaterThanOrEqualTo(2));
+          (sourceParams['menuItems'] as List).cast<Map<dynamic, dynamic>>();
+      // 1 manage entry + all 22 routes in the active group (no 20-item truncation)
+      expect(sourceItems.length, 23);
+      expect(sourceItems.first['title'], '管理片源');
+
+      final configButton = menuButtons.firstWhere(
+        (v) =>
+            ((v.creationParams as Map)['menuItems'] as List)
+                .first['id'] ==
+            'add_library',
+      );
+      final configParams = configButton.creationParams as Map<dynamic, dynamic>;
+      expect(configParams['menuAsPrimaryAction'], isFalse);
+      final configItems =
+          (configParams['menuItems'] as List).cast<Map<dynamic, dynamic>>();
+      expect(
+        configItems.map((m) => m['title']).toList(),
+        <String>['添加资源库', '管理订阅', '网盘账号'],
+      );
 
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
@@ -1285,6 +1296,10 @@ void main() {
       expect(find.byKey(const ValueKey('ios-settings-root')), findsOneWidget);
 
       // Pushing a secondary drawer hides root native tab chrome, popping restores it.
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('settings-category-about')),
+      );
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('settings-category-about')));
       await tester.pumpAndSettle();
       final visCallsDuringPush = calls

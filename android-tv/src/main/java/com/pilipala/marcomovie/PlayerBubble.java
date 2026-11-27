@@ -7,8 +7,35 @@ import android.widget.*;
 
 /** Custom anchored controls; no platform alert/list chrome. */
 final class PlayerBubble {
+    private static final Typeface TV_MEDIUM_TYPEFACE =
+            Typeface.create("sans-serif-medium", Typeface.NORMAL);
+    private static final Typeface TV_REGULAR_TYPEFACE =
+            Typeface.create("sans-serif", Typeface.NORMAL);
+
     interface IntAction {
         void accept(int index);
+    }
+
+    static final class Row {
+        final String label;
+        final boolean header;
+        final boolean checked;
+        final int actionIndex;
+
+        private Row(String label, boolean header, boolean checked, int actionIndex) {
+            this.label = label == null ? "" : label;
+            this.header = header;
+            this.checked = checked;
+            this.actionIndex = actionIndex;
+        }
+
+        static Row header(String title) {
+            return new Row(title, true, false, -1);
+        }
+
+        static Row item(int actionIndex, String label, boolean checked) {
+            return new Row(label, false, checked, actionIndex);
+        }
     }
 
     static Dialog show(
@@ -31,14 +58,66 @@ final class PlayerBubble {
             IntAction action,
             Runnable closed,
             String message) {
+        return show(a, anchor, title, labels, selected, action, closed, message, null);
+    }
+
+    static Dialog show(
+            MainActivity a,
+            View anchor,
+            String title,
+            String[] labels,
+            int selected,
+            IntAction action,
+            Runnable closed,
+            String message,
+            Runnable onCancelBack) {
+        java.util.List<Row> rows = new java.util.ArrayList<>(labels.length);
+        for (int i = 0; i < labels.length; i++) {
+            String raw = labels[i] == null ? "" : labels[i];
+            boolean checked = (i == selected) || raw.startsWith("✓");
+            rows.add(Row.item(i, raw, checked));
+        }
+        return showStructured(
+                a, anchor, title, "", rows, selected, action, closed, message, false, onCancelBack);
+    }
+
+    static Dialog showStructured(
+            MainActivity a,
+            View anchor,
+            String title,
+            String statusBanner,
+            java.util.List<Row> rows,
+            int initialFocusActionIndex,
+            IntAction action,
+            Runnable closed,
+            String message,
+            boolean forceShowHeading,
+            Runnable onCancelBack) {
         boolean modernTv = a.isTvDevice();
         boolean reducedTrans = a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
         String anchorTag =
                 anchor != null && anchor.getTag() instanceof String ? (String) anchor.getTag() : "";
         if (modernTv && title != null && title.startsWith("字幕")) {
             anchorTag = "subtitles";
+        } else if (modernTv && title != null && title.startsWith("弹幕")) {
+            anchorTag = "danmaku";
+        } else if (modernTv && title != null && title.startsWith("线路")) {
+            anchorTag = "lines";
         }
         final String iconContext = anchorTag;
+        String safeBanner = statusBanner == null ? "" : statusBanner.trim();
+        String safeMessage = message == null ? "" : message;
+        int actionRowCount = 0;
+        int headerCount = 0;
+        boolean hasLongLabel = !safeBanner.isEmpty();
+        for (Row r : rows) {
+            if (r.header) {
+                headerCount++;
+            } else {
+                actionRowCount++;
+                if (r.label.length() > 14) hasLongLabel = true;
+            }
+        }
 
         Dialog dialog = new Dialog(a);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -56,32 +135,70 @@ final class PlayerBubble {
         }
         android.graphics.drawable.GradientDrawable glass =
                 new android.graphics.drawable.GradientDrawable();
-        glass.setColor(modernTv ? (reducedTrans ? 0xf6191c23 : 0xe4171a21) : 0xfa29292e);
+        glass.setColor(modernTv ? (reducedTrans ? 0xff161922 : 0xf6151922) : 0xfa29292e);
         glass.setCornerRadius(modernTv ? u * 18f : a.dp(26));
         glass.setStroke(
                 modernTv ? Math.max(1, Math.round(u * .75f)) : a.dp(1),
-                modernTv ? 0x24ffffff : 0x38ffffff);
+                modernTv ? 0xff3b4456 : 0x38ffffff);
         panel.setBackground(glass);
-        UiCompat.setElevation(panel, modernTv ? PlayerChrome.vp(a, 10) : a.dp(8));
+        // Avoid expensive GPU ambient/spot shadow pass on Android 9 TV Dialog panels.
+        if (!modernTv) {
+            UiCompat.setElevation(panel, a.dp(8));
+        }
         panel.setClipChildren(false);
         panel.setClipToPadding(false);
 
-        boolean showHeading = !modernTv || labels.length <= 1 || !message.isEmpty();
-        boolean showHint = a.isTvDevice() && !modernTv;
-        if (showHeading) {
+        boolean showHeading =
+                forceShowHeading
+                        || !modernTv
+                        || actionRowCount <= 1
+                        || !safeMessage.isEmpty()
+                        || !safeBanner.isEmpty()
+                        || headerCount > 0;
+        boolean showHint = a.isTvDevice() && (!modernTv || hasLongLabel);
+        if (showHeading && title != null && !title.isEmpty()) {
             TextView heading = a.text(title, modernTv ? 14 : 18, MainActivity.WHITE);
+            heading.setTag("player-bubble-title");
             if (modernTv) {
                 heading.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 13.5f);
                 heading.setPadding(
                         PlayerChrome.vp(a, 10),
                         PlayerChrome.vp(a, 3),
                         PlayerChrome.vp(a, 10),
-                        PlayerChrome.vp(a, 8));
+                        PlayerChrome.vp(a, safeBanner.isEmpty() ? 7 : 4));
             } else {
-                heading.setPadding(a.dp(10), 0, a.dp(10), a.dp(10));
+                heading.setPadding(a.dp(10), 0, a.dp(10), a.dp(safeBanner.isEmpty() ? 10 : 6));
             }
             heading.setTypeface(null, Typeface.BOLD);
             panel.addView(heading);
+        }
+
+        if (!safeBanner.isEmpty()) {
+            TextView bannerView = a.text(safeBanner, modernTv ? 12 : 13, 0xffe4ecfb);
+            bannerView.setTag("player-bubble-status");
+            bannerView.setFocusable(false);
+            bannerView.setClickable(false);
+            bannerView.setMaxLines(2);
+            bannerView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            if (modernTv) {
+                bannerView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 11.4f);
+                bannerView.setPadding(
+                        PlayerChrome.vp(a, 10),
+                        PlayerChrome.vp(a, 6),
+                        PlayerChrome.vp(a, 10),
+                        PlayerChrome.vp(a, 6));
+            } else {
+                bannerView.setPadding(a.dp(10), a.dp(6), a.dp(10), a.dp(6));
+            }
+            android.graphics.drawable.GradientDrawable bannerBg =
+                    new android.graphics.drawable.GradientDrawable();
+            bannerBg.setColor(0x1effffff);
+            bannerBg.setCornerRadius(modernTv ? u * 10f : a.dp(12));
+            bannerView.setBackground(bannerBg);
+            LinearLayout.LayoutParams bLp = new LinearLayout.LayoutParams(-1, -2);
+            int bm = modernTv ? PlayerChrome.vp(a, 4) : a.dp(6);
+            bLp.setMargins(bm, 0, bm, modernTv ? PlayerChrome.vp(a, 6) : a.dp(8));
+            panel.addView(bannerView, bLp);
         }
 
         ScrollView scroll = new TvScrollView(a);
@@ -99,7 +216,12 @@ final class PlayerBubble {
         scroll.addView(items);
 
         int[] origin = new int[2];
-        anchor.getLocationInWindow(origin);
+        if (anchor != null) {
+            anchor.getLocationInWindow(origin);
+        } else {
+            origin[0] = a.root.getWidth() / 2;
+            origin[1] = a.root.getHeight() - a.dp(90);
+        }
         int anchorTop = origin[1];
         if (modernTv && a.playerChrome != null && a.playerChrome.dock != null) {
             int[] dockLoc = new int[2];
@@ -113,15 +235,16 @@ final class PlayerBubble {
             int overhead =
                     PlayerChrome.vp(a, 16)
                             + (showHeading ? PlayerChrome.vp(a, 30) : 0)
+                            + (!safeBanner.isEmpty() ? PlayerChrome.vp(a, 44) : 0)
                             + (showHint ? PlayerChrome.vp(a, 24) : 0);
             int byAnchor = anchorTop - PlayerChrome.vp(a, 22) - overhead;
-            int byScreen = (int) (a.root.getHeight() * .62f) - overhead;
+            int byScreen = (int) (a.root.getHeight() * .66f) - overhead;
             maxHeight =
                     Math.max(
                             PlayerChrome.vp(a, 76),
-                            Math.min(PlayerChrome.vp(a, 316), Math.min(byScreen, byAnchor)));
+                            Math.min(PlayerChrome.vp(a, 344), Math.min(byScreen, byAnchor)));
         } else if (a.isTvDevice()) {
-            maxHeight = Math.min(a.dp(246), Math.max(a.dp(100), origin[1] - a.dp(140)));
+            maxHeight = Math.min(a.dp(256), Math.max(a.dp(100), origin[1] - a.dp(140)));
         } else {
             maxHeight = Math.min(a.dp(260), Math.max(a.dp(120), origin[1] - a.dp(88)));
         }
@@ -138,16 +261,17 @@ final class PlayerBubble {
         viewport.setTag("scroll-viewport-clip");
         viewport.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
         int rowStride = modernTv ? PlayerChrome.vp(a, 34) : a.dp(44);
+        int headerStride = modernTv ? PlayerChrome.vp(a, 24) : a.dp(30);
+        int desiredListHeight =
+                actionRowCount * rowStride
+                        + headerCount * headerStride
+                        + (safeMessage.isEmpty() ? 0 : 6 * rowStride)
+                        + (modernTv ? PlayerChrome.vp(a, 6) : a.dp(6));
         panel.addView(
                 viewport,
-                new LinearLayout.LayoutParams(
-                        -1,
-                        Math.min(
-                                (labels.length + (message.isEmpty() ? 0 : 6)) * rowStride
-                                        + (modernTv ? PlayerChrome.vp(a, 4) : 0),
-                                maxHeight)));
-        if (!message.isEmpty()) {
-            TextView description = a.text(message, 13, 0xffdddddf);
+                new LinearLayout.LayoutParams(-1, Math.min(desiredListHeight, maxHeight)));
+        if (!safeMessage.isEmpty()) {
+            TextView description = a.text(safeMessage, 13, 0xffdddddf);
             if (modernTv) {
                 description.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 11.5f);
             }
@@ -161,26 +285,51 @@ final class PlayerBubble {
         hint.setSingleLine(false);
         hint.setMaxLines(2);
         hint.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        boolean useModernRows = modernTv && labels.length > 1;
+        boolean useModernRows = modernTv && actionRowCount > 1;
         int rowH = modernTv ? PlayerChrome.vp(a, 32) : a.dp(40);
         final int modernCornerDp =
                 Math.max(
                         12,
                         Math.round((rowH * .5f) / a.getResources().getDisplayMetrics().density));
-        for (int i = 0; i < labels.length; i++) {
-            final int index = i;
-            String rawLabel = labels[i] == null ? "" : labels[i];
-            final boolean isChecked =
-                    (i == selected) || (useModernRows && rawLabel.startsWith("✓"));
+        final boolean[] pickedOption = {false};
+        View firstFocusableView = null;
+        View targetInitialFocusView = null;
+        for (int i = 0; i < rows.size(); i++) {
+            final Row r = rows.get(i);
+            if (r.header) {
+                TextView sectionHead = a.text(r.label, modernTv ? 11f : 12f, 0x99d6dff0);
+                sectionHead.setTag("player-section-header:" + r.label);
+                sectionHead.setFocusable(false);
+                sectionHead.setClickable(false);
+                sectionHead.setSingleLine(true);
+                sectionHead.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                sectionHead.setTypeface(null, Typeface.BOLD);
+                if (modernTv) {
+                    sectionHead.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 10.4f);
+                    sectionHead.setPadding(
+                            PlayerChrome.vp(a, 10),
+                            PlayerChrome.vp(a, i == 0 ? 3 : 7),
+                            PlayerChrome.vp(a, 10),
+                            PlayerChrome.vp(a, 3));
+                } else {
+                    sectionHead.setPadding(a.dp(12), a.dp(i == 0 ? 4 : 8), a.dp(12), a.dp(4));
+                }
+                items.addView(sectionHead, new LinearLayout.LayoutParams(-1, -2));
+                continue;
+            }
+            final int index = r.actionIndex;
+            String rawLabel = r.label;
+            final boolean isChecked = r.checked || (useModernRows && rawLabel.startsWith("✓"));
             final String displayLabel =
                     useModernRows
                             ? rawLabel.replaceFirst("^✓\\s*", "")
-                            : ((i == selected ? "✓  " : "") + rawLabel);
+                            : ((isChecked && !rawLabel.startsWith("✓") ? "✓  " : "") + rawLabel);
             Button item =
                     a.button(
                             displayLabel,
-                            "player-option:" + i,
+                            "player-option:" + index,
                             () -> {
+                                pickedOption[0] = true;
                                 dialog.dismiss();
                                 action.accept(index);
                             });
@@ -204,16 +353,19 @@ final class PlayerBubble {
                 item.setCompoundDrawablePadding(PlayerChrome.vp(a, 8));
                 item.setPadding(padL, 0, padR, 0);
                 item.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
-                item.setTypeface(
-                        Typeface.create(
-                                isChecked ? "sans-serif-medium" : "sans-serif", Typeface.NORMAL));
+                item.setTypeface(isChecked ? TV_MEDIUM_TYPEFACE : TV_REGULAR_TYPEFACE);
             } else {
                 item.setPadding(padL, 0, padR, 0);
                 item.setGravity(Gravity.CENTER);
             }
+            if (android.os.Build.VERSION.SDK_INT >= 23) {
+                item.setBreakStrategy(android.text.Layout.BREAK_STRATEGY_SIMPLE);
+                item.setHyphenationFrequency(android.text.Layout.HYPHENATION_FREQUENCY_NONE);
+            }
             final int idleBg = isChecked ? (modernTv ? 0x20ffffff : 0x30ffffff) : 0x00ffffff;
             final int cornerDp = modernTv ? modernCornerDp : 16;
-            item.setBackground(a.bg(idleBg, cornerDp));
+            final android.graphics.drawable.GradientDrawable itemBg = a.bg(idleBg, cornerDp);
+            item.setBackground(itemBg);
             item.setOnFocusChangeListener(
                     (v, f) -> {
                         item.setSelected(f);
@@ -233,17 +385,22 @@ final class PlayerBubble {
                         if (rowIcon != null) {
                             rowIcon.setFocusedState(f);
                         }
-                        FocusMotion.style(
-                                a,
-                                item,
-                                f,
-                                idleBg,
-                                MainActivity.WHITE,
-                                cornerDp,
-                                MainActivity.WHITE,
-                                modernTv ? 0xff14161b : MainActivity.DARK,
-                                false,
-                                modernTv ? 1.0f : 1.015f);
+                        if (modernTv) {
+                            itemBg.setColor(f ? MainActivity.WHITE : idleBg);
+                            item.setTextColor(f ? 0xff14161b : MainActivity.WHITE);
+                        } else {
+                            FocusMotion.style(
+                                    a,
+                                    item,
+                                    f,
+                                    idleBg,
+                                    MainActivity.WHITE,
+                                    cornerDp,
+                                    MainActivity.WHITE,
+                                    MainActivity.DARK,
+                                    false,
+                                    1.015f);
+                        }
                         if (useModernRows) {
                             item.setPadding(padL, 0, padR, 0);
                         }
@@ -253,6 +410,8 @@ final class PlayerBubble {
             int mV = modernTv ? PlayerChrome.vp(a, 1f) : a.dp(2);
             lp.setMargins(mH, mV, mH, mV);
             items.addView(item, lp);
+            if (firstFocusableView == null) firstFocusableView = item;
+            if (index == initialFocusActionIndex) targetInitialFocusView = item;
         }
         if (showHint) {
             hint.setGravity(Gravity.CENTER);
@@ -260,17 +419,17 @@ final class PlayerBubble {
             panel.addView(hint);
         }
         shell.addView(panel);
-        int width =
-                Math.min(
-                        modernTv ? PlayerChrome.vp(a, 236) : a.dp(310),
-                        a.root.getWidth() - a.dp(32));
+        int baseTvWidth = (hasLongLabel || headerCount > 0) ? 318 : 236;
+        int maxBubbleW = Math.max(a.dp(200), a.root.getWidth() - a.dp(32));
+        int width = Math.min(modernTv ? PlayerChrome.vp(a, baseTvWidth) : a.dp(320), maxBubbleW);
+        int anchorWidth = anchor != null ? anchor.getWidth() : 0;
         int x =
                 Math.max(
                         a.dp(16),
                         Math.min(
                                 a.root.getWidth() - width - a.dp(16),
-                                origin[0] + anchor.getWidth() / 2 - width / 2));
-        float tip = origin[0] + anchor.getWidth() / 2f - x;
+                                origin[0] + anchorWidth / 2 - width / 2));
+        float tip = origin[0] + anchorWidth / 2f - x;
         if (!modernTv) {
             View arrow =
                     new View(a) {
@@ -292,52 +451,75 @@ final class PlayerBubble {
         dialog.setOnDismissListener(
                 d -> {
                     closed.run();
-                    if (a.isTvDevice() && UiCompat.isAttached(anchor)) anchor.requestFocus();
+                    if (!pickedOption[0] && onCancelBack != null) {
+                        onCancelBack.run();
+                        return;
+                    }
+                    if (!pickedOption[0]
+                            && a.isTvDevice()
+                            && anchor != null
+                            && UiCompat.isAttached(anchor)) {
+                        anchor.requestFocus();
+                    } else if (pickedOption[0]
+                            && a.isTvDevice()
+                            && anchor != null
+                            && UiCompat.isAttached(anchor)
+                            && (a.playbackControls == null || !a.playbackControls.dialogOpen)) {
+                        anchor.requestFocus();
+                    }
                 });
-        dialog.show();
         Window window = dialog.getWindow();
-        window.setBackgroundDrawableResource(android.R.color.transparent);
-        window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-        window.setLayout(width, -2);
-        window.setGravity(Gravity.TOP | Gravity.LEFT);
-        if (a.isTvDevice() || !a.isPortrait()) {
-            window.getDecorView().setSystemUiVisibility(5894);
+        if (window != null) {
+            window.setBackgroundDrawableResource(android.R.color.transparent);
+            window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            window.setGravity(Gravity.TOP | Gravity.LEFT);
+            if (a.isTvDevice()) {
+                window.setWindowAnimations(0);
+            }
+            shell.measure(
+                    View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(a.root.getHeight(), View.MeasureSpec.AT_MOST));
+            int measuredH = Math.max(1, shell.getMeasuredHeight());
+            window.setLayout(width, measuredH);
+            WindowManager.LayoutParams attrs = window.getAttributes();
+            attrs.x = x;
+            attrs.y = Math.max(a.dp(16), anchorTop - measuredH - a.dp(modernTv ? 10 : 8));
+            if (a.isTvDevice()) {
+                // Use window flags directly instead of setSystemUiVisibility on the Dialog decor
+                // view so opening the bubble never triggers a full system-bar insets relayout on
+                // the underlying player Activity window.
+                attrs.flags |=
+                        WindowManager.LayoutParams.FLAG_FULLSCREEN
+                                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
+            } else if (!a.isPortrait()) {
+                window.getDecorView().setSystemUiVisibility(5894);
+            }
+            window.setAttributes(attrs);
         }
-        shell.measure(
-                View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(a.root.getHeight(), View.MeasureSpec.AT_MOST));
-        WindowManager.LayoutParams attrs = window.getAttributes();
-        attrs.x = x;
-        attrs.y =
-                Math.max(a.dp(16), anchorTop - shell.getMeasuredHeight() - a.dp(modernTv ? 10 : 8));
-        window.setAttributes(attrs);
-        shell.post(
-                () -> {
-                    shell.setPivotX(tip);
-                    shell.setPivotY(shell.getHeight());
-                    if (!a.reduced) {
-                        shell.setScaleX(modernTv ? .94f : .85f);
-                        shell.setScaleY(modernTv ? .92f : .75f);
+        final View focusTarget =
+                targetInitialFocusView != null ? targetInitialFocusView : firstFocusableView;
+        dialog.show();
+        if (a.isTvDevice() && focusTarget != null) {
+            focusTarget.requestFocus();
+        }
+        if (!a.reduced && !a.isTvDevice()) {
+            shell.post(
+                    () -> {
+                        shell.setPivotX(tip);
+                        shell.setPivotY(shell.getHeight());
+                        shell.setScaleX(.85f);
+                        shell.setScaleY(.75f);
                         shell.setAlpha(0);
                         shell.animate()
                                 .scaleX(1)
                                 .scaleY(1)
                                 .alpha(1)
-                                .setDuration(modernTv ? 150 : 180)
+                                .setDuration(180)
                                 .setInterpolator(
                                         new android.view.animation.DecelerateInterpolator())
                                 .start();
-                    }
-                    if (a.isTvDevice()) {
-                        int offset = message.isEmpty() ? 0 : 1;
-                        int initialIdx =
-                                selected >= 0
-                                        ? Math.min(offset + selected, items.getChildCount() - 1)
-                                        : 0;
-                        View first = items.getChildAt(Math.max(0, initialIdx));
-                        if (first != null) first.requestFocus();
-                    }
-                });
+                    });
+        }
         return dialog;
     }
 
@@ -395,6 +577,17 @@ final class PlayerBubble {
             float sw = Math.max(1.4f, w * .095f);
 
             switch (context) {
+                case "danmaku":
+                    {
+                        p.setStyle(Paint.Style.STROKE);
+                        p.setStrokeWidth(sw);
+                        box.set(cx - w * .38f, cy - h * .30f, cx + w * .38f, cy + h * .24f);
+                        c.drawRoundRect(box, w * .14f, w * .14f, p);
+                        c.drawLine(cx - w * .22f, cy - h * .09f, cx + w * .22f, cy - h * .09f, p);
+                        c.drawLine(cx - w * .22f, cy + h * .07f, cx + w * .08f, cy + h * .07f, p);
+                        break;
+                    }
+                case "tracks":
                 case "subtitles":
                     {
                         float bw = w * .44f, bh = h * .34f;

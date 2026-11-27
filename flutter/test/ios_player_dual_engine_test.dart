@@ -243,18 +243,27 @@ void main() {
 
       expect(DiskBlockCache.shared.maxBytes, 128 * 1024 * 1024);
       expect(find.byType(IosPlayerChrome), findsOneWidget);
-      expect(find.byKey(const Key('ios-player-engine-button')), findsOneWidget);
+      expect(find.byKey(const Key('ios-player-engine-button')), findsNothing);
       expect(
         find.byKey(const Key('ios-player-loudness-button')),
+        findsNothing,
+      );
+
+      // Engine & loudness controls live cleanly inside 更多 popover.
+      await tester.tap(find.byKey(const Key('ios-player-more-button')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('播放内核：MPV'), findsOneWidget);
+      expect(
+        find.textContaining(VocalLoudnessPreset.cinemaVocal.shortLabelZh),
         findsOneWidget,
       );
-      expect(find.text('MPV'), findsOneWidget);
-      expect(find.text(VocalLoudnessPreset.cinemaVocal.shortLabelZh),
-          findsOneWidget);
 
-      // Tapping engine switch toggles persisted preference between MPV and AVPlayer.
-      await tester.tap(find.byKey(const Key('ios-player-engine-button')));
-      await tester.pump();
+      // Tapping engine switch inside 更多 opens the 3-engine picker (AVPlayer / MDK / MPV) and persists selection.
+      await tester.tap(find.textContaining('播放内核：MPV'));
+      await tester.pumpAndSettle();
+      expect(find.text('MDK (Metal 4K 杜比视界)'), findsOneWidget);
+      await tester.tap(find.text('Apple 原生 AVPlayer'));
+      await tester.pumpAndSettle();
       expect(storage.iosPlaybackEngineMode, 'avplayer');
 
       await tester.pumpWidget(const SizedBox());

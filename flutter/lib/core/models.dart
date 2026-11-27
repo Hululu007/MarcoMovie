@@ -3,6 +3,8 @@ library;
 
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
+
 import 'csp_bridge.dart';
 import 'live_catalog_parser.dart';
 import 'spider_plugin_registry.dart';
@@ -324,6 +326,14 @@ class CmsSite {
   /// Supports standard JSON/XML CMS (`type` 0 or 1), remote HTTP spider endpoints (`type` 4),
   /// M3U/TXT VOD playlists (`m3u_vod://`), and TVBox `csp_*` / `.js` spider sites via `CspBridge`.
   bool get isEmby => api.startsWith('emby://account/');
+  bool get isExternalMediaLibrary =>
+      api.startsWith('jellyfin://account/') ||
+      api.startsWith('plex://account/') ||
+      api.startsWith('webdavlib://account/') ||
+      api.startsWith('alist://account/') ||
+      api.startsWith('smbnas://account/') ||
+      api.startsWith('localfile://account/') ||
+      api.startsWith('cloudlib://account/');
   bool get isCatPaw => api.startsWith('catpaw://');
   bool get usesAdapterPack =>
       key != 'mydrive' &&
@@ -343,6 +353,7 @@ class CmsSite {
   bool get canBrowse =>
       key != 'mydrive' &&
       (isEmby ||
+          isExternalMediaLibrary ||
           isCatPaw ||
           (type == 4 && isHttpApi) ||
           (isScriptOrJarApi
@@ -372,7 +383,11 @@ class CmsSite {
             SpiderPluginRegistry.instance.hasPluginOrGatewaySupport(this))) {
       return statusOk;
     }
-    if (isEmby || isCatPaw || isM3uVodApi || (type == 4 && isHttpApi)) {
+    if (isEmby ||
+        isExternalMediaLibrary ||
+        isCatPaw ||
+        isM3uVodApi ||
+        (type == 4 && isHttpApi)) {
       return statusOk;
     }
     if ((type == 3 || isScriptOrJarApi) && CspBridge.isNetdiskSite(this)) {
@@ -958,7 +973,20 @@ class CmsEpisode {
   bool get isScriptEpisode => url.startsWith('mmjs://play?');
   bool get isGatewayEpisode => url.startsWith('mmgw://play?');
   bool get needsSourceResolution =>
-      isScriptEpisode || isGatewayEpisode || url.startsWith('mmcloud://') || url.startsWith('mmemby://play?') || url.startsWith('mmpaw://play?') || url.startsWith('mmt4://play?') || url.startsWith('mmquark://owned?') || url.startsWith('mmwogg://quark?');
+      isScriptEpisode ||
+      isGatewayEpisode ||
+      url.startsWith('mmcloud://') ||
+      url.startsWith('mmemby://play?') ||
+      url.startsWith('mmjellyfin://play?') ||
+      url.startsWith('mmplex://play?') ||
+      url.startsWith('mmwebdav://play?') ||
+      url.startsWith('mmalist://play?') ||
+      url.startsWith('mmsmb://play?') ||
+      url.startsWith('mmlocal://play?') ||
+      url.startsWith('mmpaw://play?') ||
+      url.startsWith('mmt4://play?') ||
+      url.startsWith('mmquark://owned?') ||
+      url.startsWith('mmwogg://quark?');
 
   /// Whether [url] points to an already-downloaded local file (offline playback).
   bool get isLocalFile {
@@ -1000,9 +1028,10 @@ class CmsEpisode {
 }
 
 class CmsLine {
+  final String id;
   final String name;
   final List<CmsEpisode> episodes;
-  const CmsLine({required this.name, required this.episodes});
+  const CmsLine({this.id = '', required this.name, required this.episodes});
 }
 
 class CmsVideo {
@@ -1289,12 +1318,171 @@ class LiveGroup {
 }
 
 class WatchHistoryEntry {
+  /// Prefix for opaque, non-streamable, credential-free media identity tokens.
+  static const String mediaIdPrefix = 'mid:v1:';
+
+  /// Query parameters that identify a media item without carrying temporary
+  /// auth tokens, signatures, cookies, or expirations.
+  static const Set<String> _safeIdentityQueryKeys = <String>{
+    'id',
+    'fid',
+    'file_id',
+    'fileid',
+    'vid',
+    'item_id',
+    'itemid',
+    'share_id',
+    'shareid',
+    'fs_id',
+    'fsid',
+    'path',
+    'name',
+    'ep',
+    'episode',
+    'sid',
+    'v',
+    'p',
+    'cid',
+    'bvid',
+    'aid',
+    'playid',
+    'media_id',
+    'mediaid',
+    'file',
+    'dir',
+    'folder',
+    'drive_id',
+    'driveid',
+    'pan_id',
+    'panid',
+    'uk',
+    'surl',
+    'pwd_id',
+    'vod_id',
+    'nid',
+    'part',
+    'part_id',
+    'partid',
+    'ratingkey',
+    'rating_key',
+    'episode_id',
+    'episodeid',
+    'stream_id',
+    'streamid',
+    'asset_id',
+    'assetid',
+    'provider',
+    'drive',
+    'ref',
+    'account',
+    'fids',
+    'channel_id',
+    'channelid',
+  };
+
+  static final RegExp _canonicalMediaIdRe = RegExp(r'^mid:v1:[0-9a-f]{32}$');
+
+  /// Returns true ONLY for strictly canonical `mid:v1:<32 lowercase hex>` tokens.
+  static bool isCanonicalMediaId(String value) =>
+      _canonicalMediaIdRe.hasMatch(value.trim());
+
+  /// Normalizes any supplied media identifier (canonical token OR raw/signed URL
+  /// injected by an external backup/sync payload) into a canonical `mid:v1:` hash.
+  static String normalizeMediaId(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return '';
+    if (isCanonicalMediaId(trimmed)) return trimmed;
+    return mediaIdentityForUrl(trimmed);
+  }
+
+  /// Derives a deterministic, non-streamable, credential-free identity hash
+  /// from an episode playback URL (or returns an already-canonical `mid:v1:`
+  /// token unchanged). Strips userInfo, fragments, and all non-allowlisted
+  /// query parameters (such as signed tokens/expirations) before hashing so
+  /// history/backups/sync never export usable playback credentials while still
+  /// distinguishing same-named files accurately across token rotations.
+  static String mediaIdentityForUrl(String rawUrl) {
+    final trimmed = rawUrl.trim();
+    if (trimmed.isEmpty) return '';
+    if (isCanonicalMediaId(trimmed)) return trimmed;
+
+    String canonical = trimmed;
+    final uri = Uri.tryParse(trimmed);
+    if (uri != null && uri.scheme.isNotEmpty) {
+      final scheme = uri.scheme.toLowerCase();
+      final host = uri.host.toLowerCase();
+      final hasExplicitPort = uri.hasPort &&
+          !((scheme == 'http' && uri.port == 80) ||
+              (scheme == 'https' && uri.port == 443));
+      final keptQuery = <String, List<String>>{};
+      if (uri.hasQuery) {
+        final entries = uri.queryParametersAll.entries.toList()
+          ..sort((a, b) => a.key.toLowerCase().compareTo(b.key.toLowerCase()));
+        for (final entry in entries) {
+          final lowerKey = entry.key.toLowerCase();
+          if (_safeIdentityQueryKeys.contains(lowerKey)) {
+            keptQuery[lowerKey] = entry.value;
+          }
+        }
+      }
+      final buf = StringBuffer()
+        ..write(scheme)
+        ..write(':');
+      if (uri.hasAuthority) {
+        buf.write('//');
+        buf.write(host);
+        if (hasExplicitPort) {
+          buf.write(':${uri.port}');
+        }
+      }
+      buf.write(uri.path);
+      if (keptQuery.isNotEmpty) {
+        buf.write('?');
+        var first = true;
+        for (final entry in keptQuery.entries) {
+          for (final val in entry.value) {
+            if (!first) buf.write('&');
+            first = false;
+            buf.write('${Uri.encodeQueryComponent(entry.key)}=${Uri.encodeQueryComponent(val)}');
+          }
+        }
+      }
+      canonical = buf.toString();
+    } else {
+      // Non-URI provider tokens: strip obvious secret key-value segments before hashing.
+      canonical = trimmed.replaceAll(
+        RegExp(
+          r'([?&|;\s])(token|sign|sig|signature|auth|auth_key|access_token|secret|pass|password|pwd|cookie|session|expires|expire|exp|key|api_key|apikey)=[^&|;\s]*',
+          caseSensitive: false,
+        ),
+        r'$1',
+      );
+    }
+
+    final digest = sha256.convert(utf8.encode(canonical)).toString();
+    return '$mediaIdPrefix${digest.substring(0, 32)}';
+  }
+
+  /// Checks whether a stored non-streamable media ID (or legacy raw URL)
+  /// matches [candidateEpisodeUrl].
+  static bool matchesEpisodeUrl(
+    String storedIdOrUrl,
+    String candidateEpisodeUrl,
+  ) {
+    final storedId = mediaIdentityForUrl(storedIdOrUrl);
+    final candidateId = mediaIdentityForUrl(candidateEpisodeUrl);
+    return storedId.isNotEmpty && storedId == candidateId;
+  }
+
   final String site;
   final String id;
   final String title;
   final String poster;
   final String line;
+  final String lineId;
   final String episode;
+  final String episodeUrl;
+  final String episodeMediaId;
   final int index;
   final int position;
   final int duration;
@@ -1305,12 +1493,23 @@ class WatchHistoryEntry {
     required this.title,
     this.poster = '',
     this.line = '',
+    this.lineId = '',
     this.episode = '',
+    this.episodeUrl = '',
+    this.episodeMediaId = '',
     this.index = 0,
     this.position = 0,
     this.duration = 0,
     this.updated = 0,
   });
+
+  /// Stable non-streamable identity for matching duplicate-named files.
+  String get effectiveMediaId {
+    final cleanId = episodeMediaId.trim();
+    if (cleanId.isNotEmpty) return normalizeMediaId(cleanId);
+    return mediaIdentityForUrl(episodeUrl);
+  }
+
   String get key => '$site\n$id';
   bool get complete =>
       duration >= 60000 &&
@@ -1321,34 +1520,137 @@ class WatchHistoryEntry {
     return (position / duration).clamp(0.0, 1.0);
   }
 
-  Map<String, dynamic> toJson() => {
-    'site': site,
-    'id': id,
-    'title': title,
-    'poster': poster,
-    'line': line,
-    'episode': episode,
-    'index': index,
-    'position': position < 0 ? 0 : position,
-    'duration': duration < 0 ? 0 : duration,
-    'updated': updated,
-  };
+  Map<String, dynamic> toJson() {
+    final mediaId = effectiveMediaId;
+    return {
+      'site': site,
+      'id': id,
+      'title': title,
+      'poster': poster,
+      'line': line,
+      if (lineId.isNotEmpty) 'lineId': lineId,
+      'episode': episode,
+      if (mediaId.isNotEmpty) 'episodeMediaId': mediaId,
+      'index': index,
+      'position': position < 0 ? 0 : position,
+      'duration': duration < 0 ? 0 : duration,
+      'updated': updated,
+    };
+  }
+
   factory WatchHistoryEntry.fromJson(Map<String, dynamic> json) {
     final pos = (json['position'] as num?)?.toInt() ?? 0;
     final dur = (json['duration'] as num?)?.toInt() ?? 0;
+    final storedMediaId = (json['episodeMediaId'] ?? '').toString().trim();
+    final legacyRawUrl = (json['episodeUrl'] ?? '').toString().trim();
+    final migratedMediaId = storedMediaId.isNotEmpty
+        ? normalizeMediaId(storedMediaId)
+        : mediaIdentityForUrl(legacyRawUrl);
     return WatchHistoryEntry(
       site: (json['site'] ?? '').toString(),
       id: (json['id'] ?? '').toString(),
       title: (json['title'] ?? '').toString(),
       poster: (json['poster'] ?? '').toString(),
       line: (json['line'] ?? '').toString(),
+      lineId: (json['lineId'] ?? '').toString(),
       episode: (json['episode'] ?? '').toString(),
+      episodeMediaId: migratedMediaId,
       index: (json['index'] as num?)?.toInt() ?? 0,
       position: pos < 0 ? 0 : pos,
       duration: dur < 0 ? 0 : dur,
       updated: (json['updated'] as num?)?.toInt() ?? 0,
     );
   }
+}
+
+/// Strictly resolves `(lineIndex, episodeIndex)` for an iOS watch-history
+/// bookmark without ever guessing across duplicate-named lines or
+/// duplicate-named files. Used uniformly by DetailScreen (white marker,
+/// primary resume button, auto-scroll alignment) and PlayerScreen (resume
+/// progress lookup) so all three share one exact file identity.
+(int, int)? resolveIosWatchHistoryTarget(
+  CmsVideo video,
+  WatchHistoryEntry bookmark,
+) {
+  final lines = video.lines;
+  if (lines.isEmpty) return null;
+
+  final cleanLineId = bookmark.lineId.trim();
+  final cleanMediaId = bookmark.effectiveMediaId;
+  final cleanLineName = bookmark.line.trim();
+  final cleanEpName = bookmark.episode.trim();
+
+  int? lineIdx;
+  if (cleanLineId.isNotEmpty) {
+    final idMatches = <int>[
+      for (int i = 0; i < lines.length; i++)
+        if (lines[i].id.trim() == cleanLineId) i,
+    ];
+    if (idMatches.length == 1) {
+      lineIdx = idMatches.first;
+    } else if (idMatches.length > 1 && cleanMediaId.isNotEmpty) {
+      final narrowed = idMatches
+          .where((i) => lines[i].episodes.any(
+              (e) => WatchHistoryEntry.matchesEpisodeUrl(cleanMediaId, e.url)))
+          .toList();
+      if (narrowed.length == 1) lineIdx = narrowed.first;
+    }
+  } else if (cleanMediaId.isNotEmpty) {
+    final urlMatches = <int>[
+      for (int i = 0; i < lines.length; i++)
+        if ((cleanLineName.isEmpty || lines[i].name.trim() == cleanLineName) &&
+            lines[i].episodes.any(
+                (e) => WatchHistoryEntry.matchesEpisodeUrl(cleanMediaId, e.url)))
+          i,
+    ];
+    if (urlMatches.length == 1) lineIdx = urlMatches.first;
+  } else if (cleanLineName.isNotEmpty) {
+    final nameMatches = <int>[
+      for (int i = 0; i < lines.length; i++)
+        if (lines[i].name.trim() == cleanLineName) i,
+    ];
+    if (nameMatches.length == 1) lineIdx = nameMatches.first;
+  }
+
+  if (lineIdx == null) return null;
+  final line = lines[lineIdx];
+  if (line.episodes.isEmpty) return null;
+
+  if (cleanMediaId.isNotEmpty) {
+    final epMatches = <int>[
+      for (int i = 0; i < line.episodes.length; i++)
+        if (WatchHistoryEntry.matchesEpisodeUrl(
+          cleanMediaId,
+          line.episodes[i].url,
+        ))
+          i,
+    ];
+    if (epMatches.isEmpty) return null;
+    if (epMatches.length == 1) return (lineIdx, epMatches.first);
+    if (epMatches.contains(bookmark.index) &&
+        (cleanEpName.isEmpty ||
+            line.episodes[bookmark.index].name.trim() == cleanEpName)) {
+      return (lineIdx, bookmark.index);
+    }
+    if (cleanEpName.isNotEmpty) {
+      final narrowed = epMatches
+          .where((i) => line.episodes[i].name.trim() == cleanEpName)
+          .toList();
+      if (narrowed.length == 1) return (lineIdx, narrowed.first);
+    }
+    return null;
+  }
+
+  if (cleanEpName.isNotEmpty) {
+    final nameMatches = <int>[
+      for (int i = 0; i < line.episodes.length; i++)
+        if (line.episodes[i].name.trim() == cleanEpName) i,
+    ];
+    if (nameMatches.length == 1) return (lineIdx, nameMatches.first);
+    return null;
+  }
+
+  return null;
 }
 
 class FavoriteEntry {

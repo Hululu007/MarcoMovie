@@ -2110,6 +2110,10 @@ void main() {
       // Settings -> 外观 back button uses native auto-adaptive foregroundColor (null).
       await tester.tap(find.text('设置').last);
       await tester.pumpAndSettle();
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('settings-category-appearance')),
+      );
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('settings-category-appearance')));
       await tester.pumpAndSettle();
       final backBtn = tester.widget<IosNativeGlassButton>(
@@ -2173,7 +2177,12 @@ class _RecordingNavigatorObserver extends NavigatorObserver {
 
 class _IosHomeRedesignClient extends CmsClient {
   @override
-  Future<CmsVideo> fetchDetail(CmsSite site, CmsVideo video) async => video;
+  Future<CmsVideo> fetchDetail(
+    CmsSite site,
+    CmsVideo video, {
+    bool forceRefresh = false,
+  }) async =>
+      video;
 
   @override
   Future<(List<CmsCategory>, CmsListing)> fetchHome(CmsSite site) async {

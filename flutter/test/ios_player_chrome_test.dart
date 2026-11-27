@@ -1096,12 +1096,19 @@ void main() {
         await tester.pump(const Duration(milliseconds: 50));
         expect(IosLiquidGlassBridge.isSheetPresentationInFlight, isFalse);
 
-        // Open audio/subtitle quick menu -> choose 'audio' -> opens audio sheet (in flight).
+        // Open 更多 menu -> choose 'audio' -> opens audio sheet (in flight).
         calls.clear();
-        await tester.tap(find.byKey(const Key('ios-player-tracks-button')));
+        await tester.tap(find.byKey(const Key('ios-player-more-button')));
         await tester.pump(const Duration(milliseconds: 50));
         expect(calls.where((c) => c.method == 'showOptionSheet'), hasLength(1));
-        pendingOptionSheet!.complete('0'); // 'audio'
+        final moreArgs = Map<String, dynamic>.from(
+          calls.lastWhere((c) => c.method == 'showOptionSheet').arguments as Map,
+        );
+        final moreItems = (moreArgs['items'] as List).cast<Map>();
+        final audioItemId = moreItems
+            .firstWhere((it) => (it['title'] as String).contains('切换音轨'))['id']
+            .toString();
+        pendingOptionSheet!.complete(audioItemId); // 'audio'
         await tester.pump(const Duration(milliseconds: 50));
         expect(calls.where((c) => c.method == 'showOptionSheet'), hasLength(2));
 
@@ -1227,7 +1234,7 @@ void main() {
     );
 
     testWidgets(
-      'L-02: _showAudioSubtitleQuickSheet fallback on iOS 15-18 shows both audio and subtitle chooser entries',
+      'L-02: _showIosMoreMenu fallback on iOS 15-18 includes audio, subtitle, vocal loudness, and engine switcher entries',
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
       (tester) async {
         IosLiquidGlassBridge.setAvailableForTest(false);
@@ -1238,11 +1245,13 @@ void main() {
           player: player,
         );
 
-        await tester.tap(find.byKey(const Key('ios-player-tracks-button')));
+        await tester.tap(find.byKey(const Key('ios-player-more-button')));
         await tester.pumpAndSettle();
-        expect(find.text('音轨与字幕'), findsOneWidget);
+        expect(find.text('播放选项'), findsOneWidget);
         expect(find.text('切换音轨'), findsOneWidget);
-        expect(find.text('切换内嵌字幕'), findsOneWidget);
+        expect(find.text('切换字幕'), findsOneWidget);
+        expect(find.textContaining('人声响度'), findsOneWidget);
+        expect(find.textContaining('播放内核'), findsOneWidget);
 
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump(const Duration(milliseconds: 100));
@@ -1284,10 +1293,10 @@ void main() {
         await tester.pump(const Duration(milliseconds: 100));
         expect(player.rates.last, 1.0);
 
-        // Wake controls -> speed badge MUST now display 1.0× (synced with _normalSpeed)!
+        // Wake controls -> speed pill returns to default '倍速' label (1.5× cleared)!
         await tester.tapAt(const Offset(420, 220));
         await tester.pump(const Duration(milliseconds: 300));
-        expect(find.text('1.0×'), findsOneWidget);
+        expect(find.text('倍速'), findsOneWidget);
         expect(find.text('1.5×'), findsNothing);
 
         await tester.pumpWidget(const SizedBox.shrink());
@@ -1314,13 +1323,12 @@ void main() {
     );
 
     testWidgets(
-      'iOS 27 HUD optional PiP, Engine Switch & Vocal Loudness callbacks render when supplied and spring swell scales outward on press',
+      'iOS 27 HUD keeps bottom dock decluttered (tracks/loudness/engine tucked into More) while PiP & center spring swell work',
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
       (tester) async {
         IosLiquidGlassBridge.setAvailableForTest(true);
         var pipTapped = 0;
-        var engineTapped = 0;
-        var loudnessTapped = 0;
+        var moreTapped = 0;
 
         await tester.pumpWidget(
           MaterialApp(
@@ -1357,10 +1365,10 @@ void main() {
                   onPipTap: () => pipTapped++,
                   engineLabel: 'AVPlayer',
                   isAvPlayerActive: true,
-                  onEngineSwitchTap: () => engineTapped++,
+                  onEngineSwitchTap: () {},
                   vocalLoudnessLabel: '影院人声',
                   vocalLoudnessActive: true,
-                  onVocalLoudnessTap: () => loudnessTapped++,
+                  onVocalLoudnessTap: () {},
                   onBack: () {},
                   onPlayPause: () {},
                   onRewind15: () {},
@@ -1376,7 +1384,7 @@ void main() {
                   onDanmuSettingsTap: () {},
                   onAspectAndStrategyTap: () {},
                   onAudioSubtitleTap: () {},
-                  onMoreTap: () {},
+                  onMoreTap: () => moreTapped++,
                   onLockTap: () {},
                   onFullscreenToggle: () {},
                   onInteraction: () {},
@@ -1388,16 +1396,13 @@ void main() {
         await tester.pump();
 
         expect(find.byKey(const Key('ios-player-pip-button')), findsOneWidget);
-        expect(
-          find.byKey(const Key('ios-player-engine-button')),
-          findsOneWidget,
-        );
+        expect(find.byKey(const Key('ios-player-tracks-button')), findsNothing);
+        expect(find.byKey(const Key('ios-player-engine-button')), findsNothing);
         expect(
           find.byKey(const Key('ios-player-loudness-button')),
-          findsOneWidget,
+          findsNothing,
         );
-        expect(find.text('AVPlayer'), findsOneWidget);
-        expect(find.text('影院人声'), findsOneWidget);
+        expect(find.byKey(const Key('ios-player-more-button')), findsOneWidget);
 
         // Press down center play button -> iOS 27 SpringSimulation fluid gel swell (> 1.0x, NOT shrink)
         final playFinder = find.byKey(const Key('player-center-play-pause'));
@@ -1414,13 +1419,11 @@ void main() {
         await tester.pumpAndSettle();
 
         await tester.tap(find.byKey(const Key('ios-player-pip-button')));
-        await tester.tap(find.byKey(const Key('ios-player-engine-button')));
-        await tester.tap(find.byKey(const Key('ios-player-loudness-button')));
+        await tester.tap(find.byKey(const Key('ios-player-more-button')));
         await tester.pump();
 
         expect(pipTapped, 1);
-        expect(engineTapped, 1);
-        expect(loudnessTapped, 1);
+        expect(moreTapped, 1);
       },
     );
 

@@ -12,23 +12,42 @@ private enum MarcoLiquidGlassSupport {
   static let sceneActivationChangedNotification = Notification.Name("MarcoSceneActivationChanged")
   private static var accessibilityObservers: [NSObjectProtocol] = []
   private static var hiddenAirPlayPicker: AVRoutePickerView?
+  private static weak var activeSafariAuthController: SFSafariViewController?
   private static var activeMenuButtons: Set<ObjectIdentifier> = []
 
   /// Resolves the active UIWindow across UIScene / iPhone Duo fold-unfold / Split View
-  /// without touching the deprecated `UIScreen.main` global.
+  /// without touching the deprecated `UIScreen.main` global or accidentally selecting
+  /// a system `UITextEffectsWindow` during iPadOS Home Screen cold launch.
   static func activeWindow(for view: UIView? = nil) -> UIWindow? {
     if let win = view?.window {
       return win
     }
     let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-    let activeScene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first
-    if let keyWin = activeScene?.windows.first(where: { $0.isKeyWindow }) {
+    let activeScene = scenes.first(where: { $0.activationState == .foregroundActive })
+      ?? scenes.first(where: { $0.activationState == .foregroundInactive })
+      ?? scenes.first
+    let isAppContentWindow: (UIWindow) -> Bool = { win in
+      !win.isHidden && win.windowLevel == .normal && win.rootViewController != nil
+    }
+    if let flutterKey = activeScene?.windows.first(where: { $0.isKeyWindow && $0.rootViewController is FlutterViewController }) {
+      return flutterKey
+    }
+    if let keyWin = activeScene?.windows.first(where: { $0.isKeyWindow && isAppContentWindow($0) }) {
       return keyWin
     }
-    if let anyKey = scenes.flatMap({ $0.windows }).first(where: { $0.isKeyWindow }) {
-      return anyKey
+    if let flutterWin = activeScene?.windows.first(where: { !$0.isHidden && $0.rootViewController is FlutterViewController }) {
+      return flutterWin
     }
-    return activeScene?.windows.first ?? scenes.flatMap({ $0.windows }).first
+    if let anyFlutter = scenes.flatMap({ $0.windows }).first(where: { !$0.isHidden && $0.rootViewController is FlutterViewController }) {
+      return anyFlutter
+    }
+    if let delegateWin = UIApplication.shared.delegate?.window ?? nil, delegateWin.rootViewController != nil {
+      return delegateWin
+    }
+    return activeScene?.windows.first(where: isAppContentWindow)
+      ?? scenes.flatMap({ $0.windows }).first(where: isAppContentWindow)
+      ?? activeScene?.windows.first
+      ?? (UIApplication.shared.delegate?.window ?? nil)
   }
 
   static func activeWindowBounds(for view: UIView? = nil) -> CGRect {
@@ -49,6 +68,18 @@ private enum MarcoLiquidGlassSupport {
     )
   }
 
+  /// Keeps the root Liquid Glass Dock / Logo overlay above dynamically mounted
+  /// Flutter `UiKitView`s inside `rootVC.view` while preserving `rootVC` in the
+  /// responder chain so `logoButton.showsMenuAsPrimaryAction` presents natively.
+  /// Strictly a no-op on iOS < 26 or before `configureRootTabChrome` succeeds so
+  /// an unconfigured native overlay can never appear on iOS 14–25.
+  static func bringRootChromeToFront() {
+    guard isAvailable, let controller = MarcoIos27RootTabChromeController.existingInstance else {
+      return
+    }
+    controller.bringToFrontIfNeeded()
+  }
+
   static var isEffectiveDark: Bool {
     return isEffectiveDark(for: nil)
   }
@@ -61,12 +92,12 @@ private enum MarcoLiquidGlassSupport {
       return false
     default:
       if let v = view, v.traitCollection.userInterfaceStyle != .unspecified {
-        return v.traitCollection.userInterfaceStyle != .light
+        return v.traitCollection.userInterfaceStyle == .dark
       }
-      if let win = activeWindow() {
-        return win.traitCollection.userInterfaceStyle != .light
+      if let win = activeWindow(), win.traitCollection.userInterfaceStyle != .unspecified {
+        return win.traitCollection.userInterfaceStyle == .dark
       }
-      return UITraitCollection.current.userInterfaceStyle != .light
+      return UITraitCollection.current.userInterfaceStyle == .dark
     }
   }
 
@@ -80,7 +111,9 @@ private enum MarcoLiquidGlassSupport {
       // Forced-dark media overlay subtree (Detail / Hero / Player): keep .dark intact.
       return
     }
-    if view.overrideUserInterfaceStyle != style {
+    // Never mutate FlutterView / Metal surface layers during cold launch on iPadOS/iOS.
+    let className = NSStringFromClass(type(of: view))
+    if !className.contains("Flutter") && view.overrideUserInterfaceStyle != style {
       view.overrideUserInterfaceStyle = style
     }
     if let seg = view as? UISegmentedControl {
@@ -119,15 +152,19 @@ private enum MarcoLiquidGlassSupport {
     let winBg: UIColor = isEffectiveDark
       ? UIColor.black
       : UIColor(red: 0.914, green: 0.925, blue: 0.949, alpha: 1.0)
+    var visitedWindows: [UIWindow] = []
     for scene in UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }) {
-      for win in scene.windows {
-        win.overrideUserInterfaceStyle = style
-        win.backgroundColor = winBg
-        win.rootViewController?.view.backgroundColor = winBg
-        restyleNativeViews(in: win, style: style)
-        if let marcoVC = win.rootViewController as? MarcoFlutterViewController {
-          marcoVC.marcoPreferredInterfaceStyle = style
-        }
+      visitedWindows.append(contentsOf: scene.windows)
+    }
+    if visitedWindows.isEmpty, let legacyWin = UIApplication.shared.delegate?.window ?? nil {
+      visitedWindows.append(legacyWin)
+    }
+    for win in visitedWindows {
+      win.overrideUserInterfaceStyle = style
+      win.backgroundColor = winBg
+      restyleNativeViews(in: win, style: style)
+      if let marcoVC = win.rootViewController as? MarcoFlutterViewController {
+        marcoVC.marcoPreferredInterfaceStyle = style
       }
     }
     NotificationCenter.default.post(name: appearanceChangedNotification, object: nil)
@@ -141,11 +178,21 @@ private enum MarcoLiquidGlassSupport {
 
   static func presentNativeAirPlayPicker() {
     guard let host = topPresenter() else { return }
-    let picker = hiddenAirPlayPicker ?? AVRoutePickerView(frame: CGRect(x: -100, y: -100, width: 44, height: 44))
+    let bounds = host.view.bounds
+    let anchorFrame = CGRect(
+      x: max(8.0, bounds.midX - 22.0),
+      y: max(8.0, bounds.midY - 22.0),
+      width: 44.0,
+      height: 44.0
+    )
+    let picker = hiddenAirPlayPicker ?? AVRoutePickerView(frame: anchorFrame)
     hiddenAirPlayPicker = picker
+    picker.frame = anchorFrame
     picker.prioritizesVideoDevices = true
-    picker.isHidden = true
-    if picker.superview == nil {
+    picker.alpha = 0.001
+    picker.isUserInteractionEnabled = false
+    if picker.superview !== host.view {
+      picker.removeFromSuperview()
       host.view.addSubview(picker)
     }
     for sub in picker.subviews {
@@ -202,6 +249,29 @@ private enum MarcoLiquidGlassSupport {
 
   static var isReduceTransparencyEnabled: Bool {
     return UIAccessibility.isReduceTransparencyEnabled
+  }
+
+  static var isThermalThrottled: Bool {
+    let state = ProcessInfo.processInfo.thermalState
+    return state == .serious || state == .critical
+  }
+
+  /// Raw `ProcessInfo.thermalState` level for Flutter (`0` nominal, `1` fair,
+  /// `2` serious, `3` critical) so animated shaders and large blurs can back
+  /// off at `.fair`, before sustained heat builds up.
+  static var thermalLevelCode: Int {
+    switch ProcessInfo.processInfo.thermalState {
+    case .nominal:
+      return 0
+    case .fair:
+      return 1
+    case .serious:
+      return 2
+    case .critical:
+      return 3
+    @unknown default:
+      return 0
+    }
   }
 
   static var majorOSVersion: Int {
@@ -315,6 +385,22 @@ private enum MarcoLiquidGlassSupport {
         }
       }
     )
+    accessibilityObservers.append(
+      center.addObserver(
+        forName: ProcessInfo.thermalStateDidChangeNotification,
+        object: nil,
+        queue: .main
+      ) { _ in
+        bridgeChannel?.invokeMethod(
+          "thermalStateChanged",
+          arguments: isThermalThrottled
+        )
+        bridgeChannel?.invokeMethod(
+          "thermalLevelChanged",
+          arguments: thermalLevelCode
+        )
+      }
+    )
   }
 
   static func showMenuAtRect(args: [String: Any], completion: @escaping FlutterResult) {
@@ -396,49 +482,81 @@ private enum MarcoLiquidGlassSupport {
           "sdk26": builtWithSDK26,
           "reduceTransparency": isReduceTransparencyEnabled,
           "sceneActive": isSceneActive,
+          "thermalThrottled": isThermalThrottled,
+          "thermalLevel": thermalLevelCode,
         ])
       case "configureRootTabChrome":
-        guard let args = call.arguments as? [String: Any] else {
+        guard isAvailable,
+              let args = call.arguments as? [String: Any],
+              let items = args["items"] as? [[String: Any]],
+              !items.isEmpty else {
           result(false)
           return
         }
         DispatchQueue.main.async {
-          MarcoIos27RootTabChromeController.shared.configure(args: args)
-          result(true)
+          let ok = MarcoIos27RootTabChromeController.shared.configure(args: args)
+          result(ok)
         }
       case "setRootTabSelectedIndex":
+        guard isAvailable else {
+          result(nil)
+          return
+        }
         DispatchQueue.main.async {
+          guard let controller = MarcoIos27RootTabChromeController.existingInstance else {
+            result(nil)
+            return
+          }
           if let dict = call.arguments as? [String: Any], let idx = dict["index"] as? Int {
             let animated = (dict["animated"] as? Bool) ?? true
-            MarcoIos27RootTabChromeController.shared.setSelectedIndex(idx, animated: animated)
+            let epoch = (dict["epoch"] as? NSNumber)?.intValue
+            controller.setSelectedIndex(idx, animated: animated, epoch: epoch)
           } else if let idx = call.arguments as? Int {
-            MarcoIos27RootTabChromeController.shared.setSelectedIndex(idx, animated: true)
+            controller.setSelectedIndex(idx, animated: true, epoch: nil)
           }
           result(nil)
         }
       case "setRootTabMinimized":
+        guard isAvailable else {
+          result(nil)
+          return
+        }
         DispatchQueue.main.async {
+          guard let controller = MarcoIos27RootTabChromeController.existingInstance else {
+            result(nil)
+            return
+          }
           if let dict = call.arguments as? [String: Any] {
+            let epoch = (dict["epoch"] as? NSNumber)?.intValue
             if let progress = (dict["progress"] as? NSNumber)?.doubleValue {
-              MarcoIos27RootTabChromeController.shared.updateScrollMinimizeProgress(CGFloat(progress))
+              controller.updateScrollMinimizeProgress(CGFloat(progress), epoch: epoch)
             } else {
               let minimized = (dict["minimized"] as? Bool) ?? false
               let animated = (dict["animated"] as? Bool) ?? true
-              MarcoIos27RootTabChromeController.shared.setMinimized(minimized, animated: animated)
+              controller.setMinimized(minimized, animated: animated, epoch: epoch)
             }
           } else if let minimized = call.arguments as? Bool {
-            MarcoIos27RootTabChromeController.shared.setMinimized(minimized, animated: true)
+            controller.setMinimized(minimized, animated: true, epoch: nil)
           }
           result(nil)
         }
       case "setRootTabVisible":
+        guard isAvailable else {
+          result(nil)
+          return
+        }
         DispatchQueue.main.async {
+          guard let controller = MarcoIos27RootTabChromeController.existingInstance else {
+            result(nil)
+            return
+          }
           if let dict = call.arguments as? [String: Any] {
             let visible = (dict["visible"] as? Bool) ?? true
             let animated = (dict["animated"] as? Bool) ?? true
-            MarcoIos27RootTabChromeController.shared.setRootDockVisible(visible, animated: animated)
+            let epoch = (dict["epoch"] as? NSNumber)?.intValue
+            controller.setRootDockVisible(visible, animated: animated, epoch: epoch)
           } else if let visible = call.arguments as? Bool {
-            MarcoIos27RootTabChromeController.shared.setRootDockVisible(visible, animated: true)
+            controller.setRootDockVisible(visible, animated: true, epoch: nil)
           }
           result(nil)
         }
@@ -511,6 +629,51 @@ private enum MarcoLiquidGlassSupport {
         DispatchQueue.main.async {
           presentNativeAirPlayPicker()
           result(true)
+        }
+      case "presentSafariAuth":
+        let args = (call.arguments as? [String: Any]) ?? [:]
+        let rawUrl = (args["url"] as? String) ?? ""
+        DispatchQueue.main.async {
+          guard let url = URL(string: rawUrl),
+                let scheme = url.scheme?.lowercased(),
+                (scheme == "https" || scheme == "http"),
+                let host = topPresenter() else {
+            result(false)
+            return
+          }
+          if let existing = activeSafariAuthController, existing.presentingViewController != nil {
+            existing.dismiss(animated: false, completion: nil)
+          }
+          let safari = SFSafariViewController(url: url)
+          safari.modalPresentationStyle = .pageSheet
+          activeSafariAuthController = safari
+          host.present(safari, animated: true)
+          result(true)
+        }
+      case "dismissSafariAuth":
+        DispatchQueue.main.async {
+          if let safari = activeSafariAuthController {
+            activeSafariAuthController = nil
+            if safari.presentingViewController != nil && !safari.isBeingDismissed {
+              safari.dismiss(animated: true) {
+                result(nil)
+              }
+              return
+            }
+          }
+          result(nil)
+        }
+      case "setRootTabItems":
+        guard isAvailable,
+              let args = call.arguments as? [String: Any],
+              let items = args["items"] as? [[String: Any]],
+              !items.isEmpty else {
+          result(nil)
+          return
+        }
+        DispatchQueue.main.async {
+          MarcoIos27RootTabChromeController.existingInstance?.updateItems(items)
+          result(nil)
         }
       case "triggerFavoriteDynamicIslandFeedback":
         let phase = (call.arguments as? String) ?? "shutter"
@@ -676,14 +839,27 @@ private enum MarcoLiquidGlassSupport {
 
       let image = symbol.flatMap { UIImage(systemName: $0) }
       let attrs: UIMenuElement.Attributes = destructive ? [.destructive] : []
-      let action = UIAction(
-        title: label,
-        subtitle: (subtitle?.isEmpty ?? true) ? nil : subtitle,
-        image: image,
-        attributes: attrs,
-        state: checked ? .on : .off
-      ) { _ in
-        onSelect(id)
+      let action: UIAction
+      if #available(iOS 15.0, *) {
+        action = UIAction(
+          title: label,
+          subtitle: (subtitle?.isEmpty ?? true) ? nil : subtitle,
+          image: image,
+          attributes: attrs,
+          state: checked ? .on : .off
+        ) { _ in
+          onSelect(id)
+        }
+      } else {
+        let combined = (subtitle?.isEmpty ?? true) ? label : "\(label) · \(subtitle!)"
+        action = UIAction(
+          title: combined,
+          image: image,
+          attributes: attrs,
+          state: checked ? .on : .off
+        ) { _ in
+          onSelect(id)
+        }
       }
       currentBucket.append(action)
     }
@@ -1078,18 +1254,38 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     let items: [OptionItem]
   }
 
+  private struct PopoverLayoutPlan {
+    let useSheetFallback: Bool
+    let sourceRect: CGRect
+    let permittedArrowDirections: UIPopoverArrowDirection
+    let preferredContentSize: CGSize
+    let effectiveSafeFrame: CGRect
+  }
+
   private let sheetTitle: String
   private let sheetSubtitle: String?
   private let cancelTitle: String
   private let forceOpaque: Bool
   private let isPopoverPresentation: Bool
   private let forceDarkSurface: Bool
+  private let originalArgs: [String: Any]
   private let sections: [OptionSection]
-  private let tableView = UITableView(frame: .zero, style: .insetGrouped)
+  private let rawAnchorRect: CGRect?
+  private let initialAnchorHostBounds: CGRect
+  private let allowPopoverRestore: Bool
+  private weak var hostPresenter: UIViewController?
+  private var lastHostBounds: CGRect
+  private let tableView: UITableView
+  private var compactHeaderView: UIView?
+  private var compactHeaderLabel: UILabel?
+  private var compactHeaderDivider: UIView?
 
   private var completion: FlutterResult?
   private var resolved = false
   private var dismissing = false
+  private var pendingSheetFallbackAfterTransition = false
+  private var pendingPopoverRestoreAfterTransition = false
+  private var transitioningToSheetFallback = false
   private var navIdentity: ObjectIdentifier?
 
   private var isOpaqueMode: Bool {
@@ -1100,125 +1296,7 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     return forceDarkSurface || MarcoLiquidGlassSupport.isEffectiveDark(for: isViewLoaded ? view : nil)
   }
 
-  override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-    super.traitCollectionDidChange(previousTraitCollection)
-    if traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) {
-      let dark = useDarkColors
-      tableView.separatorColor = dark
-        ? UIColor.white.withAlphaComponent(0.12)
-        : UIColor.black.withAlphaComponent(0.10)
-      tableView.reloadData()
-    }
-  }
-
-  override func viewWillTransition(
-    to size: CGSize,
-    with coordinator: UIViewControllerTransitionCoordinator
-  ) {
-    super.viewWillTransition(to: size, with: coordinator)
-    coordinator.animate(alongsideTransition: { [weak self] _ in
-      guard let self = self else { return }
-      if self.isPopoverPresentation, let nav = self.navigationController {
-        let maxW = min(Double(size.width) - 24.0, 278.0)
-        let maxH = min(Double(size.height) * 0.72, 340.0)
-        nav.preferredContentSize = CGSize(
-          width: max(220.0, min(Double(nav.preferredContentSize.width), maxW)),
-          height: min(Double(nav.preferredContentSize.height), max(maxH, 160.0))
-        )
-      }
-      self.view.setNeedsLayout()
-      self.view.layoutIfNeeded()
-    }, completion: nil)
-  }
-
-  func adaptivePresentationStyle(
-    for controller: UIPresentationController,
-    traitCollection: UITraitCollection
-  ) -> UIModalPresentationStyle {
-    return isPopoverPresentation ? .none : .automatic
-  }
-
-  static func present(args: [String: Any], completion: @escaping FlutterResult) {
-    guard let host = MarcoLiquidGlassSupport.topPresenter() else {
-      completion(nil)
-      return
-    }
-    let anchorDict = args["anchorRect"] as? [String: Any]
-    let vc = MarcoNativeOptionSheetController(
-      args: args,
-      isPopover: anchorDict != nil,
-      completion: completion
-    )
-    let nav = UINavigationController(rootViewController: vc)
-    let navId = ObjectIdentifier(nav)
-    vc.navIdentity = navId
-    let style: UIUserInterfaceStyle = vc.forceDarkSurface ? .dark : MarcoLiquidGlassSupport.interfaceStyle
-    nav.overrideUserInterfaceStyle = style
-
-    if let anchor = anchorDict,
-       let ax = (anchor["x"] as? NSNumber)?.doubleValue,
-       let ay = (anchor["y"] as? NSNumber)?.doubleValue,
-       let aw = (anchor["width"] as? NSNumber)?.doubleValue,
-       let ah = (anchor["height"] as? NSNumber)?.doubleValue {
-      nav.modalPresentationStyle = .popover
-      let itemCount = vc.sections.reduce(0) { $0 + $1.items.count }
-      let sectionHeaderCount = vc.sections.filter { !$0.title.isEmpty }.count
-      let subtitleRows = vc.sections.flatMap { $0.items }.filter { $0.subtitle != nil }.count
-      let rawHeight = 52.0 + Double(itemCount) * 44.0 + Double(subtitleRows) * 14.0 + Double(sectionHeaderCount) * 28.0 + 16.0
-      let maxH = min(Double(host.view.bounds.height) * 0.72, 340.0)
-      let maxW = min(Double(host.view.bounds.width) - 24.0, 278.0)
-      nav.preferredContentSize = CGSize(
-        width: max(226.0, maxW),
-        height: min(max(rawHeight, 132.0), max(maxH, 160.0))
-      )
-      if let popover = nav.popoverPresentationController {
-        popover.delegate = vc
-        popover.sourceView = host.view
-        popover.sourceRect = CGRect(
-          x: max(4.0, min(CGFloat(ax), host.view.bounds.width - 8.0)),
-          y: max(4.0, min(CGFloat(ay), host.view.bounds.height - 8.0)),
-          width: max(CGFloat(aw), 1.0),
-          height: max(CGFloat(ah), 1.0)
-        )
-        popover.permittedArrowDirections = [.up, .down, .left, .right]
-        popover.canOverlapSourceViewRect = false
-      }
-    } else {
-      nav.modalPresentationStyle = .pageSheet
-      nav.presentationController?.delegate = vc
-      if let sheet = nav.sheetPresentationController {
-        sheet.detents = [.medium(), .large()]
-        sheet.prefersGrabberVisible = true
-        sheet.preferredCornerRadius = 32.0
-        sheet.prefersScrollingExpandsWhenScrolledToEdge = true
-        sheet.prefersEdgeAttachedInCompactHeight = true
-        sheet.widthFollowsPreferredContentSizeWhenEdgeAttached = true
-      }
-    }
-    guard MarcoNativeSheetCoordinator.tryBeginPresentation(
-      host: host,
-      controller: nav,
-      onCancel: { [weak vc] in vc?.finish(selectedId: nil) }
-    ) else {
-      vc.finish(selectedId: nil)
-      return
-    }
-    MarcoNativeSheetCoordinator.presentRespectingDismissTransition(
-      host: host,
-      controller: nav,
-      identity: navId,
-      onRejected: { [weak vc] in vc?.finish(selectedId: nil) }
-    )
-  }
-
-  init(args: [String: Any], isPopover: Bool = false, completion: @escaping FlutterResult) {
-    self.sheetTitle = (args["title"] as? String) ?? ""
-    let rawSubtitle = (args["subtitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-    self.sheetSubtitle = (rawSubtitle?.isEmpty ?? true) ? nil : rawSubtitle
-    self.cancelTitle = (args["cancelTitle"] as? String) ?? "关闭"
-    self.forceOpaque = (args["forceOpaque"] as? Bool) ?? false
-    self.isPopoverPresentation = isPopover
-    self.forceDarkSurface = (args["forceDark"] as? Bool) ?? isPopover
+  private static func parseSections(from args: [String: Any]) -> [OptionSection] {
     let rawItems = (args["items"] as? [[String: Any]]) ?? []
     var builtSections: [OptionSection] = []
     var currentKey: Int?
@@ -1258,7 +1336,562 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     if !bucket.isEmpty {
       builtSections.append(OptionSection(title: currentTitle, items: bucket))
     }
-    self.sections = builtSections
+    return builtSections
+  }
+
+  private static func parseAnchorRect(from args: [String: Any]) -> CGRect? {
+    guard let anchor = args["anchorRect"] as? [String: Any],
+          let ax = (anchor["x"] as? NSNumber)?.doubleValue,
+          let ay = (anchor["y"] as? NSNumber)?.doubleValue,
+          let aw = (anchor["width"] as? NSNumber)?.doubleValue,
+          let ah = (anchor["height"] as? NSNumber)?.doubleValue else {
+      return nil
+    }
+    return CGRect(x: ax, y: ay, width: max(aw, 1.0), height: max(ah, 1.0))
+  }
+
+  private static func computePopoverLayout(
+    anchorRect: CGRect?,
+    hostBounds: CGRect,
+    hostSafeFrame: CGRect,
+    sections: [OptionSection],
+    sheetTitle: String
+  ) -> PopoverLayoutPlan {
+    let effSafe = (hostSafeFrame.width > 120.0 && hostSafeFrame.height > 120.0)
+      ? hostSafeFrame
+      : hostBounds.insetBy(dx: 8.0, dy: 8.0)
+    guard let anchor = anchorRect else {
+      return PopoverLayoutPlan(
+        useSheetFallback: true,
+        sourceRect: .zero,
+        permittedArrowDirections: [],
+        preferredContentSize: .zero,
+        effectiveSafeFrame: effSafe
+      )
+    }
+
+    let itemCount = sections.reduce(0) { $0 + $1.items.count }
+    let sectionHeaderCount = sections.filter { !$0.title.isEmpty }.count
+    let subtitleRows = sections.flatMap { $0.items }.filter { $0.subtitle != nil }.count
+    let headerH = sheetTitle.isEmpty ? 8.0 : 38.0
+    let rawHeight = headerH + Double(itemCount) * 44.0 + Double(subtitleRows) * 14.0 + Double(sectionHeaderCount) * 26.0 + 16.0
+
+    let clampedW = max(min(anchor.width, max(effSafe.width - 8.0, 1.0)), 1.0)
+    let clampedH = max(min(anchor.height, max(effSafe.height - 8.0, 1.0)), 1.0)
+    let clampedX = max(effSafe.minX + 2.0, min(anchor.minX, max(effSafe.minX + 2.0, effSafe.maxX - clampedW - 2.0)))
+    let clampedY = max(effSafe.minY + 2.0, min(anchor.minY, max(effSafe.minY + 2.0, effSafe.maxY - clampedH - 2.0)))
+    let sourceRect = CGRect(x: clampedX, y: clampedY, width: clampedW, height: clampedH)
+
+    let arrowMargin = 14.0
+    let spaceAbove = Double(sourceRect.minY - effSafe.minY) - arrowMargin
+    let spaceBelow = Double(effSafe.maxY - sourceRect.maxY) - arrowMargin
+    let spaceLeft = Double(sourceRect.minX - effSafe.minX) - arrowMargin
+    let spaceRight = Double(effSafe.maxX - sourceRect.maxX) - arrowMargin
+    let fullSafeH = Double(effSafe.height) - 16.0
+    let fullSafeW = Double(effSafe.width) - 16.0
+    let minComfortableH = itemCount >= 4 ? 228.0 : 124.0
+    let minComfortableW = 216.0
+
+    var chosenArrow: UIPopoverArrowDirection = []
+    var resolvedW = min(fullSafeW, 316.0)
+    var resolvedH = min(rawHeight, min(fullSafeH, 520.0))
+
+    let isSideEdge = (Double(sourceRect.midX - effSafe.minX) > Double(effSafe.width) * 0.72
+        || Double(sourceRect.midX - effSafe.minX) < Double(effSafe.width) * 0.28)
+      && Double(sourceRect.midY - effSafe.minY) >= Double(effSafe.height) * 0.22
+      && Double(sourceRect.midY - effSafe.minY) <= Double(effSafe.height) * 0.78
+
+    if isSideEdge {
+      if Double(sourceRect.midX) > Double(effSafe.midX), spaceLeft >= minComfortableW, fullSafeH >= minComfortableH {
+        chosenArrow = [.right]
+        resolvedW = min(316.0, spaceLeft)
+        resolvedH = min(max(rawHeight, minComfortableH), min(fullSafeH, 520.0))
+      } else if spaceRight >= minComfortableW, fullSafeH >= minComfortableH {
+        chosenArrow = [.left]
+        resolvedW = min(316.0, spaceRight)
+        resolvedH = min(max(rawHeight, minComfortableH), min(fullSafeH, 520.0))
+      }
+    }
+
+    if chosenArrow.isEmpty {
+      let bestVerticalSpace = max(spaceAbove, spaceBelow)
+      if bestVerticalSpace >= minComfortableH && fullSafeW >= minComfortableW {
+        if spaceAbove >= spaceBelow {
+          chosenArrow = [.down]
+          resolvedH = min(max(rawHeight, minComfortableH), min(spaceAbove, 520.0))
+        } else {
+          chosenArrow = [.up]
+          resolvedH = min(max(rawHeight, minComfortableH), min(spaceBelow, 520.0))
+        }
+        resolvedW = min(316.0, fullSafeW)
+      } else if spaceLeft >= minComfortableW && fullSafeH >= minComfortableH {
+        chosenArrow = [.right]
+        resolvedW = min(316.0, spaceLeft)
+        resolvedH = min(max(rawHeight, minComfortableH), min(fullSafeH, 520.0))
+      } else if spaceRight >= minComfortableW && fullSafeH >= minComfortableH {
+        chosenArrow = [.left]
+        resolvedW = min(316.0, spaceRight)
+        resolvedH = min(max(rawHeight, minComfortableH), min(fullSafeH, 520.0))
+      }
+    }
+
+    let preferredSize = CGSize(
+      width: max(min(minComfortableW, max(fullSafeW, 180.0)), min(resolvedW, max(fullSafeW, 180.0))),
+      height: max(min(minComfortableH, max(fullSafeH, 160.0)), min(resolvedH, max(fullSafeH, 160.0)))
+    )
+    return PopoverLayoutPlan(
+      useSheetFallback: chosenArrow.isEmpty,
+      sourceRect: sourceRect,
+      permittedArrowDirections: chosenArrow,
+      preferredContentSize: preferredSize,
+      effectiveSafeFrame: effSafe
+    )
+  }
+
+  private static func configureSheetPresentation(
+    _ nav: UINavigationController,
+    delegate: MarcoNativeOptionSheetController,
+    safeHeight: CGFloat
+  ) {
+    nav.modalPresentationStyle = .pageSheet
+    nav.setNavigationBarHidden(false, animated: false)
+    nav.presentationController?.delegate = delegate
+    if #available(iOS 15.0, *), let sheet = nav.sheetPresentationController {
+      let compactHeight = safeHeight > 0 && safeHeight < 460.0
+      sheet.detents = [.medium(), .large()]
+      sheet.selectedDetentIdentifier = compactHeight ? .large : .medium
+      sheet.prefersGrabberVisible = true
+      sheet.preferredCornerRadius = 32.0
+      sheet.prefersScrollingExpandsWhenScrolledToEdge = true
+      sheet.prefersEdgeAttachedInCompactHeight = true
+      sheet.widthFollowsPreferredContentSizeWhenEdgeAttached = true
+    }
+  }
+
+  override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+    super.traitCollectionDidChange(previousTraitCollection)
+    if traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) {
+      let dark = useDarkColors
+      tableView.separatorColor = dark
+        ? UIColor.white.withAlphaComponent(0.10)
+        : UIColor.black.withAlphaComponent(0.08)
+      compactHeaderLabel?.textColor = dark
+        ? UIColor.white.withAlphaComponent(0.92)
+        : UIColor.label
+      compactHeaderDivider?.backgroundColor = dark
+        ? UIColor.white.withAlphaComponent(0.12)
+        : UIColor.black.withAlphaComponent(0.08)
+      tableView.reloadData()
+    }
+  }
+
+  private func resolvedHostMetrics(
+    hostView: UIView?,
+    fallbackSize: CGSize? = nil
+  ) -> (bounds: CGRect, safeFrame: CGRect) {
+    let bounds: CGRect
+    if let hv = hostView, hv.bounds.width > 0, hv.bounds.height > 0 {
+      bounds = hv.bounds
+    } else if let size = fallbackSize, size.width > 0, size.height > 0 {
+      bounds = CGRect(origin: .zero, size: size)
+    } else {
+      bounds = lastHostBounds
+    }
+    let safeFrame: CGRect
+    if let hv = hostView,
+       hv.safeAreaLayoutGuide.layoutFrame.width > 120.0,
+       hv.safeAreaLayoutGuide.layoutFrame.height > 120.0 {
+      safeFrame = hv.safeAreaLayoutGuide.layoutFrame
+    } else {
+      safeFrame = bounds.insetBy(dx: 8.0, dy: 8.0)
+    }
+    return (bounds, safeFrame)
+  }
+
+  /// Remaps the immutable initial anchor rect from `initialAnchorHostBounds`
+  /// into `targetHostBounds` so both the transition animation and completion
+  /// callbacks—and repeated iPad Split View wide -> narrow -> wide resizes—
+  /// share one exact, drift-free coordinate baseline.
+  private func remappedAnchorRect(for targetHostBounds: CGRect) -> CGRect? {
+    guard let orig = rawAnchorRect else { return nil }
+    guard initialAnchorHostBounds.width > 1.0,
+          initialAnchorHostBounds.height > 1.0,
+          targetHostBounds.width > 1.0,
+          targetHostBounds.height > 1.0 else {
+      return orig
+    }
+    let rx = orig.midX / initialAnchorHostBounds.width
+    let ry = orig.midY / initialAnchorHostBounds.height
+    let newMidX = rx * targetHostBounds.width
+    let newMidY = ry * targetHostBounds.height
+    return CGRect(
+      x: newMidX - orig.width * 0.5,
+      y: newMidY - orig.height * 0.5,
+      width: orig.width,
+      height: orig.height
+    )
+  }
+
+  override func viewWillTransition(
+    to size: CGSize,
+    with coordinator: UIViewControllerTransitionCoordinator
+  ) {
+    super.viewWillTransition(to: size, with: coordinator)
+    coordinator.animate(alongsideTransition: { [weak self] _ in
+      guard let self = self, let nav = self.navigationController else { return }
+      let hostView = self.presentingViewController?.view ?? self.hostPresenter?.view
+      let metrics = self.resolvedHostMetrics(hostView: hostView, fallbackSize: size)
+      let nextHostBounds = metrics.bounds
+      let nextSafeFrame = metrics.safeFrame
+      let remappedAnchor = self.remappedAnchorRect(for: nextHostBounds)
+      self.lastHostBounds = nextHostBounds
+
+      if self.isPopoverPresentation {
+        let plan = Self.computePopoverLayout(
+          anchorRect: remappedAnchor,
+          hostBounds: nextHostBounds,
+          hostSafeFrame: nextSafeFrame,
+          sections: self.sections,
+          sheetTitle: self.sheetTitle
+        )
+        if plan.useSheetFallback {
+          self.pendingSheetFallbackAfterTransition = true
+          self.pendingPopoverRestoreAfterTransition = false
+        } else {
+          self.pendingSheetFallbackAfterTransition = false
+          let boundedW = max(180.0, min(plan.preferredContentSize.width, max(180.0, plan.effectiveSafeFrame.width - 16.0)))
+          let boundedH = max(160.0, min(plan.preferredContentSize.height, max(160.0, plan.effectiveSafeFrame.height - 16.0)))
+          nav.preferredContentSize = CGSize(width: boundedW, height: boundedH)
+          if let popover = nav.popoverPresentationController {
+            if let hv = hostView {
+              popover.sourceView = hv
+            }
+            popover.sourceRect = plan.sourceRect
+            popover.permittedArrowDirections = plan.permittedArrowDirections
+            popover.canOverlapSourceViewRect = false
+          }
+        }
+      } else {
+        if self.allowPopoverRestore, let anchor = remappedAnchor {
+          let plan = Self.computePopoverLayout(
+            anchorRect: anchor,
+            hostBounds: nextHostBounds,
+            hostSafeFrame: nextSafeFrame,
+            sections: self.sections,
+            sheetTitle: self.sheetTitle
+          )
+          if !plan.useSheetFallback {
+            self.pendingPopoverRestoreAfterTransition = true
+            self.pendingSheetFallbackAfterTransition = false
+          } else {
+            self.pendingPopoverRestoreAfterTransition = false
+          }
+        } else {
+          self.pendingPopoverRestoreAfterTransition = false
+        }
+        if !self.pendingPopoverRestoreAfterTransition,
+           #available(iOS 15.0, *),
+           let sheet = nav.sheetPresentationController {
+          let compactHeight = nextSafeFrame.height > 0 && nextSafeFrame.height < 460.0
+          sheet.animateChanges {
+            sheet.detents = [.medium(), .large()]
+            sheet.selectedDetentIdentifier = compactHeight ? .large : .medium
+          }
+        }
+      }
+      self.view.setNeedsLayout()
+      self.view.layoutIfNeeded()
+    }, completion: { [weak self] _ in
+      guard let self = self else { return }
+      if self.pendingSheetFallbackAfterTransition {
+        self.pendingSheetFallbackAfterTransition = false
+        self.transitionPopoverToSheetFallbackIfNeeded()
+      } else if self.pendingPopoverRestoreAfterTransition {
+        self.pendingPopoverRestoreAfterTransition = false
+        self.transitionSheetBackToPopoverIfNeeded()
+      }
+    })
+  }
+
+  private func transitionPopoverToSheetFallbackIfNeeded() {
+    guard isPopoverPresentation,
+          !resolved,
+          !dismissing,
+          !transitioningToSheetFallback,
+          let nav = navigationController,
+          let host = presentingViewController ?? hostPresenter else {
+      return
+    }
+    let metrics = resolvedHostMetrics(hostView: host.view)
+    let remappedAnchor = remappedAnchorRect(for: metrics.bounds)
+    let finalPlan = Self.computePopoverLayout(
+      anchorRect: remappedAnchor,
+      hostBounds: metrics.bounds,
+      hostSafeFrame: metrics.safeFrame,
+      sections: sections,
+      sheetTitle: sheetTitle
+    )
+    guard finalPlan.useSheetFallback else {
+      let boundedW = max(180.0, min(finalPlan.preferredContentSize.width, max(180.0, finalPlan.effectiveSafeFrame.width - 16.0)))
+      let boundedH = max(160.0, min(finalPlan.preferredContentSize.height, max(160.0, finalPlan.effectiveSafeFrame.height - 16.0)))
+      nav.preferredContentSize = CGSize(width: boundedW, height: boundedH)
+      if let popover = nav.popoverPresentationController {
+        popover.sourceView = host.view
+        popover.sourceRect = finalPlan.sourceRect
+        popover.permittedArrowDirections = finalPlan.permittedArrowDirections
+        popover.canOverlapSourceViewRect = false
+      }
+      return
+    }
+
+    transitioningToSheetFallback = true
+    dismissing = true
+    resolved = true
+    let pendingCompletion = completion
+    completion = nil
+    let oldNavId = navIdentity
+    navIdentity = nil
+    let argsCopy = originalArgs
+    let sectionsCopy = sections
+    let anchorCopy = rawAnchorRect
+    let initialBoundsCopy = initialAnchorHostBounds
+    let restoreCopy = allowPopoverRestore
+
+    nav.dismiss(animated: false) {
+      if let oldId = oldNavId {
+        MarcoNativeSheetCoordinator.didFinish(identity: oldId)
+      }
+      guard let cb = pendingCompletion else { return }
+      let presentHost = (host.view.window != nil ? host : MarcoLiquidGlassSupport.topPresenter()) ?? host
+      let nextVc = MarcoNativeOptionSheetController(
+        args: argsCopy,
+        parsedSections: sectionsCopy,
+        isPopover: false,
+        rawAnchorRect: anchorCopy,
+        hostPresenter: presentHost,
+        initialHostBounds: initialBoundsCopy,
+        allowPopoverRestore: restoreCopy,
+        completion: cb
+      )
+      let nextNav = UINavigationController(rootViewController: nextVc)
+      let nextId = ObjectIdentifier(nextNav)
+      nextVc.navIdentity = nextId
+      let style: UIUserInterfaceStyle = nextVc.forceDarkSurface ? .dark : MarcoLiquidGlassSupport.interfaceStyle
+      nextNav.overrideUserInterfaceStyle = style
+      Self.configureSheetPresentation(
+        nextNav,
+        delegate: nextVc,
+        safeHeight: presentHost.view.safeAreaLayoutGuide.layoutFrame.height
+      )
+      guard MarcoNativeSheetCoordinator.tryBeginPresentation(
+        host: presentHost,
+        controller: nextNav,
+        onCancel: { [weak nextVc] in nextVc?.finish(selectedId: nil) }
+      ) else {
+        nextVc.finish(selectedId: nil)
+        return
+      }
+      MarcoNativeSheetCoordinator.presentRespectingDismissTransition(
+        host: presentHost,
+        controller: nextNav,
+        identity: nextId,
+        onRejected: { [weak nextVc] in nextVc?.finish(selectedId: nil) }
+      )
+    }
+  }
+
+  private func transitionSheetBackToPopoverIfNeeded() {
+    guard !isPopoverPresentation,
+          allowPopoverRestore,
+          !resolved,
+          !dismissing,
+          !transitioningToSheetFallback,
+          let nav = navigationController,
+          let host = presentingViewController ?? hostPresenter else {
+      return
+    }
+    let metrics = resolvedHostMetrics(hostView: host.view)
+    let remappedAnchor = remappedAnchorRect(for: metrics.bounds)
+    let finalPlan = Self.computePopoverLayout(
+      anchorRect: remappedAnchor,
+      hostBounds: metrics.bounds,
+      hostSafeFrame: metrics.safeFrame,
+      sections: sections,
+      sheetTitle: sheetTitle
+    )
+    guard !finalPlan.useSheetFallback else {
+      return
+    }
+
+    transitioningToSheetFallback = true
+    dismissing = true
+    resolved = true
+    let pendingCompletion = completion
+    completion = nil
+    let oldNavId = navIdentity
+    navIdentity = nil
+    let argsCopy = originalArgs
+    let sectionsCopy = sections
+    let anchorCopy = rawAnchorRect
+    let initialBoundsCopy = initialAnchorHostBounds
+
+    nav.dismiss(animated: false) {
+      if let oldId = oldNavId {
+        MarcoNativeSheetCoordinator.didFinish(identity: oldId)
+      }
+      guard let cb = pendingCompletion else { return }
+      let presentHost = (host.view.window != nil ? host : MarcoLiquidGlassSupport.topPresenter()) ?? host
+      let nextVc = MarcoNativeOptionSheetController(
+        args: argsCopy,
+        parsedSections: sectionsCopy,
+        isPopover: true,
+        rawAnchorRect: anchorCopy,
+        hostPresenter: presentHost,
+        initialHostBounds: initialBoundsCopy,
+        allowPopoverRestore: true,
+        completion: cb
+      )
+      let nextNav = UINavigationController(rootViewController: nextVc)
+      let nextId = ObjectIdentifier(nextNav)
+      nextVc.navIdentity = nextId
+      let style: UIUserInterfaceStyle = nextVc.forceDarkSurface ? .dark : MarcoLiquidGlassSupport.interfaceStyle
+      nextNav.overrideUserInterfaceStyle = style
+      let settledMetrics = nextVc.resolvedHostMetrics(hostView: presentHost.view)
+      let settledAnchor = nextVc.remappedAnchorRect(for: settledMetrics.bounds)
+      let settledPlan = Self.computePopoverLayout(
+        anchorRect: settledAnchor,
+        hostBounds: settledMetrics.bounds,
+        hostSafeFrame: settledMetrics.safeFrame,
+        sections: sectionsCopy,
+        sheetTitle: nextVc.sheetTitle
+      )
+      nextNav.modalPresentationStyle = .popover
+      nextNav.setNavigationBarHidden(true, animated: false)
+      let boundedW = max(180.0, min(settledPlan.preferredContentSize.width, max(180.0, settledPlan.effectiveSafeFrame.width - 16.0)))
+      let boundedH = max(160.0, min(settledPlan.preferredContentSize.height, max(160.0, settledPlan.effectiveSafeFrame.height - 16.0)))
+      nextNav.preferredContentSize = CGSize(width: boundedW, height: boundedH)
+      if let popover = nextNav.popoverPresentationController {
+        popover.delegate = nextVc
+        popover.sourceView = presentHost.view
+        popover.sourceRect = settledPlan.sourceRect
+        popover.permittedArrowDirections = settledPlan.permittedArrowDirections
+        popover.canOverlapSourceViewRect = false
+      }
+      guard MarcoNativeSheetCoordinator.tryBeginPresentation(
+        host: presentHost,
+        controller: nextNav,
+        onCancel: { [weak nextVc] in nextVc?.finish(selectedId: nil) }
+      ) else {
+        nextVc.finish(selectedId: nil)
+        return
+      }
+      MarcoNativeSheetCoordinator.presentRespectingDismissTransition(
+        host: presentHost,
+        controller: nextNav,
+        identity: nextId,
+        onRejected: { [weak nextVc] in nextVc?.finish(selectedId: nil) }
+      )
+    }
+  }
+
+  func adaptivePresentationStyle(
+    for controller: UIPresentationController,
+    traitCollection: UITraitCollection
+  ) -> UIModalPresentationStyle {
+    return isPopoverPresentation ? .none : .automatic
+  }
+
+  static func present(args: [String: Any], completion: @escaping FlutterResult) {
+    guard let host = MarcoLiquidGlassSupport.topPresenter() else {
+      completion(nil)
+      return
+    }
+    let sheetTitle = (args["title"] as? String) ?? ""
+    let sections = parseSections(from: args)
+    let rawAnchorRect = parseAnchorRect(from: args)
+    let layoutPlan = computePopoverLayout(
+      anchorRect: rawAnchorRect,
+      hostBounds: host.view.bounds,
+      hostSafeFrame: host.view.safeAreaLayoutGuide.layoutFrame,
+      sections: sections,
+      sheetTitle: sheetTitle
+    )
+    let useSheetFallback = layoutPlan.useSheetFallback
+    let vc = MarcoNativeOptionSheetController(
+      args: args,
+      parsedSections: sections,
+      isPopover: !useSheetFallback,
+      rawAnchorRect: rawAnchorRect,
+      hostPresenter: host,
+      initialHostBounds: host.view.bounds,
+      allowPopoverRestore: rawAnchorRect != nil,
+      completion: completion
+    )
+    let nav = UINavigationController(rootViewController: vc)
+    let navId = ObjectIdentifier(nav)
+    vc.navIdentity = navId
+    let style: UIUserInterfaceStyle = vc.forceDarkSurface ? .dark : MarcoLiquidGlassSupport.interfaceStyle
+    nav.overrideUserInterfaceStyle = style
+
+    if !useSheetFallback {
+      nav.modalPresentationStyle = .popover
+      nav.setNavigationBarHidden(true, animated: false)
+      nav.preferredContentSize = layoutPlan.preferredContentSize
+      if let popover = nav.popoverPresentationController {
+        popover.delegate = vc
+        popover.sourceView = host.view
+        popover.sourceRect = layoutPlan.sourceRect
+        popover.permittedArrowDirections = layoutPlan.permittedArrowDirections
+        popover.canOverlapSourceViewRect = false
+      }
+    } else {
+      configureSheetPresentation(
+        nav,
+        delegate: vc,
+        safeHeight: layoutPlan.effectiveSafeFrame.height
+      )
+    }
+    guard MarcoNativeSheetCoordinator.tryBeginPresentation(
+      host: host,
+      controller: nav,
+      onCancel: { [weak vc] in vc?.finish(selectedId: nil) }
+    ) else {
+      vc.finish(selectedId: nil)
+      return
+    }
+    MarcoNativeSheetCoordinator.presentRespectingDismissTransition(
+      host: host,
+      controller: nav,
+      identity: navId,
+      onRejected: { [weak vc] in vc?.finish(selectedId: nil) }
+    )
+  }
+
+  private init(
+    args: [String: Any],
+    parsedSections: [OptionSection]? = nil,
+    isPopover: Bool = false,
+    rawAnchorRect: CGRect? = nil,
+    hostPresenter: UIViewController? = nil,
+    initialHostBounds: CGRect = .zero,
+    allowPopoverRestore: Bool = false,
+    completion: @escaping FlutterResult
+  ) {
+    self.originalArgs = args
+    self.sheetTitle = (args["title"] as? String) ?? ""
+    let rawSubtitle = (args["subtitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    self.sheetSubtitle = (rawSubtitle?.isEmpty ?? true) ? nil : rawSubtitle
+    self.cancelTitle = (args["cancelTitle"] as? String) ?? "关闭"
+    self.forceOpaque = (args["forceOpaque"] as? Bool) ?? false
+    self.isPopoverPresentation = isPopover
+    self.forceDarkSurface = (args["forceDark"] as? Bool) ?? isPopover
+    self.rawAnchorRect = rawAnchorRect
+    self.initialAnchorHostBounds = initialHostBounds
+    self.allowPopoverRestore = allowPopoverRestore
+    self.hostPresenter = hostPresenter
+    self.lastHostBounds = initialHostBounds
+    self.tableView = UITableView(frame: .zero, style: isPopover ? .plain : .insetGrouped)
+    self.sections = parsedSections ?? Self.parseSections(from: args)
     self.completion = completion
     super.init(nibName: nil, bundle: nil)
   }
@@ -1322,10 +1955,20 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     tableView.overrideUserInterfaceStyle = overrideUserInterfaceStyle
     tableView.backgroundColor = .clear
     tableView.separatorColor = dark
-      ? UIColor.white.withAlphaComponent(0.12)
-      : UIColor.black.withAlphaComponent(0.10)
+      ? UIColor.white.withAlphaComponent(isPopoverPresentation ? 0.10 : 0.12)
+      : UIColor.black.withAlphaComponent(isPopoverPresentation ? 0.08 : 0.10)
+    if isPopoverPresentation {
+      tableView.separatorInset = UIEdgeInsets(top: 0, left: 36, bottom: 0, right: 12)
+      tableView.rowHeight = UITableView.automaticDimension
+      tableView.estimatedRowHeight = 36.0
+      tableView.contentInset = UIEdgeInsets(top: 2, left: 0, bottom: 6, right: 0)
+      tableView.tableFooterView = UIView(frame: CGRect(x: 0, y: 0, width: 1, height: 0.5))
+      if #available(iOS 15.0, *) {
+        tableView.sectionHeaderTopPadding = 4.0
+      }
+    }
     #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
+    if #available(iOS 26.0, *), !isPopoverPresentation {
       tableView.cornerConfiguration = .corners(radius: .containerConcentric(minimum: 20.0))
     }
     #endif
@@ -1341,12 +1984,59 @@ private final class MarcoNativeOptionSheetController: UIViewController,
       object: nil
     )
 
-    NSLayoutConstraint.activate([
-      tableView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-      tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-      tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-      tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-    ])
+    if isPopoverPresentation && !sheetTitle.isEmpty {
+      let header = UIView()
+      header.translatesAutoresizingMaskIntoConstraints = false
+      header.backgroundColor = .clear
+
+      let titleLbl = UILabel()
+      titleLbl.translatesAutoresizingMaskIntoConstraints = false
+      titleLbl.text = sheetTitle
+      titleLbl.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
+      titleLbl.textAlignment = .center
+      titleLbl.textColor = dark ? UIColor.white.withAlphaComponent(0.92) : UIColor.label
+      header.addSubview(titleLbl)
+
+      let divider = UIView()
+      divider.translatesAutoresizingMaskIntoConstraints = false
+      divider.backgroundColor = dark
+        ? UIColor.white.withAlphaComponent(0.12)
+        : UIColor.black.withAlphaComponent(0.08)
+      header.addSubview(divider)
+
+      view.addSubview(header)
+      compactHeaderView = header
+      compactHeaderLabel = titleLbl
+      compactHeaderDivider = divider
+
+      NSLayoutConstraint.activate([
+        header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+        header.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+        header.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+        header.heightAnchor.constraint(equalToConstant: 32.0),
+
+        titleLbl.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 12.0),
+        titleLbl.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -12.0),
+        titleLbl.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+
+        divider.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+        divider.trailingAnchor.constraint(equalTo: header.trailingAnchor),
+        divider.bottomAnchor.constraint(equalTo: header.bottomAnchor),
+        divider.heightAnchor.constraint(equalToConstant: 0.5),
+
+        tableView.topAnchor.constraint(equalTo: header.bottomAnchor),
+        tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+        tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      ])
+    } else {
+      NSLayoutConstraint.activate([
+        tableView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+        tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+        tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      ])
+    }
   }
 
   @objc private func handleSceneActivationChanged() {
@@ -1365,8 +2055,37 @@ private final class MarcoNativeOptionSheetController: UIViewController,
   }
 
   func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+    if isPopoverPresentation { return nil }
     let title = sections[section].title
     return title.isEmpty ? nil : title
+  }
+
+  func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
+    if !isPopoverPresentation { return UITableView.automaticDimension }
+    return sections[section].title.isEmpty ? 0.0 : 21.0
+  }
+
+  func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+    guard isPopoverPresentation else { return nil }
+    let title = sections[section].title
+    guard !title.isEmpty else { return nil }
+    let dark = useDarkColors
+    let container = UIView()
+    container.backgroundColor = .clear
+    let label = UILabel()
+    label.translatesAutoresizingMaskIntoConstraints = false
+    label.text = title
+    label.font = UIFont.systemFont(ofSize: 10.5, weight: .semibold)
+    label.textColor = dark
+      ? UIColor.white.withAlphaComponent(0.50)
+      : UIColor.secondaryLabel
+    container.addSubview(label)
+    NSLayoutConstraint.activate([
+      label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12.0),
+      label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12.0),
+      label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -2.0),
+    ])
+    return container
   }
 
   func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -1375,22 +2094,42 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     let dark = useDarkColors
     var cfg = cell.defaultContentConfiguration()
     cfg.text = item.title
+    cfg.textProperties.numberOfLines = isPopoverPresentation ? 1 : 2
+    cfg.textProperties.lineBreakMode = .byTruncatingTail
     cfg.textProperties.color = item.destructive
       ? UIColor.systemRed
       : (dark ? UIColor.white : UIColor.label)
     cfg.textProperties.font = UIFont.systemFont(
-      ofSize: isPopoverPresentation ? 14.5 : 15.0,
-      weight: item.checked ? .semibold : .regular
+      ofSize: isPopoverPresentation ? 13.0 : 15.0,
+      weight: item.checked ? .semibold : .medium
     )
     if let sub = item.subtitle {
       cfg.secondaryText = sub
+      cfg.secondaryTextProperties.numberOfLines = 1
+      cfg.secondaryTextProperties.lineBreakMode = .byTruncatingTail
       cfg.secondaryTextProperties.color = dark
-        ? UIColor.white.withAlphaComponent(0.66)
+        ? UIColor.white.withAlphaComponent(0.60)
         : UIColor.secondaryLabel
-      cfg.secondaryTextProperties.font = UIFont.systemFont(ofSize: 12.0, weight: .regular)
+      cfg.secondaryTextProperties.font = UIFont.systemFont(
+        ofSize: isPopoverPresentation ? 10.5 : 12.0,
+        weight: .regular
+      )
+    }
+    if isPopoverPresentation {
+      cfg.directionalLayoutMargins = NSDirectionalEdgeInsets(
+        top: 5.5,
+        leading: 12.0,
+        bottom: 5.5,
+        trailing: 10.0
+      )
+      cfg.imageToTextPadding = 9.0
+      cfg.textToSecondaryTextVerticalPadding = 1.5
     }
     if let symbol = item.symbol {
-      let symCfg = UIImage.SymbolConfiguration(pointSize: 15.5, weight: .medium)
+      let symCfg = UIImage.SymbolConfiguration(
+        pointSize: isPopoverPresentation ? 13.5 : 15.5,
+        weight: .medium
+      )
       cfg.image = UIImage(systemName: symbol, withConfiguration: symCfg)
       cfg.imageProperties.tintColor = item.destructive
         ? UIColor.systemRed
@@ -1401,10 +2140,14 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     cell.contentConfiguration = cfg
     cell.accessoryType = item.checked ? .checkmark : .none
     cell.tintColor = UIColor.systemBlue
-    let alpha: CGFloat = isOpaqueMode ? 0.96 : (isPopoverPresentation ? 0.42 : 0.72)
-    cell.backgroundColor = dark
-      ? UIColor(white: 0.16, alpha: alpha)
-      : UIColor(white: 1.0, alpha: isOpaqueMode ? 0.98 : 0.78)
+    if isPopoverPresentation {
+      cell.backgroundColor = .clear
+    } else {
+      let alpha: CGFloat = isOpaqueMode ? 0.96 : 0.72
+      cell.backgroundColor = dark
+        ? UIColor(white: 0.16, alpha: alpha)
+        : UIColor(white: 1.0, alpha: isOpaqueMode ? 0.98 : 0.78)
+    }
     return cell
   }
 
@@ -1453,53 +2196,151 @@ private final class MarcoNativeOptionSheetController: UIViewController,
 
 // MARK: - Native iOS 26 Liquid Glass Filter Sheet (UISheetPresentationController)
 
-private final class MarcoWrapChipContainerView: UIView {
-  var horizontalSpacing: CGFloat = 8.0
-  var verticalSpacing: CGFloat = 8.0
-  private var chipButtons: [UIButton] = []
-  private var lastMeasuredWidth: CGFloat = 0.0
-  private var calculatedHeight: CGFloat = 0.0
+private final class MarcoFilterOptionCellButton: UIControl {
+  private let titleLbl = UILabel()
+  private let checkIconView = UIImageView()
+  private var checkWidthConstraint: NSLayoutConstraint?
+  private var isDarkMode: Bool = true
+  private var isOptionSelected: Bool = false
 
-  func setButtons(_ buttons: [UIButton]) {
-    for old in chipButtons {
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    layer.cornerRadius = 12.0
+    layer.cornerCurve = .continuous
+    layer.borderWidth = 0.6
+    isAccessibilityElement = true
+
+    titleLbl.translatesAutoresizingMaskIntoConstraints = false
+    titleLbl.textAlignment = .left
+    titleLbl.numberOfLines = 3
+    titleLbl.lineBreakMode = .byWordWrapping
+    titleLbl.adjustsFontForContentSizeCategory = true
+    addSubview(titleLbl)
+
+    checkIconView.translatesAutoresizingMaskIntoConstraints = false
+    let cfg = UIImage.SymbolConfiguration(pointSize: 13.0, weight: .bold)
+    checkIconView.image = UIImage(systemName: "checkmark", withConfiguration: cfg)
+    checkIconView.tintColor = .white
+    checkIconView.contentMode = .scaleAspectFit
+    checkIconView.isHidden = true
+    addSubview(checkIconView)
+
+    let cw = checkIconView.widthAnchor.constraint(equalToConstant: 0.0)
+    checkWidthConstraint = cw
+
+    NSLayoutConstraint.activate([
+      titleLbl.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12.0),
+      titleLbl.topAnchor.constraint(equalTo: topAnchor, constant: 10.0),
+      titleLbl.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10.0),
+      titleLbl.trailingAnchor.constraint(equalTo: checkIconView.leadingAnchor, constant: -6.0),
+
+      checkIconView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10.0),
+      checkIconView.centerYAnchor.constraint(equalTo: centerYAnchor),
+      checkIconView.heightAnchor.constraint(equalToConstant: 14.0),
+      cw,
+    ])
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
+  override var isHighlighted: Bool {
+    didSet {
+      UIView.animate(withDuration: 0.12) {
+        self.alpha = self.isHighlighted ? 0.76 : 1.0
+      }
+    }
+  }
+
+  func configure(title: String, selected: Bool, dark: Bool) {
+    isOptionSelected = selected
+    isDarkMode = dark
+    titleLbl.text = title
+    let baseFont = UIFont.systemFont(ofSize: 13.5, weight: selected ? .bold : .medium)
+    titleLbl.font = UIFontMetrics(forTextStyle: .subheadline).scaledFont(for: baseFont)
+    titleLbl.textColor = selected
+      ? .white
+      : (dark ? UIColor.white.withAlphaComponent(0.92) : UIColor.label)
+    backgroundColor = selected
+      ? UIColor.systemBlue
+      : (dark ? UIColor.white.withAlphaComponent(0.08) : UIColor.white)
+    layer.borderColor = selected
+      ? UIColor.systemBlue.cgColor
+      : (dark ? UIColor.white.withAlphaComponent(0.10).cgColor : UIColor.black.withAlphaComponent(0.08).cgColor)
+    layer.borderWidth = selected ? 1.0 : 0.6
+    checkIconView.isHidden = !selected
+    checkWidthConstraint?.constant = selected ? 15.0 : 0.0
+    accessibilityLabel = title
+    accessibilityTraits = selected ? [.button, .selected] : [.button]
+  }
+
+  func preferredHeight(forWidth width: CGFloat) -> CGFloat {
+    let textW = max(24.0, width - 12.0 - 10.0 - 6.0 - 15.0)
+    let measured = titleLbl.sizeThatFits(CGSize(width: textW, height: .greatestFiniteMagnitude))
+    return max(44.0, ceil(measured.height) + 20.0)
+  }
+}
+
+private final class MarcoFilterGridContainerView: UIView {
+  var horizontalSpacing: CGFloat = 10.0
+  var verticalSpacing: CGFloat = 10.0
+  private var cells: [MarcoFilterOptionCellButton] = []
+  private var lastMeasuredWidth: CGFloat = 0.0
+  private var calculatedHeight: CGFloat = 44.0
+
+  func setCells(_ newCells: [MarcoFilterOptionCellButton]) {
+    for old in cells {
       old.removeFromSuperview()
     }
-    chipButtons = buttons
-    for btn in buttons {
-      addSubview(btn)
+    cells = newCells
+    for c in newCells {
+      addSubview(c)
     }
     lastMeasuredWidth = 0.0
     setNeedsLayout()
     invalidateIntrinsicContentSize()
   }
 
+  private func columnCount(forWidth maxW: CGFloat) -> Int {
+    let scaled14 = UIFontMetrics(forTextStyle: .subheadline).scaledValue(for: 14.0)
+    let textScale = max(1.0, scaled14 / 14.0)
+    let effectiveWidth = maxW / textScale
+    if maxW < 250.0 || effectiveWidth < 205.0 { return 1 }
+    if maxW < 340.0 || effectiveWidth < 275.0 { return 2 }
+    if effectiveWidth < 460.0 { return 3 }
+    return 4
+  }
+
   override var intrinsicContentSize: CGSize {
-    return CGSize(width: UIView.noIntrinsicMetric, height: max(calculatedHeight, 34.0))
+    return CGSize(width: UIView.noIntrinsicMetric, height: max(calculatedHeight, 44.0))
   }
 
   override func layoutSubviews() {
     super.layoutSubviews()
     let maxW = bounds.width
     guard maxW > 0 else { return }
-    var x: CGFloat = 0.0
+    let cols = columnCount(forWidth: maxW)
+    let cellW = floor((maxW - horizontalSpacing * CGFloat(cols - 1)) / CGFloat(cols))
     var y: CGFloat = 0.0
-    var rowH: CGFloat = 0.0
-
-    for btn in chipButtons {
-      let fit = btn.sizeThatFits(CGSize(width: maxW, height: 36.0))
-      let w = min(max(fit.width, 52.0), maxW)
-      let h = max(fit.height, 34.0)
-      if x > 0 && x + w > maxW {
-        x = 0.0
-        y += rowH + verticalSpacing
-        rowH = 0.0
+    var rowIndex = 0
+    while rowIndex < cells.count {
+      let endIndex = min(rowIndex + cols, cells.count)
+      var rowH: CGFloat = 44.0
+      for i in rowIndex..<endIndex {
+        rowH = max(rowH, cells[i].preferredHeight(forWidth: cellW))
       }
-      btn.frame = CGRect(x: x, y: y, width: w, height: h)
-      x += w + horizontalSpacing
-      rowH = max(rowH, h)
+      for i in rowIndex..<endIndex {
+        let col = i - rowIndex
+        let x = CGFloat(col) * (cellW + horizontalSpacing)
+        cells[i].frame = CGRect(x: x, y: y, width: cellW, height: rowH)
+      }
+      y += rowH + verticalSpacing
+      rowIndex = endIndex
     }
 
-    let totalH = chipButtons.isEmpty ? 0.0 : (y + rowH)
+    let totalH = cells.isEmpty ? 0.0 : max(0.0, y - verticalSpacing)
     if abs(totalH - calculatedHeight) > 0.5 || abs(maxW - lastMeasuredWidth) > 0.5 {
       calculatedHeight = totalH
       lastMeasuredWidth = maxW
@@ -1520,17 +2361,23 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
   private let areas: [String]
   private let years: [String]
 
+  private var activeDimension: Int = 0
   private var selectedCategoryId: String
   private var selectedGenreLabel: String
   private var selectedArea: String
   private var selectedYear: String
 
-  private var categoryButtons: [UIButton] = []
-  private var areaButtons: [UIButton] = []
-  private var yearButtons: [UIButton] = []
-
+  private let dimensionControl = UISegmentedControl(items: ["类别", "地区", "年份"])
+  private let summaryContainer = UIView()
+  private let summaryPrefixLabel = UILabel()
+  private let summaryValueLabel = UILabel()
+  private let topDivider = UIView()
   private let scrollView = UIScrollView()
-  private let stackView = UIStackView()
+  private let gridView = MarcoFilterGridContainerView()
+  private let bottomDivider = UIView()
+  private let bottomBar = UIView()
+  private let resetButton = UIButton(type: .system)
+  private let applyButton = UIButton(type: .system)
 
   private var completion: FlutterResult?
   private var resolved = false
@@ -1548,7 +2395,7 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
     nav.modalPresentationStyle = .pageSheet
     nav.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     nav.presentationController?.delegate = vc
-    if let sheet = nav.sheetPresentationController {
+    if #available(iOS 15.0, *), let sheet = nav.sheetPresentationController {
       sheet.detents = [.medium(), .large()]
       sheet.prefersGrabberVisible = true
       sheet.preferredCornerRadius = 32.0
@@ -1572,18 +2419,81 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
     )
   }
 
-  init(args: [String: Any], completion: @escaping FlutterResult) {
-    self.sheetTitle = (args["title"] as? String) ?? "多维片库筛选"
-    let rawCats = (args["categories"] as? [[String: Any]]) ?? []
-    self.categories = rawCats.map {
-      CategoryChoice(
-        id: ($0["id"] as? String) ?? "",
-        label: ($0["label"] as? String) ?? "",
-        kind: ($0["kind"] as? String) ?? "all"
-      )
+  private static func cleanOptionLabel(_ raw: String) -> String {
+    let filteredScalars = raw.unicodeScalars.filter { scalar in
+      let v = scalar.value
+      if v <= 0x1F || v == 0x7F || v == 0xAD || v == 0x2060 || v == 0xFEFF {
+        return false
+      }
+      if (v >= 0x200B && v <= 0x200F) || (v >= 0x202A && v <= 0x202E) {
+        return false
+      }
+      return true
     }
-    self.areas = (args["areas"] as? [String]) ?? []
-    self.years = (args["years"] as? [String]) ?? []
+    let normalized = String(String.UnicodeScalarView(filteredScalars))
+      .replacingOccurrences(of: "\u{3000}", with: " ")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalized.isEmpty else { return "" }
+    let hasMeaningfulChar = normalized.unicodeScalars.contains { scalar in
+      CharacterSet.alphanumerics.contains(scalar)
+        || (scalar.value >= 0x4E00 && scalar.value <= 0x9FFF)
+        || (scalar.value >= 0x3400 && scalar.value <= 0x4DBF)
+        || (scalar.value >= 0x3040 && scalar.value <= 0x30FF)
+        || (scalar.value >= 0xAC00 && scalar.value <= 0xD7AF)
+    }
+    return hasMeaningfulChar ? normalized : ""
+  }
+
+  init(args: [String: Any], completion: @escaping FlutterResult) {
+    let rawTitle = (args["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    self.sheetTitle = rawTitle.isEmpty ? "片库筛选" : rawTitle
+    let rawCats = (args["categories"] as? [[String: Any]]) ?? []
+    var sanitizedCats: [CategoryChoice] = []
+    var seenAll = false
+    var seenCatIds = Set<String>()
+    var seenGenreLabels = Set<String>()
+    for raw in rawCats {
+      let kind = ((raw["kind"] as? String) ?? "all").trimmingCharacters(in: .whitespacesAndNewlines)
+      let id = ((raw["id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      let label = Self.cleanOptionLabel((raw["label"] as? String) ?? "")
+      guard !label.isEmpty else { continue }
+      switch kind {
+      case "all":
+        guard !seenAll else { continue }
+        seenAll = true
+        sanitizedCats.append(CategoryChoice(id: "", label: label, kind: "all"))
+      case "cat":
+        guard !id.isEmpty, label != "全部", seenCatIds.insert(id).inserted else { continue }
+        sanitizedCats.append(CategoryChoice(id: id, label: label, kind: "cat"))
+      default:
+        guard label != "全部", seenGenreLabels.insert(label).inserted else { continue }
+        sanitizedCats.append(CategoryChoice(id: id.isEmpty ? label : id, label: label, kind: "genre"))
+      }
+    }
+    if sanitizedCats.isEmpty {
+      sanitizedCats.append(CategoryChoice(id: "", label: "全部", kind: "all"))
+    }
+    self.categories = sanitizedCats
+
+    var sanitizedAreas: [String] = []
+    var seenAreas = Set<String>()
+    for rawArea in (args["areas"] as? [String]) ?? [] {
+      let cleaned = Self.cleanOptionLabel(rawArea)
+      if !cleaned.isEmpty && seenAreas.insert(cleaned).inserted {
+        sanitizedAreas.append(cleaned)
+      }
+    }
+    self.areas = sanitizedAreas
+
+    var sanitizedYears: [String] = []
+    var seenYears = Set<String>()
+    for rawYear in (args["years"] as? [String]) ?? [] {
+      let cleaned = Self.cleanOptionLabel(rawYear)
+      if !cleaned.isEmpty && seenYears.insert(cleaned).inserted {
+        sanitizedYears.append(cleaned)
+      }
+    }
+    self.years = sanitizedYears
     self.selectedCategoryId = (args["selectedCategoryId"] as? String) ?? ""
     self.selectedGenreLabel = (args["selectedGenreLabel"] as? String) ?? ""
     self.selectedArea = (args["selectedArea"] as? String) ?? ""
@@ -1618,43 +2528,90 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
   override func viewDidLoad() {
     super.viewDidLoad()
     overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    let dark = MarcoLiquidGlassSupport.isEffectiveDark
     #if compiler(>=6.2)
     if #available(iOS 26.0, *) {
       view.backgroundColor = .clear
     } else {
-      view.backgroundColor = MarcoLiquidGlassSupport.isEffectiveDark
+      view.backgroundColor = dark
         ? UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
         : UIColor.systemGroupedBackground
     }
     #else
-    view.backgroundColor = MarcoLiquidGlassSupport.isEffectiveDark
+    view.backgroundColor = dark
       ? UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
       : UIColor.systemGroupedBackground
     #endif
 
+    // Top row: ONLY title ("片库筛选") + Close button ("×").
     navigationItem.title = sheetTitle
-    navigationItem.leftBarButtonItem = UIBarButtonItem(
-      title: "重置",
-      style: .plain,
+    navigationItem.leftBarButtonItem = nil
+    let closeBtn = UIBarButtonItem(
+      barButtonSystemItem: .close,
       target: self,
-      action: #selector(resetTapped)
+      action: #selector(closeTapped)
     )
-    navigationItem.rightBarButtonItem = UIBarButtonItem(
-      title: "完成",
-      style: .done,
-      target: self,
-      action: #selector(doneTapped)
-    )
+    closeBtn.accessibilityLabel = "关闭"
+    navigationItem.rightBarButtonItem = closeBtn
+
+    dimensionControl.translatesAutoresizingMaskIntoConstraints = false
+    dimensionControl.selectedSegmentIndex = activeDimension
+    dimensionControl.addTarget(self, action: #selector(dimensionChanged(_:)), for: .valueChanged)
+    view.addSubview(dimensionControl)
+
+    summaryContainer.translatesAutoresizingMaskIntoConstraints = false
+    summaryContainer.layer.cornerRadius = 10.0
+    summaryContainer.layer.cornerCurve = .continuous
+    view.addSubview(summaryContainer)
+
+    summaryPrefixLabel.translatesAutoresizingMaskIntoConstraints = false
+    summaryPrefixLabel.text = "已选："
+    summaryPrefixLabel.font = UIFont.systemFont(ofSize: 12.5, weight: .semibold)
+    summaryPrefixLabel.textColor = dark ? UIColor.white.withAlphaComponent(0.62) : UIColor.secondaryLabel
+    summaryPrefixLabel.setContentHuggingPriority(.required, for: .horizontal)
+    summaryPrefixLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+    summaryContainer.addSubview(summaryPrefixLabel)
+
+    summaryValueLabel.translatesAutoresizingMaskIntoConstraints = false
+    summaryValueLabel.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
+    summaryValueLabel.numberOfLines = 2
+    summaryValueLabel.lineBreakMode = .byTruncatingTail
+    summaryContainer.addSubview(summaryValueLabel)
+
+    let hairlineColor = dark
+      ? UIColor.white.withAlphaComponent(0.10)
+      : UIColor.black.withAlphaComponent(0.08)
+    topDivider.translatesAutoresizingMaskIntoConstraints = false
+    topDivider.backgroundColor = hairlineColor
+    view.addSubview(topDivider)
 
     scrollView.translatesAutoresizingMaskIntoConstraints = false
     scrollView.alwaysBounceVertical = true
     scrollView.showsVerticalScrollIndicator = false
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      scrollView.cornerConfiguration = .corners(radius: .containerConcentric(minimum: 20.0))
-    }
-    #endif
     view.addSubview(scrollView)
+
+    gridView.translatesAutoresizingMaskIntoConstraints = false
+    scrollView.addSubview(gridView)
+
+    bottomDivider.translatesAutoresizingMaskIntoConstraints = false
+    bottomDivider.backgroundColor = hairlineColor
+    view.addSubview(bottomDivider)
+
+    bottomBar.translatesAutoresizingMaskIntoConstraints = false
+    bottomBar.backgroundColor = .clear
+    view.addSubview(bottomBar)
+
+    resetButton.translatesAutoresizingMaskIntoConstraints = false
+    resetButton.accessibilityLabel = "重置"
+    resetButton.addTarget(self, action: #selector(resetTapped), for: .touchUpInside)
+    bottomBar.addSubview(resetButton)
+
+    applyButton.translatesAutoresizingMaskIntoConstraints = false
+    applyButton.accessibilityLabel = "应用"
+    applyButton.addTarget(self, action: #selector(applyTapped), for: .touchUpInside)
+    bottomBar.addSubview(applyButton)
+
+    styleBottomButtons()
 
     NotificationCenter.default.addObserver(
       self,
@@ -1663,137 +2620,212 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
       object: nil
     )
 
-    stackView.axis = .vertical
-    stackView.spacing = 18.0
-    stackView.alignment = .fill
-    stackView.translatesAutoresizingMaskIntoConstraints = false
-    scrollView.addSubview(stackView)
-
     NSLayoutConstraint.activate([
-      scrollView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-      scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+      dimensionControl.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8.0),
+      dimensionControl.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16.0),
+      dimensionControl.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16.0),
+      dimensionControl.heightAnchor.constraint(greaterThanOrEqualToConstant: 36.0),
+
+      summaryContainer.topAnchor.constraint(equalTo: dimensionControl.bottomAnchor, constant: 10.0),
+      summaryContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16.0),
+      summaryContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16.0),
+
+      summaryPrefixLabel.leadingAnchor.constraint(equalTo: summaryContainer.leadingAnchor, constant: 12.0),
+      summaryPrefixLabel.topAnchor.constraint(equalTo: summaryContainer.topAnchor, constant: 8.0),
+      summaryPrefixLabel.bottomAnchor.constraint(equalTo: summaryContainer.bottomAnchor, constant: -8.0),
+
+      summaryValueLabel.leadingAnchor.constraint(equalTo: summaryPrefixLabel.trailingAnchor, constant: 2.0),
+      summaryValueLabel.trailingAnchor.constraint(equalTo: summaryContainer.trailingAnchor, constant: -12.0),
+      summaryValueLabel.centerYAnchor.constraint(equalTo: summaryPrefixLabel.centerYAnchor),
+
+      topDivider.topAnchor.constraint(equalTo: summaryContainer.bottomAnchor, constant: 10.0),
+      topDivider.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      topDivider.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      topDivider.heightAnchor.constraint(equalToConstant: 0.5),
+
+      scrollView.topAnchor.constraint(equalTo: topDivider.bottomAnchor),
       scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
       scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      scrollView.bottomAnchor.constraint(equalTo: bottomDivider.topAnchor),
 
-      stackView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor, constant: 12.0),
-      stackView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -28.0),
-      stackView.leadingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.leadingAnchor, constant: 18.0),
-      stackView.trailingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.trailingAnchor, constant: -18.0),
+      gridView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor, constant: 14.0),
+      gridView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -18.0),
+      gridView.leadingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.leadingAnchor, constant: 16.0),
+      gridView.trailingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.trailingAnchor, constant: -16.0),
+
+      bottomDivider.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      bottomDivider.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      bottomDivider.bottomAnchor.constraint(equalTo: bottomBar.topAnchor),
+      bottomDivider.heightAnchor.constraint(equalToConstant: 0.5),
+
+      bottomBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      bottomBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      bottomBar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+
+      resetButton.leadingAnchor.constraint(equalTo: bottomBar.leadingAnchor, constant: 16.0),
+      resetButton.topAnchor.constraint(equalTo: bottomBar.topAnchor, constant: 12.0),
+      resetButton.bottomAnchor.constraint(equalTo: bottomBar.bottomAnchor, constant: -12.0),
+      resetButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 46.0),
+
+      applyButton.leadingAnchor.constraint(equalTo: resetButton.trailingAnchor, constant: 12.0),
+      applyButton.trailingAnchor.constraint(equalTo: bottomBar.trailingAnchor, constant: -16.0),
+      applyButton.topAnchor.constraint(equalTo: bottomBar.topAnchor, constant: 12.0),
+      applyButton.bottomAnchor.constraint(equalTo: bottomBar.bottomAnchor, constant: -12.0),
+      applyButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 46.0),
+      applyButton.widthAnchor.constraint(equalTo: resetButton.widthAnchor, multiplier: 1.45),
     ])
 
-    if !categories.isEmpty {
-      categoryButtons = buildSection(
-        title: "类别",
-        labels: categories.map { $0.label },
-        action: #selector(categoryTapped(_:))
-      )
-    }
-    if !areas.isEmpty {
-      areaButtons = buildSection(
-        title: "地区",
-        labels: areas,
-        action: #selector(areaTapped(_:))
-      )
-    }
-    if !years.isEmpty {
-      yearButtons = buildSection(
-        title: "年份",
-        labels: years,
-        action: #selector(yearTapped(_:))
-      )
-    }
-    refreshSelectionStyles()
+    rebuildActiveDimensionGrid()
+    refreshSummaryAndButtons()
   }
 
-  private func buildSection(title: String, labels: [String], action: Selector) -> [UIButton] {
-    let header = UILabel()
-    header.text = title
-    header.font = UIFont.systemFont(ofSize: 13.5, weight: .semibold)
-    header.textColor = MarcoLiquidGlassSupport.isEffectiveDark
-      ? UIColor.white.withAlphaComponent(0.72)
-      : UIColor.secondaryLabel
-
-    let wrap = MarcoWrapChipContainerView()
-    wrap.translatesAutoresizingMaskIntoConstraints = false
-
-    var buttons: [UIButton] = []
-    for (idx, label) in labels.enumerated() {
-      let btn = UIButton(type: .system)
-      btn.tag = idx
-      btn.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
-      btn.addTarget(self, action: action, for: .touchUpInside)
-      applyChipStyle(btn, title: label, selected: false)
-      buttons.append(btn)
+  override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+    super.traitCollectionDidChange(previousTraitCollection)
+    if previousTraitCollection?.preferredContentSizeCategory != traitCollection.preferredContentSizeCategory {
+      rebuildActiveDimensionGrid()
     }
-    wrap.setButtons(buttons)
-
-    let sectionStack = UIStackView(arrangedSubviews: [header, wrap])
-    sectionStack.axis = .vertical
-    sectionStack.spacing = 10.0
-    stackView.addArrangedSubview(sectionStack)
-    return buttons
   }
 
-  private func applyChipStyle(_ button: UIButton, title: String, selected: Bool) {
+  override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+    super.viewWillTransition(to: size, with: coordinator)
+    coordinator.animate(alongsideTransition: { _ in
+      self.gridView.setNeedsLayout()
+      self.gridView.layoutIfNeeded()
+    })
+  }
+
+  private func styleBottomButtons() {
     let dark = MarcoLiquidGlassSupport.isEffectiveDark
-    var titleAttr = AttributedString(title)
-    titleAttr.font = UIFont.systemFont(ofSize: 13.0, weight: selected ? .bold : .medium)
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      var cfg = selected ? UIButton.Configuration.prominentGlass() : UIButton.Configuration.glass()
-      cfg.attributedTitle = titleAttr
-      cfg.baseForegroundColor = selected
-        ? .white
-        : (dark ? UIColor.white.withAlphaComponent(0.88) : UIColor.label)
-      if selected {
-        cfg.baseBackgroundColor = UIColor.systemBlue
-      }
-      cfg.cornerStyle = .capsule
-      cfg.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 13, bottom: 7, trailing: 13)
-      button.configuration = cfg
-      button.cornerConfiguration = .capsule()
-      return
+    let hasAny = hasAnyDraftFilter
+    if #available(iOS 15.0, *) {
+      var resetCfg = UIButton.Configuration.filled()
+      var resetTitle = AttributedString("重置")
+      resetTitle.font = UIFont.systemFont(ofSize: 15.0, weight: .semibold)
+      resetCfg.attributedTitle = resetTitle
+      resetCfg.baseBackgroundColor = dark
+        ? UIColor.white.withAlphaComponent(hasAny ? 0.14 : 0.06)
+        : UIColor.black.withAlphaComponent(hasAny ? 0.08 : 0.03)
+      resetCfg.baseForegroundColor = hasAny
+        ? (dark ? .white : .label)
+        : (dark ? UIColor.white.withAlphaComponent(0.32) : UIColor.tertiaryLabel)
+      resetCfg.background.cornerRadius = 14.0
+      resetButton.configuration = resetCfg
+
+      var applyCfg = UIButton.Configuration.filled()
+      var applyTitle = AttributedString("应用")
+      applyTitle.font = UIFont.systemFont(ofSize: 15.0, weight: .bold)
+      applyCfg.attributedTitle = applyTitle
+      applyCfg.baseBackgroundColor = UIColor.systemBlue
+      applyCfg.baseForegroundColor = .white
+      applyCfg.background.cornerRadius = 14.0
+      applyButton.configuration = applyCfg
+    } else {
+      resetButton.setTitle("重置", for: .normal)
+      resetButton.titleLabel?.font = UIFont.systemFont(ofSize: 15.0, weight: .semibold)
+      resetButton.layer.cornerRadius = 14.0
+      applyButton.setTitle("应用", for: .normal)
+      applyButton.titleLabel?.font = UIFont.systemFont(ofSize: 15.0, weight: .bold)
+      applyButton.backgroundColor = UIColor.systemBlue
+      applyButton.setTitleColor(.white, for: .normal)
+      applyButton.layer.cornerRadius = 14.0
     }
-    #endif
-    var cfg = UIButton.Configuration.filled()
-    cfg.attributedTitle = titleAttr
-    cfg.baseForegroundColor = selected
-      ? .white
-      : (dark ? UIColor.white.withAlphaComponent(0.86) : UIColor.label)
-    cfg.baseBackgroundColor = selected
+    resetButton.isEnabled = hasAny
+  }
+
+  private var hasAnyDraftFilter: Bool {
+    return !selectedCategoryId.isEmpty || !selectedGenreLabel.isEmpty || !selectedArea.isEmpty || !selectedYear.isEmpty
+  }
+
+  private func formattedSummary() -> String {
+    var parts: [String] = []
+    if !selectedCategoryId.isEmpty {
+      if let matched = categories.first(where: { $0.kind == "cat" && $0.id == selectedCategoryId }) {
+        parts.append(matched.label)
+      } else {
+        parts.append(selectedCategoryId)
+      }
+    } else if !selectedGenreLabel.isEmpty {
+      parts.append(selectedGenreLabel)
+    }
+    if !selectedArea.isEmpty {
+      parts.append(selectedArea)
+    }
+    if !selectedYear.isEmpty {
+      parts.append(selectedYear)
+    }
+    return parts.isEmpty ? "全部" : parts.joined(separator: " · ")
+  }
+
+  private func refreshSummaryAndButtons() {
+    let dark = MarcoLiquidGlassSupport.isEffectiveDark
+    let hasAny = hasAnyDraftFilter
+    let catActive = !selectedCategoryId.isEmpty || !selectedGenreLabel.isEmpty
+    let areaActive = !selectedArea.isEmpty
+    let yearActive = !selectedYear.isEmpty
+    dimensionControl.setTitle(catActive ? "类别 •" : "类别", forSegmentAt: 0)
+    dimensionControl.setTitle(areaActive ? "地区 •" : "地区", forSegmentAt: 1)
+    dimensionControl.setTitle(yearActive ? "年份 •" : "年份", forSegmentAt: 2)
+    summaryValueLabel.text = formattedSummary()
+    summaryValueLabel.textColor = hasAny
       ? UIColor.systemBlue
-      : (dark ? UIColor(white: 0.22, alpha: 0.85) : UIColor.secondarySystemFill)
-    cfg.cornerStyle = .capsule
-    cfg.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 13, bottom: 7, trailing: 13)
-    button.configuration = cfg
+      : (dark ? UIColor.white.withAlphaComponent(0.62) : UIColor.secondaryLabel)
+    summaryContainer.backgroundColor = hasAny
+      ? UIColor.systemBlue.withAlphaComponent(dark ? 0.16 : 0.09)
+      : (dark ? UIColor.white.withAlphaComponent(0.05) : UIColor.black.withAlphaComponent(0.04))
+    styleBottomButtons()
   }
 
-  private func refreshSelectionStyles() {
-    for (idx, choice) in categories.enumerated() where idx < categoryButtons.count {
-      let isSelected: Bool
-      switch choice.kind {
-      case "all":
-        isSelected = selectedCategoryId.isEmpty && selectedGenreLabel.isEmpty
-      case "cat":
-        isSelected = selectedCategoryId == choice.id
-      default:
-        isSelected = selectedCategoryId.isEmpty && selectedGenreLabel == choice.label
+  private func rebuildActiveDimensionGrid() {
+    let dark = MarcoLiquidGlassSupport.isEffectiveDark
+    var cells: [MarcoFilterOptionCellButton] = []
+    switch activeDimension {
+    case 0:
+      for (idx, choice) in categories.enumerated() {
+        let cell = MarcoFilterOptionCellButton()
+        cell.tag = idx
+        let isSelected: Bool
+        switch choice.kind {
+        case "all":
+          isSelected = selectedCategoryId.isEmpty && selectedGenreLabel.isEmpty
+        case "cat":
+          isSelected = selectedCategoryId == choice.id
+        default:
+          isSelected = selectedCategoryId.isEmpty && selectedGenreLabel == choice.label
+        }
+        cell.configure(title: choice.label, selected: isSelected, dark: dark)
+        cell.addTarget(self, action: #selector(categoryTapped(_:)), for: .touchUpInside)
+        cells.append(cell)
       }
-      applyChipStyle(categoryButtons[idx], title: choice.label, selected: isSelected)
+    case 1:
+      for (idx, area) in areas.enumerated() {
+        let cell = MarcoFilterOptionCellButton()
+        cell.tag = idx
+        let isSelected = (selectedArea.isEmpty && area == "全部") || selectedArea == area
+        cell.configure(title: area, selected: isSelected, dark: dark)
+        cell.addTarget(self, action: #selector(areaTapped(_:)), for: .touchUpInside)
+        cells.append(cell)
+      }
+    default:
+      for (idx, yr) in years.enumerated() {
+        let cell = MarcoFilterOptionCellButton()
+        cell.tag = idx
+        let isSelected = (selectedYear.isEmpty && yr == "全部") || selectedYear == yr
+        cell.configure(title: yr, selected: isSelected, dark: dark)
+        cell.addTarget(self, action: #selector(yearTapped(_:)), for: .touchUpInside)
+        cells.append(cell)
+      }
     }
-    for (idx, area) in areas.enumerated() where idx < areaButtons.count {
-      let isSelected = (selectedArea.isEmpty && area == "全部") || selectedArea == area
-      applyChipStyle(areaButtons[idx], title: area, selected: isSelected)
-    }
-    for (idx, yr) in years.enumerated() where idx < yearButtons.count {
-      let isSelected = (selectedYear.isEmpty && yr == "全部") || selectedYear == yr
-      applyChipStyle(yearButtons[idx], title: yr, selected: isSelected)
-    }
-    let hasAny = !selectedCategoryId.isEmpty || !selectedGenreLabel.isEmpty || !selectedArea.isEmpty || !selectedYear.isEmpty
-    navigationItem.leftBarButtonItem?.isEnabled = hasAny
+    gridView.setCells(cells)
   }
 
-  @objc private func categoryTapped(_ sender: UIButton) {
+  @objc private func dimensionChanged(_ sender: UISegmentedControl) {
+    activeDimension = sender.selectedSegmentIndex
+    UISelectionFeedbackGenerator().selectionChanged()
+    scrollView.setContentOffset(.zero, animated: false)
+    rebuildActiveDimensionGrid()
+  }
+
+  @objc private func categoryTapped(_ sender: UIControl) {
     let idx = sender.tag
     guard idx >= 0, idx < categories.count else { return }
     let choice = categories[idx]
@@ -1809,25 +2841,28 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
       selectedGenreLabel = choice.label
     }
     UISelectionFeedbackGenerator().selectionChanged()
-    refreshSelectionStyles()
+    rebuildActiveDimensionGrid()
+    refreshSummaryAndButtons()
   }
 
-  @objc private func areaTapped(_ sender: UIButton) {
+  @objc private func areaTapped(_ sender: UIControl) {
     let idx = sender.tag
     guard idx >= 0, idx < areas.count else { return }
     let val = areas[idx]
     selectedArea = (val == "全部") ? "" : val
     UISelectionFeedbackGenerator().selectionChanged()
-    refreshSelectionStyles()
+    rebuildActiveDimensionGrid()
+    refreshSummaryAndButtons()
   }
 
-  @objc private func yearTapped(_ sender: UIButton) {
+  @objc private func yearTapped(_ sender: UIControl) {
     let idx = sender.tag
     guard idx >= 0, idx < years.count else { return }
     let val = years[idx]
     selectedYear = (val == "全部") ? "" : val
     UISelectionFeedbackGenerator().selectionChanged()
-    refreshSelectionStyles()
+    rebuildActiveDimensionGrid()
+    refreshSummaryAndButtons()
   }
 
   @objc private func resetTapped() {
@@ -1836,7 +2871,8 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
     selectedArea = ""
     selectedYear = ""
     UIImpactFeedbackGenerator(style: .light).impactOccurred()
-    refreshSelectionStyles()
+    rebuildActiveDimensionGrid()
+    refreshSummaryAndButtons()
   }
 
   @objc private func handleSceneActivationChanged() {
@@ -1846,13 +2882,18 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
     }
   }
 
-  @objc private func doneTapped() {
+  @objc private func closeTapped() {
+    finish(applied: false)
+    dismiss(animated: true, completion: nil)
+  }
+
+  @objc private func applyTapped() {
     finish(applied: true)
     dismiss(animated: true, completion: nil)
   }
 
   func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
-    finish(applied: true)
+    finish(applied: false)
   }
 
   private func finish(applied: Bool) {
@@ -1997,29 +3038,40 @@ private final class MarcoNativePinSheetController: UIViewController {
     titleLabel.textColor = dark ? .white : UIColor.label
     for btn in digitButtons {
       btn.overrideUserInterfaceStyle = style
-      if var cfg = btn.configuration {
-        cfg.baseForegroundColor = dark ? .white : UIColor.label
-        if #unavailable(iOS 26.0) {
-          cfg.baseBackgroundColor = dark
-            ? UIColor(white: 0.22, alpha: 0.85)
-            : UIColor.secondarySystemFill
+      let fg = dark ? UIColor.white : UIColor.label
+      let bg = dark ? UIColor(white: 0.22, alpha: 0.85) : UIColor.secondarySystemFill
+      if #available(iOS 15.0, *) {
+        if var cfg = btn.configuration {
+          cfg.baseForegroundColor = fg
+          if #unavailable(iOS 26.0) {
+            cfg.baseBackgroundColor = bg
+          }
+          btn.configuration = cfg
         }
-        btn.configuration = cfg
+      } else {
+        btn.setTitleColor(fg, for: .normal)
+        btn.backgroundColor = bg
       }
     }
     cancelButton.overrideUserInterfaceStyle = style
-    if var cfg = cancelButton.configuration {
-      cfg.baseForegroundColor = dark
-        ? UIColor.white.withAlphaComponent(0.78)
-        : UIColor.secondaryLabel
-      cancelButton.configuration = cfg
+    let cancelFg = dark ? UIColor.white.withAlphaComponent(0.78) : UIColor.secondaryLabel
+    if #available(iOS 15.0, *) {
+      if var cfg = cancelButton.configuration {
+        cfg.baseForegroundColor = cancelFg
+        cancelButton.configuration = cfg
+      }
+    } else {
+      cancelButton.setTitleColor(cancelFg, for: .normal)
     }
     backspaceButton.overrideUserInterfaceStyle = style
-    if var cfg = backspaceButton.configuration {
-      cfg.baseForegroundColor = dark
-        ? UIColor.white.withAlphaComponent(0.84)
-        : UIColor.label
-      backspaceButton.configuration = cfg
+    let backFg = dark ? UIColor.white.withAlphaComponent(0.84) : UIColor.label
+    if #available(iOS 15.0, *) {
+      if var cfg = backspaceButton.configuration {
+        cfg.baseForegroundColor = backFg
+        backspaceButton.configuration = cfg
+      }
+    } else {
+      backspaceButton.tintColor = backFg
     }
   }
 
@@ -2268,7 +3320,9 @@ private final class MarcoNativePinSheetController: UIViewController {
 
     backdropControl.alpha = 0.0
     cardShadowView.alpha = 0.0
-    cardShadowView.transform = CGAffineTransform(scaleX: 0.90, y: 0.90)
+    cardShadowView.transform = UIAccessibility.isReduceMotionEnabled
+      ? .identity
+      : CGAffineTransform(scaleX: 0.90, y: 0.90)
     refreshUI(animatedDotIndex: nil)
   }
 
@@ -2277,10 +3331,24 @@ private final class MarcoNativePinSheetController: UIViewController {
     becomeFirstResponder()
     guard !didAnimateIn else { return }
     didAnimateIn = true
-    MarcoLiquidGlassSupport.animateSpring(duration: 0.36, bounce: 0.14) {
-      self.backdropControl.alpha = 1.0
-      self.cardShadowView.alpha = 1.0
-      self.cardShadowView.transform = .identity
+    if UIAccessibility.isReduceMotionEnabled {
+      UIView.animate(
+        withDuration: 0.16,
+        delay: 0,
+        options: [.curveEaseOut],
+        animations: {
+          self.backdropControl.alpha = 1.0
+          self.cardShadowView.alpha = 1.0
+          self.cardShadowView.transform = .identity
+        },
+        completion: nil
+      )
+    } else {
+      MarcoLiquidGlassSupport.animateSpring(duration: 0.36, bounce: 0.14) {
+        self.backdropControl.alpha = 1.0
+        self.cardShadowView.alpha = 1.0
+        self.cardShadowView.transform = .identity
+      }
     }
   }
 
@@ -2314,39 +3382,47 @@ private final class MarcoNativePinSheetController: UIViewController {
     btn.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     btn.tag = Int(digit) ?? 0
     btn.accessibilityLabel = digit
-    var titleAttr = AttributedString(digit)
-    titleAttr.font = UIFont.monospacedDigitSystemFont(ofSize: 28.0, weight: .medium)
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      var cfg = UIButton.Configuration.glass()
-      cfg.attributedTitle = titleAttr
-      cfg.baseForegroundColor = dark ? .white : UIColor.label
-      cfg.cornerStyle = .capsule
-      cfg.contentInsets = .zero
-      btn.configuration = cfg
-      btn.cornerConfiguration = .capsule()
-    } else {
+    let font = UIFont.monospacedDigitSystemFont(ofSize: 28.0, weight: .medium)
+    let fg: UIColor = dark ? .white : UIColor.label
+    let bg: UIColor = dark ? UIColor(white: 0.22, alpha: 0.85) : UIColor.secondarySystemFill
+    if #available(iOS 15.0, *) {
+      var titleAttr = AttributedString(digit)
+      titleAttr.font = font
+      #if compiler(>=6.2)
+      if #available(iOS 26.0, *) {
+        var cfg = UIButton.Configuration.glass()
+        cfg.attributedTitle = titleAttr
+        cfg.baseForegroundColor = fg
+        cfg.cornerStyle = .capsule
+        cfg.contentInsets = .zero
+        btn.configuration = cfg
+        btn.cornerConfiguration = .capsule()
+      } else {
+        var cfg = UIButton.Configuration.filled()
+        cfg.attributedTitle = titleAttr
+        cfg.baseForegroundColor = fg
+        cfg.baseBackgroundColor = bg
+        cfg.cornerStyle = .capsule
+        cfg.contentInsets = .zero
+        btn.configuration = cfg
+      }
+      #else
       var cfg = UIButton.Configuration.filled()
       cfg.attributedTitle = titleAttr
-      cfg.baseForegroundColor = dark ? .white : UIColor.label
-      cfg.baseBackgroundColor = dark
-        ? UIColor(white: 0.22, alpha: 0.85)
-        : UIColor.secondarySystemFill
+      cfg.baseForegroundColor = fg
+      cfg.baseBackgroundColor = bg
       cfg.cornerStyle = .capsule
       cfg.contentInsets = .zero
       btn.configuration = cfg
+      #endif
+    } else {
+      btn.setTitle(digit, for: .normal)
+      btn.titleLabel?.font = font
+      btn.setTitleColor(fg, for: .normal)
+      btn.backgroundColor = bg
+      btn.layer.cornerRadius = size * 0.5
+      btn.layer.masksToBounds = true
     }
-    #else
-    var cfg = UIButton.Configuration.filled()
-    cfg.attributedTitle = titleAttr
-    cfg.baseForegroundColor = dark ? .white : UIColor.label
-    cfg.baseBackgroundColor = dark
-      ? UIColor(white: 0.22, alpha: 0.85)
-      : UIColor.secondarySystemFill
-    cfg.cornerStyle = .capsule
-    cfg.contentInsets = .zero
-    btn.configuration = cfg
-    #endif
     btn.addTarget(self, action: #selector(digitTapped(_:)), for: .touchUpInside)
     NSLayoutConstraint.activate([
       btn.widthAnchor.constraint(equalToConstant: size),
@@ -2360,15 +3436,21 @@ private final class MarcoNativePinSheetController: UIViewController {
     cancelButton.translatesAutoresizingMaskIntoConstraints = false
     cancelButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     cancelButton.accessibilityLabel = "取消"
-    var titleAttr = AttributedString("取消")
-    titleAttr.font = UIFont.systemFont(ofSize: 16.0, weight: .semibold)
-    var cfg = UIButton.Configuration.plain()
-    cfg.attributedTitle = titleAttr
-    cfg.baseForegroundColor = dark
-      ? UIColor.white.withAlphaComponent(0.78)
-      : UIColor.secondaryLabel
-    cfg.contentInsets = .zero
-    cancelButton.configuration = cfg
+    let font = UIFont.systemFont(ofSize: 16.0, weight: .semibold)
+    let fg = dark ? UIColor.white.withAlphaComponent(0.78) : UIColor.secondaryLabel
+    if #available(iOS 15.0, *) {
+      var titleAttr = AttributedString("取消")
+      titleAttr.font = font
+      var cfg = UIButton.Configuration.plain()
+      cfg.attributedTitle = titleAttr
+      cfg.baseForegroundColor = fg
+      cfg.contentInsets = .zero
+      cancelButton.configuration = cfg
+    } else {
+      cancelButton.setTitle("取消", for: .normal)
+      cancelButton.titleLabel?.font = font
+      cancelButton.setTitleColor(fg, for: .normal)
+    }
     cancelButton.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
     NSLayoutConstraint.activate([
       cancelButton.widthAnchor.constraint(equalToConstant: size),
@@ -2382,13 +3464,18 @@ private final class MarcoNativePinSheetController: UIViewController {
     backspaceButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     backspaceButton.accessibilityLabel = "删除"
     let symCfg = UIImage.SymbolConfiguration(pointSize: 22.0, weight: .medium)
-    var cfg = UIButton.Configuration.plain()
-    cfg.image = UIImage(systemName: "delete.left.fill", withConfiguration: symCfg)
-    cfg.baseForegroundColor = dark
-      ? UIColor.white.withAlphaComponent(0.84)
-      : UIColor.label
-    cfg.contentInsets = .zero
-    backspaceButton.configuration = cfg
+    let img = UIImage(systemName: "delete.left.fill", withConfiguration: symCfg)
+    let fg = dark ? UIColor.white.withAlphaComponent(0.84) : UIColor.label
+    if #available(iOS 15.0, *) {
+      var cfg = UIButton.Configuration.plain()
+      cfg.image = img
+      cfg.baseForegroundColor = fg
+      cfg.contentInsets = .zero
+      backspaceButton.configuration = cfg
+    } else {
+      backspaceButton.setImage(img, for: .normal)
+      backspaceButton.tintColor = fg
+    }
     backspaceButton.addTarget(self, action: #selector(backspaceTapped), for: .touchUpInside)
     NSLayoutConstraint.activate([
       backspaceButton.widthAnchor.constraint(equalToConstant: size),
@@ -2448,7 +3535,7 @@ private final class MarcoNativePinSheetController: UIViewController {
       } else {
         dot.layer.shadowOpacity = 0.0
       }
-      if animatedDotIndex == idx {
+      if animatedDotIndex == idx && !UIAccessibility.isReduceMotionEnabled {
         dot.transform = CGAffineTransform(scaleX: 1.32, y: 1.32)
         UIView.animate(
           withDuration: 0.22,
@@ -2470,6 +3557,11 @@ private final class MarcoNativePinSheetController: UIViewController {
   }
 
   private func shakeDots() {
+    if UIAccessibility.isReduceMotionEnabled {
+      // Under Reduce Motion, omit horizontal shake while preserving immediate
+      // error color/border styling, message text, and notification haptics.
+      return
+    }
     let anim = CAKeyframeAnimation(keyPath: "transform.translation.x")
     anim.timingFunction = CAMediaTimingFunction(name: .linear)
     anim.duration = 0.36
@@ -2594,14 +3686,17 @@ private final class MarcoNativePinSheetController: UIViewController {
 
   private func dismissAnimated(succeeded: Bool) {
     finish(succeeded: succeeded)
+    let reduceMotion = UIAccessibility.isReduceMotionEnabled
     UIView.animate(
-      withDuration: 0.18,
+      withDuration: reduceMotion ? 0.14 : 0.18,
       delay: 0,
       options: [.curveEaseIn],
       animations: {
         self.backdropControl.alpha = 0.0
         self.cardShadowView.alpha = 0.0
-        self.cardShadowView.transform = CGAffineTransform(scaleX: 0.92, y: 0.92)
+        self.cardShadowView.transform = reduceMotion
+          ? .identity
+          : CGAffineTransform(scaleX: 0.92, y: 0.92)
       }
     ) { _ in
       self.dismiss(animated: false, completion: nil)
@@ -2648,6 +3743,16 @@ private final class MarcoNativeDockFactory: NSObject, FlutterPlatformViewFactory
 private final class MarcoTraitAwareHostView: UIView {
   var onTraitChanged: (() -> Void)?
 
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if window != nil {
+      MarcoLiquidGlassSupport.bringRootChromeToFront()
+      DispatchQueue.main.async {
+        MarcoLiquidGlassSupport.bringRootChromeToFront()
+      }
+    }
+  }
+
   override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
     super.traitCollectionDidChange(previousTraitCollection)
     if traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) {
@@ -2656,11 +3761,12 @@ private final class MarcoTraitAwareHostView: UIView {
   }
 }
 
-/// Bespoke 24x24pt CoreAnimation layered vector tab icon for the 4 bottom Dock
-/// tabs (`主页` / `直播` / `片库` / `设置`) with rich dual-tone selected styling
-/// and distinctive per-tab spring micro-animations (cinema screen pop + sparkle,
-/// live crimson broadcast wave ripple, 3-layer library card fan, and 60°
-/// mechanical precision gear turn). Adapts natively to Light & Dark Mode.
+/// Apple HIG native SF Symbols tab icon view for the floating Liquid Glass Dock.
+///
+/// Uses genuine Apple SF Symbols (`house`, `play.tv`, `rectangle.stack`,
+/// `gearshape`, all available natively on iOS 14.0 through iOS 26+) at Apple's
+/// exact tab-bar optical weight with monochrome tinting and native iOS 17+
+/// `.bounce` SF Symbol effects.
 private final class MarcoAnimatedTabIconView: UIView {
   enum Kind: String {
     case home
@@ -2680,7 +3786,7 @@ private final class MarcoAnimatedTabIconView: UIView {
       if sym.contains("radiowaves") || sym.contains("antenna") || sym.contains("tv") || label.contains("直播") {
         return .live
       }
-      if sym.contains("square.stack") || sym.contains("film") || sym.contains("bookmark") || label.contains("片库") {
+      if sym.contains("square.stack") || sym.contains("rectangle.stack") || sym.contains("film") || sym.contains("bookmark") || label.contains("片库") {
         return .library
       }
       if sym.contains("gear") || sym.contains("slider") || label.contains("设置") {
@@ -2688,32 +3794,24 @@ private final class MarcoAnimatedTabIconView: UIView {
       }
       return .fallback
     }
+
+    func appleSymbolName(selected: Bool, fallback: String) -> String {
+      switch self {
+      case .home:
+        return selected ? "house.fill" : "house"
+      case .live:
+        return selected ? "play.tv.fill" : "play.tv"
+      case .library:
+        return selected ? "rectangle.stack.fill" : "rectangle.stack"
+      case .settings:
+        return selected ? "gearshape.fill" : "gearshape"
+      case .fallback:
+        return fallback
+      }
+    }
   }
 
-  private let canvasLayer = CALayer()
-  // Home layers
-  private let homeScreenLayer = CAShapeLayer()
-  private let homePlayLayer = CAShapeLayer()
-  private let homeStandLayer = CAShapeLayer()
-  private let homeSparkleLayer = CAShapeLayer()
-  // Live layers
-  private let liveOuterWaveLayer = CAShapeLayer()
-  private let liveInnerWaveLayer = CAShapeLayer()
-  private let liveStandLayer = CAShapeLayer()
-  private let liveHaloLayer = CAShapeLayer()
-  private let liveBeaconLayer = CAShapeLayer()
-  // Library layers
-  private let libBackCardLayer = CAShapeLayer()
-  private let libMidCardLayer = CAShapeLayer()
-  private let libFrontCardLayer = CAShapeLayer()
-  private let libBookmarkLayer = CAShapeLayer()
-  // Settings layers
-  private let settingsGearLayer = CAShapeLayer()
-  private let settingsHoleLayer = CAShapeLayer()
-  private let settingsJewelLayer = CAShapeLayer()
-  // Fallback SF Symbol
-  private let fallbackImageView = UIImageView()
-
+  private let symbolImageView = UIImageView()
   private var currentKind: Kind = .home
   private var isSelectedState: Bool = false
   private var isDarkState: Bool = true
@@ -2730,48 +3828,10 @@ private final class MarcoAnimatedTabIconView: UIView {
     isUserInteractionEnabled = false
     clipsToBounds = false
 
-    canvasLayer.frame = CGRect(x: 0.0, y: 0.0, width: 24.0, height: 24.0)
-    canvasLayer.masksToBounds = false
-    layer.addSublayer(canvasLayer)
-
-    let scale = max(MarcoLiquidGlassSupport.activeWindow()?.windowScene?.screen.scale ?? 3.0, 2.0)
-    func setup(_ sl: CAShapeLayer, pivot: CGPoint) {
-      sl.bounds = CGRect(x: 0.0, y: 0.0, width: 24.0, height: 24.0)
-      sl.anchorPoint = CGPoint(x: pivot.x / 24.0, y: pivot.y / 24.0)
-      sl.position = pivot
-      sl.contentsScale = scale
-      sl.lineCap = .round
-      sl.lineJoin = .round
-      sl.isHidden = true
-      canvasLayer.addSublayer(sl)
-    }
-
-    setup(homeStandLayer, pivot: CGPoint(x: 12.0, y: 19.6))
-    setup(homeScreenLayer, pivot: CGPoint(x: 12.0, y: 10.7))
-    setup(homePlayLayer, pivot: CGPoint(x: 12.2, y: 10.7))
-    setup(homeSparkleLayer, pivot: CGPoint(x: 20.6, y: 3.4))
-
-    setup(liveOuterWaveLayer, pivot: CGPoint(x: 12.0, y: 10.6))
-    setup(liveInnerWaveLayer, pivot: CGPoint(x: 12.0, y: 10.6))
-    setup(liveStandLayer, pivot: CGPoint(x: 12.0, y: 17.5))
-    setup(liveHaloLayer, pivot: CGPoint(x: 12.0, y: 10.6))
-    setup(liveBeaconLayer, pivot: CGPoint(x: 12.0, y: 10.6))
-
-    setup(libBackCardLayer, pivot: CGPoint(x: 12.0, y: 4.1))
-    setup(libMidCardLayer, pivot: CGPoint(x: 12.0, y: 7.2))
-    setup(libFrontCardLayer, pivot: CGPoint(x: 12.0, y: 15.2))
-    setup(libBookmarkLayer, pivot: CGPoint(x: 12.0, y: 9.4))
-
-    setup(settingsGearLayer, pivot: CGPoint(x: 12.0, y: 12.0))
-    setup(settingsHoleLayer, pivot: CGPoint(x: 12.0, y: 12.0))
-    setup(settingsJewelLayer, pivot: CGPoint(x: 12.0, y: 12.0))
-
-    fallbackImageView.contentMode = .scaleAspectFit
-    fallbackImageView.isHidden = true
-    fallbackImageView.frame = CGRect(x: 0.0, y: 0.0, width: 24.0, height: 24.0)
-    addSubview(fallbackImageView)
-
-    buildStaticPaths()
+    symbolImageView.contentMode = .center
+    symbolImageView.isUserInteractionEnabled = false
+    symbolImageView.frame = CGRect(x: 0.0, y: 0.0, width: 24.0, height: 24.0)
+    addSubview(symbolImageView)
   }
 
   @available(*, unavailable)
@@ -2779,141 +3839,9 @@ private final class MarcoAnimatedTabIconView: UIView {
     fatalError("init(coder:) has not been implemented")
   }
 
-  override func didMoveToWindow() {
-    super.didMoveToWindow()
-    let displayScale = window?.windowScene?.screen.scale ?? traitCollection.displayScale
-    guard displayScale >= 1.0 else { return }
-    for sub in canvasLayer.sublayers ?? [] {
-      sub.contentsScale = displayScale
-    }
-  }
-
   override func layoutSubviews() {
     super.layoutSubviews()
-    let sx = bounds.width > 0 ? bounds.width / 24.0 : 1.0
-    let sy = bounds.height > 0 ? bounds.height / 24.0 : 1.0
-    let s = min(sx, sy)
-    CATransaction.begin()
-    CATransaction.setDisableActions(true)
-    canvasLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
-    canvasLayer.transform = CATransform3DMakeScale(s, s, 1.0)
-    fallbackImageView.frame = bounds
-    CATransaction.commit()
-  }
-
-  private func buildStaticPaths() {
-    // 1. Home: Cinema Screen + Sculpted Play Triangle + Curved Stand + 4-pt Sparkle
-    homeScreenLayer.path = UIBezierPath(
-      roundedRect: CGRect(x: 2.3, y: 3.9, width: 19.4, height: 13.6),
-      cornerRadius: 4.3
-    ).cgPath
-
-    let playPath = UIBezierPath()
-    playPath.move(to: CGPoint(x: 10.0, y: 8.3))
-    playPath.addLine(to: CGPoint(x: 15.3, y: 10.7))
-    playPath.addLine(to: CGPoint(x: 10.0, y: 13.1))
-    playPath.close()
-    homePlayLayer.path = playPath.cgPath
-
-    let standPath = UIBezierPath()
-    standPath.move(to: CGPoint(x: 8.1, y: 20.5))
-    standPath.addQuadCurve(to: CGPoint(x: 15.9, y: 20.5), controlPoint: CGPoint(x: 12.0, y: 18.8))
-    homeStandLayer.path = standPath.cgPath
-
-    let sparklePath = UIBezierPath()
-    let sc = CGPoint(x: 20.6, y: 3.4)
-    let sr: Double = 2.75
-    let ir: Double = 0.78
-    for k in 0..<8 {
-      let a = Double(k) * (Double.pi / 4.0)
-      let rr = (k % 2 == 0) ? sr : ir
-      let pt = CGPoint(
-        x: sc.x + CGFloat(Foundation.cos(a) * rr),
-        y: sc.y + CGFloat(Foundation.sin(a) * rr)
-      )
-      if k == 0 { sparklePath.move(to: pt) } else { sparklePath.addLine(to: pt) }
-    }
-    sparklePath.close()
-    homeSparkleLayer.path = sparklePath.cgPath
-
-    // 2. Live: Broadcast Beacon + Dual Concentric Wave Arcs + Dish Stand
-    let bc = CGPoint(x: 12.0, y: 10.6)
-    let outerArc = UIBezierPath()
-    let deg42 = 42.0 * Double.pi / 180.0
-    let deg138 = 138.0 * Double.pi / 180.0
-    let deg222 = 222.0 * Double.pi / 180.0
-    outerArc.addArc(withCenter: bc, radius: 8.5, startAngle: CGFloat(deg138), endAngle: CGFloat(deg222), clockwise: true)
-    outerArc.move(to: CGPoint(x: bc.x + CGFloat(Foundation.cos(-deg42) * 8.5), y: bc.y + CGFloat(Foundation.sin(-deg42) * 8.5)))
-    outerArc.addArc(withCenter: bc, radius: 8.5, startAngle: CGFloat(-deg42), endAngle: CGFloat(deg42), clockwise: true)
-    liveOuterWaveLayer.path = outerArc.cgPath
-
-    let innerArc = UIBezierPath()
-    let deg40 = 40.0 * Double.pi / 180.0
-    let deg140 = 140.0 * Double.pi / 180.0
-    let deg220 = 220.0 * Double.pi / 180.0
-    innerArc.addArc(withCenter: bc, radius: 5.25, startAngle: CGFloat(deg140), endAngle: CGFloat(deg220), clockwise: true)
-    innerArc.move(to: CGPoint(x: bc.x + CGFloat(Foundation.cos(-deg40) * 5.25), y: bc.y + CGFloat(Foundation.sin(-deg40) * 5.25)))
-    innerArc.addArc(withCenter: bc, radius: 5.25, startAngle: CGFloat(-deg40), endAngle: CGFloat(deg40), clockwise: true)
-    liveInnerWaveLayer.path = innerArc.cgPath
-
-    let liveStand = UIBezierPath()
-    liveStand.move(to: CGPoint(x: 12.0, y: 14.0))
-    liveStand.addLine(to: CGPoint(x: 12.0, y: 19.6))
-    liveStand.move(to: CGPoint(x: 8.2, y: 20.6))
-    liveStand.addQuadCurve(to: CGPoint(x: 15.8, y: 20.6), controlPoint: CGPoint(x: 12.0, y: 18.8))
-    liveStandLayer.path = liveStand.cgPath
-
-    liveHaloLayer.path = UIBezierPath(ovalIn: CGRect(x: bc.x - 4.0, y: bc.y - 4.0, width: 8.0, height: 8.0)).cgPath
-    liveBeaconLayer.path = UIBezierPath(ovalIn: CGRect(x: bc.x - 2.35, y: bc.y - 2.35, width: 4.7, height: 4.7)).cgPath
-
-    // 3. Library: 3-Layer Film Collection Deck + Bookmark Ribbon
-    libBackCardLayer.path = UIBezierPath(
-      roundedRect: CGRect(x: 6.6, y: 3.1, width: 10.8, height: 2.0),
-      cornerRadius: 1.0
-    ).cgPath
-    libMidCardLayer.path = UIBezierPath(
-      roundedRect: CGRect(x: 4.5, y: 6.1, width: 15.0, height: 2.15),
-      cornerRadius: 1.08
-    ).cgPath
-    libFrontCardLayer.path = UIBezierPath(
-      roundedRect: CGRect(x: 2.5, y: 9.4, width: 19.0, height: 11.6),
-      cornerRadius: 3.7
-    ).cgPath
-
-    let bm = UIBezierPath()
-    bm.move(to: CGPoint(x: 9.3, y: 9.4))
-    bm.addLine(to: CGPoint(x: 14.7, y: 9.4))
-    bm.addLine(to: CGPoint(x: 14.7, y: 16.5))
-    bm.addLine(to: CGPoint(x: 12.0, y: 14.4))
-    bm.addLine(to: CGPoint(x: 9.3, y: 16.5))
-    bm.close()
-    libBookmarkLayer.path = bm.cgPath
-
-    // 4. Settings: Sculpted 6-Lobe Apple Precision Gear + Inner Ring + Center Jewel
-    let gearPath = buildSculptedGearPath(includeInnerHole: true)
-    settingsGearLayer.path = gearPath.cgPath
-    settingsGearLayer.fillRule = .evenOdd
-    settingsHoleLayer.path = UIBezierPath(ovalIn: CGRect(x: 8.75, y: 8.75, width: 6.5, height: 6.5)).cgPath
-    settingsJewelLayer.path = UIBezierPath(ovalIn: CGRect(x: 10.25, y: 10.25, width: 3.5, height: 3.5)).cgPath
-  }
-
-  private func buildSculptedGearPath(includeInnerHole: Bool) -> UIBezierPath {
-    let path = UIBezierPath()
-    let samples = 96
-    for i in 0..<samples {
-      let th = (2.0 * Double.pi * Double(i)) / Double(samples) - Double.pi * 0.5
-      let wave = Foundation.cos(6.0 * th)
-      let shaped = (wave >= 0 ? 1.0 : -1.0) * Foundation.pow(abs(wave), 0.54)
-      let r = 8.0 + 1.55 * shaped
-      let pt = CGPoint(x: 12.0 + r * Foundation.cos(th), y: 12.0 + r * Foundation.sin(th))
-      if i == 0 { path.move(to: pt) } else { path.addLine(to: pt) }
-    }
-    path.close()
-    if includeInnerHole {
-      let hole = UIBezierPath(ovalIn: CGRect(x: 8.35, y: 8.35, width: 7.3, height: 7.3))
-      path.append(hole)
-    }
-    return path
+    symbolImageView.frame = bounds
   }
 
   func configure(kind: Kind, selected: Bool, dark: Bool, fallbackSymbol: String) {
@@ -2922,325 +3850,53 @@ private final class MarcoAnimatedTabIconView: UIView {
     self.isDarkState = dark
     self.fallbackSymbol = fallbackSymbol
 
-    let activePrimary: UIColor = dark
-      ? UIColor(red: 0.25, green: 0.65, blue: 1.0, alpha: 1.0)
+    let activeTint: UIColor = dark
+      ? UIColor(red: 0.039, green: 0.518, blue: 1.0, alpha: 1.0)
       : UIColor.systemBlue
-    let activeSecondary: UIColor = dark
-      ? UIColor(red: 0.46, green: 0.84, blue: 1.0, alpha: 1.0)
-      : UIColor(red: 0.22, green: 0.71, blue: 1.0, alpha: 1.0)
-    let liveBeaconRed: UIColor = dark
-      ? UIColor(red: 1.0, green: 0.27, blue: 0.23, alpha: 1.0)
-      : UIColor(red: 1.0, green: 0.23, blue: 0.19, alpha: 1.0)
-    let inactiveColor: UIColor = dark
-      ? UIColor.white.withAlphaComponent(0.70)
-      : UIColor(red: 0.17, green: 0.19, blue: 0.23, alpha: 0.74)
+    let inactiveTint: UIColor = dark
+      ? UIColor.white.withAlphaComponent(0.76)
+      : UIColor(white: 0.10, alpha: 0.82)
 
-    let allShapeLayers: [CAShapeLayer] = [
-      homeScreenLayer, homePlayLayer, homeStandLayer, homeSparkleLayer,
-      liveOuterWaveLayer, liveInnerWaveLayer, liveStandLayer, liveHaloLayer, liveBeaconLayer,
-      libBackCardLayer, libMidCardLayer, libFrontCardLayer, libBookmarkLayer,
-      settingsGearLayer, settingsHoleLayer, settingsJewelLayer,
-    ]
-
-    CATransaction.begin()
-    CATransaction.setDisableActions(true)
-    for sl in allShapeLayers {
-      sl.isHidden = true
-    }
-    fallbackImageView.isHidden = true
-
-    switch kind {
-    case .home:
-      homeScreenLayer.isHidden = false
-      homePlayLayer.isHidden = false
-      homeStandLayer.isHidden = false
-      homeSparkleLayer.isHidden = !selected
-
-      if selected {
-        homeScreenLayer.fillColor = activePrimary.cgColor
-        homeScreenLayer.strokeColor = nil
-        homeScreenLayer.lineWidth = 0.0
-
-        homePlayLayer.fillColor = UIColor.white.cgColor
-        homePlayLayer.strokeColor = UIColor.white.cgColor
-        homePlayLayer.lineWidth = 0.9
-
-        homeStandLayer.fillColor = nil
-        homeStandLayer.strokeColor = activeSecondary.cgColor
-        homeStandLayer.lineWidth = 2.05
-
-        homeSparkleLayer.fillColor = activeSecondary.cgColor
-        homeSparkleLayer.strokeColor = nil
-      } else {
-        homeScreenLayer.fillColor = nil
-        homeScreenLayer.strokeColor = inactiveColor.cgColor
-        homeScreenLayer.lineWidth = 1.85
-
-        homePlayLayer.fillColor = nil
-        homePlayLayer.strokeColor = inactiveColor.cgColor
-        homePlayLayer.lineWidth = 1.55
-
-        homeStandLayer.fillColor = nil
-        homeStandLayer.strokeColor = inactiveColor.withAlphaComponent(0.74).cgColor
-        homeStandLayer.lineWidth = 1.75
-      }
-
-    case .live:
-      liveOuterWaveLayer.isHidden = false
-      liveInnerWaveLayer.isHidden = false
-      liveStandLayer.isHidden = false
-      liveBeaconLayer.isHidden = false
-      liveHaloLayer.isHidden = !selected
-
-      liveOuterWaveLayer.fillColor = nil
-      liveInnerWaveLayer.fillColor = nil
-      liveStandLayer.fillColor = nil
-
-      if selected {
-        liveOuterWaveLayer.strokeColor = activeSecondary.cgColor
-        liveOuterWaveLayer.lineWidth = 1.9
-        liveInnerWaveLayer.strokeColor = activePrimary.cgColor
-        liveInnerWaveLayer.lineWidth = 1.95
-        liveStandLayer.strokeColor = activePrimary.cgColor
-        liveStandLayer.lineWidth = 1.95
-        liveHaloLayer.fillColor = liveBeaconRed.withAlphaComponent(0.28).cgColor
-        liveHaloLayer.strokeColor = nil
-        liveBeaconLayer.fillColor = liveBeaconRed.cgColor
-        liveBeaconLayer.strokeColor = nil
-      } else {
-        liveOuterWaveLayer.strokeColor = inactiveColor.withAlphaComponent(0.56).cgColor
-        liveOuterWaveLayer.lineWidth = 1.8
-        liveInnerWaveLayer.strokeColor = inactiveColor.cgColor
-        liveInnerWaveLayer.lineWidth = 1.85
-        liveStandLayer.strokeColor = inactiveColor.cgColor
-        liveStandLayer.lineWidth = 1.8
-        liveBeaconLayer.fillColor = inactiveColor.cgColor
-        liveBeaconLayer.strokeColor = nil
-      }
-
-    case .library:
-      libBackCardLayer.isHidden = false
-      libMidCardLayer.isHidden = false
-      libFrontCardLayer.isHidden = false
-      libBookmarkLayer.isHidden = false
-
-      if selected {
-        libBackCardLayer.fillColor = activeSecondary.withAlphaComponent(0.52).cgColor
-        libBackCardLayer.strokeColor = nil
-        libMidCardLayer.fillColor = activeSecondary.withAlphaComponent(0.84).cgColor
-        libMidCardLayer.strokeColor = nil
-        libFrontCardLayer.fillColor = activePrimary.cgColor
-        libFrontCardLayer.strokeColor = nil
-        libFrontCardLayer.lineWidth = 0.0
-        libBookmarkLayer.fillColor = UIColor.white.cgColor
-        libBookmarkLayer.strokeColor = nil
-      } else {
-        libBackCardLayer.fillColor = inactiveColor.withAlphaComponent(0.46).cgColor
-        libBackCardLayer.strokeColor = nil
-        libMidCardLayer.fillColor = inactiveColor.withAlphaComponent(0.72).cgColor
-        libMidCardLayer.strokeColor = nil
-        libFrontCardLayer.fillColor = nil
-        libFrontCardLayer.strokeColor = inactiveColor.cgColor
-        libFrontCardLayer.lineWidth = 1.85
-        libBookmarkLayer.fillColor = nil
-        libBookmarkLayer.strokeColor = inactiveColor.cgColor
-        libBookmarkLayer.lineWidth = 1.55
-      }
-
-    case .settings:
-      settingsGearLayer.isHidden = false
-      settingsHoleLayer.isHidden = selected
-      settingsJewelLayer.isHidden = !selected
-
-      if selected {
-        settingsGearLayer.path = buildSculptedGearPath(includeInnerHole: true).cgPath
-        settingsGearLayer.fillColor = activePrimary.cgColor
-        settingsGearLayer.strokeColor = nil
-        settingsGearLayer.lineWidth = 0.0
-        settingsJewelLayer.fillColor = activeSecondary.cgColor
-        settingsJewelLayer.strokeColor = nil
-      } else {
-        settingsGearLayer.path = buildSculptedGearPath(includeInnerHole: false).cgPath
-        settingsGearLayer.fillColor = nil
-        settingsGearLayer.strokeColor = inactiveColor.cgColor
-        settingsGearLayer.lineWidth = 1.85
-        settingsHoleLayer.fillColor = nil
-        settingsHoleLayer.strokeColor = inactiveColor.cgColor
-        settingsHoleLayer.lineWidth = 1.75
-      }
-
-    case .fallback:
-      fallbackImageView.isHidden = false
-      let cfg = UIImage.SymbolConfiguration(pointSize: 20.5, weight: selected ? .semibold : .medium)
-      fallbackImageView.image = UIImage(systemName: fallbackSymbol, withConfiguration: cfg)
-      fallbackImageView.tintColor = selected ? activePrimary : inactiveColor
-    }
-    CATransaction.commit()
+    let symbolName = kind.appleSymbolName(selected: selected, fallback: fallbackSymbol)
+    let pointSize: CGFloat = kind == .live ? 19.0 : 20.0
+    let cfg = UIImage.SymbolConfiguration(
+      pointSize: pointSize,
+      weight: selected ? .semibold : .medium,
+      scale: .medium
+    )
+    let img = UIImage(systemName: symbolName, withConfiguration: cfg)
+      ?? UIImage(systemName: fallbackSymbol, withConfiguration: cfg)
+    symbolImageView.image = img?.withRenderingMode(.alwaysTemplate)
+    symbolImageView.tintColor = selected ? activeTint : inactiveTint
   }
 
-  /// Plays this tab's signature tactile spring micro-animation on selection.
+  /// Plays Apple's native SF Symbol effect (iOS 17+) or crisp spring bounce (iOS 14–16).
   func playSelectAnimation() {
     guard !UIAccessibility.isReduceMotionEnabled else { return }
-    let now = canvasLayer.convertTime(CACurrentMediaTime(), from: nil)
-
-    func keyframe(
-      _ keyPath: String,
-      values: [Any],
-      times: [NSNumber],
-      duration: CFTimeInterval,
-      delay: CFTimeInterval = 0.0
-    ) -> CAKeyframeAnimation {
-      let anim = CAKeyframeAnimation(keyPath: keyPath)
-      anim.values = values
-      anim.keyTimes = times
-      anim.duration = duration
-      anim.beginTime = delay > 0 ? now + delay : 0
-      anim.fillMode = .backwards
-      anim.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
-      return anim
+    if #available(iOS 17.0, *) {
+      symbolImageView.addSymbolEffect(.bounce.up.byLayer, options: .nonRepeating, animated: true)
+      return
     }
-
-    switch currentKind {
-    case .home:
-      homeScreenLayer.removeAllAnimations()
-      homePlayLayer.removeAllAnimations()
-      homeStandLayer.removeAllAnimations()
-      homeSparkleLayer.removeAllAnimations()
-
-      homeScreenLayer.add(
-        keyframe("transform.scale", values: [0.82, 1.12, 0.97, 1.0], times: [0, 0.42, 0.76, 1.0], duration: 0.52),
-        forKey: "marcoHomePop"
-      )
-      homePlayLayer.add(
-        keyframe("transform.translation.x", values: [-2.4, 0.9, -0.2, 0.0], times: [0, 0.46, 0.78, 1.0], duration: 0.52),
-        forKey: "marcoHomePlaySlide"
-      )
-      homePlayLayer.add(
-        keyframe("transform.scale", values: [0.55, 1.18, 0.96, 1.0], times: [0, 0.46, 0.78, 1.0], duration: 0.52),
-        forKey: "marcoHomePlayScale"
-      )
-      homeStandLayer.add(
-        keyframe("transform.scale.x", values: [0.38, 1.14, 0.98, 1.0], times: [0, 0.48, 0.78, 1.0], duration: 0.48),
-        forKey: "marcoHomeStand"
-      )
-      homeSparkleLayer.add(
-        keyframe("transform.scale", values: [0.01, 1.35, 0.92, 1.0], times: [0, 0.52, 0.80, 1.0], duration: 0.56, delay: 0.06),
-        forKey: "marcoHomeSparkleScale"
-      )
-      homeSparkleLayer.add(
-        keyframe("transform.rotation.z", values: [-0.78, 0.24, -0.05, 0.0], times: [0, 0.54, 0.82, 1.0], duration: 0.56, delay: 0.06),
-        forKey: "marcoHomeSparkleSpin"
-      )
-
-    case .live:
-      liveBeaconLayer.removeAllAnimations()
-      liveHaloLayer.removeAllAnimations()
-      liveInnerWaveLayer.removeAllAnimations()
-      liveOuterWaveLayer.removeAllAnimations()
-
-      liveBeaconLayer.add(
-        keyframe("transform.scale", values: [0.58, 1.38, 0.94, 1.0], times: [0, 0.38, 0.72, 1.0], duration: 0.54),
-        forKey: "marcoLiveBeacon"
-      )
-      liveHaloLayer.add(
-        keyframe("transform.scale", values: [0.55, 1.72, 1.08, 1.0], times: [0, 0.45, 0.78, 1.0], duration: 0.64),
-        forKey: "marcoLiveHaloScale"
-      )
-      liveHaloLayer.add(
-        keyframe("opacity", values: [0.9, 0.25, 0.85, 1.0], times: [0, 0.48, 0.78, 1.0], duration: 0.64),
-        forKey: "marcoLiveHaloFade"
-      )
-      liveInnerWaveLayer.add(
-        keyframe("transform.scale", values: [0.68, 1.16, 0.98, 1.0], times: [0, 0.48, 0.78, 1.0], duration: 0.50, delay: 0.05),
-        forKey: "marcoLiveInnerScale"
-      )
-      liveInnerWaveLayer.add(
-        keyframe("opacity", values: [0.22, 1.0, 1.0], times: [0, 0.42, 1.0], duration: 0.50, delay: 0.05),
-        forKey: "marcoLiveInnerFade"
-      )
-      liveOuterWaveLayer.add(
-        keyframe("transform.scale", values: [0.64, 1.20, 0.98, 1.0], times: [0, 0.50, 0.80, 1.0], duration: 0.52, delay: 0.13),
-        forKey: "marcoLiveOuterScale"
-      )
-      liveOuterWaveLayer.add(
-        keyframe("opacity", values: [0.12, 1.0, 1.0], times: [0, 0.44, 1.0], duration: 0.52, delay: 0.13),
-        forKey: "marcoLiveOuterFade"
-      )
-
-    case .library:
-      libFrontCardLayer.removeAllAnimations()
-      libBookmarkLayer.removeAllAnimations()
-      libMidCardLayer.removeAllAnimations()
-      libBackCardLayer.removeAllAnimations()
-
-      libFrontCardLayer.add(
-        keyframe("transform.scale", values: [0.86, 1.09, 0.98, 1.0], times: [0, 0.42, 0.76, 1.0], duration: 0.50),
-        forKey: "marcoLibFront"
-      )
-      libBookmarkLayer.add(
-        keyframe("transform.scale.y", values: [0.42, 1.16, 0.96, 1.0], times: [0, 0.46, 0.78, 1.0], duration: 0.50),
-        forKey: "marcoLibBookmark"
-      )
-      libMidCardLayer.add(
-        keyframe("transform.translation.y", values: [3.2, -1.5, 0.3, 0.0], times: [0, 0.46, 0.78, 1.0], duration: 0.52, delay: 0.03),
-        forKey: "marcoLibMidY"
-      )
-      libMidCardLayer.add(
-        keyframe("transform.scale.x", values: [0.84, 1.06, 0.99, 1.0], times: [0, 0.46, 0.78, 1.0], duration: 0.52, delay: 0.03),
-        forKey: "marcoLibMidScale"
-      )
-      libBackCardLayer.add(
-        keyframe("transform.translation.y", values: [5.2, -2.3, 0.4, 0.0], times: [0, 0.48, 0.80, 1.0], duration: 0.54, delay: 0.08),
-        forKey: "marcoLibBackY"
-      )
-      libBackCardLayer.add(
-        keyframe("transform.scale.x", values: [0.74, 1.08, 0.98, 1.0], times: [0, 0.48, 0.80, 1.0], duration: 0.54, delay: 0.08),
-        forKey: "marcoLibBackScale"
-      )
-
-    case .settings:
-      settingsGearLayer.removeAllAnimations()
-      settingsJewelLayer.removeAllAnimations()
-
-      // 60° (pi/3) clockwise turn aligns cleanly with 6-lobe rotational symmetry!
-      let sixtyDeg = CGFloat.pi / 3.0
-      settingsGearLayer.add(
-        keyframe(
-          "transform.rotation.z",
-          values: [0.0, sixtyDeg * 1.18, sixtyDeg * 0.95, sixtyDeg],
-          times: [0, 0.48, 0.78, 1.0],
-          duration: 0.58
-        ),
-        forKey: "marcoSettingsRotate"
-      )
-      settingsGearLayer.add(
-        keyframe("transform.scale", values: [0.86, 1.11, 0.98, 1.0], times: [0, 0.42, 0.76, 1.0], duration: 0.54),
-        forKey: "marcoSettingsScale"
-      )
-      settingsJewelLayer.add(
-        keyframe("transform.scale", values: [0.20, 1.34, 0.94, 1.0], times: [0, 0.48, 0.80, 1.0], duration: 0.54, delay: 0.06),
-        forKey: "marcoSettingsJewel"
-      )
-
-    case .fallback:
-      fallbackImageView.layer.removeAllAnimations()
-      fallbackImageView.layer.add(
-        keyframe("transform.scale", values: [0.84, 1.14, 0.97, 1.0], times: [0, 0.44, 0.76, 1.0], duration: 0.48),
-        forKey: "marcoFallbackBounce"
-      )
-    }
+    symbolImageView.layer.removeAllAnimations()
+    let anim = CAKeyframeAnimation(keyPath: "transform.scale")
+    anim.values = [0.88, 1.08, 0.98, 1.0]
+    anim.keyTimes = [0, 0.42, 0.76, 1.0]
+    anim.duration = 0.42
+    anim.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+    symbolImageView.layer.add(anim, forKey: "marcoAppleSymbolBounce")
   }
 }
 
 /// Fallback capsule for iOS 15–25 (non-Liquid Glass OS versions).
 /// On iOS 26+, `MarcoIos27DockChromeView` renders real `UITabBar` + `UIGlassContainerEffect`
 /// + `UIButton(configuration: .glass())`.
-private final class MarcoNativeLiquidTabCapsuleView: UIView {
+private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuInteractionDelegate {
   struct TabSpec {
     let label: String
     let symbol: String
     let selectedSymbol: String
     let kind: MarcoAnimatedTabIconView.Kind
+    let menuItems: [[String: Any]]
   }
 
   private final class SlotView: UIView {
@@ -3318,8 +3974,17 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
   private var lastScrubTimestamp: TimeInterval = 0
   private var scrubVelocityX: CGFloat = 0
   private let selectionFeedback = UISelectionFeedbackGenerator()
+  private var contextMenuActive: Bool = false
+  // 0.7.9: Dock long-press menus never lift / float the pressed tab. iOS 17.4+
+  // presents the tab UIMenu from an invisible ephemeral anchor button placed
+  // over the pressed slot (no context-menu preview at all); iOS 15–17.3 keeps
+  // UIContextMenuInteraction but targets an invisible 2pt dot so nothing lifts.
+  private var tabMenuLongPress: UILongPressGestureRecognizer?
+  private weak var tabMenuAnchorButton: UIButton?
+  private let legacyMenuAnchorDotView = UIView()
 
   var onSelect: ((Int) -> Void)?
+  var onTabMenuAction: ((Int, String) -> Void)?
 
   override init(frame: CGRect) {
     #if compiler(>=6.2)
@@ -3423,6 +4088,248 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
       slotsStack.leadingAnchor.constraint(equalTo: effectView.contentView.leadingAnchor, constant: 4.0),
       slotsStack.trailingAnchor.constraint(equalTo: effectView.contentView.trailingAnchor, constant: -4.0),
     ])
+
+    if #available(iOS 17.4, *) {
+      // No UIContextMenuInteraction on iOS 17.4+: its targeted preview always
+      // lifts / floats the pressed tab (or the whole Dock). A plain long-press
+      // recognizer presents the tab's UIMenu from an invisible anchor button
+      // placed right over the pressed slot, so the Dock stays in place.
+      let longPress = UILongPressGestureRecognizer(
+        target: self,
+        action: #selector(handleTabMenuLongPress(_:))
+      )
+      longPress.minimumPressDuration = 0.4
+      longPress.allowableMovement = 12.0
+      longPress.cancelsTouchesInView = true
+      longPress.delaysTouchesBegan = false
+      longPress.delaysTouchesEnded = false
+      addGestureRecognizer(longPress)
+      tabMenuLongPress = longPress
+    } else {
+      legacyMenuAnchorDotView.backgroundColor = .clear
+      legacyMenuAnchorDotView.isOpaque = false
+      legacyMenuAnchorDotView.isUserInteractionEnabled = false
+      legacyMenuAnchorDotView.isAccessibilityElement = false
+      legacyMenuAnchorDotView.frame = CGRect(x: 0.0, y: 0.0, width: 2.0, height: 2.0)
+      addSubview(legacyMenuAnchorDotView)
+      let contextMenu = UIContextMenuInteraction(delegate: self)
+      addInteraction(contextMenu)
+    }
+  }
+
+  // MARK: Dock tab long-press menu (no lift / no floating preview)
+
+  private func resetScrubbingForTabMenu() {
+    isScrubbing = false
+    scrubCancelledByExit = false
+    scrubContinuousSlot = nil
+    lastScrubX = nil
+    scrubVelocityX = 0
+    highlightedIndex = selectedIndex
+    scrubbingLensShadowView.layer.removeAllAnimations()
+    applySlotAppearances(activeIndex: selectedIndex)
+    positionLens(slotPosition: CGFloat(selectedIndex), animated: true, lifted: false)
+  }
+
+  private func tabMenuSlotRect(for idx: Int) -> CGRect? {
+    guard let metrics = lensMetrics(for: CGFloat(idx)) else { return nil }
+    return CGRect(
+      x: metrics.center.x - metrics.bounds.width * 0.5,
+      y: metrics.center.y - metrics.bounds.height * 0.5,
+      width: metrics.bounds.width,
+      height: metrics.bounds.height
+    )
+  }
+
+  private func tearDownTabMenuAnchor() {
+    if let btn = tabMenuAnchorButton {
+      btn.removeFromSuperview()
+    }
+    tabMenuAnchorButton = nil
+    contextMenuActive = false
+  }
+
+  override func willMove(toWindow newWindow: UIWindow?) {
+    super.willMove(toWindow: newWindow)
+    if newWindow == nil {
+      tearDownTabMenuAnchor()
+    }
+  }
+
+  override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+    let hit = super.hitTest(point, with: event)
+    // The ephemeral menu anchor must never swallow later Dock taps.
+    if let hit = hit, hit is MarcoEphemeralMenuAnchorButton {
+      return self
+    }
+    return hit
+  }
+
+  override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+    guard let longPress = tabMenuLongPress, gestureRecognizer === longPress else {
+      return super.gestureRecognizerShouldBegin(gestureRecognizer)
+    }
+    guard !specs.isEmpty, !isHidden, alpha > 0.5, window != nil else { return false }
+    let (idx, _) = indexForX(longPress.location(in: self).x)
+    guard idx >= 0, idx < specs.count else { return false }
+    return !specs[idx].menuItems.isEmpty
+  }
+
+  @objc private func handleTabMenuLongPress(_ gesture: UILongPressGestureRecognizer) {
+    guard gesture.state == .began else { return }
+    let (idx, _) = indexForX(gesture.location(in: self).x)
+    if #available(iOS 17.4, *) {
+      presentTabMenuAnchored(at: idx)
+    }
+  }
+
+  @available(iOS 17.4, *)
+  private func presentTabMenuAnchored(at idx: Int) {
+    guard idx >= 0, idx < specs.count, window != nil else { return }
+    let rawItems = specs[idx].menuItems
+    guard !rawItems.isEmpty, let slotRect = tabMenuSlotRect(for: idx) else { return }
+    tearDownTabMenuAnchor()
+    resetScrubbingForTabMenu()
+    guard let menu = MarcoLiquidGlassSupport.buildMenu(title: "", rawItems: rawItems, onSelect: { [weak self] actionId in
+      self?.onTabMenuAction?(idx, actionId)
+    }) else {
+      return
+    }
+    let anchorBtn = MarcoEphemeralMenuAnchorButton(type: .system)
+    // Position the ephemeral 2pt anchor strictly ABOVE the top rim of the
+    // bottom Dock capsule (or below the top bar when docked at the top on wide
+    // landscape iPad) so UIKit UIMenu always pops upward above the Dock instead
+    // of aligning its bottom edge with slotRect.maxY and occluding the Dock.
+    let globalOriginY = convert(CGPoint.zero, to: nil).y
+    let anchorY: CGFloat = globalOriginY < 140.0 ? (bounds.height + 8.0) : -10.0
+    let anchorW: CGFloat = min(max(slotRect.width * 0.36, 16.0), 28.0)
+    anchorBtn.frame = CGRect(
+      x: slotRect.midX - anchorW * 0.5,
+      y: anchorY,
+      width: anchorW,
+      height: 2.0
+    )
+    anchorBtn.backgroundColor = .clear
+    anchorBtn.tintColor = .clear
+    anchorBtn.alpha = 0.02
+    anchorBtn.isAccessibilityElement = false
+    anchorBtn.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    if #available(iOS 16.0, *) {
+      anchorBtn.preferredMenuElementOrder = .fixed
+    }
+    anchorBtn.menu = menu
+    anchorBtn.showsMenuAsPrimaryAction = true
+    anchorBtn.onMenuEnded = { [weak self, weak anchorBtn] in
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak anchorBtn] in
+        guard let self = self else {
+          anchorBtn?.removeFromSuperview()
+          return
+        }
+        if let btn = anchorBtn, self.tabMenuAnchorButton === btn {
+          self.tearDownTabMenuAnchor()
+        } else {
+          anchorBtn?.removeFromSuperview()
+        }
+      }
+    }
+    addSubview(anchorBtn)
+    tabMenuAnchorButton = anchorBtn
+    contextMenuActive = true
+    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    anchorBtn.performPrimaryAction()
+  }
+
+  // iOS 15–17.3 fallback: UIContextMenuInteraction with an invisible preview.
+
+  func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction,
+    configurationForMenuAtLocation location: CGPoint
+  ) -> UIContextMenuConfiguration? {
+    guard !specs.isEmpty, !isHidden, alpha > 0.5 else { return nil }
+    let (idx, _) = indexForX(location.x)
+    guard idx >= 0, idx < specs.count else { return nil }
+    let rawItems = specs[idx].menuItems
+    guard !rawItems.isEmpty else { return nil }
+    contextMenuActive = true
+    resetScrubbingForTabMenu()
+    return UIContextMenuConfiguration(identifier: NSNumber(value: idx), previewProvider: nil) { [weak self] _ in
+      guard let self = self else { return nil }
+      return MarcoLiquidGlassSupport.buildMenu(title: "", rawItems: rawItems) { [weak self] actionId in
+        self?.onTabMenuAction?(idx, actionId)
+      }
+    }
+  }
+
+  private func invisibleTabMenuPreview(for configuration: UIContextMenuConfiguration) -> UITargetedPreview? {
+    guard let num = configuration.identifier as? NSNumber, window != nil else { return nil }
+    guard let slotRect = tabMenuSlotRect(for: num.intValue) else { return nil }
+    let dot = legacyMenuAnchorDotView
+    if dot.superview !== self {
+      addSubview(dot)
+    }
+    let globalOriginY = convert(CGPoint.zero, to: nil).y
+    let dotY: CGFloat = globalOriginY < 140.0 ? (bounds.height + 8.0) : -10.0
+    dot.frame = CGRect(x: slotRect.midX - 1.0, y: dotY, width: 2.0, height: 2.0)
+    let params = UIPreviewParameters()
+    params.backgroundColor = .clear
+    params.visiblePath = UIBezierPath(rect: dot.bounds)
+    params.shadowPath = UIBezierPath()
+    return UITargetedPreview(view: dot, parameters: params)
+  }
+
+  @available(iOS 16.0, *)
+  func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction,
+    configuration: UIContextMenuConfiguration,
+    highlightPreviewForItemWithIdentifier identifier: any NSCopying
+  ) -> UITargetedPreview? {
+    return invisibleTabMenuPreview(for: configuration)
+  }
+
+  @available(iOS 16.0, *)
+  func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction,
+    configuration: UIContextMenuConfiguration,
+    dismissalPreviewForItemWithIdentifier identifier: any NSCopying
+  ) -> UITargetedPreview? {
+    return invisibleTabMenuPreview(for: configuration)
+  }
+
+  func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction,
+    previewForHighlightingMenuWithConfiguration configuration: UIContextMenuConfiguration
+  ) -> UITargetedPreview? {
+    return invisibleTabMenuPreview(for: configuration)
+  }
+
+  func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction,
+    previewForDismissingMenuWithConfiguration configuration: UIContextMenuConfiguration
+  ) -> UITargetedPreview? {
+    return invisibleTabMenuPreview(for: configuration)
+  }
+
+  func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction,
+    willDisplayMenuFor configuration: UIContextMenuConfiguration,
+    animator: UIContextMenuInteractionAnimating?
+  ) {
+    contextMenuActive = true
+  }
+
+  func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction,
+    willEndFor configuration: UIContextMenuConfiguration,
+    animator: UIContextMenuInteractionAnimating?
+  ) {
+    let finish: () -> Void = { [weak self] in
+      self?.contextMenuActive = false
+    }
+    if let animator = animator {
+      animator.addCompletion(finish)
+    } else {
+      finish()
+    }
   }
 
   @available(*, unavailable)
@@ -3476,14 +4383,14 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
   private func applySlotAppearances(activeIndex: Int) {
     let dark = MarcoLiquidGlassSupport.isEffectiveDark(for: self)
     let activeLabelColor: UIColor = dark
-      ? UIColor(red: 0.36, green: 0.72, blue: 1.0, alpha: 1.0)
+      ? UIColor(red: 0.039, green: 0.518, blue: 1.0, alpha: 1.0)
       : UIColor.systemBlue
     let inactiveLabelColor: UIColor = dark
-      ? UIColor.white.withAlphaComponent(0.70)
-      : UIColor(red: 0.17, green: 0.19, blue: 0.23, alpha: 0.76)
+      ? UIColor.white.withAlphaComponent(0.76)
+      : UIColor(white: 0.10, alpha: 0.82)
     selectionLensView.layer.borderColor = (dark
-      ? UIColor(red: 0.55, green: 0.80, blue: 1.0, alpha: 0.28)
-      : UIColor(red: 0.0, green: 0.48, blue: 1.0, alpha: 0.16)).cgColor
+      ? UIColor.white.withAlphaComponent(0.14)
+      : UIColor.black.withAlphaComponent(0.05)).cgColor
     scrubbingLensShadowView.layer.shadowOpacity = dark ? 0.34 : 0.16
     #if compiler(>=6.2)
     if #available(iOS 26.0, *) {
@@ -3554,8 +4461,8 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
       self.selectionLensView.transform = .identity
       let dark = MarcoLiquidGlassSupport.isEffectiveDark(for: self)
       self.selectionLensView.backgroundColor = dark
-        ? UIColor(red: 0.22, green: 0.58, blue: 1.0, alpha: 0.22)
-        : UIColor(red: 0.0, green: 0.48, blue: 1.0, alpha: 0.12)
+        ? UIColor.white.withAlphaComponent(0.14)
+        : UIColor.black.withAlphaComponent(0.065)
       self.selectionLensView.alpha = lifted ? 0.0 : 1.0
 
       self.scrubbingLensShadowView.bounds = liftedBounds
@@ -3574,10 +4481,13 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
       #else
       self.scrubbingLensEffectView.layer.cornerRadius = liftedBounds.height * 0.5
       #endif
-      self.scrubbingLensShadowView.transform = CGAffineTransform(scaleX: stretchX, y: stretchY)
+      let reduceMotion = UIAccessibility.isReduceMotionEnabled
+      self.scrubbingLensShadowView.transform = reduceMotion
+        ? .identity
+        : CGAffineTransform(scaleX: stretchX, y: stretchY)
       self.scrubbingLensShadowView.alpha = lifted ? 1.0 : 0.0
     }
-    if animated {
+    if animated && !UIAccessibility.isReduceMotionEnabled {
       UIView.animate(
         withDuration: lifted ? 0.20 : 0.34,
         delay: 0,
@@ -3618,14 +4528,44 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
     return (discrete, continuous)
   }
 
+  func setScrollCollapseProgress(_ rawProgress: CGFloat) {
+    let p = max(0.0, min(rawProgress, 1.0))
+    let count = max(slotViews.count, 1)
+    let spanW = max(bounds.width, 1.0)
+    for (idx, slot) in slotViews.enumerated() {
+      // Stagger left-to-right so leftmost tabs roll rightward into the Search
+      // circle first while rightmost tabs follow cleanly in linear lockstep.
+      let frac = CGFloat(idx) / CGFloat(max(count - 1, 1))
+      let slotP = max(0.0, min((p - frac * 0.18) / 0.82, 1.0))
+      let pullX = (1.0 - frac * 0.45) * spanW * 0.24 * slotP
+      let scale = max(0.32, 1.0 - 0.62 * slotP)
+      slot.transform = CGAffineTransform(translationX: pullX, y: 0.0).scaledBy(x: scale, y: scale)
+      slot.alpha = max(0.0, 1.0 - slotP * 1.15)
+    }
+    selectionLensView.alpha = isScrubbing ? 0.0 : max(0.0, 1.0 - p * 1.35)
+  }
+
+  private var scrubCancelledByExit: Bool = false
+
+  private func isTouchInsideCommitZone(_ pt: CGPoint) -> Bool {
+    return bounds.insetBy(dx: -24.0, dy: -28.0).contains(pt)
+  }
+
   override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-    super.touchesBegan(touches, with: event)
+    // Intentionally do NOT call super.touchesBegan: forwarding up the responder
+    // chain leaks Dock taps directly into FlutterView behind the overlay.
     guard let touch = touches.first, !specs.isEmpty else { return }
+    if tabMenuAnchorButton != nil {
+      // A menu anchor that outlived its menu must never wedge later taps.
+      tearDownTabMenuAnchor()
+    }
+    contextMenuActive = false
     selectionFeedback.prepare()
     let pt = touch.location(in: self)
     let (idx, _) = indexForX(pt.x)
     let prevHighlighted = highlightedIndex
     isScrubbing = true
+    scrubCancelledByExit = false
     highlightedIndex = idx
     scrubContinuousSlot = CGFloat(idx)
     lastScrubX = pt.x
@@ -3639,9 +4579,22 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
   }
 
   override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-    super.touchesMoved(touches, with: event)
+    // Intentionally absorb scrubbing touches so underlying Flutter scrollables
+    // and carousels never drag simultaneously with the Dock.
     guard isScrubbing, let touch = touches.first, !specs.isEmpty else { return }
     let pt = touch.location(in: self)
+    if !isTouchInsideCommitZone(pt) {
+      if !scrubCancelledByExit {
+        scrubCancelledByExit = true
+        scrubContinuousSlot = nil
+        scrubVelocityX = 0
+        highlightedIndex = selectedIndex
+        applySlotAppearances(activeIndex: selectedIndex)
+        positionLens(slotPosition: CGFloat(selectedIndex), animated: true, lifted: false)
+      }
+      return
+    }
+    scrubCancelledByExit = false
     if let prevX = lastScrubX {
       let dt = max(touch.timestamp - lastScrubTimestamp, 0.008)
       let instantV = (pt.x - prevX) / CGFloat(dt)
@@ -3663,10 +4616,25 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
   }
 
   override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-    super.touchesEnded(touches, with: event)
+    // Intentionally absorb touch release so underlying Flutter items never fire.
     guard isScrubbing else { return }
+    let finalPt = touches.first?.location(in: self)
+    let releasedOutside = scrubCancelledByExit
+      || (finalPt != nil && !isTouchInsideCommitZone(finalPt!))
+    if contextMenuActive || releasedOutside {
+      isScrubbing = false
+      scrubCancelledByExit = false
+      scrubContinuousSlot = nil
+      lastScrubX = nil
+      scrubVelocityX = 0
+      highlightedIndex = selectedIndex
+      applySlotAppearances(activeIndex: selectedIndex)
+      positionLens(slotPosition: CGFloat(selectedIndex), animated: true, lifted: false)
+      return
+    }
     let target = highlightedIndex
     isScrubbing = false
+    scrubCancelledByExit = false
     scrubContinuousSlot = nil
     lastScrubX = nil
     scrubVelocityX = 0
@@ -3684,9 +4652,10 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
   }
 
   override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-    super.touchesCancelled(touches, with: event)
+    // Intentionally absorb cancellation without forwarding to FlutterView.
     guard isScrubbing else { return }
     isScrubbing = false
+    scrubCancelledByExit = false
     scrubContinuousSlot = nil
     lastScrubX = nil
     scrubVelocityX = 0
@@ -3699,6 +4668,11 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
 private final class MarcoIos27PassthroughChromeView: UIView {
   weak var chromeView: UIView?
   weak var glassContainerView: UIVisualEffectView?
+
+  override func didMoveToSuperview() {
+    super.didMoveToSuperview()
+    layer.zPosition = 1000.0
+  }
 
   override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
     guard !isHidden, alpha > 0.01, isUserInteractionEnabled else { return nil }
@@ -3725,6 +4699,12 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
   private(set) var isMinimized: Bool = false
   private(set) var isChromeVisible: Bool = true
   private var minimizeProgress: CGFloat = 0.0
+  private var morphDisplayLink: CADisplayLink?
+  private var morphStartTime: CFTimeInterval = 0
+  private var morphDuration: CFTimeInterval = 0.26
+  private var morphFromProgress: CGFloat = 0.0
+  private var morphToProgress: CGFloat = 0.0
+  private var morphGeneration: Int = 0
   var showSearchButton: Bool = true {
     didSet {
       updateVisibilityState()
@@ -3738,6 +4718,7 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
   var onSelectTab: ((Int) -> Void)?
   var onSearchTapped: (() -> Void)?
   var onScrollToTopTapped: (() -> Void)?
+  var onTabMenuAction: ((Int, String) -> Void)?
 
   private var usesNativeGlass26: Bool {
     #if compiler(>=6.2)
@@ -3785,26 +4766,21 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
       contentParent = fallbackContainerView
     }
 
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      nativeTabBar.delegate = self
-      nativeTabBar.isTranslucent = true
-      nativeTabBar.itemPositioning = .fill
-      nativeTabBar.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
-      nativeTabBar.cornerConfiguration = .capsule()
-      contentParent.addSubview(nativeTabBar)
-    } else {
-      contentParent.addSubview(legacyTabCapsule)
-    }
-    #else
+    // Always mount the custom height-matched Liquid Glass tab capsule (which
+    // uses native UIGlassEffect(style: .regular) + .capsule() + interactive
+    // scrubbing lens on iOS 26+, and crisp blur material on iOS 14–25) so the
+    // 4-tab capsule strictly matches the circular Search button's exact height
+    // and displays our redesigned vector icons across every iOS & iPadOS version.
     contentParent.addSubview(legacyTabCapsule)
-    #endif
 
     legacyTabCapsule.onSelect = { [weak self] idx in
       guard let self = self else { return }
       self.selectedIndex = idx
       self.rebuildLogoMenu()
       self.onSelectTab?(idx)
+    }
+    legacyTabCapsule.onTabMenuAction = { [weak self] idx, actionId in
+      self?.onTabMenuAction?(idx, actionId)
     }
 
     configureGlassCircleButton(
@@ -3816,6 +4792,7 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
       accessibilityLabel: "搜索"
     )
     searchButton.addTarget(self, action: #selector(handleSearchTap), for: .touchUpInside)
+    searchButton.isExclusiveTouch = true
     contentParent.addSubview(searchButton)
 
     configureGlassCircleButton(
@@ -3824,10 +4801,12 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
       accessibilityLabel: "快捷导航"
     )
     logoButton.showsMenuAsPrimaryAction = true
+    logoButton.isExclusiveTouch = true
     logoButton.alpha = 0.0
     logoButton.isUserInteractionEnabled = false
-    logoButton.transform = CGAffineTransform(scaleX: 0.55, y: 0.55)
+    logoButton.transform = CGAffineTransform(rotationAngle: -.pi)
     contentParent.addSubview(logoButton)
+    rebuildLogoMenu()
 
     NotificationCenter.default.addObserver(
       self,
@@ -3844,7 +4823,24 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
   }
 
   deinit {
+    stopMorphAnimation()
     NotificationCenter.default.removeObserver(self)
+  }
+
+  override func willMove(toWindow newWindow: UIWindow?) {
+    super.willMove(toWindow: newWindow)
+    // Never leave a CADisplayLink ticking at 120 Hz for a dock that is no
+    // longer attached to a window: snap straight to the pending morph target.
+    if newWindow == nil, morphDisplayLink != nil {
+      let target = morphToProgress
+      stopMorphAnimation()
+      minimizeProgress = target
+      isMinimized = target >= 0.5
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      applyScrollMorph(progress: target)
+      CATransaction.commit()
+    }
   }
 
   @available(*, unavailable)
@@ -3864,6 +4860,14 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
     }
     return hit
   }
+
+  // Secondary responder-chain firewall: once a touch hit-tests onto an active
+  // Dock control (capsule or circular button), never let it propagate further
+  // up to MarcoIos27PassthroughChromeView / FlutterView.
+  override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {}
+  override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {}
+  override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {}
+  override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {}
 
   override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
     super.traitCollectionDidChange(previousTraitCollection)
@@ -3896,15 +4900,24 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
     }
     #endif
     let dark = MarcoLiquidGlassSupport.isEffectiveDark(for: self)
-    var cfg = UIButton.Configuration.filled()
-    cfg.image = image
-    cfg.baseForegroundColor = fg
-    cfg.baseBackgroundColor = dark
+    let bg = dark
       ? UIColor(white: 0.16, alpha: 0.88)
       : UIColor(white: 0.98, alpha: 0.92)
-    cfg.cornerStyle = .capsule
-    cfg.contentInsets = .zero
-    button.configuration = cfg
+    if #available(iOS 15.0, *) {
+      var cfg = UIButton.Configuration.filled()
+      cfg.image = image
+      cfg.baseForegroundColor = fg
+      cfg.baseBackgroundColor = bg
+      cfg.cornerStyle = .capsule
+      cfg.contentInsets = .zero
+      button.configuration = cfg
+    } else {
+      button.setImage(image, for: .normal)
+      button.tintColor = fg
+      button.backgroundColor = bg
+      button.layer.cornerRadius = (button.bounds.height > 1.0 ? button.bounds.height : 62.0) * 0.5
+      button.layer.masksToBounds = true
+    }
   }
 
   @objc private func handleAppearanceChanged() {
@@ -3925,11 +4938,28 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
       image: MarcoLiquidGlassSupport.brandLogoImage,
       accessibilityLabel: "快捷导航"
     )
+    logoButton.showsMenuAsPrimaryAction = true
+    rebuildLogoMenu()
   }
 
   @objc private func handleSceneActivationChanged() {
     let active = MarcoLiquidGlassSupport.isSceneActive
-    let targetAlpha: CGFloat = isChromeVisible ? (active ? 1.0 : 0.86) : 0.0
+    if !active, morphDisplayLink != nil {
+      let target = morphToProgress
+      stopMorphAnimation()
+      minimizeProgress = target
+      isMinimized = target >= 0.5
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      applyScrollMorph(progress: target)
+      CATransaction.commit()
+    }
+    guard isChromeVisible else {
+      self.alpha = 0.0
+      self.isHidden = true
+      return
+    }
+    let targetAlpha: CGFloat = active ? 1.0 : 0.86
     UIView.animate(withDuration: 0.18) {
       self.alpha = targetAlpha
     }
@@ -3959,11 +4989,13 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
         symbol: symbol,
         label: title
       )
+      let menuItems = (item["menuItems"] as? [[String: Any]]) ?? []
       return MarcoNativeLiquidTabCapsuleView.TabSpec(
         label: title,
         symbol: symbol,
         selectedSymbol: selectedSymbol,
-        kind: kind
+        kind: kind,
+        menuItems: menuItems
       )
     }
     tabSpecs = specs
@@ -4006,25 +5038,85 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
   }
 
   private func activeTabView() -> UIView {
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      return nativeTabBar
-    }
-    #endif
     return legacyTabCapsule
   }
 
-  func updateScrollMinimizeProgress(_ rawProgress: CGFloat) {
+  private func stopMorphAnimation() {
+    morphGeneration += 1
+    morphDisplayLink?.invalidate()
+    morphDisplayLink = nil
+  }
+
+  private func startMorphAnimation(to targetProgress: CGFloat, duration: CFTimeInterval = 0.26) {
+    stopMorphAnimation()
+    let clampedTarget = max(0.0, min(targetProgress, 1.0))
+    if UIAccessibility.isReduceMotionEnabled
+      || !isChromeVisible
+      || isHidden
+      || window == nil
+      || !MarcoLiquidGlassSupport.isSceneActive
+      || MarcoLiquidGlassSupport.isThermalThrottled
+      || abs(minimizeProgress - clampedTarget) <= 0.004 {
+      minimizeProgress = clampedTarget
+      isMinimized = clampedTarget >= 0.5
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      applyScrollMorph(progress: clampedTarget)
+      CATransaction.commit()
+      return
+    }
+    morphFromProgress = minimizeProgress
+    morphToProgress = clampedTarget
+    morphDuration = max(0.12, duration)
+    morphStartTime = CACurrentMediaTime()
+    let link = CADisplayLink(target: self, selector: #selector(handleMorphDisplayLink(_:)))
+    if #available(iOS 15.0, *) {
+      link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+    }
+    link.add(to: .main, forMode: .common)
+    morphDisplayLink = link
+  }
+
+  @objc private func handleMorphDisplayLink(_ link: CADisplayLink) {
+    let elapsed = CACurrentMediaTime() - morphStartTime
+    let rawT = min(1.0, max(0.0, elapsed / morphDuration))
+    // Cubic ease-out for crisp, smooth settling without overshoot on rotation.
+    let inv = 1.0 - rawT
+    let eased = CGFloat(1.0 - inv * inv * inv)
+    let nextP = morphFromProgress + (morphToProgress - morphFromProgress) * eased
+    minimizeProgress = nextP
+    isMinimized = nextP >= 0.5
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    applyScrollMorph(progress: nextP)
+    CATransaction.commit()
+    if rawT >= 1.0 {
+      minimizeProgress = morphToProgress
+      isMinimized = morphToProgress >= 0.5
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      applyScrollMorph(progress: morphToProgress)
+      CATransaction.commit()
+      stopMorphAnimation()
+    }
+  }
+
+  private func applyScrollMorph(progress rawProgress: CGFloat) {
     let p = max(0.0, min(rawProgress, 1.0))
-    minimizeProgress = p
-    let minimizedTarget = p >= 0.5
-    isMinimized = minimizedTarget
+    guard bounds.width > 1.0, logoButton.bounds.width > 1.0 else { return }
     let tabView = activeTabView()
+    let settledCollapsed = p >= 0.995
+    let settledExpanded = p <= 0.005
     let targetCenterX = logoButton.center.x
-    let tabShift = (targetCenterX - tabView.center.x) * 0.42 * p
-    let tabScale = 1.0 - 0.55 * p
-    let searchScale = 1.0 - 0.55 * p
-    let logoScale = 0.55 + 0.45 * p
+    let dx = targetCenterX - tabView.center.x
+    let tabTx = dx * p
+    let tabScaleX = max(0.08, 1.0 - 0.90 * p)
+    let tabScaleY = max(0.28, 1.0 - 0.62 * p)
+    let spinScale: CGFloat = (settledCollapsed || settledExpanded) ? 1.0 : (1.0 - 0.08 * sin(p * .pi))
+    let searchAngle: CGFloat = settledExpanded ? 0.0 : p * .pi
+    let logoAngle: CGFloat = settledCollapsed ? 0.0 : (p - 1.0) * .pi
+    let searchAlpha: CGFloat = (showSearchButton && !settledCollapsed) ? max(0.0, min(1.0, (0.62 - p) / 0.28)) : 0.0
+    let logoAlpha: CGFloat = settledCollapsed ? 1.0 : max(0.0, min(1.0, (p - 0.34) / 0.28))
 
     #if compiler(>=6.2)
     if #available(iOS 26.0, *), let glassEffect = glassContainerView?.effect as? UIGlassContainerEffect {
@@ -4032,66 +5124,73 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
     }
     #endif
 
-    tabView.alpha = max(0.0, 1.0 - p * 1.15)
-    tabView.transform = CGAffineTransform(translationX: tabShift, y: 0).scaledBy(x: tabScale, y: tabScale)
-    searchButton.alpha = showSearchButton ? max(0.0, 1.0 - p * 1.15) : 0.0
-    searchButton.transform = CGAffineTransform(scaleX: searchScale, y: searchScale)
-    logoButton.alpha = max(0.0, (p - 0.2) / 0.8)
-    logoButton.transform = CGAffineTransform(scaleX: logoScale, y: logoScale)
+    legacyTabCapsule.setScrollCollapseProgress(p)
+    tabView.isHidden = settledCollapsed
+    tabView.alpha = settledCollapsed ? 0.0 : max(0.0, 1.0 - p * 1.15)
+    tabView.transform = settledExpanded
+      ? .identity
+      : CGAffineTransform(translationX: tabTx, y: 0.0).scaledBy(x: tabScaleX, y: tabScaleY)
 
-    tabView.isUserInteractionEnabled = !minimizedTarget
-    searchButton.isUserInteractionEnabled = !minimizedTarget && showSearchButton
-    logoButton.isUserInteractionEnabled = minimizedTarget
+    searchButton.isHidden = !showSearchButton || settledCollapsed
+    searchButton.alpha = searchAlpha
+    searchButton.transform = settledExpanded
+      ? .identity
+      : CGAffineTransform(rotationAngle: searchAngle).scaledBy(x: spinScale, y: spinScale)
+
+    logoButton.isHidden = settledExpanded
+    logoButton.alpha = logoAlpha
+    logoButton.transform = settledCollapsed
+      ? .identity
+      : CGAffineTransform(rotationAngle: logoAngle).scaledBy(x: spinScale, y: spinScale)
+
+    tabView.isUserInteractionEnabled = !settledCollapsed && p < 0.35
+    searchButton.isUserInteractionEnabled = !settledCollapsed && p < 0.5 && showSearchButton
+    logoButton.isUserInteractionEnabled = settledCollapsed || p >= 0.5
+  }
+
+  func updateScrollMinimizeProgress(_ rawProgress: CGFloat) {
+    stopMorphAnimation()
+    let p = max(0.0, min(rawProgress, 1.0))
+    minimizeProgress = p
+    isMinimized = p >= 0.5
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    applyScrollMorph(progress: p)
+    CATransaction.commit()
   }
 
   func setMinimized(_ minimized: Bool, animated: Bool) {
-    guard minimized != isMinimized || (minimized ? minimizeProgress < 0.99 : minimizeProgress > 0.01) else {
-      return
-    }
+    let targetProgress: CGFloat = minimized ? 1.0 : 0.0
     isMinimized = minimized
-    minimizeProgress = minimized ? 1.0 : 0.0
-    let tabView = activeTabView()
-    let targetCenterX = logoButton.center.x
-    let tabShift = targetCenterX - tabView.center.x
-
-    let apply = {
-      #if compiler(>=6.2)
-      if #available(iOS 26.0, *), let glassEffect = self.glassContainerView?.effect as? UIGlassContainerEffect {
-        glassEffect.spacing = minimized ? 0.0 : 10.0
-      }
-      #endif
-      if minimized {
-        tabView.alpha = 0.0
-        tabView.transform = CGAffineTransform(translationX: tabShift * 0.42, y: 0).scaledBy(x: 0.45, y: 0.45)
-        self.searchButton.alpha = 0.0
-        self.searchButton.transform = CGAffineTransform(scaleX: 0.45, y: 0.45)
-        self.logoButton.alpha = 1.0
-        self.logoButton.transform = .identity
-      } else {
-        tabView.alpha = 1.0
-        tabView.transform = .identity
-        self.searchButton.alpha = self.showSearchButton ? 1.0 : 0.0
-        self.searchButton.transform = .identity
-        self.logoButton.alpha = 0.0
-        self.logoButton.transform = CGAffineTransform(scaleX: 0.55, y: 0.55)
-      }
-    }
-
-    tabView.isUserInteractionEnabled = !minimized
-    searchButton.isUserInteractionEnabled = !minimized && showSearchButton
-    logoButton.isUserInteractionEnabled = minimized
-
     if animated {
-      MarcoLiquidGlassSupport.animateSpring(duration: 0.38, bounce: 0.16, animations: apply)
+      startMorphAnimation(to: targetProgress, duration: 0.26)
     } else {
-      apply()
+      stopMorphAnimation()
+      minimizeProgress = targetProgress
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      applyScrollMorph(progress: targetProgress)
+      CATransaction.commit()
     }
   }
 
   func setRootDockVisible(_ visible: Bool, animated: Bool) {
     isChromeVisible = visible
     isUserInteractionEnabled = visible
-    let isTopWide = isRootHost && adaptiveTopOnWide && (bounds.width >= 600.0 || bounds.width > bounds.height)
+    if !visible, morphDisplayLink != nil {
+      let target = morphToProgress
+      stopMorphAnimation()
+      minimizeProgress = target
+      isMinimized = target >= 0.5
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      applyScrollMorph(progress: target)
+      CATransaction.commit()
+    }
+    if visible {
+      self.isHidden = false
+    }
+    let isTopWide = isRootHost && adaptiveTopOnWide && (bounds.width > bounds.height && bounds.width >= 600.0)
     let hiddenOffsetY: CGFloat = isTopWide ? -96.0 : 120.0
     let targetTransform = visible ? CGAffineTransform.identity : CGAffineTransform(translationX: 0.0, y: hiddenOffsetY)
     let targetAlpha: CGFloat = visible ? (MarcoLiquidGlassSupport.isSceneActive ? 1.0 : 0.86) : 0.0
@@ -4101,10 +5200,16 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
       host.transform = targetTransform
       self.alpha = targetAlpha
     }
-    if animated {
-      MarcoLiquidGlassSupport.animateSpring(duration: 0.38, bounce: 0.16, animations: apply)
+    if animated && MarcoLiquidGlassSupport.isSceneActive {
+      MarcoLiquidGlassSupport.animateSpring(duration: 0.38, bounce: 0.16, animations: apply) { [weak self] in
+        guard let self = self, !self.isChromeVisible else { return }
+        self.isHidden = true
+      }
     } else {
       apply()
+      if !visible {
+        self.isHidden = true
+      }
     }
   }
 
@@ -4165,7 +5270,7 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
 
     // Determine whether we are embedded inside a 76pt PlatformView slice or full-screen root host.
     let isEmbeddedSlice = !isRootHost || totalH <= 140.0
-    let isWideTopLayout = !isEmbeddedSlice && adaptiveTopOnWide && (totalW >= 600.0 || totalW > totalH)
+    let isWideTopLayout = !isEmbeddedSlice && adaptiveTopOnWide && (totalW > totalH && totalW >= 600.0)
 
     let chromeBounds: CGRect
     if isEmbeddedSlice {
@@ -4206,6 +5311,12 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
     let rightCenterX = rowX + maxRowWidth - outerMargin - dockSize * 0.5
     logoButton.bounds = CGRect(x: 0, y: 0, width: dockSize, height: dockSize)
     logoButton.center = CGPoint(x: rightCenterX, y: centerY)
+    if #available(iOS 15.0, *) {
+      // Capsule corner radius handled by UIButton.Configuration.
+    } else {
+      logoButton.layer.cornerRadius = dockSize * 0.5
+      searchButton.layer.cornerRadius = dockSize * 0.5
+    }
 
     if showSearchButton {
       searchButton.bounds = CGRect(x: 0, y: 0, width: dockSize, height: dockSize)
@@ -4227,16 +5338,42 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
     let contentParent = glassContainerView?.contentView ?? fallbackContainerView
     contentParent.bringSubviewToFront(searchButton)
     contentParent.bringSubviewToFront(logoButton)
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    applyScrollMorph(progress: minimizeProgress)
+    CATransaction.commit()
   }
 }
 
 private final class MarcoIos27RootTabChromeController: NSObject {
-  static let shared = MarcoIos27RootTabChromeController()
+  private static var _sharedInstance: MarcoIos27RootTabChromeController?
+  static var existingInstance: MarcoIos27RootTabChromeController? {
+    return _sharedInstance
+  }
+  static var shared: MarcoIos27RootTabChromeController {
+    if let existing = _sharedInstance {
+      return existing
+    }
+    let created = MarcoIos27RootTabChromeController()
+    _sharedInstance = created
+    return created
+  }
 
   private let overlayView = MarcoIos27PassthroughChromeView(frame: .zero)
   private let chromeView = MarcoIos27DockChromeView(isRootHost: true, frame: .zero)
   private var observers: [NSObjectProtocol] = []
   private weak var attachedHostView: UIView?
+  private var isConfigured: Bool = false
+  private var latestEpoch: Int = 0
+
+  private func acceptEpoch(_ epoch: Int?) -> Bool {
+    guard let e = epoch else { return true }
+    if e < latestEpoch {
+      return false
+    }
+    latestEpoch = e
+    return true
+  }
 
   private override init() {
     super.init()
@@ -4259,6 +5396,12 @@ private final class MarcoIos27RootTabChromeController: NSObject {
     chromeView.onScrollToTopTapped = {
       MarcoLiquidGlassSupport.bridgeChannel?.invokeMethod("rootTabScrollToTop", arguments: nil)
     }
+    chromeView.onTabMenuAction = { idx, actionId in
+      MarcoLiquidGlassSupport.bridgeChannel?.invokeMethod(
+        "rootTabMenuAction",
+        arguments: ["tabIndex": idx, "actionId": actionId]
+      )
+    }
 
     observers.append(
       NotificationCenter.default.addObserver(
@@ -4278,31 +5421,68 @@ private final class MarcoIos27RootTabChromeController: NSObject {
   }
 
   private func attachToRootIfNeeded() {
-    guard let rootVC = MarcoLiquidGlassSupport.activeWindow()?.rootViewController,
+    guard MarcoLiquidGlassSupport.isAvailable, isConfigured else { return }
+    guard let window = MarcoLiquidGlassSupport.activeWindow(),
+          let rootVC = window.rootViewController,
           let rootView = rootVC.view else {
       return
     }
+    // Keep overlayView mounted inside rootVC.view so UIButton.showsMenuAsPrimaryAction
+    // (`logoButton`'s native UIMenu) ALWAYS has rootVC in its responder chain
+    // (`_viewControllerForAncestor != nil`). Pair with `layer.zPosition = 1000`
+    // (strictly local to rootView.layer, so UIWindow-hosted UIMenus & sheets
+    // stay above it) and `bringToFrontIfNeeded()` invoked from
+    // `MarcoFlutterViewController.viewDidLayoutSubviews()` and every native
+    // FlutterPlatformView's `didMoveToWindow()` so dynamically scrolling
+    // UiKitViews (e.g. Filter button) never cover or intercept hits on the Dock/Logo.
+    overlayView.layer.zPosition = 1000.0
     if attachedHostView !== rootView || overlayView.superview !== rootView {
       overlayView.removeFromSuperview()
       overlayView.frame = rootView.bounds
       chromeView.frame = overlayView.bounds
       rootView.addSubview(overlayView)
       attachedHostView = rootView
+    } else if rootView.subviews.last !== overlayView {
+      rootView.bringSubviewToFront(overlayView)
     }
-    rootView.bringSubviewToFront(overlayView)
   }
 
-  private func syncOverlayFrame() {
+  func bringToFrontIfNeeded() {
+    guard MarcoLiquidGlassSupport.isAvailable, isConfigured else { return }
     guard let rootView = attachedHostView ?? MarcoLiquidGlassSupport.activeWindow()?.rootViewController?.view else {
       return
     }
+    guard overlayView.superview === rootView else { return }
+    overlayView.layer.zPosition = 1000.0
+    if rootView.subviews.last !== overlayView {
+      rootView.bringSubviewToFront(overlayView)
+    }
+  }
+
+  private func syncOverlayFrame() {
+    guard MarcoLiquidGlassSupport.isAvailable, isConfigured else { return }
+    guard let window = MarcoLiquidGlassSupport.activeWindow(),
+          let rootView = attachedHostView ?? window.rootViewController?.view else {
+      return
+    }
+    attachToRootIfNeeded()
     overlayView.frame = rootView.bounds
     chromeView.frame = overlayView.bounds
     chromeView.setNeedsLayout()
-    rootView.bringSubviewToFront(overlayView)
+    bringToFrontIfNeeded()
   }
 
-  func configure(args: [String: Any]) {
+  @discardableResult
+  func configure(args: [String: Any]) -> Bool {
+    guard MarcoLiquidGlassSupport.isAvailable,
+          let items = args["items"] as? [[String: Any]],
+          !items.isEmpty else {
+      return false
+    }
+    isConfigured = true
+    if let epoch = (args["epoch"] as? NSNumber)?.intValue {
+      latestEpoch = max(latestEpoch, epoch)
+    }
     attachToRootIfNeeded()
     if let showSearch = args["showSearch"] as? Bool {
       chromeView.showSearchButton = showSearch
@@ -4310,9 +5490,7 @@ private final class MarcoIos27RootTabChromeController: NSObject {
     if let adaptiveTop = args["adaptiveTopOnWide"] as? Bool {
       chromeView.adaptiveTopOnWide = adaptiveTop
     }
-    if let items = args["items"] as? [[String: Any]], !items.isEmpty {
-      chromeView.setItems(items)
-    }
+    chromeView.setItems(items)
     if let selectedIndex = args["selectedIndex"] as? Int {
       chromeView.setSelectedIndex(selectedIndex, animated: false)
     }
@@ -4323,26 +5501,37 @@ private final class MarcoIos27RootTabChromeController: NSObject {
       chromeView.setRootDockVisible(visible, animated: false)
     }
     syncOverlayFrame()
+    return true
   }
 
-  func setSelectedIndex(_ index: Int, animated: Bool) {
+  func setSelectedIndex(_ index: Int, animated: Bool, epoch: Int? = nil) {
+    guard MarcoLiquidGlassSupport.isAvailable, isConfigured, acceptEpoch(epoch) else { return }
     attachToRootIfNeeded()
     chromeView.setSelectedIndex(index, animated: animated)
   }
 
-  func setMinimized(_ minimized: Bool, animated: Bool) {
+  func setMinimized(_ minimized: Bool, animated: Bool, epoch: Int? = nil) {
+    guard MarcoLiquidGlassSupport.isAvailable, isConfigured, acceptEpoch(epoch) else { return }
     attachToRootIfNeeded()
     chromeView.setMinimized(minimized, animated: animated)
   }
 
-  func updateScrollMinimizeProgress(_ progress: CGFloat) {
+  func updateScrollMinimizeProgress(_ progress: CGFloat, epoch: Int? = nil) {
+    guard MarcoLiquidGlassSupport.isAvailable, isConfigured, acceptEpoch(epoch) else { return }
     attachToRootIfNeeded()
     chromeView.updateScrollMinimizeProgress(progress)
   }
 
-  func setRootDockVisible(_ visible: Bool, animated: Bool) {
+  func setRootDockVisible(_ visible: Bool, animated: Bool, epoch: Int? = nil) {
+    guard MarcoLiquidGlassSupport.isAvailable, isConfigured, acceptEpoch(epoch) else { return }
     attachToRootIfNeeded()
     chromeView.setRootDockVisible(visible, animated: animated)
+  }
+
+  func updateItems(_ items: [[String: Any]]) {
+    guard MarcoLiquidGlassSupport.isAvailable, isConfigured, !items.isEmpty else { return }
+    attachToRootIfNeeded()
+    chromeView.setItems(items)
   }
 }
 
@@ -4377,6 +5566,9 @@ private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView {
     }
     container.onScrollToTopTapped = { [weak self] in
       self?.channel.invokeMethod("onScrollToTop", arguments: nil)
+    }
+    container.onTabMenuAction = { [weak self] idx, actionId in
+      self?.channel.invokeMethod("onTabMenuAction", arguments: ["tabIndex": idx, "actionId": actionId])
     }
 
     if let args = args {
@@ -4476,13 +5668,29 @@ private final class MarcoNativeGlassButtonFactory: NSObject, FlutterPlatformView
   }
 }
 
+private final class MarcoMinTouchButton: UIButton {
+  override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+    let minSize: CGFloat = 44.0
+    let dx = max(0.0, (minSize - bounds.width) * 0.5)
+    let dy = max(0.0, (minSize - bounds.height) * 0.5)
+    return bounds.insetBy(dx: -dx, dy: -dy).contains(point)
+  }
+}
+
 private final class MarcoNativeGlassButtonControl: UIView {
-  private let button = UIButton(type: .system)
+  private let button = MarcoMinTouchButton(type: .system)
   private let fallbackBlurView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
   private let trailingAccessoryView = UIImageView()
   private var sceneObserver: NSObjectProtocol?
 
   var onTap: (() -> Void)?
+
+  override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+    let minSize: CGFloat = 44.0
+    let dx = max(0.0, (minSize - bounds.width) * 0.5)
+    let dy = max(0.0, (minSize - bounds.height) * 0.5)
+    return bounds.insetBy(dx: -dx, dy: -dy).contains(point)
+  }
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -4559,11 +5767,22 @@ private final class MarcoNativeGlassButtonControl: UIView {
     fatalError("init(coder:) has not been implemented")
   }
 
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if window != nil {
+      MarcoLiquidGlassSupport.bringRootChromeToFront()
+      DispatchQueue.main.async {
+        MarcoLiquidGlassSupport.bringRootChromeToFront()
+      }
+    }
+  }
+
   override func layoutSubviews() {
     super.layoutSubviews()
     if fallbackBlurView.superview != nil {
       fallbackBlurView.layer.cornerRadius = bounds.height * 0.5
     }
+    MarcoLiquidGlassSupport.bringRootChromeToFront()
   }
 
   @objc private func handleButtonTap() {
@@ -4583,6 +5802,7 @@ private final class MarcoNativeGlassButtonControl: UIView {
     prominent: Bool,
     symbolSize: CGFloat,
     menu: UIMenu?,
+    menuAsPrimaryAction: Bool,
     accessibilityLabel: String,
     forceDark: Bool
   ) {
@@ -4608,67 +5828,92 @@ private final class MarcoNativeGlassButtonControl: UIView {
         self.trailingAccessoryView.isHidden = true
       }
 
-      var titleAttr: AttributedString?
-      if isCapsule && !label.isEmpty {
-        var attr = AttributedString(label)
-        attr.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
-        titleAttr = attr
-      }
-
       let useProminent = prominent || tintColor != nil
+      let singleLineLabel = label
+        .replacingOccurrences(of: "\r", with: " ")
+        .replacingOccurrences(of: "\n", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
 
-      #if compiler(>=6.2)
-      if #available(iOS 26.0, *) {
-        var cfg = useProminent ? UIButton.Configuration.prominentGlass() : UIButton.Configuration.glass()
-        cfg.image = leadingImg
-        cfg.attributedTitle = titleAttr
-        cfg.baseForegroundColor = foregroundColor
-        if let tint = tintColor {
-          cfg.baseBackgroundColor = tint
-        } else if forceDark {
-          cfg.baseBackgroundColor = UIColor(white: 0.10, alpha: 0.35)
+      if #available(iOS 15.0, *) {
+        var titleAttr: AttributedString?
+        if isCapsule && !singleLineLabel.isEmpty {
+          var attr = AttributedString(singleLineLabel)
+          attr.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
+          titleAttr = attr
         }
-        cfg.imagePadding = isCapsule ? 5.0 : 0.0
-        cfg.cornerStyle = .capsule
-        cfg.contentInsets = isCapsule
-          ? NSDirectionalEdgeInsets(top: 0.0, leading: 12.0, bottom: 0.0, trailing: hasTrailing ? 26.0 : 12.0)
-          : .zero
-        self.button.configuration = cfg
-        self.button.cornerConfiguration = .capsule()
-      } else {
+
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+          var cfg = useProminent ? UIButton.Configuration.prominentGlass() : UIButton.Configuration.glass()
+          cfg.image = leadingImg
+          cfg.attributedTitle = titleAttr
+          cfg.titleLineBreakMode = .byTruncatingTail
+          cfg.baseForegroundColor = foregroundColor
+          if let tint = tintColor {
+            cfg.baseBackgroundColor = tint
+          } else if forceDark {
+            cfg.baseBackgroundColor = UIColor(white: 0.10, alpha: 0.35)
+          }
+          cfg.imagePadding = isCapsule ? 4.5 : 0.0
+          cfg.cornerStyle = .capsule
+          cfg.contentInsets = isCapsule
+            ? NSDirectionalEdgeInsets(top: 0.0, leading: 11.0, bottom: 0.0, trailing: hasTrailing ? 24.0 : 11.0)
+            : .zero
+          self.button.configuration = cfg
+          self.button.cornerConfiguration = .capsule()
+        } else {
+          var cfg = useProminent ? UIButton.Configuration.filled() : UIButton.Configuration.plain()
+          cfg.image = leadingImg
+          cfg.attributedTitle = titleAttr
+          cfg.titleLineBreakMode = .byTruncatingTail
+          cfg.baseForegroundColor = foregroundColor
+          if let tint = tintColor {
+            cfg.baseBackgroundColor = tint
+          }
+          cfg.imagePadding = isCapsule ? 4.5 : 0.0
+          cfg.cornerStyle = .capsule
+          cfg.contentInsets = isCapsule
+            ? NSDirectionalEdgeInsets(top: 0.0, leading: 11.0, bottom: 0.0, trailing: hasTrailing ? 24.0 : 11.0)
+            : .zero
+          self.button.configuration = cfg
+        }
+        #else
         var cfg = useProminent ? UIButton.Configuration.filled() : UIButton.Configuration.plain()
         cfg.image = leadingImg
         cfg.attributedTitle = titleAttr
+        cfg.titleLineBreakMode = .byTruncatingTail
         cfg.baseForegroundColor = foregroundColor
         if let tint = tintColor {
           cfg.baseBackgroundColor = tint
         }
-        cfg.imagePadding = isCapsule ? 5.0 : 0.0
+        cfg.imagePadding = isCapsule ? 4.5 : 0.0
         cfg.cornerStyle = .capsule
         cfg.contentInsets = isCapsule
-          ? NSDirectionalEdgeInsets(top: 0.0, leading: 12.0, bottom: 0.0, trailing: hasTrailing ? 26.0 : 12.0)
+          ? NSDirectionalEdgeInsets(top: 0.0, leading: 11.0, bottom: 0.0, trailing: hasTrailing ? 24.0 : 11.0)
           : .zero
         self.button.configuration = cfg
+        #endif
+        self.button.titleLabel?.numberOfLines = 1
+        self.button.titleLabel?.lineBreakMode = .byTruncatingTail
+        self.button.titleLabel?.allowsDefaultTighteningForTruncation = true
+      } else {
+        self.button.setImage(leadingImg, for: .normal)
+        self.button.setTitle(isCapsule ? singleLineLabel : nil, for: .normal)
+        self.button.titleLabel?.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
+        self.button.titleLabel?.numberOfLines = 1
+        self.button.titleLabel?.lineBreakMode = .byTruncatingTail
+        self.button.titleLabel?.allowsDefaultTighteningForTruncation = true
+        self.button.tintColor = foregroundColor
+        self.button.setTitleColor(foregroundColor, for: .normal)
+        self.button.backgroundColor = useProminent ? (tintColor ?? UIColor.systemBlue) : .clear
+        self.button.contentEdgeInsets = isCapsule
+          ? UIEdgeInsets(top: 0.0, left: 11.0, bottom: 0.0, right: hasTrailing ? 24.0 : 11.0)
+          : .zero
       }
-      #else
-      var cfg = useProminent ? UIButton.Configuration.filled() : UIButton.Configuration.plain()
-      cfg.image = leadingImg
-      cfg.attributedTitle = titleAttr
-      cfg.baseForegroundColor = foregroundColor
-      if let tint = tintColor {
-        cfg.baseBackgroundColor = tint
-      }
-      cfg.imagePadding = isCapsule ? 5.0 : 0.0
-      cfg.cornerStyle = .capsule
-      cfg.contentInsets = isCapsule
-        ? NSDirectionalEdgeInsets(top: 0.0, leading: 12.0, bottom: 0.0, trailing: hasTrailing ? 26.0 : 12.0)
-        : .zero
-      self.button.configuration = cfg
-      #endif
 
       if let menu = menu {
         self.button.menu = menu
-        self.button.showsMenuAsPrimaryAction = true
+        self.button.showsMenuAsPrimaryAction = menuAsPrimaryAction
       } else {
         self.button.menu = nil
         self.button.showsMenuAsPrimaryAction = false
@@ -4801,6 +6046,7 @@ private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatfor
     let a11yLabel = (args["accessibilityLabel"] as? String) ?? label
     let menuTitle = (args["menuTitle"] as? String) ?? ""
     let rawMenuItems = (args["menuItems"] as? [[String: Any]]) ?? []
+    let menuAsPrimaryAction = (args["menuAsPrimaryAction"] as? Bool) ?? true
     let menu = MarcoLiquidGlassSupport.buildMenu(title: menuTitle, rawItems: rawMenuItems) { [weak self] selectedId in
       self?.channel.invokeMethod("onMenuSelected", arguments: selectedId)
     }
@@ -4816,6 +6062,7 @@ private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatfor
       prominent: prominent,
       symbolSize: symbolSize,
       menu: menu,
+      menuAsPrimaryAction: menuAsPrimaryAction,
       accessibilityLabel: a11yLabel,
       forceDark: forceDark
     )
@@ -4879,6 +6126,8 @@ private final class MarcoGlassPillHostView: UIView {
     isOpaque = false
     clipsToBounds = false
     overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    isExclusiveTouch = true
+    isMultipleTouchEnabled = false
 
     effectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     effectView.backgroundColor = .clear
@@ -4943,6 +6192,16 @@ private final class MarcoGlassPillHostView: UIView {
   @available(*, unavailable)
   required init?(coder: NSCoder) {
     fatalError("init(coder:) has not been implemented")
+  }
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if window != nil {
+      MarcoLiquidGlassSupport.bringRootChromeToFront()
+      DispatchQueue.main.async {
+        MarcoLiquidGlassSupport.bringRootChromeToFront()
+      }
+    }
   }
 
   override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -5122,29 +6381,34 @@ private final class MarcoNativeGlassPillPlatformView: NSObject, FlutterPlatformV
       }
       let label = (item["accessibilityLabel"] as? String) ?? symbol
       let img = UIImage(systemName: symbol, withConfiguration: symCfg)
-      #if compiler(>=6.2)
-      if #available(iOS 26.0, *) {
-        var cfg = UIButton.Configuration.glass()
-        cfg.image = img
-        cfg.baseForegroundColor = tint
-        cfg.cornerStyle = .capsule
-        cfg.contentInsets = .zero
-        btn.configuration = cfg
-        btn.cornerConfiguration = .capsule()
-      } else {
+      if #available(iOS 15.0, *) {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+          var cfg = UIButton.Configuration.glass()
+          cfg.image = img
+          cfg.baseForegroundColor = tint
+          cfg.cornerStyle = .capsule
+          cfg.contentInsets = .zero
+          btn.configuration = cfg
+          btn.cornerConfiguration = .capsule()
+        } else {
+          var cfg = UIButton.Configuration.plain()
+          cfg.image = img
+          cfg.baseForegroundColor = tint
+          cfg.contentInsets = .zero
+          btn.configuration = cfg
+        }
+        #else
         var cfg = UIButton.Configuration.plain()
         cfg.image = img
         cfg.baseForegroundColor = tint
         cfg.contentInsets = .zero
         btn.configuration = cfg
+        #endif
+      } else {
+        btn.setImage(img, for: .normal)
+        btn.tintColor = tint
       }
-      #else
-      var cfg = UIButton.Configuration.plain()
-      cfg.image = img
-      cfg.baseForegroundColor = tint
-      cfg.contentInsets = .zero
-      btn.configuration = cfg
-      #endif
       btn.accessibilityLabel = label
     }
   }

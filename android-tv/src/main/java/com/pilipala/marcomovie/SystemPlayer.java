@@ -37,6 +37,11 @@ public final class SystemPlayer extends MoviePlayer {
     private CueListener cueListener;
     private boolean prepared, focusHeld;
     private volatile boolean released;
+    private volatile long prepareStarted;
+    private volatile long firstFrameMs = -1L;
+    private volatile Surface currentSurface;
+    private volatile boolean firstFrameRenderedOnCurrentSurface;
+    private volatile Boolean hasVideoTrack;
     private int width, height, captionVersion;
     private float speed = 1;
     private volatile String lastError = "";
@@ -62,6 +67,15 @@ public final class SystemPlayer extends MoviePlayer {
                             });
             };
 
+    private volatile long systemPendingSeekGen;
+
+    @Override
+    public long networkSpeedBytesPerSec() {
+        // Android MediaPlayer does not expose a byte-transfer counter; report -1 so
+        // NetworkSpeedMonitor falls back to UID TrafficStats instead of falsely reading 0 B/s.
+        return -1L;
+    }
+
     public SystemPlayer(Context host) {
         super(host, false);
         context = host.getApplicationContext();
@@ -71,13 +85,20 @@ public final class SystemPlayer extends MoviePlayer {
                     nativePlayer = new MediaPlayer();
                     nativePlayer.setOnSeekCompleteListener(
                             player -> {
-                                if (!released && prepared)
-                                    observeSeekPosition(player.getCurrentPosition());
+                                if (!released && prepared) {
+                                    int actual = Math.max(0, player.getCurrentPosition());
+                                    confirmSeekCompleted(systemPendingSeekGen);
+                                    observeSeekPosition(actual);
+                                }
                             });
                     nativePlayer.setOnPreparedListener(
                             player -> {
                                 if (released) return;
                                 prepared = true;
+                                boolean detectedVideo = detectVideoTrackPresent(player);
+                                hasVideoTrack = Boolean.valueOf(detectedVideo);
+                                notifyFileOpened();
+                                notifyVideoTrackPresence(detectedVideo);
                                 if (preparedListener != null)
                                     preparedListener.onPrepared(SystemPlayer.this);
                                 JSONArray tracks = options.optJSONArray("subtitles");
@@ -114,6 +135,25 @@ public final class SystemPlayer extends MoviePlayer {
                     nativePlayer.setOnInfoListener(
                             (player, what, extra) -> {
                                 if (released) return false;
+                                if (what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
+                                    Surface surface = currentSurface;
+                                    if (surface != null && surface.isValid()) {
+                                        long elapsed =
+                                                prepareStarted > 0L
+                                                        ? Math.max(
+                                                                0L,
+                                                                android.os.SystemClock
+                                                                                .elapsedRealtime()
+                                                                        - prepareStarted)
+                                                        : 0L;
+                                        if (firstFrameMs < 0L) {
+                                            firstFrameMs = elapsed;
+                                        }
+                                        firstFrameRenderedOnCurrentSurface = true;
+                                        notifyFirstFrameRendered(surface, firstFrameMs);
+                                    }
+                                    return false;
+                                }
                                 if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
                                     if (prepared) notifyBufferingChanged(true, -1);
                                 } else if (what == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
@@ -185,11 +225,44 @@ public final class SystemPlayer extends MoviePlayer {
                 });
     }
 
+    private boolean detectVideoTrackPresent(MediaPlayer player) {
+        if (width > 0 && height > 0) return true;
+        try {
+            if (player.getVideoWidth() > 0 && player.getVideoHeight() > 0) return true;
+        } catch (Throwable ignored) {
+        }
+        try {
+            MediaPlayer.TrackInfo[] info = player.getTrackInfo();
+            if (info != null) {
+                for (MediaPlayer.TrackInfo track : info) {
+                    if (track != null
+                            && track.getTrackType()
+                                    == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_VIDEO) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
     @Override
     public void setSurface(Surface surface) {
         onMain(
                 () -> {
-                    check();
+                    if (released || nativePlayer == null) {
+                        if (surface == null) {
+                            currentSurface = null;
+                            firstFrameRenderedOnCurrentSurface = false;
+                            return null;
+                        }
+                        check();
+                    }
+                    if (surface != currentSurface) {
+                        currentSurface = surface;
+                        firstFrameRenderedOnCurrentSurface = false;
+                    }
                     nativePlayer.setSurface(surface);
                     return null;
                 });
@@ -270,6 +343,13 @@ public final class SystemPlayer extends MoviePlayer {
         onMain(
                 () -> {
                     check();
+                    prepared = false;
+                    resetSeekClockState();
+                    systemPendingSeekGen = 0L;
+                    firstFrameMs = -1L;
+                    firstFrameRenderedOnCurrentSurface = false;
+                    hasVideoTrack = null;
+                    prepareStarted = android.os.SystemClock.elapsedRealtime();
                     nativePlayer.prepareAsync();
                     return null;
                 });
@@ -306,7 +386,12 @@ public final class SystemPlayer extends MoviePlayer {
         onMain(
                 () -> {
                     check();
-                    if (prepared) nativePlayer.seekTo(Math.max(0, position));
+                    if (prepared) {
+                        int clamped = Math.max(0, position);
+                        int prePos = Math.max(0, nativePlayer.getCurrentPosition());
+                        systemPendingSeekGen = beginSeek(clamped, prePos);
+                        nativePlayer.seekTo(clamped);
+                    }
                     caption("");
                     return null;
                 });
@@ -563,8 +648,46 @@ public final class SystemPlayer extends MoviePlayer {
     }
 
     @Override
+    public long getFirstFrameMs() {
+        return firstFrameMs;
+    }
+
+    @Override
+    public Boolean hasConfirmedVideoTrack() {
+        return hasVideoTrack;
+    }
+
+    @Override
+    public boolean hasRenderedFirstFrameOnCurrentSurface() {
+        return firstFrameRenderedOnCurrentSurface;
+    }
+
+    @Override
+    public String videoOutputStateName() {
+        if (Boolean.FALSE.equals(hasVideoTrack)) return "AUDIO_ONLY";
+        if (firstFrameRenderedOnCurrentSurface) return "FIRST_FRAME_RENDERED";
+        if (prepared) return "DECODER_PREPARED";
+        return "NONE";
+    }
+
+    @Override
     public JSONObject decoderDiagnostics() {
-        return new JSONObject();
+        JSONObject info = new JSONObject();
+        try {
+            info.put("engine", "system");
+            info.put("width", width);
+            info.put("height", height);
+            info.put("first_frame_ms", firstFrameMs);
+            info.put("output_state", videoOutputStateName());
+            if (hasVideoTrack != null) {
+                info.put("has_video_track", hasVideoTrack.booleanValue());
+            }
+            if (lastError != null && !lastError.isEmpty()) {
+                info.put("last_error", lastError);
+            }
+        } catch (Exception ignored) {
+        }
+        return info;
     }
 
     @Override
@@ -887,7 +1010,10 @@ public final class SystemPlayer extends MoviePlayer {
                 () -> {
                     if (released) return null;
                     released = true;
+                    markBaseReleased();
                     prepared = false;
+                    currentSurface = null;
+                    firstFrameRenderedOnCurrentSurface = false;
                     nativePlayer.release();
                     if (audio != null && focusHeld) audio.abandonAudioFocus(focusChange);
                     focusHeld = false;

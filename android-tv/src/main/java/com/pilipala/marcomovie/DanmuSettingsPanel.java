@@ -442,16 +442,15 @@ public final class DanmuSettingsPanel {
             if (ma.windowHeight() > 0) winH = ma.windowHeight();
         }
         final float d = dm.density;
-        final int targetW =
-                Math.min(
-                        Math.round((isTv ? 700f : 432f) * d),
-                        Math.max(
-                                Math.round((isTv ? 460f : 300f) * d),
-                                winW - Math.round((isTv ? 84f : 28f) * d)));
+        int availW = Math.max(dp(d, 220), winW - Math.round((isTv ? 64f : 24f) * d));
+        final int targetW = Math.min(Math.round((isTv ? 700f : 432f) * d), availW);
+        int maxAllowedH = Math.max(dp(d, 160), winH - Math.round((isTv ? 28f : 40f) * d));
         final int maxDialogH =
-                Math.max(Math.round(240f * d), Math.round(winH * (isTv ? 0.90f : 0.86f)));
-        final int maxBodyH =
-                Math.max(Math.round(160f * d), maxDialogH - Math.round((isTv ? 80f : 138f) * d));
+                Math.min(
+                        maxAllowedH,
+                        Math.max(dp(d, 160), Math.round(winH * (isTv ? 0.90f : 0.86f))));
+        int chromeReserve = Math.round((isTv ? 86f : 138f) * d);
+        final int maxBodyH = Math.max(dp(d, 72), maxDialogH - chromeReserve);
         final AlertDialog[] dialogRef = new AlertDialog[1];
         final View[] initialFocusRef = new View[1];
         final View panel =

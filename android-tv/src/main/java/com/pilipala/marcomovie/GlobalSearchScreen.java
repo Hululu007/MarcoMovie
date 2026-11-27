@@ -4,19 +4,52 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffXfermode;
+import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.text.TextUtils;
 import android.view.*;
 import android.widget.*;
+
+import androidx.recyclerview.widget.DiffUtil;
+import androidx.recyclerview.widget.GridLayoutManager;
+import androidx.recyclerview.widget.RecyclerView;
+
 import com.google.zxing.BarcodeFormat;
 import com.google.zxing.common.BitMatrix;
 import com.google.zxing.qrcode.QRCodeWriter;
+
 import org.json.*;
+
 import java.util.*;
 
-/** Dedicated global search page with a local remote-control keyboard. */
+/** Dedicated global search page with Apple TV two-column layout, exact/fuzzy match modes, and local remote-control keyboard. */
 public final class GlobalSearchScreen implements AutoCloseable {
+    // Apple TV dark static palette (zero runtime blur, sculpted glass hairlines for 3m viewing)
+    private static final int BG_PAGE = 0xff0a0e15;
+    private static final int BG_PAGE_BOTTOM = 0xff06080d;
+    private static final int BG_PANEL = 0xff141923;
+    private static final int BG_PANEL_BOTTOM = 0xff0e121a;
+    private static final int BORDER_PANEL = 0x28ffffff;
+    private static final int BG_FIELD = 0xff0b0f16;
+    private static final int BG_FIELD_FOCUS = 0xff1b2535;
+    private static final int BG_SEGMENT_TRACK = 0xff0a0e14;
+    private static final int BG_PILL_SELECTED = 0xfff2f6fb;
+    private static final int BG_KEY = 0xff212936;
+    private static final int BG_KEY_SELECTED = 0xff314258;
+    private static final int BG_FILTER = 0xff19212c;
+    private static final int BG_FILTER_SELECTED = 0xff2b3e56;
+    private static final int BORDER_FILTER_SELECTED = 0xff82b0e8;
+    private static final int BG_HOT_CARD = 0xff151c27;
+    private static final int BORDER_HOT_CARD = 0x22ffffff;
+    private static final int TEXT_PRIMARY = 0xfff5f8fc;
+    private static final int TEXT_SECONDARY = 0xffa4b5cc;
+    private static final int TEXT_MUTED = 0xff7b8ca3;
+    private static final int TEXT_ON_LIGHT = 0xff0b1017;
+
     final MainActivity a;
     final String initial;
     PinyinKeyboardModel keyboard;
@@ -38,16 +71,30 @@ public final class GlobalSearchScreen implements AutoCloseable {
     String pageFailureSource = "", pageFailureReason = "";
     final List<Cms.Site> searchSites = new ArrayList<>();
     final Map<String, Integer> sourceScroll = new HashMap<>(), sourceLimits = new HashMap<>();
+    final Map<String, Integer> sourceScrollPos = new HashMap<>(),
+            sourceScrollOffset = new HashMap<>();
     final Map<String, String> sourceFocus = new HashMap<>();
     Runnable pendingInputClick;
     LinearLayout candidates, keys, resultBody, sourceFilters;
     SearchCoordinator coordinator, retryCoordinator;
+    TvSearchBudget.BatchHandoff activeBatchHandoff, activeRetryHandoff;
     List<String> searchVariants = Collections.emptyList();
     int sourceCount, columns = 4;
     Button retrySource;
     boolean closed;
-    int pageTicket, searchSerial, candidatePage, finished, failed, timedOut, busy, matched;
+    int pageTicket,
+            searchSerial,
+            filterSwitchSerial,
+            candidatePage,
+            finished,
+            failed,
+            timedOut,
+            busy,
+            matched;
+    long searchMultiSourceRev;
     String activeFilter = "", submitted = "", edited = "";
+    TvSearchMatcher.Mode matchMode = TvSearchMatcher.Mode.EXACT;
+    String lastLeftFocusTag = "primary";
     TvSearchImeState imeDraft = new TvSearchImeState();
     Runnable pendingSearch, pendingRender;
     java.util.concurrent.Future<?> expansion;
@@ -56,36 +103,65 @@ public final class GlobalSearchScreen implements AutoCloseable {
     String suggestedQuery;
     HorizontalScrollView suggestionScroll;
     LinearLayout titleSuggestions;
+    HorizontalScrollView filterScrollView;
     final Map<String, Button> filterButtons = new LinkedHashMap<>();
+    final Map<String, GradientDrawable> filterBgs = new HashMap<>();
     final Map<String, String> filterNames = new HashMap<>();
+    final Map<String, String> renderedFilterLabels = new HashMap<>();
+    final Map<String, Integer> renderedFilterStates = new HashMap<>();
+    final Map<TvSearchMatcher.Mode, Button> matchModeButtons = new LinkedHashMap<>();
+    final Map<TvSearchMatcher.Mode, GradientDrawable> matchModeBgs = new LinkedHashMap<>();
     final Set<String> displayed = new LinkedHashSet<>();
+    final List<TvSearchBudget.ProtectedItem> displayedItems = new ArrayList<>();
     LinearLayout resultGrid, lastRow;
     TextView emptyResult, resultHint;
-    Button moreResults;
+    TextView tvHeaderTitle, tvHeaderMeta;
+    Button moreResults, switchFuzzyBtn, retryAllBtn;
+    LinearLayout tvStateContainer, tvRecentContainer, tvFooterRow;
+    TvScrollView tvRecentScroll;
+    RecyclerView tvResultRecycler;
+    GridLayoutManager tvResultLayout;
+    TvSearchPosterAdapter tvResultAdapter;
     int shownLimit = 24, renderPasses;
-    boolean focusNewResults, restoringResults;
+    int searchArtworkScope;
+    boolean focusNewResults, restoringResults, cacheDirty, globalBudgetCapped;
+    boolean pendingPaginationFocus, deferredRerankPending;
+    int pendingPaginationTargetIndex = -1;
+    String pendingPaginationAnchorKey = "";
+    Set<String> pendingPaginationPrevKeys = Collections.emptySet();
+    long lastCacheSnapshotMs, searchStartedMs, totalRenderUiMs, maxRenderUiMs;
+    int peakRetainedVideos, peakInFlightImages, searchSourceArrivals;
     ScrollView resultScroll;
     int savedResultScroll;
+    int savedRecyclerPos, savedRecyclerOffset;
     long resultTime;
     Cms.Config resultConfig;
     final LinkedHashMap<String, SourceResult> results = new LinkedHashMap<>();
     final Map<String, LinearLayout> posterCards = new HashMap<>();
     final Map<PinyinKeyboardModel.Mode, Button> modeButtons = new LinkedHashMap<>();
+    final Map<PinyinKeyboardModel.Mode, GradientDrawable> modeButtonBgs = new LinkedHashMap<>();
     SearchInputServer qrServer;
     int qrGeneration;
     String qrAddress = "";
     AppDialog qrDialog;
+    FrameLayout retainedRoot;
+    LinearLayout retainedBody;
+    int tvLeftInnerWidthPx;
+    int tvResultColumnWidthPx;
+    int tvCardPosterWidthPx;
+    int tvCardPosterHeightPx;
 
     private static Snapshot cache;
 
     private static final class Snapshot {
         final TvSearchContext context;
         final String query, filter;
+        final TvSearchMatcher.Mode matchMode;
         final long time;
         final List<String> variants;
         final List<Cms.Site> sites;
         final Map<String, SourceResult> results;
-        final Map<String, Integer> scroll, limits;
+        final Map<String, Integer> scroll, limits, scrollPos, scrollOffset;
         final Map<String, String> focus;
         final PinyinKeyboardModel.Snapshot keyboard;
         final TvSearchImeState ime;
@@ -95,12 +171,15 @@ public final class GlobalSearchScreen implements AutoCloseable {
             context = screen.pageContext;
             query = screen.submitted;
             filter = screen.activeFilter;
+            matchMode = screen.matchMode;
             time = screen.resultTime;
             variants = new ArrayList<>(screen.searchVariants);
             sites = new ArrayList<>(screen.searchSites);
             results = new LinkedHashMap<>(screen.results);
             scroll = new HashMap<>(screen.sourceScroll);
             limits = new HashMap<>(screen.sourceLimits);
+            scrollPos = new HashMap<>(screen.sourceScrollPos);
+            scrollOffset = new HashMap<>(screen.sourceScrollOffset);
             focus = new HashMap<>(screen.sourceFocus);
             keyboard = screen.keyboard == null ? null : screen.keyboard.snapshot();
             ime = screen.imeDraft.copy();
@@ -133,6 +212,180 @@ public final class GlobalSearchScreen implements AutoCloseable {
     public GlobalSearchScreen(MainActivity activity, String initialKeyword) {
         a = activity;
         initial = initialKeyword == null ? "" : initialKeyword;
+        matchMode = loadPreferredMatchMode();
+    }
+
+    /** Responsive column count for Apple TV search poster wall (wider screens 4–5 cols, 720p/1.3x fewer cols). */
+    static int computeTvSearchColumns(float rightWidthDp, float fontScale) {
+        float scaleFactor = fontScale > 1.15f ? 1.22f : 1f;
+        float effective = rightWidthDp / scaleFactor;
+        if (effective >= 720f) return 5;
+        if (effective >= 520f) return 4;
+        if (effective >= 360f) return 3;
+        return 2;
+    }
+
+    private TvSearchMatcher.Mode loadPreferredMatchMode() {
+        if (a == null || a.privateMode || a.prefs == null) {
+            return TvSearchMatcher.Mode.EXACT;
+        }
+        return TvSearchMatcher.Mode.fromPref(
+                a.prefs.getString(Prefs.SEARCH_MATCH_MODE, TvSearchMatcher.Mode.EXACT.prefValue));
+    }
+
+    private void persistMatchModeIfAllowed(TvSearchMatcher.Mode mode) {
+        if (a == null || a.privateMode || a.prefs == null || mode == null) return;
+        a.prefs.edit().putString(Prefs.SEARCH_MATCH_MODE, mode.prefValue).apply();
+    }
+
+    /** Pre-warms shared pinyin TSV dictionary off the UI thread so first Search open avoids asset I/O. */
+    static void prewarmDictionaryAsync(final MainActivity a) {
+        if (a == null || a.worker == null || PinyinKeyboardModel.hasWarmSharedDictionary()) return;
+        a.worker.execute(
+                () -> {
+                    try {
+                        if (!PinyinKeyboardModel.hasWarmSharedDictionary()) {
+                            PinyinKeyboardModel.warmSharedDictionary(
+                                    a.getAssets().open("search/pinyin-characters.tsv"));
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                });
+    }
+
+    boolean handleBackPressed() {
+        if (closed) return false;
+        if (qrDialog != null && qrDialog.isShowing()) {
+            qrDialog.dismiss();
+            qrDialog = null;
+            return true;
+        }
+        if (TvQrInputHelper.isActive()) {
+            TvQrInputHelper.dismissActive();
+            return true;
+        }
+        if (imeActive && input != null) {
+            finishSystemIme(false);
+            hideSystemIme();
+            input.setCursorVisible(false);
+            input.setShowSoftInputOnFocus(false);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Fast TV resume path when returning via BACK from Detail: unhides the retained search tree
+     * directly in {@code tvStage} instead of re-inflating keyboard/result views, restoring search
+     * mode, source filter, scroll offset, and exact {@code siteKey:vodId} card focus.
+     */
+    boolean resumeSyncNeeded = false;
+
+    boolean resumeResultsSyncNeeded = false;
+
+    boolean hasUnrenderedResults() {
+        if (results.isEmpty()) return false;
+        List<TvSearchMatcher.RankedHit> ranked = collectCurrentRankedHits();
+        int cap = Math.min(shownLimit, ranked.size());
+        for (int i = 0; i < cap; i++) {
+            if (!displayed.contains(ranked.get(i).stableKey())) return true;
+        }
+        return false;
+    }
+
+    public void resumeOrShow() {
+        if (a.isTvDevice()
+                && retainedRoot != null
+                && retainedBody != null
+                && a.tvStage != null
+                && retainedRoot.getParent() == a.tvStage
+                && pageContext != null
+                && contextMatches()
+                && keyboard != null) {
+            a.preparePage(false);
+            closed = false;
+            pageTicket = a.generation;
+            a.root = retainedRoot;
+            a.body = retainedBody;
+            a.scroll = null;
+            a.homeDock = null;
+            a.homeAmbient = null;
+            a.presentRoot(retainedRoot, true);
+            a.watchRootLayout(retainedRoot);
+            updateMatchModeButtons();
+            updateResultHeader();
+            boolean needCards = resumeResultsSyncNeeded || hasUnrenderedResults();
+            boolean needSync = resumeSyncNeeded || needCards;
+            resumeSyncNeeded = false;
+            resumeResultsSyncNeeded = false;
+            if (sourceCount > 0) {
+                updateStatus(sourceCount);
+            }
+            if (needSync) {
+                renderFilters();
+                if (needCards) {
+                    renderResults();
+                }
+            }
+            final String targetTag = resolveResumeFocusTag();
+            if (tvResultRecycler != null && tvResultLayout != null) {
+                final int pos = savedRecyclerPos;
+                final int off = savedRecyclerOffset;
+                if (pos >= 0 && tvResultAdapter != null && pos < tvResultAdapter.getItemCount()) {
+                    tvResultLayout.scrollToPositionWithOffset(pos, off);
+                }
+                if (targetTag != null && !targetTag.isEmpty()) {
+                    View immediate = retainedRoot.findViewWithTag(targetTag);
+                    if (immediate != null && immediate.isShown() && immediate.isFocusable()) {
+                        a.tvInitialFocus = immediate;
+                    } else {
+                        final int serial = searchSerial;
+                        tvResultRecycler.post(
+                                () -> {
+                                    if (!current() || serial != searchSerial) return;
+                                    View delayed = retainedRoot.findViewWithTag(targetTag);
+                                    if (delayed != null
+                                            && delayed.isShown()
+                                            && delayed.isFocusable()) {
+                                        delayed.requestFocus();
+                                    }
+                                });
+                    }
+                }
+            } else {
+                if (targetTag != null && !targetTag.isEmpty()) {
+                    View v = retainedRoot.findViewWithTag(targetTag);
+                    if (v != null && v.isShown() && v.isFocusable()) {
+                        a.tvInitialFocus = v;
+                    }
+                }
+                if (resultScroll != null && savedResultScroll > 0) {
+                    final int restoreScrollY = savedResultScroll;
+                    final int serial = searchSerial;
+                    resultScroll.post(
+                            () -> {
+                                if (current() && serial == searchSerial && resultScroll != null) {
+                                    resultScroll.scrollTo(0, restoreScrollY);
+                                }
+                            });
+                }
+            }
+            if (a.tvInitialFocus == null && input != null) {
+                a.tvInitialFocus = input;
+            }
+            return;
+        }
+        retainedRoot = null;
+        retainedBody = null;
+        show();
+    }
+
+    private String resolveResumeFocusTag() {
+        String targetTag = sourceFocus.get(activeFilter);
+        if ((targetTag == null || targetTag.isEmpty()) && a.current != null) {
+            targetTag = a.current.focus;
+        }
+        return targetTag;
     }
 
     public void show() {
@@ -141,6 +394,9 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 keyboard == null ? null : keyboard.snapshot();
         int restoredCandidatePage = candidatePage;
         String restored = keyboard == null ? (contextDiscarded ? "" : initial) : keyboard.query();
+        if (keyboard == null) {
+            matchMode = loadPreferredMatchMode();
+        }
         Snapshot saved = cache;
         if (results.isEmpty()
                 && saved != null
@@ -151,6 +407,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 && System.currentTimeMillis() - saved.time < 7200000L
                 && (restored.trim().isEmpty() || restored.trim().equals(saved.query))) {
             restored = submitted = saved.query;
+            matchMode = saved.matchMode == null ? TvSearchMatcher.Mode.EXACT : saved.matchMode;
             restoredKeyboard = saved.keyboard;
             imeDraft = saved.ime.copy();
             restoredCandidatePage = saved.candidatePage;
@@ -164,11 +421,21 @@ public final class GlobalSearchScreen implements AutoCloseable {
             activeFilter = saved.filter;
             sourceScroll.putAll(saved.scroll);
             sourceLimits.putAll(saved.limits);
+            sourceScrollPos.putAll(saved.scrollPos);
+            sourceScrollOffset.putAll(saved.scrollOffset);
             sourceFocus.putAll(saved.focus);
             shownLimit =
                     sourceLimits.containsKey(activeFilter) ? sourceLimits.get(activeFilter) : 24;
             savedResultScroll =
                     sourceScroll.containsKey(activeFilter) ? sourceScroll.get(activeFilter) : 0;
+            savedRecyclerPos =
+                    sourceScrollPos.containsKey(activeFilter)
+                            ? sourceScrollPos.get(activeFilter)
+                            : 0;
+            savedRecyclerOffset =
+                    sourceScrollOffset.containsKey(activeFilter)
+                            ? sourceScrollOffset.get(activeFilter)
+                            : 0;
             recount();
         }
         boolean searchAgain =
@@ -180,39 +447,577 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         && resultPrivateMode == a.privateMode
                         && System.currentTimeMillis() - resultTime >= 0
                         && System.currentTimeMillis() - resultTime < 7200000L;
-        a.renderPage("", "");
+        if (a.isTvDevice()) {
+            a.renderDirectTvPage();
+        } else {
+            a.renderPage("", "");
+        }
+        retainedRoot = a.isTvDevice() ? a.root : null;
+        retainedBody = a.isTvDevice() ? a.body : null;
         closed = false;
         edited = "";
         syncingInput = false;
         imeActive = false;
         lastInputClickMs = 0L;
+        lastLeftFocusTag = "primary";
         if (pendingInputClick != null) {
             a.ui.removeCallbacks(pendingInputClick);
             pendingInputClick = null;
         }
         filterButtons.clear();
+        filterBgs.clear();
+        filterNames.clear();
+        renderedFilterLabels.clear();
+        renderedFilterStates.clear();
+        matchModeButtons.clear();
+        matchModeBgs.clear();
         displayed.clear();
-        posterCards.clear();
+        displayedItems.clear();
+        clearCards();
         modeButtons.clear();
+        modeButtonBgs.clear();
+        globalBudgetCapped = false;
+        cacheDirty = false;
         resultGrid = null;
         lastRow = null;
         emptyResult = null;
         moreResults = null;
+        switchFuzzyBtn = null;
+        retryAllBtn = null;
+        tvResultRecycler = null;
+        tvResultLayout = null;
+        tvResultAdapter = null;
+        tvStateContainer = null;
+        tvRecentContainer = null;
+        tvRecentScroll = null;
+        tvFooterRow = null;
+        tvHeaderTitle = null;
+        tvHeaderMeta = null;
+        filterScrollView = null;
         pageTicket = a.generation;
         pageContext = new TvSearchContext(a.config, a.privateMode, a.engineEpoch);
+        // Solid opaque BG_PAGE avoids 1920x1080 full-screen GradientDrawable shader overdraw on
+        // Mali-450 during RecyclerView scroll frames and matches TvSearchPosterArtView corner
+        // masks.
+        a.root.setBackgroundColor(BG_PAGE);
         if (!a.isTvDevice()) {
-            a.root.setBackgroundColor(0xff101013);
             if (a.root.getChildAt(0) instanceof ImageLoader.Atmosphere) a.root.removeViewAt(0);
         }
-        a.body.setPadding(a.dp(32), a.dp(14), a.dp(32), a.dp(16));
         try {
-            keyboard = new PinyinKeyboardModel(a.getAssets().open("search/pinyin-characters.tsv"));
+            if (!PinyinKeyboardModel.hasWarmSharedDictionary()) {
+                PinyinKeyboardModel.warmSharedDictionary(
+                        a.getAssets().open("search/pinyin-characters.tsv"));
+            }
+            keyboard = PinyinKeyboardModel.fromWarmSharedDictionary();
         } catch (Exception missing) {
             a.paragraph("内置拼音字库无法读取，请重新安装完整版本。");
             return;
         }
         if (restoredKeyboard != null) keyboard.restore(restoredKeyboard);
         else keyboard.set(restored);
+
+        if (a.isTvDevice()) {
+            buildTvAppleStyleLayout(reuse, restored, searchAgain, restoredCandidatePage);
+        } else {
+            buildLegacyLayout(reuse, restored, searchAgain, restoredCandidatePage);
+        }
+    }
+
+    private void buildTvAppleStyleLayout(
+            boolean reuse, String restored, boolean searchAgain, int restoredCandidatePage) {
+        android.util.DisplayMetrics dm = a.getResources().getDisplayMetrics();
+        float density = Math.max(0.5f, dm.density);
+        float scaledDensity = Math.max(density, dm.scaledDensity);
+        float fontScale = Math.max(0.85f, a.getResources().getConfiguration().fontScale);
+        float windowWidthDp = a.windowWidth() / density;
+        float windowHeightDp = a.windowHeight() / density;
+
+        int outerHPadDp = windowWidthDp < 780f ? 18 : 26;
+        int outerTopDp = fontScale > 1.15f ? 8 : 10;
+        int outerBottomDp = fontScale > 1.15f ? 8 : 10;
+        a.body.setPadding(
+                a.dp(outerHPadDp), a.dp(outerTopDp), a.dp(outerHPadDp), a.dp(outerBottomDp));
+        a.body.setClipChildren(false);
+        a.body.setClipToPadding(false);
+
+        // Slim Apple TV top bar ("搜索" title + subtle brand & frosted remote hint pill)
+        LinearLayout topBar = a.row();
+        topBar.setGravity(Gravity.CENTER_VERTICAL);
+        TextView pageTitle = a.text("搜索", 23, TEXT_PRIMARY);
+        pageTitle.setTypeface(null, Typeface.BOLD);
+        pageTitle.setIncludeFontPadding(false);
+        topBar.addView(pageTitle, new LinearLayout.LayoutParams(-2, -2));
+        TextView brandSub =
+                a.text(a.privateMode ? " · 隐私空间" : " · Apple TV 搜索体验", 11.5f, TEXT_MUTED);
+        brandSub.setIncludeFontPadding(false);
+        LinearLayout.LayoutParams brandLp = new LinearLayout.LayoutParams(-2, -2);
+        brandLp.leftMargin = a.dp(8);
+        topBar.addView(brandSub, brandLp);
+        View spacer = new View(a);
+        topBar.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1));
+        TextView topHint = a.text("↑↓←→ 移动  ·  确认选择  ·  返回退出", 10.5f, TEXT_SECONDARY);
+        topHint.setIncludeFontPadding(false);
+        topHint.setSingleLine(true);
+        topHint.setPadding(a.dp(10), a.dp(3), a.dp(10), a.dp(3));
+        GradientDrawable hintPillBg = new GradientDrawable();
+        hintPillBg.setColor(0x14ffffff);
+        hintPillBg.setCornerRadius(a.dp(11));
+        hintPillBg.setStroke(Math.max(1, a.dp(1)), 0x1affffff);
+        topHint.setBackground(hintPillBg);
+        topBar.addView(topHint, new LinearLayout.LayoutParams(-2, -2));
+        int topBarH = a.dp(fontScale > 1.15f ? 30 : 32);
+        int topBarGap = a.dp(fontScale > 1.15f ? 4 : 6);
+        LinearLayout.LayoutParams topBarLp = new LinearLayout.LayoutParams(-1, topBarH);
+        topBarLp.bottomMargin = topBarGap;
+        a.body.addView(topBar, topBarLp);
+
+        float contentWidthDp = Math.max(600f, windowWidthDp - outerHPadDp * 2f);
+        int splitHeightPx =
+                Math.max(
+                        a.dp(300),
+                        a.windowHeight() - a.dp(outerTopDp + outerBottomDp) - topBarH - topBarGap);
+        int leftWidthDp = Math.max(248, Math.min(302, Math.round(contentWidthDp * 0.315f)));
+        int splitGapDp = windowWidthDp < 780f ? 14 : 22;
+        float rightWidthDp = Math.max(320f, contentWidthDp - leftWidthDp - splitGapDp);
+
+        columns = computeTvSearchColumns(rightWidthDp, fontScale);
+        int rightWidthPx = a.dp(Math.round(rightWidthDp));
+        int cellOuterMarginPx = a.dp(10);
+        tvResultColumnWidthPx = Math.max(a.dp(92), (rightWidthPx - a.dp(8)) / Math.max(1, columns));
+
+        // Reserve FULL 2 title lines + FULL 1 metadata line + focus-ring & chrome heights using
+        // real scaledDensity BEFORE deriving 2:3 poster height so Row 1 metadata is 100% visible
+        // in normal and focused states across 1080p, simulated 720p, and 1.3x fontScale.
+        int filterBarH = a.dp(fontScale > 1.15f ? 38 : 44);
+        int filterBarTop = a.dp(fontScale > 1.15f ? 3 : 4);
+        int sugBarH = a.dp(fontScale > 1.15f ? 36 : 42);
+        int sugBarBottom = a.dp(fontScale > 1.15f ? 2 : 4);
+        int footerBarH = a.dp(fontScale > 1.15f ? 36 : 40);
+        int headerLinePx = (int) Math.ceil(21f * scaledDensity * 1.32f);
+        int statusLinePx = (int) Math.ceil(12f * scaledDensity * 1.35f) + a.dp(6);
+        int rvVertPadPx = a.dp(8) + a.dp(10);
+        int rightChromePx =
+                headerLinePx
+                        + filterBarH
+                        + filterBarTop
+                        + statusLinePx
+                        + sugBarH
+                        + sugBarBottom
+                        + footerBarH
+                        + rvVertPadPx;
+        int titleTwoLinesPx = (int) Math.ceil(2f * 13.5f * scaledDensity * 1.32f) + a.dp(6);
+        int metaOneLinePx = (int) Math.ceil(11.5f * scaledDensity * 1.45f) + a.dp(6);
+        int cardChromePx = a.dp(5 + 10 + 4 + 7 + 3 + 12) + titleTwoLinesPx + metaOneLinePx;
+        int maxPosterH = Math.max(a.dp(108), splitHeightPx - rightChromePx - cardChromePx);
+        int rawPosterW = Math.max(a.dp(76), tvResultColumnWidthPx - cellOuterMarginPx - a.dp(6));
+        int cappedPosterW = Math.max(a.dp(72), Math.round(maxPosterH / 1.5f));
+        tvCardPosterWidthPx = Math.min(rawPosterW, cappedPosterW);
+        tvCardPosterHeightPx = Math.round(tvCardPosterWidthPx * 1.5f);
+
+        LinearLayout split = a.row();
+        split.setGravity(Gravity.TOP);
+        split.setClipChildren(false);
+        split.setClipToPadding(false);
+        a.body.addView(split, new LinearLayout.LayoutParams(-1, splitHeightPx));
+
+        // ---- Left Input Panel (~31.5% width, Apple TV frosted glass dock) ----
+        int leftPadHDp = 12;
+        int leftPadVDp = 10;
+        LinearLayout left = a.vertical();
+        left.setPadding(a.dp(leftPadHDp), a.dp(leftPadVDp), a.dp(leftPadHDp), a.dp(leftPadVDp));
+        left.setClipChildren(false);
+        left.setClipToPadding(false);
+        GradientDrawable leftCardBg = new GradientDrawable();
+        leftCardBg.setColor(BG_PANEL);
+        leftCardBg.setCornerRadius(a.dp(22));
+        leftCardBg.setStroke(Math.max(1, a.dp(1)), BORDER_PANEL);
+
+        TvScrollView keyboardScroll = new TvScrollView(a);
+        keyboardScroll.setFocusFrameEnabled(false);
+        keyboardScroll.setTag("search-keyboard-scroll");
+        keyboardScroll.setVerticalScrollBarEnabled(false);
+        keyboardScroll.setBackground(leftCardBg);
+        keyboardScroll.setClipChildren(true);
+        keyboardScroll.setClipToPadding(false);
+        keyboardScroll.addView(left, new ScrollView.LayoutParams(-1, -2));
+        LinearLayout.LayoutParams leftLp = new LinearLayout.LayoutParams(a.dp(leftWidthDp), -1);
+        leftLp.rightMargin = a.dp(splitGapDp);
+        split.addView(keyboardScroll, leftLp);
+
+        tvLeftInnerWidthPx = Math.max(a.dp(180), a.dp(leftWidthDp - leftPadHDp * 2));
+
+        // 1. Search Input Row (Apple TV capsule with crisp vector search glyph + inline QR icon)
+        input = createSearchEditText(true);
+        LinearLayout inputRow = a.row();
+        inputRow.setGravity(Gravity.CENTER_VERTICAL);
+        inputRow.setClipChildren(false);
+        inputRow.setClipToPadding(false);
+        GradientDrawable inputRowBg = new GradientDrawable();
+        inputRowBg.setColor(BG_FIELD);
+        inputRowBg.setCornerRadius(a.dp(12));
+        inputRowBg.setStroke(Math.max(1, a.dp(1)), 0x26ffffff);
+        inputRow.setBackground(inputRowBg);
+        int glyphW = a.dp(26);
+        int qrBtnPx = a.dp(36);
+        int inputW = Math.max(a.dp(102), tvLeftInnerWidthPx - glyphW - qrBtnPx - a.dp(8));
+        int inputRowH = a.dp(fontScale > 1.15f ? 44 : 40);
+        View searchGlyph = buildTvSearchGlyph();
+        LinearLayout.LayoutParams glyphLp = new LinearLayout.LayoutParams(glyphW, a.dp(24));
+        glyphLp.leftMargin = a.dp(4);
+        inputRow.addView(searchGlyph, glyphLp);
+        inputRow.addView(input, new LinearLayout.LayoutParams(inputW, inputRowH));
+        View qrIconBtn = buildTvQrIconButton();
+        LinearLayout.LayoutParams qrLp = new LinearLayout.LayoutParams(qrBtnPx, a.dp(34));
+        qrLp.rightMargin = a.dp(3);
+        qrLp.leftMargin = a.dp(2);
+        inputRow.addView(qrIconBtn, qrLp);
+        left.addView(inputRow, new LinearLayout.LayoutParams(-1, inputRowH));
+
+        a.gap(left, 6);
+
+        // 2. Match Mode Segmented Control: "精准搜索" | "模糊搜索" (Confirm ONLY switches mode!)
+        LinearLayout matchSegRow = a.row();
+        matchSegRow.setGravity(Gravity.CENTER_VERTICAL);
+        matchSegRow.setPadding(a.dp(3), a.dp(3), a.dp(3), a.dp(3));
+        matchSegRow.setClipChildren(false);
+        matchSegRow.setClipToPadding(false);
+        GradientDrawable segTrackBg = new GradientDrawable();
+        segTrackBg.setColor(BG_SEGMENT_TRACK);
+        segTrackBg.setCornerRadius(a.dp(10));
+        segTrackBg.setStroke(Math.max(1, a.dp(1)), 0x20ffffff);
+        matchSegRow.setBackground(segTrackBg);
+        int segBtnH = a.dp(fontScale > 1.15f ? 32 : 30);
+        int segBtnW = Math.max(a.dp(72), (tvLeftInnerWidthPx - a.dp(10)) / 2);
+        addMatchModeButton(matchSegRow, TvSearchMatcher.Mode.EXACT, segBtnW, segBtnH);
+        addMatchModeButton(matchSegRow, TvSearchMatcher.Mode.FUZZY, segBtnW, segBtnH);
+        left.addView(matchSegRow, new LinearLayout.LayoutParams(-1, segBtnH + a.dp(6)));
+
+        // 3. Pinyin Composition Hint + Candidate Row
+        composition = a.text("", 10.5f, TEXT_MUTED);
+        composition.setSingleLine(true);
+        composition.setEllipsize(TextUtils.TruncateAt.END);
+        composition.setIncludeFontPadding(false);
+        composition.setPadding(a.dp(2), a.dp(3), a.dp(2), a.dp(2));
+        left.addView(
+                composition, new LinearLayout.LayoutParams(-1, a.dp(fontScale > 1.15f ? 23 : 19)));
+
+        candidates = a.row();
+        candidates.setGravity(Gravity.CENTER_VERTICAL);
+        candidates.setClipChildren(false);
+        candidates.setClipToPadding(false);
+        left.addView(candidates, new LinearLayout.LayoutParams(-1, a.dp(29)));
+
+        a.gap(left, 3);
+
+        // 4. Compact Keyboard Type Row (Visually distinct from Exact/Fuzzy match mode!)
+        LinearLayout kbdModeRow = a.row();
+        kbdModeRow.setGravity(Gravity.CENTER_VERTICAL);
+        kbdModeRow.setClipChildren(false);
+        kbdModeRow.setClipToPadding(false);
+        TextView kbdLabel = a.text("键盘", 10.5f, TEXT_MUTED);
+        kbdLabel.setIncludeFontPadding(false);
+        kbdLabel.setSingleLine(true);
+        int kbdLabelW = a.dp(fontScale > 1.15f ? 34 : 28);
+        kbdModeRow.addView(kbdLabel, new LinearLayout.LayoutParams(kbdLabelW, -2));
+        int tvThirdKeyW = Math.max(a.dp(44), (tvLeftInnerWidthPx - kbdLabelW - a.dp(12)) / 3);
+        modeButton(kbdModeRow, "拼音", PinyinKeyboardModel.Mode.PINYIN, tvThirdKeyW);
+        modeButton(kbdModeRow, "字母", PinyinKeyboardModel.Mode.LETTERS, tvThirdKeyW);
+        modeButton(kbdModeRow, "123", PinyinKeyboardModel.Mode.NUMBERS, tvThirdKeyW);
+        left.addView(kbdModeRow, new LinearLayout.LayoutParams(-1, a.dp(29)));
+
+        a.gap(left, 3);
+
+        // 5. 6-Column On-screen Remote Keyboard
+        keys = a.vertical();
+        keys.setClipChildren(false);
+        keys.setClipToPadding(false);
+        left.addView(keys);
+
+        a.gap(left, 5);
+
+        // 6. Bottom Command Row: [空格 | 退格 | 清空 | 搜索] (Fits 100% cleanly on 720p, 1080p, 1.3x)
+        LinearLayout cmdRow = a.row();
+        cmdRow.setGravity(Gravity.CENTER_VERTICAL);
+        cmdRow.setClipChildren(false);
+        cmdRow.setClipToPadding(false);
+        int cmdBtnW = Math.max(a.dp(42), (tvLeftInnerWidthPx - a.dp(16)) / 4);
+        int cmdBtnH = a.dp(fontScale > 1.15f ? 34 : 32);
+        addTvCommandButton(
+                cmdRow,
+                "空格",
+                "search-space",
+                false,
+                cmdBtnW,
+                cmdBtnH,
+                () -> {
+                    keyboard.space();
+                    changed();
+                });
+        addTvCommandButton(
+                cmdRow,
+                "退格",
+                "search-delete",
+                false,
+                cmdBtnW,
+                cmdBtnH,
+                () -> {
+                    keyboard.backspace();
+                    changed();
+                });
+        addTvCommandButton(
+                cmdRow,
+                "清空",
+                "search-clear",
+                false,
+                cmdBtnW,
+                cmdBtnH,
+                () -> {
+                    keyboard.clear();
+                    changed();
+                });
+        addTvCommandButton(cmdRow, "搜索", "search-submit", true, cmdBtnW, cmdBtnH, () -> submit());
+        left.addView(cmdRow, new LinearLayout.LayoutParams(-1, cmdBtnH + a.dp(4)));
+
+        // ---- Right Content Area (~68.5% width) ----
+        LinearLayout right = a.vertical();
+        right.setClipChildren(false);
+        right.setClipToPadding(false);
+        split.addView(right, new LinearLayout.LayoutParams(rightWidthPx, -1));
+
+        // Right Header: Apple TV bold section title + glass pill mode & count badge
+        LinearLayout rightHeader = a.row();
+        rightHeader.setGravity(Gravity.CENTER_VERTICAL);
+        tvHeaderTitle = a.text("探索与搜索", 21, TEXT_PRIMARY);
+        tvHeaderTitle.setTypeface(null, Typeface.BOLD);
+        tvHeaderTitle.setSingleLine(true);
+        tvHeaderTitle.setEllipsize(TextUtils.TruncateAt.END);
+        tvHeaderTitle.setIncludeFontPadding(false);
+        rightHeader.addView(tvHeaderTitle, new LinearLayout.LayoutParams(0, -2, 1));
+
+        tvHeaderMeta = a.text("", 11.5f, TEXT_SECONDARY);
+        tvHeaderMeta.setSingleLine(true);
+        tvHeaderMeta.setIncludeFontPadding(false);
+        tvHeaderMeta.setPadding(a.dp(11), a.dp(4), a.dp(11), a.dp(4));
+        GradientDrawable metaPillBg = new GradientDrawable();
+        metaPillBg.setColor(0x18ffffff);
+        metaPillBg.setCornerRadius(a.dp(12));
+        metaPillBg.setStroke(Math.max(1, a.dp(1)), 0x20ffffff);
+        tvHeaderMeta.setBackground(metaPillBg);
+        LinearLayout.LayoutParams metaLp = new LinearLayout.LayoutParams(-2, -2);
+        metaLp.leftMargin = a.dp(10);
+        rightHeader.addView(tvHeaderMeta, metaLp);
+        right.addView(rightHeader, new LinearLayout.LayoutParams(-1, -2));
+
+        // Horizontal Source Filter Pills
+        filterScrollView = new HorizontalScrollView(a);
+        filterScrollView.setTag("search-source-scroll");
+        filterScrollView.setHorizontalScrollBarEnabled(false);
+        filterScrollView.setClipChildren(false);
+        filterScrollView.setClipToPadding(false);
+        sourceFilters = a.row();
+        sourceFilters.setGravity(Gravity.CENTER_VERTICAL);
+        sourceFilters.setClipChildren(false);
+        sourceFilters.setClipToPadding(false);
+        sourceFilters.setPadding(a.dp(2), a.dp(4), a.dp(8), a.dp(4));
+        filterScrollView.addView(sourceFilters);
+        filterScrollView.setVisibility(View.GONE);
+        LinearLayout.LayoutParams filterScrollLp = new LinearLayout.LayoutParams(-1, filterBarH);
+        filterScrollLp.topMargin = filterBarTop;
+        right.addView(filterScrollView, filterScrollLp);
+
+        // Status line
+        status = a.text("默认精准匹配完整片名 · 可随时切到模糊搜索", 12, TEXT_MUTED);
+        status.setSingleLine(true);
+        status.setEllipsize(TextUtils.TruncateAt.END);
+        status.setIncludeFontPadding(false);
+        LinearLayout.LayoutParams statusLp = new LinearLayout.LayoutParams(-1, -2);
+        statusLp.topMargin = a.dp(2);
+        statusLp.bottomMargin = a.dp(3);
+        right.addView(status, statusLp);
+
+        // Title Suggestions (public mode only, honors acceptsTitleSuggestions)
+        suggestionScroll = new HorizontalScrollView(a);
+        suggestionScroll.setTag("search-title-suggestions");
+        suggestionScroll.setHorizontalScrollBarEnabled(false);
+        suggestionScroll.setClipChildren(false);
+        suggestionScroll.setClipToPadding(false);
+        titleSuggestions = a.row();
+        titleSuggestions.setGravity(Gravity.CENTER_VERTICAL);
+        titleSuggestions.setClipChildren(false);
+        titleSuggestions.setClipToPadding(false);
+        titleSuggestions.setPadding(a.dp(2), a.dp(3), a.dp(8), a.dp(3));
+        suggestionScroll.addView(titleSuggestions);
+        suggestionScroll.setVisibility(View.GONE);
+        LinearLayout.LayoutParams sugLp = new LinearLayout.LayoutParams(-1, sugBarH);
+        sugLp.bottomMargin = sugBarBottom;
+        right.addView(suggestionScroll, sugLp);
+
+        // Result Body container (also referenced by IME suspension/resume slice!)
+        resultBody = a.vertical();
+        resultBody.setClipChildren(false);
+        resultBody.setClipToPadding(false);
+        right.addView(resultBody, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        // 1) Recent Searches + Trending Recommendations Scroll Container (empty query state)
+        tvRecentScroll = new TvScrollView(a);
+        tvRecentScroll.setFocusFrameEnabled(false);
+        tvRecentScroll.setTag("tv-search-discover-scroll");
+        tvRecentScroll.setVerticalScrollBarEnabled(false);
+        tvRecentScroll.setClipChildren(true);
+        tvRecentScroll.setClipToPadding(false);
+        tvRecentContainer = a.vertical();
+        tvRecentContainer.setClipChildren(false);
+        tvRecentContainer.setClipToPadding(false);
+        tvRecentContainer.setPadding(a.dp(2), a.dp(6), a.dp(4), a.dp(10));
+        tvRecentScroll.addView(tvRecentContainer, new ScrollView.LayoutParams(-1, -2));
+        resultBody.addView(tvRecentScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        // 2) State Container (searching / zero-exact with Switch-to-Fuzzy / all-fail / per-source
+        // error)
+        tvStateContainer = a.vertical();
+        tvStateContainer.setClipChildren(false);
+        tvStateContainer.setClipToPadding(false);
+        tvStateContainer.setPadding(a.dp(16), a.dp(18), a.dp(16), a.dp(18));
+        GradientDrawable stateCardBg = new GradientDrawable();
+        stateCardBg.setColor(BG_PANEL);
+        stateCardBg.setCornerRadius(a.dp(14));
+        stateCardBg.setStroke(Math.max(1, a.dp(1)), BORDER_PANEL);
+        tvStateContainer.setBackground(stateCardBg);
+        emptyResult = a.text("", 14, TEXT_SECONDARY);
+        emptyResult.setLineSpacing(a.dp(4), 1f);
+        tvStateContainer.addView(emptyResult, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout stateActions = a.row();
+        stateActions.setGravity(Gravity.CENTER_VERTICAL);
+        stateActions.setClipChildren(false);
+        stateActions.setClipToPadding(false);
+        LinearLayout.LayoutParams stateActLp = new LinearLayout.LayoutParams(-1, -2);
+        stateActLp.topMargin = a.dp(14);
+        tvStateContainer.addView(stateActions, stateActLp);
+
+        switchFuzzyBtn =
+                makeTvActionPill(
+                        "切换到模糊搜索",
+                        "search-switch-fuzzy",
+                        true,
+                        () -> setMatchMode(TvSearchMatcher.Mode.FUZZY, true));
+        switchFuzzyBtn.setVisibility(View.GONE);
+        LinearLayout.LayoutParams sfLp = new LinearLayout.LayoutParams(-2, a.dp(38));
+        sfLp.rightMargin = a.dp(10);
+        stateActions.addView(switchFuzzyBtn, sfLp);
+
+        retryAllBtn =
+                makeTvActionPill(
+                        "重试全部来源",
+                        "search-retry-all",
+                        true,
+                        () -> submitInternal(false, activeFilter, true));
+        retryAllBtn.setVisibility(View.GONE);
+        LinearLayout.LayoutParams raLp = new LinearLayout.LayoutParams(-2, a.dp(38));
+        raLp.rightMargin = a.dp(10);
+        stateActions.addView(retryAllBtn, raLp);
+
+        retrySource = makeTvActionPill("重新搜索此源", "search-retry-source", false, this::retrySelected);
+        retrySource.setVisibility(View.GONE);
+        stateActions.addView(retrySource, new LinearLayout.LayoutParams(-2, a.dp(38)));
+
+        tvStateContainer.setVisibility(View.GONE);
+        LinearLayout.LayoutParams stateWrapLp = new LinearLayout.LayoutParams(-1, -2);
+        stateWrapLp.topMargin = a.dp(8);
+        resultBody.addView(tvStateContainer, stateWrapLp);
+
+        // 3) RecyclerView 2:3 Poster Wall (DiffUtil incremental updates, zero flash, zero focus
+        // steal)
+        tvResultRecycler = new RecyclerView(a);
+        tvResultRecycler.setTag("tv-search-results-wall");
+        tvResultRecycler.setHasFixedSize(true);
+        tvResultRecycler.setItemViewCacheSize(8);
+        tvResultRecycler.setClipToPadding(true);
+        tvResultRecycler.setClipChildren(true);
+        tvResultRecycler.setItemAnimator(null);
+        tvResultRecycler.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        tvResultRecycler.setPadding(a.dp(8), a.dp(8), a.dp(8), a.dp(10));
+        tvResultLayout = new GridLayoutManager(a, columns);
+        tvResultRecycler.setLayoutManager(tvResultLayout);
+        tvResultAdapter = new TvSearchPosterAdapter();
+        tvResultRecycler.setAdapter(tvResultAdapter);
+        tvResultRecycler.setVisibility(View.GONE);
+        resultBody.addView(tvResultRecycler, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        // 4) Compact Footer Bar (Load more / pagination / cap hint)
+        tvFooterRow = a.row();
+        tvFooterRow.setGravity(Gravity.CENTER_VERTICAL);
+        tvFooterRow.setClipChildren(false);
+        tvFooterRow.setClipToPadding(false);
+        tvFooterRow.setPadding(a.dp(8), a.dp(4), a.dp(8), a.dp(2));
+        moreResults =
+                makeTvActionPill(
+                        "读取来源更多结果", "search-more-results", false, () -> triggerMoreResults());
+        moreResults.setVisibility(View.GONE);
+        LinearLayout.LayoutParams mrLp =
+                new LinearLayout.LayoutParams(-2, a.dp(fontScale > 1.15f ? 32 : 36));
+        mrLp.rightMargin = a.dp(12);
+        tvFooterRow.addView(moreResults, mrLp);
+
+        resultHint = a.text("", 11.5f, TEXT_MUTED);
+        resultHint.setSingleLine(true);
+        resultHint.setEllipsize(TextUtils.TruncateAt.END);
+        resultHint.setVisibility(View.GONE);
+        tvFooterRow.addView(resultHint, new LinearLayout.LayoutParams(0, -2, 1));
+        tvFooterRow.setVisibility(View.GONE);
+        resultBody.addView(tvFooterRow, new LinearLayout.LayoutParams(-1, -2));
+
+        resultScroll = null;
+
+        if (!a.privateMode) {
+            HotTitleCatalog.ensureLoadedAsync(
+                    a,
+                    () -> {
+                        if (current() && !a.privateMode) {
+                            suggestedQuery = null;
+                            updateTitleSuggestions();
+                        }
+                    });
+            TvCuratedHome.loadAsync(
+                    a,
+                    catalog -> {
+                        if (current()
+                                && !a.privateMode
+                                && catalog != null
+                                && catalog.live
+                                && submitted.isEmpty()
+                                && tvRecentContainer != null
+                                && tvRecentContainer.getVisibility() == View.VISIBLE
+                                && focusedTag(tvRecentContainer) == null) {
+                            showTvHistory();
+                        }
+                    });
+        }
+        rebuildKeys();
+        updateMatchModeButtons();
+        updateResultHeader();
+        if (reuse) {
+            edited = TvSearchMatcher.isBlankQuery(restored) ? "" : restored.trim();
+            changed();
+            restoringResults = true;
+            renderFilters();
+            renderResults();
+            status.setText("已恢复上次" + matchMode.label + "结果 · " + matched + " 个来源有结果");
+        } else {
+            changed();
+            showHistory();
+            if (searchAgain && !TvSearchMatcher.isBlankQuery(restored)) submit();
+        }
+        if (restoredCandidatePage != 0) {
+            candidatePage = restoredCandidatePage;
+            renderCandidates();
+        }
+        a.tvInitialFocus = input;
+    }
+
+    private void buildLegacyLayout(
+            boolean reuse, String restored, boolean searchAgain, int restoredCandidatePage) {
+        a.body.setPadding(a.dp(32), a.dp(14), a.dp(32), a.dp(16));
         LinearLayout split = a.row();
         split.setGravity(Gravity.TOP);
         int height =
@@ -231,11 +1036,12 @@ public final class GlobalSearchScreen implements AutoCloseable {
         keyboardScroll.setClipToPadding(false);
         keyboardScroll.addView(left, new ScrollView.LayoutParams(-1, -2));
         split.addView(keyboardScroll, new LinearLayout.LayoutParams(a.dp(294), -1));
+        tvLeftInnerWidthPx = Math.max(a.dp(180), a.dp(294 - 34));
         float availableWidth = a.windowWidth() / a.getResources().getDisplayMetrics().density - 358;
-        columns =
-                a.isTvDevice()
-                        ? Math.max(2, Math.min(6, (int) (availableWidth / 98)))
-                        : TvLayoutPolicy.searchColumns(availableWidth);
+        columns = TvLayoutPolicy.searchColumns(availableWidth);
+        int rightInnerPx = Math.max(a.dp(240), a.windowWidth() - a.dp(358 + 12));
+        tvResultColumnWidthPx =
+                Math.max(a.dp(92), (rightInnerPx - columns * a.dp(11)) / Math.max(1, columns));
         LinearLayout headingRow = a.row();
         headingRow.setGravity(Gravity.CENTER_VERTICAL);
         TextView heading = a.text("搜索所有片源", 22, MainActivity.WHITE);
@@ -247,10 +1053,121 @@ public final class GlobalSearchScreen implements AutoCloseable {
         qrBtn.setMinHeight(a.dp(30));
         qrBtn.setMinimumHeight(a.dp(30));
         qrBtn.setPadding(a.dp(10), a.dp(3), a.dp(10), a.dp(3));
-        if (!a.isTvDevice()) headingRow.addView(qrBtn, new LinearLayout.LayoutParams(-2, a.dp(30)));
+        headingRow.addView(qrBtn, new LinearLayout.LayoutParams(-2, a.dp(30)));
         left.addView(headingRow, new LinearLayout.LayoutParams(-1, -2));
-        a.gap(left, 16);
-        input =
+        a.gap(left, 12);
+        input = createSearchEditText(false);
+        left.addView(input, new LinearLayout.LayoutParams(-1, a.dp(46)));
+        a.gap(left, 6);
+        LinearLayout matchSegRow = a.row();
+        addMatchModeButton(matchSegRow, TvSearchMatcher.Mode.EXACT, 0, a.dp(34));
+        addMatchModeButton(matchSegRow, TvSearchMatcher.Mode.FUZZY, 0, a.dp(34));
+        left.addView(matchSegRow, new LinearLayout.LayoutParams(-1, a.dp(38)));
+        composition = a.text("", 12, MainActivity.MUTED);
+        composition.setSingleLine(true);
+        composition.setPadding(a.dp(2), a.dp(5), 0, 0);
+        left.addView(composition, new LinearLayout.LayoutParams(-1, a.dp(25)));
+        candidates = a.row();
+        left.addView(candidates, new LinearLayout.LayoutParams(-1, a.dp(34)));
+        LinearLayout modes = a.row();
+        left.addView(modes, new LinearLayout.LayoutParams(-1, a.dp(38)));
+        modeButton(modes, "拼音", PinyinKeyboardModel.Mode.PINYIN, 0);
+        modeButton(modes, "字母", PinyinKeyboardModel.Mode.LETTERS, 0);
+        modeButton(modes, "数字", PinyinKeyboardModel.Mode.NUMBERS, 0);
+        keys = a.vertical();
+        left.addView(keys);
+        a.gap(left, 5);
+        LinearLayout editing = a.row();
+        left.addView(editing);
+        keyButtonFixedWidth(
+                editing,
+                "空格",
+                "search-space",
+                () -> {
+                    keyboard.space();
+                    changed();
+                },
+                1,
+                0);
+        keyButtonFixedWidth(
+                editing,
+                "删除",
+                "search-delete",
+                () -> {
+                    keyboard.backspace();
+                    changed();
+                },
+                1,
+                0);
+        keyButtonFixedWidth(
+                editing,
+                "清空",
+                "search-clear",
+                () -> {
+                    keyboard.clear();
+                    changed();
+                },
+                1,
+                0);
+        Button submit = a.button("立即搜索", "search-submit", () -> submit());
+        submit.setTextSize(15);
+        submit.setMinHeight(a.dp(40));
+        submit.setMinimumHeight(a.dp(40));
+        submit.setPadding(a.dp(8), a.dp(5), a.dp(8), a.dp(5));
+        LinearLayout.LayoutParams submitSize = new LinearLayout.LayoutParams(-1, a.dp(42));
+        submitSize.topMargin = a.dp(8);
+        left.addView(submit, submitSize);
+        LinearLayout right = a.vertical();
+        split.addView(right, new LinearLayout.LayoutParams(0, -1, 1));
+        status = a.text("默认精准搜索 · 输入停顿片刻自动更新结果。", 14, MainActivity.MUTED);
+        status.setMinHeight(a.dp(30));
+        right.addView(status);
+        HorizontalScrollView filterScroll = new HorizontalScrollView(a);
+        filterScroll.setTag("search-source-scroll");
+        filterScroll.setHorizontalScrollBarEnabled(false);
+        filterScroll.setClipChildren(false);
+        filterScroll.setClipToPadding(false);
+        sourceFilters = a.row();
+        sourceFilters.setClipChildren(false);
+        sourceFilters.setClipToPadding(false);
+        sourceFilters.setPadding(a.dp(4), a.dp(5), a.dp(4), a.dp(5));
+        filterScroll.addView(sourceFilters);
+        right.addView(filterScroll, new LinearLayout.LayoutParams(-1, a.dp(46)));
+        resultScroll = new TvScrollView(a);
+        resultScroll.setTag("global-search-results");
+        resultScroll.setClipToPadding(false);
+        resultBody = a.vertical();
+        resultBody.setPadding(a.dp(6), a.dp(12), a.dp(6), a.dp(28));
+        resultScroll.addView(resultBody);
+        right.addView(resultScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        rebuildKeys();
+        updateMatchModeButtons();
+        if (reuse) {
+            edited = restored.trim();
+            changed();
+            resetGrid();
+            restoringResults = true;
+            renderFilters();
+            renderResults();
+            status.setText("已恢复上次结果 · " + matched + " 个来源有结果，可点立即搜索刷新");
+        } else {
+            changed();
+            showHistory();
+            if (searchAgain && !restored.trim().isEmpty()) submit();
+        }
+        if (restoredCandidatePage != 0) {
+            candidatePage = restoredCandidatePage;
+            renderCandidates();
+        }
+    }
+
+    private EditText createSearchEditText(boolean tvStyle) {
+        final GradientDrawable tvFieldBg = new GradientDrawable();
+        tvFieldBg.setColor(BG_FIELD);
+        tvFieldBg.setCornerRadius(a.dp(10));
+        tvFieldBg.setStroke(0, Color.TRANSPARENT);
+
+        EditText field =
                 new EditText(a) {
                     @Override
                     public android.view.inputmethod.InputConnection onCreateInputConnection(
@@ -356,54 +1273,63 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         return super.onKeyUp(keyCode, event);
                     }
                 };
-        input.setTextSize(18);
-        input.setTextColor(MainActivity.WHITE);
-        input.setHintTextColor(MainActivity.MUTED);
-        input.setHint("输入片名…（双击调出输入法）");
-        input.setGravity(Gravity.CENTER_VERTICAL);
-        input.setIncludeFontPadding(false);
-        input.setTag("primary");
-        input.setContentDescription("搜索内容");
-        input.setSingleLine(true);
-        input.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
-        input.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
-        input.setShowSoftInputOnFocus(false);
-        input.setCursorVisible(false);
-        input.setEllipsize(android.text.TextUtils.TruncateAt.START);
-        input.setPadding(a.dp(14), a.dp(10), a.dp(12), a.dp(10));
-        input.setBackground(a.bg(0xff29292e, 10));
-        input.setFocusable(true);
-        input.setFocusableInTouchMode(true);
-        input.setClickable(true);
-        input.setOnFocusChangeListener(
+        field.setTextSize(tvStyle ? 16 : 18);
+        field.setTextColor(TEXT_PRIMARY);
+        field.setHintTextColor(TEXT_MUTED);
+        field.setHint(tvStyle ? "输入片名（双击调出输入法）" : "输入片名…（双击调出输入法）");
+        field.setGravity(Gravity.CENTER_VERTICAL);
+        field.setIncludeFontPadding(false);
+        field.setTag("primary");
+        field.setContentDescription("搜索内容");
+        field.setSingleLine(true);
+        field.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
+        field.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
+        field.setShowSoftInputOnFocus(false);
+        field.setCursorVisible(false);
+        field.setEllipsize(TextUtils.TruncateAt.START);
+        field.setPadding(a.dp(12), a.dp(6), a.dp(10), a.dp(6));
+        field.setBackground(tvStyle ? tvFieldBg : a.bg(0xff29292e, 10));
+        UiCompat.setDefaultFocusHighlightEnabled(field, false);
+        field.setFocusable(true);
+        field.setFocusableInTouchMode(true);
+        field.setClickable(true);
+        field.setOnFocusChangeListener(
                 (v, f) -> {
+                    if (f) lastLeftFocusTag = "primary";
                     if (!f && imeActive) {
                         finishSystemIme(false);
-                        input.setCursorVisible(false);
-                        input.setShowSoftInputOnFocus(false);
+                        field.setCursorVisible(false);
+                        field.setShowSoftInputOnFocus(false);
                         hideSystemIme();
                     }
-                    FocusMotion.style(
-                            a,
-                            input,
-                            f,
-                            0xff29292e,
-                            0xff35353e,
-                            10,
-                            MainActivity.WHITE,
-                            MainActivity.WHITE,
-                            true,
-                            1.01f);
+                    if (tvStyle) {
+                        tvFieldBg.setColor(f ? BG_FIELD_FOCUS : BG_FIELD);
+                        tvFieldBg.setStroke(
+                                f ? Math.max(2, a.dp(2.5f)) : 0,
+                                f ? Color.WHITE : Color.TRANSPARENT);
+                    } else {
+                        FocusMotion.style(
+                                a,
+                                field,
+                                f,
+                                0xff29292e,
+                                0xff35353e,
+                                10,
+                                MainActivity.WHITE,
+                                MainActivity.WHITE,
+                                true,
+                                1.01f);
+                    }
                 });
-        input.setOnClickListener(v -> handleInputClick());
-        input.setOnEditorActionListener(
+        field.setOnClickListener(v -> handleInputClick());
+        field.setOnEditorActionListener(
                 (v, actionId, event) -> {
                     finishSystemIme(true);
                     hideSystemIme();
                     submit();
                     return true;
                 });
-        input.addTextChangedListener(
+        field.addTextChangedListener(
                 new android.text.TextWatcher() {
                     @Override
                     public void beforeTextChanged(
@@ -416,8 +1342,6 @@ public final class GlobalSearchScreen implements AutoCloseable {
                     public void afterTextChanged(android.text.Editable s) {
                         if (!current() || syncingInput || keyboard == null) return;
                         if (imeActive) {
-                            // replace() may notify this watcher before BaseInputConnection sets
-                            // spans.
                             if (imeConnectionDepth == 0) {
                                 if (pendingImeRead != null) a.ui.removeCallbacks(pendingImeRead);
                                 pendingImeRead =
@@ -435,151 +1359,368 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         updateAfterImeInput();
                     }
                 });
-        input.setOnKeyListener((v, key, event) -> physicalKey(key, event));
-        if (a.isTvDevice()) {
-            LinearLayout inputRow = a.row();
-            inputRow.setGravity(Gravity.CENTER_VERTICAL);
-            inputRow.setClipChildren(false);
-            inputRow.setClipToPadding(false);
-            inputRow.setBackground(a.bg(0xff29292e, 12));
-            inputRow.addView(input, new LinearLayout.LayoutParams(0, a.dp(48), 1));
-            View qrIconBtn = buildTvQrIconButton();
-            LinearLayout.LayoutParams qrLp = new LinearLayout.LayoutParams(a.dp(40), a.dp(40));
-            qrLp.rightMargin = a.dp(4);
-            inputRow.addView(qrIconBtn, qrLp);
-            left.addView(inputRow, new LinearLayout.LayoutParams(-1, a.dp(48)));
-        } else left.addView(input, new LinearLayout.LayoutParams(-1, a.dp(48)));
-        composition = a.text("", 12, MainActivity.MUTED);
-        composition.setSingleLine(true);
-        composition.setPadding(a.dp(2), a.dp(5), 0, 0);
-        left.addView(composition, new LinearLayout.LayoutParams(-1, a.dp(25)));
-        candidates = a.row();
-        left.addView(candidates, new LinearLayout.LayoutParams(-1, a.dp(34)));
-        LinearLayout modes = a.row();
-        left.addView(modes, new LinearLayout.LayoutParams(-1, a.dp(38)));
-        modeButton(modes, "拼音", PinyinKeyboardModel.Mode.PINYIN);
-        modeButton(modes, "字母", PinyinKeyboardModel.Mode.LETTERS);
-        modeButton(modes, "数字", PinyinKeyboardModel.Mode.NUMBERS);
-        keys = a.vertical();
-        left.addView(keys);
-        a.gap(left, 5);
-        LinearLayout editing = a.row();
-        left.addView(editing);
-        keyButton(
-                editing,
-                "空格",
-                "search-space",
-                () -> {
-                    keyboard.space();
-                    changed();
-                },
-                1);
-        keyButton(
-                editing,
-                "删除",
-                "search-delete",
-                () -> {
-                    keyboard.backspace();
-                    changed();
-                },
-                1);
-        keyButton(
-                editing,
-                "清空",
-                "search-clear",
-                () -> {
-                    keyboard.clear();
-                    changed();
-                },
-                1);
-        Button submit = a.button("立即搜索", "search-submit", () -> submit());
-        submit.setTextSize(15);
-        submit.setMinHeight(a.dp(40));
-        submit.setMinimumHeight(a.dp(40));
-        submit.setPadding(a.dp(8), a.dp(5), a.dp(8), a.dp(5));
-        LinearLayout.LayoutParams submitSize = new LinearLayout.LayoutParams(-1, a.dp(42));
-        submitSize.topMargin = a.dp(8);
-        left.addView(submit, submitSize);
-        LinearLayout right = a.vertical();
-        split.addView(right, new LinearLayout.LayoutParams(0, -1, 1));
-        status = a.text("输入即搜索 · 停顿片刻自动更新结果。", 14, MainActivity.MUTED);
-        status.setMinHeight(a.dp(30));
-        LinearLayout resultHeader = a.row();
-        resultHeader.setGravity(Gravity.CENTER_VERTICAL);
-        TextView resultTitle = a.text("搜索结果", 19, MainActivity.WHITE);
-        resultTitle.setTypeface(null, Typeface.BOLD);
-        if (a.isTvDevice()) resultHeader.addView(resultTitle);
-        else right.addView(status);
-        HorizontalScrollView filterScroll = new HorizontalScrollView(a);
-        filterScroll.setTag("search-source-scroll");
-        filterScroll.setHorizontalScrollBarEnabled(false);
-        filterScroll.setClipChildren(false);
-        filterScroll.setClipToPadding(false);
-        sourceFilters = a.row();
-        sourceFilters.setClipChildren(false);
-        sourceFilters.setClipToPadding(false);
-        sourceFilters.setPadding(a.dp(4), a.dp(5), a.dp(4), a.dp(5));
-        filterScroll.addView(sourceFilters);
-        if (a.isTvDevice()) {
-            resultHeader.addView(filterScroll, new LinearLayout.LayoutParams(0, a.dp(46), 1));
-            right.addView(resultHeader);
-            right.addView(status);
-        } else right.addView(filterScroll, new LinearLayout.LayoutParams(-1, a.dp(46)));
-        if (a.isTvDevice()) {
-            suggestionScroll = new HorizontalScrollView(a);
-            suggestionScroll.setTag("search-title-suggestions");
-            suggestionScroll.setHorizontalScrollBarEnabled(false);
-            suggestionScroll.setClipChildren(false);
-            suggestionScroll.setClipToPadding(false);
-            titleSuggestions = a.row();
-            titleSuggestions.setGravity(Gravity.CENTER_VERTICAL);
-            titleSuggestions.setClipChildren(false);
-            titleSuggestions.setClipToPadding(false);
-            titleSuggestions.setPadding(a.dp(4), a.dp(6), a.dp(8), a.dp(6));
-            suggestionScroll.addView(titleSuggestions);
-            suggestionScroll.setVisibility(View.GONE);
-            LinearLayout.LayoutParams sugLp = new LinearLayout.LayoutParams(-1, a.dp(50));
-            sugLp.topMargin = a.dp(4);
-            sugLp.bottomMargin = a.dp(4);
-            right.addView(suggestionScroll, sugLp);
+        field.setOnKeyListener((v, key, event) -> physicalKey(key, event));
+        return field;
+    }
+
+    private void addMatchModeButton(
+            LinearLayout row, final TvSearchMatcher.Mode mode, int fixedW, int heightPx) {
+        final String tag = "search-match:" + mode.name();
+        final Button b = new Button(a);
+        b.setText(mode.label);
+        b.setTag(tag);
+        b.setContentDescription(mode.label);
+        b.setAllCaps(false);
+        b.setGravity(Gravity.CENTER);
+        b.setIncludeFontPadding(false);
+        b.setStateListAnimator(null);
+        b.setOutlineProvider(null);
+        b.setSingleLine(true);
+        b.setMinWidth(0);
+        b.setMinimumWidth(0);
+        b.setMinHeight(0);
+        b.setMinimumHeight(0);
+        b.setTextSize(12.5f);
+        b.setPadding(a.dp(6), 0, a.dp(6), 0);
+        if (android.os.Build.VERSION.SDK_INT >= 23) {
+            b.setBreakStrategy(android.text.Layout.BREAK_STRATEGY_SIMPLE);
+            b.setHyphenationFrequency(android.text.Layout.HYPHENATION_FREQUENCY_NONE);
         }
-        resultScroll = new TvScrollView(a);
-        resultScroll.setTag("global-search-results");
-        resultScroll.setClipToPadding(false);
-        resultBody = a.vertical();
-        resultBody.setPadding(a.dp(6), a.dp(12), a.dp(6), a.dp(28));
-        resultScroll.addView(resultBody);
-        right.addView(resultScroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        if (!a.privateMode) {
-            HotTitleCatalog.ensureLoadedAsync(
-                    a,
-                    () -> {
-                        if (current() && !a.privateMode) {
-                            suggestedQuery = null;
-                            updateTitleSuggestions();
-                        }
-                    });
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(a.dp(8));
+        b.setBackground(bg);
+        UiCompat.setDefaultFocusHighlightEnabled(b, false);
+        b.setFocusable(true);
+        b.setFocusableInTouchMode(true);
+        b.setClickable(true);
+        // CRITICAL: Focus movement NEVER switches match mode; ONLY confirm/click switches mode!
+        b.setOnClickListener(
+                v -> {
+                    if (!current()) return;
+                    setMatchMode(mode, false);
+                });
+        b.setOnFocusChangeListener(
+                (v, focused) -> {
+                    if (focused) lastLeftFocusTag = tag;
+                    styleMatchModeButton(b, mode, focused);
+                });
+        b.setOnKeyListener(
+                (v, keyCode, event) -> {
+                    if (a.isTvDevice()
+                            && mode == TvSearchMatcher.Mode.FUZZY
+                            && keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                            && event.getAction() == KeyEvent.ACTION_DOWN) {
+                        return focusRightFromLeft();
+                    }
+                    return physicalKey(keyCode, event);
+                });
+        LinearLayout.LayoutParams lp =
+                fixedW > 0
+                        ? new LinearLayout.LayoutParams(fixedW, heightPx)
+                        : new LinearLayout.LayoutParams(0, heightPx, 1);
+        lp.setMargins(a.dp(1), 0, a.dp(1), 0);
+        row.addView(b, lp);
+        matchModeButtons.put(mode, b);
+        matchModeBgs.put(mode, bg);
+        styleMatchModeButton(b, mode, false);
+    }
+
+    private void styleMatchModeButton(Button b, TvSearchMatcher.Mode mode, boolean focused) {
+        if (b == null) return;
+        boolean selected = mode == matchMode;
+        b.setSelected(selected);
+        b.setTypeface(null, (selected || focused) ? Typeface.BOLD : Typeface.NORMAL);
+        GradientDrawable bg = matchModeBgs.get(mode);
+        if (bg != null) {
+            if (focused && selected) {
+                bg.setColor(Color.WHITE);
+                bg.setStroke(Math.max(2, a.dp(2.5f)), 0xff5fa8ff);
+            } else if (focused) {
+                bg.setColor(0xff273244);
+                bg.setStroke(Math.max(2, a.dp(2.5f)), Color.WHITE);
+            } else if (selected) {
+                bg.setColor(BG_PILL_SELECTED);
+                bg.setStroke(0, Color.TRANSPARENT);
+            } else {
+                bg.setColor(Color.TRANSPARENT);
+                bg.setStroke(0, Color.TRANSPARENT);
+            }
         }
-        rebuildKeys();
-        if (reuse) {
-            edited = restored.trim();
-            changed();
-            resetGrid();
-            restoringResults = true;
-            renderFilters();
-            renderResults();
-            status.setText("已恢复上次结果 · " + matched + " 个来源有结果，可点立即搜索刷新");
+        if (focused && selected) {
+            b.setTextColor(TEXT_ON_LIGHT);
+        } else if (focused) {
+            b.setTextColor(Color.WHITE);
+        } else if (selected) {
+            b.setTextColor(TEXT_ON_LIGHT);
         } else {
-            changed();
-            showHistory();
-            if (searchAgain && !restored.trim().isEmpty()) submit();
+            b.setTextColor(TEXT_SECONDARY);
         }
-        candidatePage = restoredCandidatePage;
-        renderCandidates();
+    }
+
+    void updateMatchModeButtons() {
+        for (Map.Entry<TvSearchMatcher.Mode, Button> e : matchModeButtons.entrySet()) {
+            styleMatchModeButton(e.getValue(), e.getKey(), e.getValue().hasFocus());
+        }
+    }
+
+    void setMatchMode(TvSearchMatcher.Mode targetMode, boolean autoFocusResults) {
+        if (!current() || targetMode == null) return;
+        if (targetMode == matchMode) {
+            updateMatchModeButtons();
+            return;
+        }
+        matchMode = targetMode;
+        persistMatchModeIfAllowed(matchMode);
+        updateMatchModeButtons();
+        updateResultHeader();
+        String query = keyboard == null ? "" : keyboard.query().trim();
+        if (query.isEmpty()) {
+            if (status != null) {
+                status.setText(
+                        matchMode == TvSearchMatcher.Mode.EXACT
+                                ? "已切到精准搜索 · 仅保留完整片名或明确别名匹配"
+                                : "已切到模糊搜索 · 支持前缀、包含与拼音首字母匹配");
+            }
+            return;
+        }
+        // Preserve active source filter if still valid, and re-run with new mode & fresh serial so
+        // late callbacks from the superseded mode are strictly rejected.
+        String preservedFilter = isValidActiveFilter(activeFilter) ? activeFilter : "";
+        submitInternal(false, preservedFilter, autoFocusResults);
+    }
+
+    private boolean isValidActiveFilter(String key) {
+        if (key == null || key.isEmpty()) return false;
+        for (Cms.Site s : searchSites) {
+            if (s != null && key.equals(s.key) && a.isSiteEnabledInMultiSource(key)) return true;
+        }
+        return false;
+    }
+
+    private Button makeTvActionPill(
+            String label, final String tag, final boolean primary, final Runnable action) {
+        final Button b = new Button(a);
+        b.setText(label);
+        b.setTag(tag);
+        b.setContentDescription(label);
+        b.setAllCaps(false);
+        b.setGravity(Gravity.CENTER);
+        b.setIncludeFontPadding(false);
+        b.setStateListAnimator(null);
+        b.setOutlineProvider(null);
+        b.setSingleLine(true);
+        b.setMinWidth(a.dp(92));
+        b.setMinimumWidth(a.dp(92));
+        b.setMinHeight(0);
+        b.setMinimumHeight(0);
+        b.setTextSize(13);
+        b.setTypeface(null, Typeface.BOLD);
+        b.setPadding(a.dp(16), 0, a.dp(16), 0);
+        final GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(a.dp(10));
+        bg.setColor(primary ? BG_PILL_SELECTED : BG_FILTER);
+        bg.setStroke(Math.max(1, a.dp(1)), primary ? 0x00000000 : 0x33ffffff);
+        b.setBackground(bg);
+        b.setTextColor(primary ? TEXT_ON_LIGHT : TEXT_PRIMARY);
+        UiCompat.setDefaultFocusHighlightEnabled(b, false);
+        b.setFocusable(true);
+        b.setFocusableInTouchMode(true);
+        b.setClickable(true);
+        b.setOnClickListener(
+                v -> {
+                    if (current()) action.run();
+                });
+        b.setOnFocusChangeListener(
+                (v, focused) -> {
+                    if (focused) {
+                        bg.setColor(Color.WHITE);
+                        bg.setStroke(Math.max(2, a.dp(2.5f)), primary ? 0xff5fa8ff : Color.WHITE);
+                        b.setTextColor(TEXT_ON_LIGHT);
+                    } else {
+                        bg.setColor(primary ? BG_PILL_SELECTED : BG_FILTER);
+                        bg.setStroke(Math.max(1, a.dp(1)), primary ? 0x00000000 : 0x33ffffff);
+                        b.setTextColor(primary ? TEXT_ON_LIGHT : TEXT_PRIMARY);
+                    }
+                });
+        b.setOnKeyListener(
+                (v, keyCode, event) -> {
+                    if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+                            && event.getAction() == KeyEvent.ACTION_DOWN) {
+                        if (b == switchFuzzyBtn
+                                || (b == retryAllBtn
+                                        && (switchFuzzyBtn == null
+                                                || switchFuzzyBtn.getVisibility() != View.VISIBLE))
+                                || b == retrySource
+                                || b == moreResults) {
+                            return restoreLeftFocus();
+                        }
+                    }
+                    if (keyCode == KeyEvent.KEYCODE_DPAD_UP
+                            && event.getAction() == KeyEvent.ACTION_DOWN
+                            && b == moreResults
+                            && tvResultRecycler != null
+                            && tvResultRecycler.getVisibility() == View.VISIBLE
+                            && tvResultAdapter != null
+                            && tvResultAdapter.getItemCount() > 0) {
+                        focusCardAt(tvResultAdapter.getItemCount() - 1);
+                        return true;
+                    }
+                    return false;
+                });
+        return b;
+    }
+
+    private void addTvCommandButton(
+            LinearLayout row,
+            String label,
+            final String tag,
+            final boolean accent,
+            int fixedW,
+            int heightPx,
+            final Runnable action) {
+        final Button b = new Button(a);
+        b.setText(label);
+        b.setTag(tag);
+        b.setContentDescription(label);
+        b.setAllCaps(false);
+        b.setGravity(Gravity.CENTER);
+        b.setIncludeFontPadding(false);
+        b.setStateListAnimator(null);
+        b.setOutlineProvider(null);
+        b.setSingleLine(true);
+        b.setMinWidth(0);
+        b.setMinimumWidth(0);
+        b.setMinHeight(0);
+        b.setMinimumHeight(0);
+        b.setTextSize(12.5f);
+        b.setTypeface(null, accent ? Typeface.BOLD : Typeface.NORMAL);
+        b.setPadding(a.dp(2), 0, a.dp(2), 0);
+        if (android.os.Build.VERSION.SDK_INT >= 23) {
+            b.setBreakStrategy(android.text.Layout.BREAK_STRATEGY_SIMPLE);
+            b.setHyphenationFrequency(android.text.Layout.HYPHENATION_FREQUENCY_NONE);
+        }
+        final GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(a.dp(8));
+        bg.setColor(accent ? BG_PILL_SELECTED : BG_KEY);
+        bg.setStroke(0, Color.TRANSPARENT);
+        b.setBackground(bg);
+        b.setTextColor(accent ? TEXT_ON_LIGHT : TEXT_PRIMARY);
+        UiCompat.setDefaultFocusHighlightEnabled(b, false);
+        b.setFocusable(true);
+        b.setFocusableInTouchMode(true);
+        b.setClickable(true);
+        b.setOnClickListener(
+                v -> {
+                    if (!current()) return;
+                    if ("search-clear".equals(tag)) imeDraft.clear();
+                    if (imeDraft.composing()) {
+                        a.toast("输入法文字尚未确认，请双击输入框继续或取消");
+                        return;
+                    }
+                    action.run();
+                });
+        b.setOnFocusChangeListener(
+                (v, focus) -> {
+                    if (focus) lastLeftFocusTag = tag;
+                    if (focus) {
+                        bg.setColor(Color.WHITE);
+                        bg.setStroke(Math.max(2, a.dp(2.5f)), accent ? 0xff5fa8ff : Color.WHITE);
+                        b.setTextColor(TEXT_ON_LIGHT);
+                    } else {
+                        bg.setColor(accent ? BG_PILL_SELECTED : BG_KEY);
+                        bg.setStroke(0, Color.TRANSPARENT);
+                        b.setTextColor(accent ? TEXT_ON_LIGHT : TEXT_PRIMARY);
+                    }
+                });
+        b.setOnKeyListener(
+                (v, keyCode, event) -> {
+                    if (accent
+                            && keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                            && event.getAction() == KeyEvent.ACTION_DOWN) {
+                        return focusRightFromLeft();
+                    }
+                    return physicalKey(keyCode, event);
+                });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(fixedW, heightPx);
+        lp.setMargins(a.dp(2), a.dp(2), a.dp(2), a.dp(2));
+        row.addView(b, lp);
+    }
+
+    private boolean focusRightFromLeft() {
+        if (!current()) return false;
+        if (submitted.isEmpty()) {
+            if (tvRecentContainer != null && tvRecentContainer.getVisibility() == View.VISIBLE) {
+                View preferred = findFirstDiscoverCard(tvRecentContainer);
+                if (preferred == null) preferred = findFirstFocusable(tvRecentContainer);
+                if (preferred != null) {
+                    preferred.requestFocus();
+                    return true;
+                }
+            }
+            return false;
+        }
+        // Prefer remembered poster card, then first visible card, then active filter, then state
+        // CTA.
+        if (focusSelectedResultsInternal()) return true;
+        Button tab = filterButtons.get(activeFilter);
+        if (tab != null && tab.isShown()) {
+            tab.requestFocus();
+            return true;
+        }
+        return false;
+    }
+
+    private static View findFirstDiscoverCard(View root) {
+        if (root == null || root.getVisibility() != View.VISIBLE) return null;
+        if (root.isFocusable() && root.getTag() instanceof String) {
+            String t = (String) root.getTag();
+            if (t.startsWith("search-history:") || t.startsWith("search-hot:")) {
+                return root;
+            }
+        }
+        if (root instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) root;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                View found = findFirstDiscoverCard(g.getChildAt(i));
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    private boolean restoreLeftFocus() {
+        if (!current() || a.root == null) return false;
+        if (lastLeftFocusTag != null && !lastLeftFocusTag.isEmpty()) {
+            View v = a.root.findViewWithTag(lastLeftFocusTag);
+            if (v != null && v.isShown() && v.isFocusable()) {
+                v.requestFocus();
+                return true;
+            }
+        }
+        if (input != null && input.isShown()) {
+            input.requestFocus();
+            return true;
+        }
+        return false;
+    }
+
+    private static View findFirstFocusable(View root) {
+        if (root == null || root.getVisibility() != View.VISIBLE) return null;
+        if (root.isFocusable()) return root;
+        if (root instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) root;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                View found = findFirstFocusable(g.getChildAt(i));
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
 
     boolean contextMatches() {
-        return pageContext != null && pageContext.matches(a.config, a.privateMode, a.engineEpoch);
+        return pageContext != null
+                && pageContext.matches(a.config, a.privateMode, a.engineEpoch)
+                && (searchMultiSourceRev == 0L || searchMultiSourceRev == a.multiSourceRevision());
     }
 
     boolean current() {
@@ -590,6 +1731,13 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 && contextMatches();
     }
 
+    static void trimMemory(int level) {
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW
+                || level >= android.content.ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
+            cache = null;
+        }
+    }
+
     static void invalidateContext(MainActivity activity) {
         TvSearchContext.revokeAll();
         cache = null;
@@ -598,36 +1746,87 @@ public final class GlobalSearchScreen implements AutoCloseable {
         if (activity.searchScreen != null) activity.searchScreen.discardContext();
     }
 
+    private void deferPendingPhoneticLearn() {
+        if (a.isTvDevice() && a.ui != null && !a.pendingTitles.isEmpty()) {
+            a.ui.removeCallbacks(a.learnPendingTitles);
+            a.ui.postDelayed(a.learnPendingTitles, 3000L);
+        }
+    }
+
+    private void learnSearchTitlesDeferred(List<Cms.Video> videos) {
+        if (videos == null || videos.isEmpty()) return;
+        a.learnTitles(videos);
+        deferPendingPhoneticLearn();
+    }
+
     private void discardContext() {
         close();
+        retainedRoot = null;
+        retainedBody = null;
         contextDiscarded = true;
         submitted = edited = activeFilter = "";
+        matchMode = loadPreferredMatchMode();
         keyboard = null;
         imeDraft.clear();
         if (input != null) input.setText("");
         if (composition != null) composition.setText("");
-        if (resultBody != null) resultBody.removeAllViews();
+        if (tvResultAdapter != null) tvResultAdapter.clearAll();
+        if (resultBody != null && !a.isTvDevice()) resultBody.removeAllViews();
         if (sourceFilters != null) sourceFilters.removeAllViews();
         results.clear();
         searchSites.clear();
         searchVariants = Collections.emptyList();
         sourceScroll.clear();
         sourceLimits.clear();
+        sourceScrollPos.clear();
+        sourceScrollOffset.clear();
         sourceFocus.clear();
+        filterButtons.clear();
+        filterBgs.clear();
+        filterNames.clear();
+        renderedFilterLabels.clear();
+        renderedFilterStates.clear();
+        globalBudgetCapped = false;
+        cacheDirty = false;
         shownLimit = 24;
         savedResultScroll = 0;
+        savedRecyclerPos = 0;
+        savedRecyclerOffset = 0;
     }
 
     private void cacheResults() {
-        if (contextMatches() && !a.privateMode && !submitted.isEmpty() && !results.isEmpty())
+        if (contextMatches() && !a.privateMode && !submitted.isEmpty() && !results.isEmpty()) {
             cache = new Snapshot(this);
+            cacheDirty = false;
+            lastCacheSnapshotMs = android.os.SystemClock.elapsedRealtime();
+        }
+    }
+
+    private void maybeCacheResults(boolean force) {
+        if (!contextMatches() || a.privateMode || submitted.isEmpty() || results.isEmpty()) return;
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (force
+                || (cacheDirty
+                        && (lastCacheSnapshotMs == 0L || now - lastCacheSnapshotMs >= 1500L))) {
+            cacheResults();
+        }
+    }
+
+    int retainedVideoCount() {
+        int count = 0;
+        for (SourceResult r : results.values()) {
+            if (r != null && r.videos != null) count += r.videos.size();
+        }
+        return count;
     }
 
     private void recount() {
         finished = results.size();
         failed = timedOut = busy = matched = 0;
         for (SourceResult result : results.values()) {
-            if (result.outcome == SearchCoordinator.Outcome.RESULT) matched++;
+            if (result.outcome == SearchCoordinator.Outcome.RESULT
+                    && result.videos != null
+                    && !result.videos.isEmpty()) matched++;
             if (result.outcome == SearchCoordinator.Outcome.FAILED) failed++;
             if (result.outcome == SearchCoordinator.Outcome.TIMEOUT) timedOut++;
             if (result.outcome == SearchCoordinator.Outcome.BUSY) busy++;
@@ -635,59 +1834,222 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     void modeButton(LinearLayout row, String title, PinyinKeyboardModel.Mode mode) {
+        modeButton(row, title, mode, 0);
+    }
+
+    void modeButton(LinearLayout row, String title, PinyinKeyboardModel.Mode mode, int fixedW) {
+        final String tag = "search-mode:" + mode.name();
+        if (a.isTvDevice()) {
+            final Button b = new Button(a);
+            b.setText(title);
+            b.setTag(tag);
+            b.setContentDescription("键盘类型 " + title);
+            b.setAllCaps(false);
+            b.setGravity(Gravity.CENTER);
+            b.setIncludeFontPadding(false);
+            b.setStateListAnimator(null);
+            b.setOutlineProvider(null);
+            b.setSingleLine(true);
+            b.setMinWidth(0);
+            b.setMinimumWidth(0);
+            b.setMinHeight(0);
+            b.setMinimumHeight(0);
+            b.setTextSize(11.5f);
+            b.setPadding(a.dp(4), 0, a.dp(4), 0);
+            GradientDrawable bg = new GradientDrawable();
+            bg.setCornerRadius(a.dp(7));
+            b.setBackground(bg);
+            UiCompat.setDefaultFocusHighlightEnabled(b, false);
+            b.setFocusable(true);
+            b.setFocusableInTouchMode(true);
+            b.setOnClickListener(
+                    v -> {
+                        if (!current()) return;
+                        if (imeDraft.composing()) {
+                            a.toast("输入法文字尚未确认，请双击输入框继续或取消");
+                            return;
+                        }
+                        keyboard.mode(mode);
+                        candidatePage = 0;
+                        rebuildKeys();
+                        changed();
+                    });
+            b.setOnFocusChangeListener(
+                    (v, focused) -> {
+                        if (focused) lastLeftFocusTag = tag;
+                        styleKeyboardModeButton(b, mode, focused);
+                    });
+            b.setOnKeyListener(
+                    (v, keyCode, event) -> {
+                        if (mode == PinyinKeyboardModel.Mode.NUMBERS
+                                && keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                                && event.getAction() == KeyEvent.ACTION_DOWN) {
+                            return focusRightFromLeft();
+                        }
+                        return physicalKey(keyCode, event);
+                    });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(fixedW, a.dp(25));
+            lp.setMargins(a.dp(2), a.dp(1), a.dp(2), a.dp(1));
+            row.addView(b, lp);
+            modeButtons.put(mode, b);
+            modeButtonBgs.put(mode, bg);
+            styleKeyboardModeButton(b, mode, false);
+            return;
+        }
         Button b =
-                keyButton(
+                keyButtonFixedWidth(
                         row,
                         title,
-                        "search-mode:" + mode.name(),
+                        tag,
                         () -> {
                             keyboard.mode(mode);
                             candidatePage = 0;
                             rebuildKeys();
                             changed();
                         },
-                        1);
+                        1,
+                        fixedW);
         modeButtons.put(mode, b);
     }
 
+    private void styleKeyboardModeButton(Button b, PinyinKeyboardModel.Mode mode, boolean focused) {
+        if (b == null || keyboard == null) return;
+        boolean selected = keyboard.mode() == mode;
+        b.setSelected(selected);
+        b.setTypeface(null, selected || focused ? Typeface.BOLD : Typeface.NORMAL);
+        GradientDrawable bg = modeButtonBgs.get(mode);
+        if (bg != null) {
+            if (focused) {
+                bg.setColor(Color.WHITE);
+                bg.setStroke(Math.max(1, a.dp(2)), Color.WHITE);
+            } else if (selected) {
+                bg.setColor(BG_KEY_SELECTED);
+                bg.setStroke(Math.max(1, a.dp(1)), 0x558ab4e8);
+            } else {
+                bg.setColor(0x16ffffff);
+                bg.setStroke(0, Color.TRANSPARENT);
+            }
+        }
+        b.setTextColor(focused ? TEXT_ON_LIGHT : (selected ? TEXT_PRIMARY : TEXT_MUTED));
+    }
+
     Button keyButton(LinearLayout row, String label, String tag, Runnable action, float weight) {
-        Button b =
-                a.button(
-                        label,
-                        tag,
-                        () -> {
-                            if (!current()) return;
-                            if ("search-clear".equals(tag)) imeDraft.clear();
-                            if (imeDraft.composing()) {
-                                a.toast("输入法文字尚未确认，请双击输入框继续或取消");
-                                return;
-                            }
-                            action.run();
-                        });
-        b.setMinWidth(0);
-        b.setMinimumWidth(0);
-        b.setMinHeight(0);
-        b.setMinimumHeight(0);
-        b.setTextSize(14);
-        b.setPadding(a.dp(2), 0, a.dp(2), 0);
-        b.setBackground(a.bg(0xff29292e, 7));
-        b.setOnFocusChangeListener(
-                (v, focus) -> {
-                    FocusMotion.style(
-                            a,
-                            b,
-                            focus,
-                            0xff29292e,
-                            MainActivity.WHITE,
-                            7,
-                            MainActivity.WHITE,
-                            MainActivity.DARK,
-                            false,
-                            1.08f);
-                });
-        b.setOnKeyListener((v, key, event) -> physicalKey(key, event));
-        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(0, a.dp(28), weight);
-        size.setMargins(a.dp(2), a.dp(2), a.dp(2), a.dp(2));
+        return keyButtonFixedWidth(row, label, tag, action, weight, 0);
+    }
+
+    Button keyButtonFixedWidth(
+            LinearLayout row, String label, String tag, Runnable action, float weight, int fixedW) {
+        return keyButtonFixedWidth(row, label, tag, action, weight, fixedW, false);
+    }
+
+    Button keyButtonFixedWidth(
+            LinearLayout row,
+            String label,
+            final String tag,
+            final Runnable action,
+            float weight,
+            int fixedW,
+            final boolean rightEdgeToContent) {
+        final Button b;
+        if (a.isTvDevice()) {
+            b = new Button(a);
+            b.setText(label);
+            b.setTag(tag);
+            b.setAllCaps(false);
+            b.setGravity(Gravity.CENTER);
+            b.setIncludeFontPadding(false);
+            b.setStateListAnimator(null);
+            b.setOutlineProvider(null);
+            b.setSingleLine(true);
+            b.setMinWidth(0);
+            b.setMinimumWidth(0);
+            b.setMinHeight(0);
+            b.setMinimumHeight(0);
+            b.setTextSize(13.5f);
+            b.setTextColor(TEXT_PRIMARY);
+            b.setPadding(a.dp(2), 0, a.dp(2), 0);
+            if (android.os.Build.VERSION.SDK_INT >= 23) {
+                b.setBreakStrategy(android.text.Layout.BREAK_STRATEGY_SIMPLE);
+                b.setHyphenationFrequency(android.text.Layout.HYPHENATION_FREQUENCY_NONE);
+            }
+            final GradientDrawable keyBg = new GradientDrawable();
+            keyBg.setColor(BG_KEY);
+            keyBg.setCornerRadius(a.dp(9));
+            b.setBackground(keyBg);
+            UiCompat.setDefaultFocusHighlightEnabled(b, false);
+            b.setFocusable(true);
+            b.setFocusableInTouchMode(true);
+            b.setOnClickListener(
+                    v -> {
+                        if (!current()) return;
+                        if ("search-clear".equals(tag)) imeDraft.clear();
+                        if (imeDraft.composing()) {
+                            a.toast("输入法文字尚未确认，请双击输入框继续或取消");
+                            return;
+                        }
+                        action.run();
+                    });
+            b.setOnFocusChangeListener(
+                    (v, focus) -> {
+                        if (focus) lastLeftFocusTag = tag;
+                        keyBg.setColor(focus ? Color.WHITE : BG_KEY);
+                        keyBg.setStroke(
+                                focus ? Math.max(1, a.dp(2)) : 0,
+                                focus ? Color.WHITE : Color.TRANSPARENT);
+                        b.setTextColor(focus ? TEXT_ON_LIGHT : TEXT_PRIMARY);
+                    });
+            b.setOnKeyListener(
+                    (v, key, event) -> {
+                        if (rightEdgeToContent
+                                && key == KeyEvent.KEYCODE_DPAD_RIGHT
+                                && event.getAction() == KeyEvent.ACTION_DOWN) {
+                            return focusRightFromLeft();
+                        }
+                        return physicalKey(key, event);
+                    });
+        } else {
+            b =
+                    a.button(
+                            label,
+                            tag,
+                            () -> {
+                                if (!current()) return;
+                                if ("search-clear".equals(tag)) imeDraft.clear();
+                                if (imeDraft.composing()) {
+                                    a.toast("输入法文字尚未确认，请双击输入框继续或取消");
+                                    return;
+                                }
+                                action.run();
+                            });
+            b.setMinWidth(0);
+            b.setMinimumWidth(0);
+            b.setMinHeight(0);
+            b.setMinimumHeight(0);
+            b.setTextSize(14);
+            b.setPadding(a.dp(2), 0, a.dp(2), 0);
+            b.setBackground(a.bg(0xff29292e, 7));
+            b.setOnFocusChangeListener(
+                    (v, focus) -> {
+                        FocusMotion.style(
+                                a,
+                                b,
+                                focus,
+                                0xff29292e,
+                                MainActivity.WHITE,
+                                7,
+                                MainActivity.WHITE,
+                                MainActivity.DARK,
+                                false,
+                                1.08f);
+                    });
+            b.setOnKeyListener((v, key, event) -> physicalKey(key, event));
+        }
+        int keyHeightPx = a.isTvDevice() ? a.dp(29) : a.dp(28);
+        LinearLayout.LayoutParams size =
+                (fixedW > 0)
+                        ? new LinearLayout.LayoutParams(fixedW, keyHeightPx)
+                        : new LinearLayout.LayoutParams(0, keyHeightPx, weight);
+        size.setMargins(a.dp(2), a.dp(1.5f), a.dp(2), a.dp(1.5f));
         row.addView(b, size);
         return b;
     }
@@ -700,17 +2062,30 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         : keyboard.mode() == PinyinKeyboardModel.Mode.LETTERS
                                 ? "abcdefghijklmnopqrstuvwxyz"
                                 : "abcdefghijklmnopqrstuvwxyz'";
+        int fixedKeyW =
+                (a.isTvDevice() && tvLeftInnerWidthPx > 0)
+                        ? Math.max(a.dp(28), (tvLeftInnerWidthPx - a.dp(4) * 6) / 6)
+                        : 0;
         for (int start = 0; start < characters.length(); start += 6) {
             LinearLayout row = a.row();
+            row.setClipChildren(false);
+            row.setClipToPadding(false);
             keys.addView(row);
+            int rowEnd = Math.min(characters.length(), start + 6);
             for (int column = 0; column < 6; column++) {
                 int index = start + column;
                 if (index >= characters.length()) {
-                    row.addView(new View(a), new LinearLayout.LayoutParams(0, a.dp(32), 1));
+                    LinearLayout.LayoutParams blankLp =
+                            fixedKeyW > 0
+                                    ? new LinearLayout.LayoutParams(fixedKeyW, a.dp(29))
+                                    : new LinearLayout.LayoutParams(0, a.dp(29), 1);
+                    if (fixedKeyW > 0) blankLp.setMargins(a.dp(2), a.dp(1.5f), a.dp(2), a.dp(1.5f));
+                    row.addView(new View(a), blankLp);
                     continue;
                 }
-                String letter = characters.substring(index, index + 1);
-                keyButton(
+                final String letter = characters.substring(index, index + 1);
+                boolean isRightmostInRow = (index == rowEnd - 1);
+                keyButtonFixedWidth(
                         row,
                         letter.toUpperCase(Locale.ROOT),
                         "search-key:" + letter,
@@ -718,20 +2093,29 @@ public final class GlobalSearchScreen implements AutoCloseable {
                             keyboard.input(letter);
                             changed();
                         },
-                        1);
+                        1,
+                        fixedKeyW,
+                        a.isTvDevice() && isRightmostInRow);
             }
         }
-        for (Map.Entry<PinyinKeyboardModel.Mode, Button> entry : modeButtons.entrySet())
-            entry.getValue()
-                    .setText(
-                            (entry.getKey() == keyboard.mode() ? "● " : "")
-                                    + modeLabel(entry.getKey()));
+        for (Map.Entry<PinyinKeyboardModel.Mode, Button> entry : modeButtons.entrySet()) {
+            if (a.isTvDevice()) {
+                entry.getValue().setText(modeLabel(entry.getKey()));
+                styleKeyboardModeButton(
+                        entry.getValue(), entry.getKey(), entry.getValue().hasFocus());
+            } else {
+                entry.getValue()
+                        .setText(
+                                (entry.getKey() == keyboard.mode() ? "● " : "")
+                                        + modeLabel(entry.getKey()));
+            }
+        }
     }
 
     String modeLabel(PinyinKeyboardModel.Mode mode) {
         return mode == PinyinKeyboardModel.Mode.PINYIN
                 ? "拼音"
-                : mode == PinyinKeyboardModel.Mode.LETTERS ? "字母" : "数字";
+                : mode == PinyinKeyboardModel.Mode.LETTERS ? "字母" : (a.isTvDevice() ? "123" : "数字");
     }
 
     void handleInputClick() {
@@ -774,7 +2158,6 @@ public final class GlobalSearchScreen implements AutoCloseable {
 
     static boolean isLowRamMemoryClass(boolean lowRamFlag, int memoryClassMb, long maxHeapBytes) {
         if (lowRamFlag) return true;
-        // Standard memoryClass (MB) is unaffected by android:largeHeap="true" (e.g. 192 MB TVs).
         if (memoryClassMb > 0 && memoryClassMb <= 256) return true;
         return maxHeapBytes > 0L && maxHeapBytes <= 256L * 1024L * 1024L;
     }
@@ -801,7 +2184,8 @@ public final class GlobalSearchScreen implements AutoCloseable {
         imeDraft.open(keyboard);
         syncingInput = true;
         String currentText = imeDraft.text == null ? "" : imeDraft.text;
-        if (!currentText.equals(input.getText().toString())) {
+        android.text.Editable existingText = input.getText();
+        if (!currentText.equals(existingText == null ? "" : existingText.toString())) {
             input.setText(currentText);
         }
         int actualLen = input.getText() == null ? 0 : input.getText().length();
@@ -850,7 +2234,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
         }
         searchSerial++;
         cancelWork();
-        edited = ""; // After composition ends, even the same query must replace canceled work.
+        edited = "";
         status.setText("输入法正在组词，确认后搜索");
         resultBody.setVisibility(View.INVISIBLE);
     }
@@ -858,6 +2242,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
     void readImeDraft() {
         if (!imeActive || keyboard == null || input == null || !contextMatches()) return;
         android.text.Editable value = input.getText();
+        if (value == null) return;
         imeDraft.update(
                 value.toString(),
                 android.view.inputmethod.BaseInputConnection.getComposingSpanStart(value),
@@ -962,7 +2347,8 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                                 ? ""
                                                 : "  " + keyboard.composition());
         syncingInput = true;
-        if (!display.equals(input.getText().toString())) {
+        android.text.Editable currentInput = input.getText();
+        if (!display.equals(currentInput == null ? "" : currentInput.toString())) {
             input.setText(display);
             int actualLen = input.getText() == null ? 0 : input.getText().length();
             try {
@@ -989,8 +2375,8 @@ public final class GlobalSearchScreen implements AutoCloseable {
         composition.setText(
                 keyboard.composition().isEmpty()
                         ? (keyboard.mode() == PinyinKeyboardModel.Mode.PINYIN
-                                ? "默认识别首拼 / 全拼 · 双击输入框调出电视输入法"
-                                : "直接输入字母、首字母或数字 · 双击输入框调出输入法")
+                                ? "输入拼音选候选字 · 双击输入框调系统输入法"
+                                : "直接输入字母、数字或符号 · 双击调系统输入法")
                         : "拼音  " + keyboard.composition());
         if (resetCandidates) candidatePage = 0;
         renderCandidates();
@@ -1011,12 +2397,12 @@ public final class GlobalSearchScreen implements AutoCloseable {
 
     void updateTitleSuggestions() {
         if (suggestionScroll == null || !current() || keyboard == null) return;
-        // The shared index contains public history. Never display it inside a private space.
         if (a.privateMode || imeDraft.composing()) {
             cancelSuggestions();
             return;
         }
-        final String query = keyboard.query().trim();
+        final String rawQuery = keyboard.query();
+        final String query = TvSearchMatcher.isBlankQuery(rawQuery) ? "" : rawQuery.trim();
         if (query.equals(suggestedQuery)) return;
         cancelSuggestions();
         suggestedQuery = query;
@@ -1045,74 +2431,69 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                             if (!acceptsTitleSuggestions(ticket, query)) return;
                                             titleSuggestions.removeAllViews();
                                             if (values.isEmpty()) return;
-                                            TextView label = a.text("热门联想", 12.5f, 0xa8ebebf5);
+                                            TextView label = a.text("片名补全", 11.5f, TEXT_MUTED);
                                             label.setTypeface(null, Typeface.BOLD);
-                                            label.setPadding(0, 0, a.dp(10), 0);
+                                            label.setPadding(0, 0, a.dp(8), 0);
                                             titleSuggestions.addView(label);
-                                            for (String title : values) {
-                                                Button choice =
-                                                        a.button(
-                                                                title,
-                                                                "search-title:" + title,
-                                                                () -> {
-                                                                    if (!current()
-                                                                            || ticket
-                                                                                    != suggestionSerial
-                                                                            || a.privateMode
-                                                                            || imeDraft.composing())
-                                                                        return;
-                                                                    input.requestFocus();
-                                                                    imeDraft.clear();
-                                                                    keyboard.set(title);
-                                                                    changed();
-                                                                    submit(true);
-                                                                });
+                                            for (final String title : values) {
+                                                final Button choice = new Button(a);
+                                                choice.setText(title);
                                                 choice.setTag("search-title:" + title);
+                                                choice.setAllCaps(false);
+                                                choice.setIncludeFontPadding(false);
+                                                choice.setStateListAnimator(null);
+                                                choice.setOutlineProvider(null);
                                                 UiCompat.setDefaultFocusHighlightEnabled(
                                                         choice, false);
-                                                choice.setTextSize(13.5f);
+                                                choice.setTextSize(12.5f);
                                                 choice.setSingleLine(true);
-                                                choice.setMaxWidth(a.dp(220));
-                                                choice.setEllipsize(
-                                                        android.text.TextUtils.TruncateAt.END);
+                                                choice.setMaxWidth(a.dp(200));
+                                                choice.setEllipsize(TextUtils.TruncateAt.END);
                                                 choice.setMinWidth(0);
                                                 choice.setMinimumWidth(0);
                                                 choice.setMinHeight(0);
                                                 choice.setMinimumHeight(0);
-                                                choice.setPadding(a.dp(14), 0, a.dp(14), 0);
-                                                choice.setBackground(
-                                                        TvV17Surface.rounded(
-                                                                0x28ffffff,
-                                                                a.dp(18),
-                                                                0x38ffffff,
-                                                                a.dp(1)));
-                                                choice.setTextColor(0xf2ffffff);
+                                                choice.setPadding(a.dp(12), 0, a.dp(12), 0);
+                                                final GradientDrawable cBg = new GradientDrawable();
+                                                cBg.setColor(BG_FILTER);
+                                                cBg.setCornerRadius(a.dp(15));
+                                                cBg.setStroke(Math.max(1, a.dp(1)), 0x26ffffff);
+                                                choice.setBackground(cBg);
+                                                choice.setTextColor(TEXT_PRIMARY);
+                                                choice.setFocusable(true);
+                                                choice.setFocusableInTouchMode(true);
+                                                choice.setOnClickListener(
+                                                        v -> {
+                                                            if (!current()
+                                                                    || ticket != suggestionSerial
+                                                                    || a.privateMode
+                                                                    || imeDraft.composing()) return;
+                                                            imeDraft.clear();
+                                                            keyboard.set(title);
+                                                            changed();
+                                                            submit(true);
+                                                        });
                                                 choice.setOnFocusChangeListener(
                                                         (v, focused) -> {
-                                                            FocusMotion.unclipAncestors(choice);
-                                                            choice.setBackground(
-                                                                    TvV17Surface.rounded(
-                                                                            focused
-                                                                                    ? 0xfff5f5f7
-                                                                                    : 0x28ffffff,
-                                                                            a.dp(18),
-                                                                            focused
-                                                                                    ? 0xffffffff
-                                                                                    : 0x38ffffff,
-                                                                            a.dp(1)));
+                                                            cBg.setColor(
+                                                                    focused
+                                                                            ? Color.WHITE
+                                                                            : BG_FILTER);
+                                                            cBg.setStroke(
+                                                                    focused
+                                                                            ? Math.max(2, a.dp(2))
+                                                                            : Math.max(1, a.dp(1)),
+                                                                    focused
+                                                                            ? Color.WHITE
+                                                                            : 0x26ffffff);
                                                             choice.setTextColor(
                                                                     focused
-                                                                            ? 0xff0b0e14
-                                                                            : 0xf2ffffff);
-                                                            choice.animate()
-                                                                    .scaleX(focused ? 1.05f : 1f)
-                                                                    .scaleY(focused ? 1.05f : 1f)
-                                                                    .setDuration(120)
-                                                                    .start();
+                                                                            ? TEXT_ON_LIGHT
+                                                                            : TEXT_PRIMARY);
                                                         });
                                                 LinearLayout.LayoutParams size =
-                                                        new LinearLayout.LayoutParams(-2, a.dp(36));
-                                                size.rightMargin = a.dp(8);
+                                                        new LinearLayout.LayoutParams(-2, a.dp(32));
+                                                size.rightMargin = a.dp(7);
                                                 titleSuggestions.addView(choice, size);
                                             }
                                             suggestionScroll.scrollTo(0, 0);
@@ -1134,14 +2515,13 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     void renderCandidates() {
+        if (candidates == null || keyboard == null) return;
         candidates.removeAllViews();
         List<PinyinKeyboardModel.Candidate> values = keyboard.candidates();
         if (values.isEmpty()) {
             TextView hint =
-                    a.text(
-                            keyboard.composition().isEmpty() ? "" : "继续输入拼音，或切到字母搜索",
-                            12,
-                            MainActivity.MUTED);
+                    a.text(keyboard.composition().isEmpty() ? "" : "继续输入拼音选字，或点搜索", 11, TEXT_MUTED);
+            hint.setSingleLine(true);
             candidates.addView(hint);
             return;
         }
@@ -1159,7 +2539,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         1)
                 .setEnabled(page > 0);
         for (int i = page * 6; i < Math.min(values.size(), page * 6 + 6); i++) {
-            PinyinKeyboardModel.Candidate candidate = values.get(i);
+            final PinyinKeyboardModel.Candidate candidate = values.get(i);
             keyButton(
                     candidates,
                     candidate.text,
@@ -1186,15 +2566,16 @@ public final class GlobalSearchScreen implements AutoCloseable {
 
     void scheduleSearch() {
         if (!current() || keyboard == null || imeDraft.composing()) return;
-        String query = keyboard.query().trim();
+        final String rawQuery = keyboard.query();
+        String query = TvSearchMatcher.isBlankQuery(rawQuery) ? "" : rawQuery.trim();
         if (query.equals(edited)) return;
         edited = query;
         if (pendingSearch != null) a.ui.removeCallbacks(pendingSearch);
         pendingSearch = null;
         ++searchSerial;
         restoringResults = false;
+        pendingPaginationFocus = false;
         cancelWork();
-        // Old results must never be shown under a newly edited query during debounce.
         if (!query.equals(submitted)) {
             cache = null;
             results.clear();
@@ -1202,32 +2583,62 @@ public final class GlobalSearchScreen implements AutoCloseable {
             sourceScroll.clear();
             sourceFocus.clear();
             sourceLimits.clear();
+            sourceScrollPos.clear();
+            sourceScrollOffset.clear();
             clearCards();
+            displayed.clear();
+            displayedItems.clear();
             filterButtons.clear();
-            sourceFilters.removeAllViews();
-            resultBody.removeAllViews();
+            filterBgs.clear();
+            filterNames.clear();
+            renderedFilterLabels.clear();
+            renderedFilterStates.clear();
+            globalBudgetCapped = false;
+            cacheDirty = false;
+            if (sourceFilters != null) sourceFilters.removeAllViews();
+            if (filterScrollView != null) filterScrollView.setVisibility(View.GONE);
+            if (tvResultAdapter != null) tvResultAdapter.clearAll();
+            if (!a.isTvDevice() && resultBody != null) resultBody.removeAllViews();
             resultGrid = null;
         }
         if (query.isEmpty()) {
             submitted = "";
             results.clear();
             clearCards();
+            displayed.clear();
+            displayedItems.clear();
             filterButtons.clear();
-            sourceFilters.removeAllViews();
-            resultBody.removeAllViews();
+            filterBgs.clear();
+            filterNames.clear();
+            renderedFilterLabels.clear();
+            renderedFilterStates.clear();
+            globalBudgetCapped = false;
+            cacheDirty = false;
+            if (sourceFilters != null) sourceFilters.removeAllViews();
+            if (filterScrollView != null) filterScrollView.setVisibility(View.GONE);
+            if (tvResultAdapter != null) tvResultAdapter.clearAll();
+            if (!a.isTvDevice() && resultBody != null) resultBody.removeAllViews();
             resultGrid = null;
-        }
-
-        if (query.isEmpty()) {
-            status.setText("输入即搜索 · 支持中文、首拼和全拼");
+            updateResultHeader();
+            if (status != null) {
+                status.setText(
+                        matchMode == TvSearchMatcher.Mode.EXACT
+                                ? "默认精准搜索完整片名 · 可按需切到模糊搜索"
+                                : "当前模糊搜索 · 支持片名片段、拼音与首字母");
+            }
             showHistory();
             return;
         }
-        status.setText("正在输入… 停顿后自动搜索");
+        updateResultHeader();
+        if (status != null) status.setText("正在输入… 停顿片刻自动" + matchMode.label);
         pendingSearch =
                 () -> {
                     pendingSearch = null;
-                    if (current() && query.equals(keyboard.query().trim())) submit(false);
+                    if (current() && keyboard != null) {
+                        String cur = keyboard.query();
+                        String trimmedCur = TvSearchMatcher.isBlankQuery(cur) ? "" : cur.trim();
+                        if (query.equals(trimmedCur)) submit(false);
+                    }
                 };
         a.ui.postDelayed(pendingSearch, 650);
     }
@@ -1237,7 +2648,12 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     void submit(boolean remember) {
-        if (!current()) return;
+        submitInternal(remember, "", false);
+    }
+
+    void submitInternal(boolean remember, String preserveFilter, boolean focusFirstOnResult) {
+        if (!current() || keyboard == null) return;
+        searchMultiSourceRev = a.multiSourceRevision();
         if (imeDraft.composing()) {
             a.toast("请先在输入法确认组词");
             return;
@@ -1246,14 +2662,24 @@ public final class GlobalSearchScreen implements AutoCloseable {
             a.ui.removeCallbacks(pendingSearch);
             pendingSearch = null;
         }
-        String query = keyboard.query().trim();
-        if (query.isEmpty()) {
-            status.setText("先输入一个片名。也可以搜索英文、首字母或数字。");
+        final String rawQuery = keyboard.query();
+        if (TvSearchMatcher.isBlankQuery(rawQuery)) {
+            submitted = "";
+            pendingPaginationFocus = false;
+            updateResultHeader();
+            if (status != null) status.setText("请先输入片名；空关键词不会发起网络搜索。");
+            showHistory();
             return;
         }
+        final String query = rawQuery.trim();
         cancelWork();
         restoringResults = false;
+        pendingPaginationFocus = false;
+        resumeSyncNeeded = false;
+        resumeResultsSyncNeeded = false;
+        focusNewResults = focusFirstOnResult;
         submitted = query;
+        final TvSearchMatcher.Mode requestMode = matchMode;
         resultConfig = a.config;
         resultPrivateMode = a.privateMode;
         resultTime = System.currentTimeMillis();
@@ -1261,22 +2687,40 @@ public final class GlobalSearchScreen implements AutoCloseable {
         if (coordinator != null) coordinator.close();
         results.clear();
         clearCards();
+        displayed.clear();
+        displayedItems.clear();
+        deferredRerankPending = false;
         finished = failed = timedOut = busy = matched = 0;
-        activeFilter = "";
         filterButtons.clear();
-        sourceFilters.removeAllViews();
+        filterBgs.clear();
+        filterNames.clear();
+        renderedFilterLabels.clear();
+        renderedFilterStates.clear();
+        globalBudgetCapped = false;
+        cacheDirty = false;
+        lastCacheSnapshotMs = 0L;
+        searchStartedMs = android.os.SystemClock.elapsedRealtime();
+        totalRenderUiMs = 0L;
+        maxRenderUiMs = 0L;
+        peakRetainedVideos = 0;
+        peakInFlightImages = 0;
+        searchSourceArrivals = 0;
+        if (sourceFilters != null) sourceFilters.removeAllViews();
         shownLimit = 24;
         searchSites.clear();
         sourceScroll.clear();
         sourceFocus.clear();
         sourceLimits.clear();
-        resetGrid();
+        sourceScrollPos.clear();
+        sourceScrollOffset.clear();
+
         final int serial = ++searchSerial;
         List<Cms.Site> sources = new ArrayList<>();
-        if (a.config != null)
-            for (Cms.Site site : SourcePreferences.prioritized(a, a.config.sites))
+        if (a.config != null) {
+            for (Cms.Site site : SourcePreferences.prioritized(a, a.config.sites)) {
                 if (site.searchable && a.available(site)) sources.add(site);
-        // Only changes scheduling order; every available searchable source participates.
+            }
+        }
         final String selected = a.prefs.getString(Prefs.SELECTED_SITE, "");
         Collections.sort(
                 sources,
@@ -1284,9 +2728,46 @@ public final class GlobalSearchScreen implements AutoCloseable {
         final int total = sources.size();
         sourceCount = total;
         searchSites.addAll(sources);
+
+        activeFilter = "";
+        if (preserveFilter != null && !preserveFilter.isEmpty()) {
+            for (Cms.Site s : sources) {
+                if (preserveFilter.equals(s.key)) {
+                    activeFilter = preserveFilter;
+                    break;
+                }
+            }
+        }
+
+        if (a.isTvDevice()) {
+            if (tvRecentScroll != null) tvRecentScroll.setVisibility(View.GONE);
+            if (tvRecentContainer != null) tvRecentContainer.setVisibility(View.GONE);
+            if (tvResultAdapter != null) tvResultAdapter.clearAll();
+            if (tvResultRecycler != null) tvResultRecycler.setVisibility(View.GONE);
+            if (filterScrollView != null) {
+                filterScrollView.setVisibility(total > 0 ? View.VISIBLE : View.GONE);
+            }
+        } else {
+            resetGrid();
+        }
+        updateResultHeader();
         renderFilters();
-        status.setText(total == 0 ? "没有可搜索来源，请先导入配置并启用来源扩展。" : "正在搜索全部 " + total + " 个来源…");
-        if (total == 0) return;
+        if (total == 0) {
+            if (status != null) status.setText("没有可搜索来源，请先导入配置并启用来源扩展。");
+            renderResults();
+            return;
+        }
+        if (status != null) {
+            status.setText("正在" + requestMode.label + "全部 " + total + " 个来源…");
+        }
+        renderResults();
+
+        if (requestMode == TvSearchMatcher.Mode.EXACT) {
+            // EXACT mode never needs phonetic dictionary expansion — launch immediately!
+            List<String> exactTerms = TvSearchMatcher.buildRecallTerms(requestMode, query, null);
+            startSources(sources, query, exactTerms, serial, requestMode);
+            return;
+        }
         try {
             expansion =
                     a.phoneticWork.submit(
@@ -1301,107 +2782,249 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                     }
                                 if (Thread.currentThread().isInterrupted()) return;
                                 final PhoneticSearchIndex index = a.phonetic;
-                                final List<String> baseVariants =
-                                        index == null
-                                                ? Collections.singletonList(query)
-                                                : index.searchTerms(query);
                                 final List<String> variants =
-                                        SearchVariants.mergeTerms(query, baseVariants);
+                                        TvSearchMatcher.buildRecallTerms(requestMode, query, index);
                                 a.ui.post(
                                         () -> {
-                                            if (current() && serial == searchSerial) {
+                                            if (current()
+                                                    && serial == searchSerial
+                                                    && requestMode == matchMode) {
                                                 if (index != null
                                                         && !resultPrivateMode
-                                                        && !query.matches("[A-Za-z0-9' -]+"))
+                                                        && !query.matches("[A-Za-z0-9' -]+")) {
                                                     index.prefer(query);
-                                                startSources(sources, query, variants, serial);
+                                                }
+                                                startSources(
+                                                        sources,
+                                                        query,
+                                                        variants,
+                                                        serial,
+                                                        requestMode);
                                             }
                                         });
                             });
         } catch (java.util.concurrent.RejectedExecutionException ignored) {
             expansion = null;
-            startSources(sources, query, SearchVariants.mergeTerms(query, null), serial);
+            startSources(
+                    sources,
+                    query,
+                    TvSearchMatcher.buildRecallTerms(requestMode, query, null),
+                    serial,
+                    requestMode);
         }
     }
 
-    void startSources(List<Cms.Site> sources, String query, List<String> variants, int serial) {
-        if (!current() || serial != searchSerial) return;
+    void startSources(
+            List<Cms.Site> sources,
+            String query,
+            List<String> variants,
+            int serial,
+            final TvSearchMatcher.Mode requestMode) {
         final TvSearchContext context = pageContext;
-        final Map<String, TvSearchPages> batches = new java.util.concurrent.ConcurrentHashMap<>();
+        if (!current()
+                || serial != searchSerial
+                || requestMode != matchMode
+                || context == null
+                || !context.matches(a.config, a.privateMode, a.engineEpoch)) return;
+        final TvSearchBudget.BatchHandoff batches = new TvSearchBudget.BatchHandoff();
+        if (activeBatchHandoff != null) activeBatchHandoff.close();
+        activeBatchHandoff = batches;
         final int total = sources.size();
         searchVariants = variants;
-        if (variants.size() > 1) {
+        if (requestMode == TvSearchMatcher.Mode.FUZZY && variants.size() > 1 && status != null) {
             String joined =
                     variants.size() >= 2
                             ? variants.get(0) + " / " + variants.get(1)
                             : variants.get(0);
-            status.setText("搜索全部 " + total + " 个来源 · 自动匹配 " + joined);
+            status.setText("模糊搜索全部 " + total + " 个来源 · 扩展召回 " + joined);
         }
-        boolean lowRam = isLowRamTv();
+        final boolean lowRam = isLowRamTv();
+        final boolean tvDevice = a.isTvDevice();
+        final int globalCap = TvSearchBudget.globalCap(tvDevice, lowRam);
+        final int initialPerSource = TvSearchBudget.initialPerSourceCap(total, tvDevice, lowRam);
         int effectiveThreads =
                 computeEffectiveSearchThreads(
-                        a.prefs.getInt(Prefs.SEARCH_THREADS, 6), a.isTvDevice(), lowRam);
+                        a.prefs.getInt(Prefs.SEARCH_THREADS, 6), tvDevice, lowRam);
         SearchCoordinator.onLowMemoryHook =
-                () ->
-                        ImmersivePoster.trimMemory(
-                                android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL);
-        SearchCoordinator.configureMaxPoolThreads(a.isTvDevice() ? (lowRam ? 6 : 8) : 14);
+                () -> {
+                    trimMemory(android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL);
+                    ImmersivePoster.trimMemory(
+                            android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL);
+                };
+        SearchCoordinator.configureMaxPoolThreads(tvDevice ? (lowRam ? 6 : 8) : 14);
         SearchCoordinator.configureThreads(effectiveThreads);
-        coordinator =
+        final SearchCoordinator[] sessionOwner = new SearchCoordinator[1];
+        sessionOwner[0] =
                 new SearchCoordinator(
-                        (site, keyword) -> firstPage(context, site, query, variants, batches),
+                        (site, keyword) ->
+                                firstPage(
+                                        context,
+                                        site,
+                                        query,
+                                        variants,
+                                        requestMode,
+                                        batches,
+                                        initialPerSource),
                         (site, videos, outcome) ->
                                 a.ui.post(
                                         () -> {
-                                            if (!current()
-                                                    || serial != searchSerial
-                                                    || resultConfig != a.config
-                                                    || resultPrivateMode != a.privateMode) return;
-                                            a.learnTitles(videos);
+                                            boolean valid =
+                                                    current()
+                                                            && serial == searchSerial
+                                                            && requestMode == matchMode
+                                                            && context.matches(
+                                                                    a.config,
+                                                                    a.privateMode,
+                                                                    a.engineEpoch)
+                                                            && resultConfig == a.config
+                                                            && resultPrivateMode == a.privateMode
+                                                            && a.isSiteEnabledInMultiSource(
+                                                                    site.key);
+                                            boolean accept =
+                                                    valid
+                                                            && (outcome
+                                                                            == SearchCoordinator
+                                                                                    .Outcome.RESULT
+                                                                    || outcome
+                                                                            == SearchCoordinator
+                                                                                    .Outcome.EMPTY);
+                                            TvSearchPages pages = batches.take(site.key, accept);
+                                            if (!valid) {
+                                                batches.close();
+                                                if (activeBatchHandoff == batches) {
+                                                    activeBatchHandoff = null;
+                                                }
+                                                return;
+                                            }
+                                            List<Cms.Video> retained =
+                                                    pages != null ? pages.videos : videos;
+                                            if (retained != null && !retained.isEmpty()) {
+                                                List<Cms.Video> ranked = new ArrayList<>(retained);
+                                                TvSearchMatcher.rankSourceVideos(
+                                                        requestMode,
+                                                        query,
+                                                        ranked,
+                                                        site.name,
+                                                        a.phonetic);
+                                                retained = Collections.unmodifiableList(ranked);
+                                            }
+                                            learnSearchTitlesDeferred(retained);
+                                            SearchCoordinator.Outcome effectiveOutcome = outcome;
+                                            if (outcome == SearchCoordinator.Outcome.RESULT
+                                                    && (retained == null || retained.isEmpty())) {
+                                                effectiveOutcome = SearchCoordinator.Outcome.EMPTY;
+                                            }
                                             SourceResult source =
                                                     new SourceResult(
                                                             site,
-                                                            videos,
-                                                            outcome,
-                                                            outcome
-                                                                                    == SearchCoordinator
-                                                                                            .Outcome
-                                                                                            .RESULT
-                                                                            || outcome
-                                                                                    == SearchCoordinator
-                                                                                            .Outcome
-                                                                                            .EMPTY
-                                                                    ? batches.get(site.key)
-                                                                    : null);
+                                                            retained == null
+                                                                    ? Collections.emptyList()
+                                                                    : retained,
+                                                            effectiveOutcome,
+                                                            pages);
                                             results.put(site.key, source);
+                                            boolean evicted =
+                                                    TvSearchBudget.enforceGlobalResultsCapByItems(
+                                                            results,
+                                                            activeFilter,
+                                                            site.key,
+                                                            protectedBudgetItems(),
+                                                            globalCap);
+                                            SourceResult storedSource = results.get(site.key);
+                                            if (evicted
+                                                    || (storedSource != null
+                                                            && storedSource.pages != null
+                                                            && storedSource.pages.hasMore())) {
+                                                globalBudgetCapped = true;
+                                            }
+                                            if (evicted) pruneEvictedCards();
                                             finished++;
-                                            if (outcome == SearchCoordinator.Outcome.RESULT)
+                                            searchSourceArrivals++;
+                                            if (effectiveOutcome == SearchCoordinator.Outcome.RESULT
+                                                    && !source.videos.isEmpty()) {
                                                 matched++;
-                                            if (outcome == SearchCoordinator.Outcome.FAILED)
-                                                failed++;
-                                            if (outcome == SearchCoordinator.Outcome.TIMEOUT)
+                                            }
+                                            if (effectiveOutcome
+                                                    == SearchCoordinator.Outcome.FAILED) failed++;
+                                            if (effectiveOutcome
+                                                    == SearchCoordinator.Outcome.TIMEOUT)
                                                 timedOut++;
-                                            if (outcome == SearchCoordinator.Outcome.BUSY) busy++;
-                                            cacheResults();
-                                            updateStatus(total);
+                                            if (effectiveOutcome == SearchCoordinator.Outcome.BUSY)
+                                                busy++;
+                                            int retainedNow = retainedVideoCount();
+                                            if (retainedNow > peakRetainedVideos) {
+                                                peakRetainedVideos = retainedNow;
+                                            }
+                                            int imgInFlight = ImageLoader.inFlightCount();
+                                            if (imgInFlight > peakInFlightImages) {
+                                                peakInFlightImages = imgInFlight;
+                                            }
+                                            cacheDirty = true;
+                                            if (finished >= total || evicted) {
+                                                maybeCacheResults(true);
+                                                updateStatus(total);
+                                            }
                                             scheduleRender();
+                                            if (finished >= total) {
+                                                batches.close();
+                                                if (activeBatchHandoff == batches) {
+                                                    activeBatchHandoff = null;
+                                                }
+                                                if (coordinator == sessionOwner[0]) {
+                                                    coordinator.close();
+                                                    coordinator = null;
+                                                }
+                                                if (!a.privateMode) {
+                                                    long elapsed =
+                                                            Math.max(
+                                                                    0L,
+                                                                    android.os.SystemClock
+                                                                                    .elapsedRealtime()
+                                                                            - searchStartedMs);
+                                                    AppLog.i(
+                                                            "SearchDiag",
+                                                            "done serial="
+                                                                    + serial
+                                                                    + " mode="
+                                                                    + requestMode.prefValue
+                                                                    + " sources="
+                                                                    + total
+                                                                    + " matched="
+                                                                    + matched
+                                                                    + " failed="
+                                                                    + failed
+                                                                    + " timeout="
+                                                                    + timedOut
+                                                                    + " busy="
+                                                                    + busy
+                                                                    + " retained="
+                                                                    + peakRetainedVideos
+                                                                    + " capped="
+                                                                    + globalBudgetCapped
+                                                                    + " uiMaxMs="
+                                                                    + maxRenderUiMs
+                                                                    + " imgPeak="
+                                                                    + peakInFlightImages
+                                                                    + " elapsedMs="
+                                                                    + elapsed);
+                                                }
+                                            }
                                         }),
                         Prefs.clampSearchTimeoutSeconds(a.prefs.getInt(Prefs.SEARCH_TIMEOUT, 20))
                                 * 1000L,
                         90000L,
-                        a.isTvDevice() ? TvSearchPages.MAX_RESULTS : 24);
+                        tvDevice ? TvSearchPages.MAX_RESULTS : 24);
+        coordinator = sessionOwner[0];
         coordinator.start(sources, query);
     }
 
-    List<Cms.Video> searchSource(Cms.Site site, String query, List<String> variants)
+    List<Cms.Video> searchSource(
+            Cms.Site site, String query, List<String> variants, TvSearchMatcher.Mode requestMode)
             throws Exception {
-        return SearchVariants.run(
+        return SearchVariants.runVideos(
                 query,
                 variants,
-                title ->
-                        !query.matches("[A-Za-z0-9' -]+")
-                                || a.phonetic == null
-                                || a.phonetic.matches(title, query),
+                TvSearchMatcher.videoPredicate(requestMode, query, a.phonetic),
                 term -> {
                     try {
                         return Cms.listing(a.engine(site).search(term, 1)).videos;
@@ -1418,30 +3041,37 @@ public final class GlobalSearchScreen implements AutoCloseable {
             Cms.Site site,
             String query,
             List<String> variants,
-            Map<String, TvSearchPages> batches)
+            TvSearchMatcher.Mode requestMode,
+            TvSearchBudget.BatchHandoff batches,
+            int maxRetained)
             throws Exception {
-        if (!a.isTvDevice()) return searchSource(site, query, variants);
+        if (!a.isTvDevice()) {
+            List<Cms.Video> raw = searchSource(site, query, variants, requestMode);
+            if (raw.size() <= maxRetained) return raw;
+            return Collections.unmodifiableList(
+                    new ArrayList<>(raw.subList(0, Math.max(0, maxRetained))));
+        }
         TvSearchPages pages =
-                TvSearchPages.first(
+                TvSearchPages.firstVideos(
                         query,
                         variants,
-                        title -> matchesTitle(title, query),
-                        (term, page) -> fetchSearchPage(context, site, term, page));
-        batches.put(site.key, pages);
+                        TvSearchMatcher.videoPredicate(requestMode, query, a.phonetic),
+                        (term, page) -> fetchSearchPage(context, site, term, page),
+                        maxRetained);
+        if (!batches.put(site.key, pages)) {
+            return Collections.emptyList();
+        }
         return pages.videos;
     }
 
     boolean matchesTitle(String title, String query) {
-        return !query.matches("[A-Za-z0-9' -]+")
-                || a.phonetic == null
-                || a.phonetic.matches(title, query);
+        return TvSearchMatcher.matches(TvSearchMatcher.Mode.FUZZY, query, title, null, a.phonetic);
     }
 
     Cms.Listing fetchSearchPage(TvSearchContext context, Cms.Site site, String term, int page)
             throws Exception {
         if (!context.matches(a.config, a.privateMode, a.engineEpoch)
                 || Thread.currentThread().isInterrupted()) throw new InterruptedException();
-        // Initialization may block; never hold the Activity monitor across SingleFlight.get().
         final SourceEngine engine = SourceController.engine(a, site, context);
         if (!context.matches(a.config, a.privateMode, a.engineEpoch)
                 || Thread.currentThread().isInterrupted()) throw new InterruptedException();
@@ -1454,20 +3084,234 @@ public final class GlobalSearchScreen implements AutoCloseable {
         }
     }
 
-    SourceResult nextPageSource() {
-        for (SourceResult result : results.values())
-            if ((activeFilter.isEmpty() || activeFilter.equals(result.site.key))
+    static boolean isAllTabBudgetExhausted(
+            String activeFilter,
+            int displayedCount,
+            int retainedCount,
+            int availableCount,
+            int shownLimit,
+            int globalCap) {
+        if (activeFilter != null && !activeFilter.isEmpty()) return false;
+        if (globalCap <= 0) return false;
+        if (displayedCount >= globalCap) return true;
+        return retainedCount >= globalCap && availableCount <= shownLimit;
+    }
+
+    static SourceResult selectNextPageSource(
+            Map<String, SourceResult> results,
+            String activeFilter,
+            int displayedCount,
+            int retainedCount,
+            int availableCount,
+            int shownLimit,
+            int globalCap) {
+        if (results == null || results.isEmpty()) return null;
+        if (isAllTabBudgetExhausted(
+                activeFilter,
+                displayedCount,
+                retainedCount,
+                availableCount,
+                shownLimit,
+                globalCap)) {
+            return null;
+        }
+        String filter = activeFilter == null ? "" : activeFilter;
+        for (SourceResult result : results.values()) {
+            if (result != null
+                    && (filter.isEmpty() || filter.equals(result.site.key))
                     && result.pages != null
-                    && result.pages.hasMore()) return result;
+                    && result.pages.hasMore()) {
+                return result;
+            }
+        }
         return null;
+    }
+
+    SourceResult nextPageSource() {
+        return nextPageSource(collectCurrentRankedHits().size());
+    }
+
+    private SourceResult nextPageSource(int availableCount) {
+        int globalCap = TvSearchBudget.globalCap(a.isTvDevice(), isLowRamTv());
+        return selectNextPageSource(
+                results,
+                activeFilter,
+                displayed.size(),
+                retainedVideoCount(),
+                availableCount,
+                shownLimit,
+                globalCap);
+    }
+
+    private boolean isCurrentAllTabBudgetExhausted(int availableCount) {
+        int globalCap = TvSearchBudget.globalCap(a.isTvDevice(), isLowRamTv());
+        return isAllTabBudgetExhausted(
+                activeFilter,
+                displayed.size(),
+                retainedVideoCount(),
+                availableCount,
+                shownLimit,
+                globalCap);
+    }
+
+    private List<TvSearchBudget.ProtectedItem> protectedBudgetItems() {
+        List<TvSearchBudget.ProtectedItem> items = new ArrayList<>(displayedItems.size() + 2);
+        items.addAll(displayedItems);
+        String wallFocused = focusedTag(tvResultRecycler);
+        addFocusedProtectedItem(items, wallFocused);
+        String savedFocused = sourceFocus.get(activeFilter);
+        if (savedFocused != null && !savedFocused.equals(wallFocused)) {
+            addFocusedProtectedItem(items, savedFocused);
+        }
+        return items;
+    }
+
+    private void addFocusedProtectedItem(List<TvSearchBudget.ProtectedItem> out, String cardTag) {
+        if (cardTag == null || !cardTag.startsWith("global-result:")) return;
+        String rawKey = cardTag.substring("global-result:".length());
+        if (rawKey.isEmpty()) return;
+        if (tvResultAdapter != null) {
+            int idx = tvResultAdapter.indexOfTag(cardTag);
+            if (idx >= 0 && idx < tvResultAdapter.items.size()) {
+                TvSearchMatcher.RankedHit hit = tvResultAdapter.items.get(idx);
+                if (hit != null && hit.site != null && hit.video != null) {
+                    out.add(new TvSearchBudget.ProtectedItem(hit.site.key, hit.video.id));
+                    return;
+                }
+            }
+        }
+        TvSearchMatcher.HitId parsed = TvSearchMatcher.HitId.parseKey(rawKey);
+        if (parsed != null) {
+            SourceResult sr = results.get(parsed.siteKey);
+            if (sr != null && sr.videos != null) {
+                for (Cms.Video v : sr.videos) {
+                    if (v != null && parsed.vodId.equals(v.id)) {
+                        out.add(new TvSearchBudget.ProtectedItem(parsed.siteKey, parsed.vodId));
+                        return;
+                    }
+                }
+            }
+            if (rawKey.indexOf('%') >= 0) {
+                return;
+            }
+        }
+        for (Map.Entry<String, SourceResult> entry : results.entrySet()) {
+            String siteKey = entry.getKey();
+            SourceResult sr = entry.getValue();
+            if (siteKey == null
+                    || siteKey.isEmpty()
+                    || sr == null
+                    || sr.videos == null
+                    || rawKey.length() <= siteKey.length() + 1
+                    || !rawKey.startsWith(siteKey)
+                    || rawKey.charAt(siteKey.length()) != ':') {
+                continue;
+            }
+            String candidateVodId = rawKey.substring(siteKey.length() + 1);
+            for (Cms.Video v : sr.videos) {
+                if (v != null && candidateVodId.equals(v.id)) {
+                    out.add(new TvSearchBudget.ProtectedItem(siteKey, candidateVodId));
+                    return;
+                }
+            }
+        }
+    }
+
+    private String currentPaginationAnchorKey() {
+        String focused = focusedTag(tvResultRecycler);
+        if (focused != null && focused.startsWith("global-result:")) {
+            return focused.substring("global-result:".length());
+        }
+        String saved = sourceFocus.get(activeFilter);
+        if (saved != null && saved.startsWith("global-result:")) {
+            return saved.substring("global-result:".length());
+        }
+        String last = "";
+        for (String key : displayed) last = key;
+        return last;
+    }
+
+    /**
+     * Resolves the post-pagination focus target: prefers the first newly-revealed card at or after
+     * {@code targetIndex} (e.g. card #25 after expanding from 24), else the first newly-added card
+     * anywhere in {@code visible}, else retains {@code anchorKey} without ever jumping back to 0.
+     */
+    static int resolvePaginationFocusIndex(
+            List<TvSearchMatcher.RankedHit> visible,
+            Set<String> prevKeys,
+            int targetIndex,
+            String anchorKey) {
+        if (visible == null || visible.isEmpty()) return -1;
+        Set<String> before = prevKeys == null ? Collections.emptySet() : prevKeys;
+        int start = Math.max(0, Math.min(targetIndex, visible.size()));
+        for (int i = start; i < visible.size(); i++) {
+            if (!before.contains(visible.get(i).stableKey())) {
+                return i;
+            }
+        }
+        for (int i = 0; i < start; i++) {
+            if (!before.contains(visible.get(i).stableKey())) {
+                return i;
+            }
+        }
+        if (anchorKey != null && !anchorKey.isEmpty()) {
+            for (int i = 0; i < visible.size(); i++) {
+                if (anchorKey.equals(visible.get(i).stableKey())) {
+                    return i;
+                }
+            }
+        }
+        return Math.max(0, Math.min(visible.size() - 1, start > 0 ? start - 1 : 0));
+    }
+
+    void triggerMoreResults() {
+        if (!current()) return;
+        int available = collectCurrentRankedHits().size();
+        if (available <= shownLimit) loadNextPage();
+        else {
+            int prevShown = Math.min(available, shownLimit);
+            pendingPaginationPrevKeys = new LinkedHashSet<>(displayed);
+            pendingPaginationAnchorKey = currentPaginationAnchorKey();
+            pendingPaginationTargetIndex = prevShown;
+            pendingPaginationFocus = true;
+            shownLimit = shownLimit > Integer.MAX_VALUE - 24 ? Integer.MAX_VALUE : shownLimit + 24;
+            sourceLimits.put(activeFilter, shownLimit);
+            renderResults();
+        }
+    }
+
+    /**
+     * Returns whether a late pagination completion may update the active view's visible limit,
+     * scroll position, and focus target. Only allowed when the user is still on the exact same
+     * filter tab and filter-selection epoch from which pagination was triggered; stale callbacks
+     * from a prior source still update their source cache without hijacking "全部" or another tab.
+     */
+    static boolean shouldApplyPaginationViewUpdate(
+            String requestedFilter,
+            String currentFilter,
+            int requestedFilterSerial,
+            int currentFilterSerial) {
+        String req = requestedFilter == null ? "" : requestedFilter;
+        String cur = currentFilter == null ? "" : currentFilter;
+        return req.equals(cur) && requestedFilterSerial == currentFilterSerial;
     }
 
     void loadNextPage() {
         if (!current() || pageRequests.get() != null) return;
         final SourceResult source = nextPageSource();
         if (source == null) return;
+        final int prevVisibleCount = displayed.size();
+        final Set<String> prevVisibleKeys = new LinkedHashSet<>(displayed);
+        final String prevAnchorKey = currentPaginationAnchorKey();
+        final String requestedFilter = activeFilter;
+        final int requestedFilterSerial = filterSwitchSerial;
         final int serial = searchSerial;
+        final TvSearchMatcher.Mode requestMode = matchMode;
         final TvSearchContext context = pageContext;
+        final boolean lowRam = isLowRamTv();
+        final boolean tvDevice = a.isTvDevice();
+        final int stepCap = TvSearchBudget.pageStepCap(tvDevice, lowRam);
+        final int globalCap = TvSearchBudget.globalCap(tvDevice, lowRam);
         final java.util.concurrent.atomic.AtomicReference<TvSearchPages> completed =
                 new java.util.concurrent.atomic.AtomicReference<>();
         pageFailureSource = pageFailureReason = "";
@@ -1476,40 +3320,84 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 new SearchCoordinator(
                         (site, query) -> {
                             TvSearchPages next =
-                                    source.pages.next(
-                                            title -> matchesTitle(title, source.pages.query),
+                                    source.pages.nextVideos(
+                                            TvSearchMatcher.videoPredicate(
+                                                    requestMode, source.pages.query, a.phonetic),
                                             (term, page) ->
-                                                    fetchSearchPage(context, site, term, page));
+                                                    fetchSearchPage(context, site, term, page),
+                                            stepCap,
+                                            globalCap);
                             completed.set(next);
                             return next.videos;
                         },
                         (site, videos, outcome) ->
                                 a.ui.post(
                                         () -> {
+                                            TvSearchPages next = completed.getAndSet(null);
                                             if (!pageRequests.finish(owner[0])) return;
-                                            if (!current() || serial != searchSerial) return;
+                                            if (!current()
+                                                    || serial != searchSerial
+                                                    || requestMode != matchMode
+                                                    || context == null
+                                                    || !context.matches(
+                                                            a.config, a.privateMode, a.engineEpoch)
+                                                    || resultConfig != a.config
+                                                    || resultPrivateMode != a.privateMode) return;
                                             if (results.get(site.key) != source) {
                                                 renderResults();
                                                 return;
                                             }
-                                            if (completed.get() != null
+                                            if (next != null
                                                     && (outcome == SearchCoordinator.Outcome.RESULT
                                                             || outcome
                                                                     == SearchCoordinator.Outcome
                                                                             .EMPTY)) {
-                                                TvSearchPages next = completed.get();
+                                                SearchCoordinator.Outcome effectiveOutcome =
+                                                        next.videos.isEmpty()
+                                                                ? SearchCoordinator.Outcome.EMPTY
+                                                                : SearchCoordinator.Outcome.RESULT;
                                                 results.put(
                                                         site.key,
                                                         new SourceResult(
-                                                                site, next.videos, outcome, next));
-                                                if (activeFilter.isEmpty()
-                                                        || activeFilter.equals(site.key)) {
+                                                                site,
+                                                                next.videos,
+                                                                effectiveOutcome,
+                                                                next));
+                                                boolean evicted =
+                                                        TvSearchBudget
+                                                                .enforceGlobalResultsCapByItems(
+                                                                        results,
+                                                                        activeFilter,
+                                                                        site.key,
+                                                                        protectedBudgetItems(),
+                                                                        globalCap);
+                                                SourceResult storedNext = results.get(site.key);
+                                                if (evicted
+                                                        || (storedNext != null
+                                                                && storedNext.pages != null
+                                                                && storedNext.pages.hasMore())) {
+                                                    globalBudgetCapped = true;
+                                                }
+                                                if (evicted) pruneEvictedCards();
+                                                int retainedNow = retainedVideoCount();
+                                                if (retainedNow > peakRetainedVideos) {
+                                                    peakRetainedVideos = retainedNow;
+                                                }
+                                                if (shouldApplyPaginationViewUpdate(
+                                                        requestedFilter,
+                                                        activeFilter,
+                                                        requestedFilterSerial,
+                                                        filterSwitchSerial)) {
                                                     shownLimit =
                                                             Math.min(
                                                                             Integer.MAX_VALUE - 24,
                                                                             shownLimit)
                                                                     + 24;
-                                                    focusNewResults = true;
+                                                    sourceLimits.put(activeFilter, shownLimit);
+                                                    pendingPaginationPrevKeys = prevVisibleKeys;
+                                                    pendingPaginationAnchorKey = prevAnchorKey;
+                                                    pendingPaginationTargetIndex = prevVisibleCount;
+                                                    pendingPaginationFocus = true;
                                                 }
                                                 recount();
                                                 cacheResults();
@@ -1548,61 +3436,116 @@ public final class GlobalSearchScreen implements AutoCloseable {
         pageRequests.cancel();
         pageFailureSource = pageFailureReason = "";
         final TvSearchContext context = pageContext;
-        final Map<String, TvSearchPages> batches = new java.util.concurrent.ConcurrentHashMap<>();
+        final TvSearchBudget.BatchHandoff batches = new TvSearchBudget.BatchHandoff();
+        if (activeRetryHandoff != null) activeRetryHandoff.close();
+        activeRetryHandoff = batches;
         final String query = submitted;
-        final List<String> variants = new ArrayList<>(searchVariants);
+        final TvSearchMatcher.Mode requestMode = matchMode;
+        final List<String> variants =
+                TvSearchMatcher.buildRecallTerms(requestMode, query, a.phonetic);
         final int serial = searchSerial;
+        final boolean lowRam = isLowRamTv();
+        final boolean tvDevice = a.isTvDevice();
+        final int stepCap = TvSearchBudget.pageStepCap(tvDevice, lowRam);
+        final int globalCap = TvSearchBudget.globalCap(tvDevice, lowRam);
         if (retrySource != null) retrySource.setEnabled(false);
-        if (emptyResult != null) emptyResult.setText("正在重新搜索此源…");
-        retryCoordinator =
+        if (emptyResult != null) emptyResult.setText("正在按" + requestMode.label + "重新搜索此源…");
+        final SearchCoordinator[] retryOwner = new SearchCoordinator[1];
+        retryOwner[0] =
                 new SearchCoordinator(
-                        (site, ignored) -> firstPage(context, site, query, variants, batches),
+                        (site, ignored) ->
+                                firstPage(
+                                        context,
+                                        site,
+                                        query,
+                                        variants,
+                                        requestMode,
+                                        batches,
+                                        stepCap),
                         (site, videos, outcome) ->
                                 a.ui.post(
                                         () -> {
-                                            if (!current()
-                                                    || serial != searchSerial
-                                                    || resultConfig != a.config
-                                                    || resultPrivateMode != a.privateMode) return;
-                                            if (retryCoordinator != null) {
+                                            boolean ownsRetry = retryCoordinator == retryOwner[0];
+                                            if (ownsRetry) {
                                                 retryCoordinator.close();
                                                 retryCoordinator = null;
                                             }
-                                            SourceResult old = results.get(site.key);
-                                            if (old != null) {
-                                                if (old.outcome == SearchCoordinator.Outcome.RESULT)
-                                                    matched--;
-                                                if (old.outcome == SearchCoordinator.Outcome.FAILED)
-                                                    failed--;
-                                                if (old.outcome
-                                                        == SearchCoordinator.Outcome.TIMEOUT)
-                                                    timedOut--;
-                                                if (old.outcome == SearchCoordinator.Outcome.BUSY)
-                                                    busy--;
+                                            boolean valid =
+                                                    ownsRetry
+                                                            && current()
+                                                            && serial == searchSerial
+                                                            && requestMode == matchMode
+                                                            && context != null
+                                                            && context.matches(
+                                                                    a.config,
+                                                                    a.privateMode,
+                                                                    a.engineEpoch)
+                                                            && resultConfig == a.config
+                                                            && resultPrivateMode == a.privateMode
+                                                            && a.isSiteEnabledInMultiSource(
+                                                                    site.key);
+                                            boolean accept =
+                                                    valid
+                                                            && (outcome
+                                                                            == SearchCoordinator
+                                                                                    .Outcome.RESULT
+                                                                    || outcome
+                                                                            == SearchCoordinator
+                                                                                    .Outcome.EMPTY);
+                                            TvSearchPages pages = batches.take(site.key, accept);
+                                            batches.close();
+                                            if (activeRetryHandoff == batches) {
+                                                activeRetryHandoff = null;
                                             }
+                                            if (!valid) return;
+                                            List<Cms.Video> retained =
+                                                    pages != null ? pages.videos : videos;
+                                            if (retained != null && !retained.isEmpty()) {
+                                                List<Cms.Video> ranked = new ArrayList<>(retained);
+                                                TvSearchMatcher.rankSourceVideos(
+                                                        requestMode,
+                                                        query,
+                                                        ranked,
+                                                        site.name,
+                                                        a.phonetic);
+                                                retained = Collections.unmodifiableList(ranked);
+                                            }
+                                            learnSearchTitlesDeferred(retained);
+                                            SearchCoordinator.Outcome effectiveOutcome =
+                                                    outcome == SearchCoordinator.Outcome.RESULT
+                                                                    && (retained == null
+                                                                            || retained.isEmpty())
+                                                            ? SearchCoordinator.Outcome.EMPTY
+                                                            : outcome;
                                             results.put(
                                                     site.key,
                                                     new SourceResult(
                                                             site,
-                                                            videos,
-                                                            outcome,
-                                                            outcome
-                                                                                    == SearchCoordinator
-                                                                                            .Outcome
-                                                                                            .RESULT
-                                                                            || outcome
-                                                                                    == SearchCoordinator
-                                                                                            .Outcome
-                                                                                            .EMPTY
-                                                                    ? batches.get(site.key)
-                                                                    : null));
-                                            if (outcome == SearchCoordinator.Outcome.RESULT)
-                                                matched++;
-                                            if (outcome == SearchCoordinator.Outcome.FAILED)
-                                                failed++;
-                                            if (outcome == SearchCoordinator.Outcome.TIMEOUT)
-                                                timedOut++;
-                                            if (outcome == SearchCoordinator.Outcome.BUSY) busy++;
+                                                            retained == null
+                                                                    ? Collections.emptyList()
+                                                                    : retained,
+                                                            effectiveOutcome,
+                                                            pages));
+                                            boolean evicted =
+                                                    TvSearchBudget.enforceGlobalResultsCapByItems(
+                                                            results,
+                                                            activeFilter,
+                                                            site.key,
+                                                            protectedBudgetItems(),
+                                                            globalCap);
+                                            SourceResult storedRetry = results.get(site.key);
+                                            if (evicted
+                                                    || (storedRetry != null
+                                                            && storedRetry.pages != null
+                                                            && storedRetry.pages.hasMore())) {
+                                                globalBudgetCapped = true;
+                                            }
+                                            if (evicted) pruneEvictedCards();
+                                            int retainedNow = retainedVideoCount();
+                                            if (retainedNow > peakRetainedVideos) {
+                                                peakRetainedVideos = retainedNow;
+                                            }
+                                            recount();
                                             cacheResults();
                                             updateStatus(sourceCount);
                                             scheduleRender();
@@ -1610,33 +3553,77 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         Prefs.clampSearchTimeoutSeconds(a.prefs.getInt(Prefs.SEARCH_TIMEOUT, 20))
                                 * 1000L,
                         40000L,
-                        a.isTvDevice() ? TvSearchPages.MAX_RESULTS : 24);
+                        tvDevice ? TvSearchPages.MAX_RESULTS : 24);
+        retryCoordinator = retryOwner[0];
         retryCoordinator.start(Collections.singletonList(selected.site), submitted);
     }
 
+    private boolean allSourcesFailed() {
+        if (sourceCount <= 0 || finished < sourceCount) return false;
+        int healthy = 0;
+        for (SourceResult r : results.values()) {
+            if (r != null
+                    && (r.outcome == SearchCoordinator.Outcome.RESULT
+                            || r.outcome == SearchCoordinator.Outcome.EMPTY)) {
+                healthy++;
+            }
+        }
+        return healthy == 0 && !results.isEmpty();
+    }
+
+    void updateResultHeader() {
+        if (tvHeaderTitle == null || tvHeaderMeta == null) return;
+        if (submitted.isEmpty()) {
+            tvHeaderTitle.setText("探索与搜索");
+            tvHeaderMeta.setText(matchMode.label);
+            return;
+        }
+        tvHeaderTitle.setText("“" + submitted + "” 的结果");
+        int count = collectCurrentRankedHits().size();
+        String suffix =
+                finished < sourceCount ? (count > 0 ? count + " 项 · 搜索中" : "搜索中…") : (count + " 项");
+        tvHeaderMeta.setText(matchMode.label + " · " + suffix);
+    }
+
     void updateStatus(int total) {
+        updateResultHeader();
         String text =
-                (finished == total ? "搜索结束" : "搜索中")
+                matchMode.label
                         + " · "
+                        + (finished == total ? "已完成" : "搜索中")
+                        + " "
                         + finished
-                        + " / "
+                        + "/"
                         + total
-                        + " 个来源已处理 · "
+                        + " 来源 · "
                         + matched
-                        + " 个有结果";
-        if (timedOut > 0) text += " · " + timedOut + " 个超时";
-        if (failed > 0) text += " · " + failed + " 个暂不可用";
-        if (busy > 0) text += " · " + busy + " 个未完成";
+                        + " 个命中";
+        if (timedOut > 0) text += " · " + timedOut + " 超时";
+        if (failed > 0) text += " · " + failed + " 失败";
+        if (busy > 0) text += " · " + busy + " 未完成";
         int verification = 0;
         for (SourceResult result : results.values())
             if (result.outcome == SearchCoordinator.Outcome.VERIFICATION_REQUIRED) verification++;
-        if (verification > 0) text += " · " + verification + " 个需网站验证码";
-        status.setText(text);
+        if (verification > 0) text += " · " + verification + " 需验证";
+        if (status != null) {
+            CharSequence prev = status.getText();
+            if (prev == null || !text.equals(prev.toString())) {
+                status.setText(text);
+            }
+        }
     }
 
     void cancelWork() {
         pageRequests.cancel();
         pageFailureSource = pageFailureReason = "";
+        if (activeBatchHandoff != null) {
+            activeBatchHandoff.close();
+            activeBatchHandoff = null;
+        }
+        if (activeRetryHandoff != null) {
+            activeRetryHandoff.close();
+            activeRetryHandoff = null;
+        }
         if (retryCoordinator != null) {
             retryCoordinator.close();
             retryCoordinator = null;
@@ -1656,71 +3643,182 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     void clearCards() {
-        for (LinearLayout card : posterCards.values())
-            if (card.getChildCount() > 0) card.getChildAt(0).setTag(null);
+        for (LinearLayout card : posterCards.values()) {
+            TvV17PosterCard.unbindCard(card);
+            card.setOnClickListener(null);
+            card.setOnKeyListener(null);
+            card.setOnFocusChangeListener(null);
+        }
         posterCards.clear();
+        if (tvResultRecycler != null) {
+            for (int i = 0; i < tvResultRecycler.getChildCount(); i++) {
+                View child = tvResultRecycler.getChildAt(i);
+                if (child instanceof ViewGroup && ((ViewGroup) child).getChildCount() > 0) {
+                    View art = ((ViewGroup) child).getChildAt(0);
+                    if (art instanceof TvSearchPosterArtView) {
+                        ((TvSearchPosterArtView) art).clearPoster();
+                    }
+                }
+                TvV17PosterCard.unbindCard(child);
+            }
+        }
+        if (searchArtworkScope != 0) {
+            ImageLoader.cancelScope(a, searchArtworkScope);
+        }
+        searchArtworkScope = ImageLoader.newScope();
+    }
+
+    void pruneEvictedCards() {
+        if (posterCards.isEmpty()) return;
+        Set<String> liveKeys = new HashSet<>();
+        for (SourceResult r : results.values()) {
+            if (r == null || r.videos == null) continue;
+            for (int i = 0; i < r.videos.size(); i++) {
+                Cms.Video v = r.videos.get(i);
+                if (v != null && r.site != null) {
+                    liveKeys.add(TvSearchMatcher.stableKey(r.site.key, v.id));
+                }
+            }
+        }
+        boolean displayedEvicted = false;
+        Iterator<Map.Entry<String, LinearLayout>> it = posterCards.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<String, LinearLayout> entry = it.next();
+            if (!liveKeys.contains(entry.getKey())) {
+                LinearLayout card = entry.getValue();
+                TvV17PosterCard.unbindCard(card);
+                card.setOnClickListener(null);
+                card.setOnKeyListener(null);
+                card.setOnFocusChangeListener(null);
+                it.remove();
+                if (displayed.contains(entry.getKey())) displayedEvicted = true;
+            }
+        }
+        if (displayedEvicted && resultGrid != null) {
+            resetGrid();
+        }
     }
 
     void scheduleRender() {
         if (pendingRender != null) return;
         final int serial = searchSerial;
+        final TvSearchMatcher.Mode modeSnap = matchMode;
         pendingRender =
                 () -> {
                     pendingRender = null;
-                    if (!current() || serial != searchSerial) return;
+                    if (!current() || serial != searchSerial || modeSnap != matchMode) return;
+                    if (sourceCount > 0) updateStatus(sourceCount);
                     renderFilters();
                     renderResults();
                 };
-        a.ui.postDelayed(pendingRender, 100);
+        a.ui.postDelayed(pendingRender, 90);
     }
 
     void renderFilters() {
+        if (sourceFilters == null) return;
         if (!filterButtons.containsKey("")) addFilter("全部", "");
-        if (!searchSites.isEmpty()) {
-            for (Cms.Site site : searchSites)
-                if (!filterButtons.containsKey(site.key)) addFilter(clean(site.name), site.key);
-        } else
-            for (SourceResult source : results.values())
-                if (!filterButtons.containsKey(source.site.key))
-                    addFilter(clean(source.site.name), source.site.key);
+        int addedNow = 0;
+        final int maxPerPass = a.isTvDevice() ? 16 : Integer.MAX_VALUE;
+        boolean moreFiltersPending = false;
+        for (SourceResult source : results.values()) {
+            if (!filterButtons.containsKey(source.site.key)) {
+                if (addedNow >= maxPerPass) {
+                    moreFiltersPending = true;
+                    break;
+                }
+                addFilter(clean(source.site.name), source.site.key);
+                addedNow++;
+            }
+        }
+        if (!moreFiltersPending && !searchSites.isEmpty()) {
+            for (Cms.Site site : searchSites) {
+                if (!filterButtons.containsKey(site.key)) {
+                    if (addedNow >= maxPerPass) {
+                        moreFiltersPending = true;
+                        break;
+                    }
+                    addFilter(clean(site.name), site.key);
+                    addedNow++;
+                }
+            }
+        }
         updateFilterLabels();
+        if (moreFiltersPending && pendingRender == null) {
+            final int serial = searchSerial;
+            final TvSearchMatcher.Mode modeSnap = matchMode;
+            pendingRender =
+                    () -> {
+                        pendingRender = null;
+                        if (current() && serial == searchSerial && modeSnap == matchMode) {
+                            renderFilters();
+                            renderResults();
+                        }
+                    };
+            a.ui.postDelayed(pendingRender, 16);
+        }
     }
 
-    void addFilter(String label, String key) {
-        Button b =
-                a.button(
-                        label,
-                        "search-filter:" + key,
-                        () -> {
-                            if (a.isTvDevice()) focusSelectedResults();
-                            else selectFilter(key);
-                        });
+    void addFilter(String label, final String key) {
+        final Button b;
+        if (a.isTvDevice()) {
+            b = new Button(a);
+            b.setText(label);
+            b.setTag("search-filter:" + key);
+            b.setAllCaps(false);
+            b.setIncludeFontPadding(false);
+            b.setStateListAnimator(null);
+            b.setOutlineProvider(null);
+            if (android.os.Build.VERSION.SDK_INT >= 23) {
+                b.setBreakStrategy(android.text.Layout.BREAK_STRATEGY_SIMPLE);
+                b.setHyphenationFrequency(android.text.Layout.HYPHENATION_FREQUENCY_NONE);
+            }
+            GradientDrawable pillBg = new GradientDrawable();
+            pillBg.setCornerRadius(a.dp(16));
+            pillBg.setColor(BG_FILTER);
+            b.setBackground(pillBg);
+            filterBgs.put(key, pillBg);
+            UiCompat.setDefaultFocusHighlightEnabled(b, false);
+            b.setFocusable(true);
+            b.setFocusableInTouchMode(true);
+            // Confirm selects filter if unselected, or enters poster wall if already active!
+            b.setOnClickListener(
+                    v -> {
+                        if (!current()) return;
+                        if (!key.equals(activeFilter)) {
+                            selectFilter(key);
+                        } else {
+                            focusSelectedResults();
+                        }
+                    });
+        } else {
+            b = a.button(label, "search-filter:" + key, () -> selectFilter(key));
+        }
         b.setTextSize(12);
-        b.setMinWidth(a.dp(64));
-        b.setMinimumWidth(a.dp(64));
+        b.setMinWidth(a.dp(58));
+        b.setMinimumWidth(a.dp(58));
         b.setMinHeight(0);
         b.setMinimumHeight(0);
-        b.setPadding(a.dp(15), 0, a.dp(15), 0);
+        b.setPadding(a.dp(14), 0, a.dp(14), 0);
         b.setSingleLine(true);
         b.setGravity(Gravity.CENTER);
         b.setContentDescription(label);
-        b.setOnFocusChangeListener(
-                (v, focus) -> {
-                    if (focus && a.isTvDevice()) selectFilter(key);
-                    styleFilter(b, key, focus);
-                });
-        if (a.isTvDevice())
+        b.setOnFocusChangeListener((v, focus) -> styleFilter(b, key, focus));
+        if (a.isTvDevice()) {
             b.setOnKeyListener(
                     (v, keyCode, event) -> {
-                        if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN
-                                && event.getAction() == KeyEvent.ACTION_DOWN) {
+                        if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                        if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
                             focusSelectedResults();
                             return true;
                         }
+                        if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT && key.isEmpty()) {
+                            return restoreLeftFocus();
+                        }
                         return false;
                     });
-        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-2, a.dp(34));
-        size.setMargins(a.dp(2), 0, a.dp(8), 0);
+        }
+        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-2, a.dp(32));
+        size.setMargins(a.dp(2), 0, a.dp(7), 0);
         sourceFilters.addView(b, size);
         filterButtons.put(key, b);
         filterNames.put(key, label);
@@ -1728,58 +3826,215 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     void rememberSourcePosition() {
+        sourceLimits.put(activeFilter, shownLimit);
+        if (tvResultRecycler != null && tvResultLayout != null) {
+            int firstPos = tvResultLayout.findFirstVisibleItemPosition();
+            if (firstPos >= 0) {
+                View child = tvResultLayout.findViewByPosition(firstPos);
+                int topOff = child == null ? 0 : child.getTop() - tvResultRecycler.getPaddingTop();
+                sourceScrollPos.put(activeFilter, firstPos);
+                sourceScrollOffset.put(activeFilter, topOff);
+                savedRecyclerPos = firstPos;
+                savedRecyclerOffset = topOff;
+            }
+            String tag = focusedTag(tvResultRecycler);
+            if (tag != null) sourceFocus.put(activeFilter, tag);
+            return;
+        }
         if (resultScroll == null) return;
         sourceScroll.put(activeFilter, resultScroll.getScrollY());
-        sourceLimits.put(activeFilter, shownLimit);
         String tag = focusedTag(resultGrid);
         if (tag != null) sourceFocus.put(activeFilter, tag);
     }
 
-    void selectFilter(String key) {
+    void selectFilter(final String key) {
         if (!current()) return;
         if (key.equals(activeFilter)) return;
         rememberSourcePosition();
         focusNewResults = false;
+        pendingPaginationFocus = false;
+        deferredRerankPending = false;
+        displayed.clear();
+        displayedItems.clear();
+        filterSwitchSerial++;
         activeFilter = key;
         shownLimit = sourceLimits.containsKey(key) ? sourceLimits.get(key) : 24;
         updateFilterLabels();
-        resetGrid();
-        renderResults();
-        final int scroll = sourceScroll.containsKey(key) ? sourceScroll.get(key) : 0;
-        final int serial = searchSerial;
-        resultScroll.post(
-                () -> {
-                    if (current() && serial == searchSerial && key.equals(activeFilter))
-                        resultScroll.scrollTo(0, scroll);
-                });
+        updateResultHeader();
+        if (a.isTvDevice()) {
+            renderResults();
+        } else {
+            resetGrid();
+            renderResults();
+        }
+        if (!key.isEmpty()) {
+            SourceResult selected = results.get(key);
+            if (selected != null
+                    && selected.videos.isEmpty()
+                    && selected.pages != null
+                    && selected.pages.hasMore()) {
+                loadNextPage();
+            }
+        }
+        if (tvResultRecycler != null && tvResultLayout != null) {
+            final int pos = sourceScrollPos.containsKey(key) ? sourceScrollPos.get(key) : 0;
+            final int off = sourceScrollOffset.containsKey(key) ? sourceScrollOffset.get(key) : 0;
+            final int serial = searchSerial;
+            tvResultRecycler.post(
+                    () -> {
+                        if (current()
+                                && serial == searchSerial
+                                && key.equals(activeFilter)
+                                && tvResultAdapter != null
+                                && pos < tvResultAdapter.getItemCount()) {
+                            tvResultLayout.scrollToPositionWithOffset(pos, off);
+                        }
+                    });
+        } else if (resultScroll != null) {
+            final int scroll = sourceScroll.containsKey(key) ? sourceScroll.get(key) : 0;
+            final int serial = searchSerial;
+            resultScroll.post(
+                    () -> {
+                        if (current() && serial == searchSerial && key.equals(activeFilter))
+                            resultScroll.scrollTo(0, scroll);
+                    });
+        }
     }
 
     void focusSelectedResults() {
-        if (!current()) return;
+        focusSelectedResultsInternal();
+    }
+
+    private boolean focusSelectedResultsInternal() {
+        if (!current()) return false;
         String tag = sourceFocus.get(activeFilter);
-        View target = tag == null ? null : a.root.findViewWithTag(tag);
-        if (target == null && !displayed.isEmpty())
-            target = posterCards.get(displayed.iterator().next());
-        if (target != null) target.requestFocus();
-        else if (retrySource != null && retrySource.getVisibility() == View.VISIBLE)
+        if (tvResultRecycler != null && tvResultRecycler.getVisibility() == View.VISIBLE) {
+            if (tag != null && !tag.isEmpty()) {
+                View target = tvResultRecycler.findViewWithTag(tag);
+                if (target != null && target.isShown()) {
+                    target.requestFocus();
+                    return true;
+                }
+                int idx = tvResultAdapter == null ? -1 : tvResultAdapter.indexOfTag(tag);
+                if (idx >= 0) {
+                    focusCardAt(idx);
+                    return true;
+                }
+            }
+            if (tvResultAdapter != null && tvResultAdapter.getItemCount() > 0) {
+                focusCardAt(0);
+                return true;
+            }
+        } else {
+            View target = tag == null ? null : a.root.findViewWithTag(tag);
+            if (target == null && !displayed.isEmpty())
+                target = posterCards.get(displayed.iterator().next());
+            if (target != null) {
+                target.requestFocus();
+                return true;
+            }
+        }
+        if (switchFuzzyBtn != null && switchFuzzyBtn.getVisibility() == View.VISIBLE) {
+            switchFuzzyBtn.requestFocus();
+            return true;
+        }
+        if (retryAllBtn != null && retryAllBtn.getVisibility() == View.VISIBLE) {
+            retryAllBtn.requestFocus();
+            return true;
+        }
+        if (retrySource != null && retrySource.getVisibility() == View.VISIBLE) {
             retrySource.requestFocus();
+            return true;
+        }
+        if (moreResults != null && moreResults.getVisibility() == View.VISIBLE) {
+            moreResults.requestFocus();
+            return true;
+        }
+        return false;
+    }
+
+    private void focusCardAt(final int position) {
+        if (tvResultRecycler == null
+                || tvResultLayout == null
+                || tvResultAdapter == null
+                || position < 0
+                || position >= tvResultAdapter.getItemCount()) return;
+        RecyclerView.ViewHolder vh = tvResultRecycler.findViewHolderForAdapterPosition(position);
+        if (vh != null && vh.itemView.isShown()) {
+            vh.itemView.requestFocus();
+            return;
+        }
+        tvResultLayout.scrollToPositionWithOffset(position, a.dp(8));
+        final int serial = searchSerial;
+        tvResultRecycler.post(
+                () -> {
+                    if (!current() || serial != searchSerial || tvResultRecycler == null) return;
+                    RecyclerView.ViewHolder bound =
+                            tvResultRecycler.findViewHolderForAdapterPosition(position);
+                    if (bound != null) {
+                        bound.itemView.requestFocus();
+                    } else {
+                        tvResultRecycler.post(
+                                () -> {
+                                    if (!current()
+                                            || serial != searchSerial
+                                            || tvResultRecycler == null) return;
+                                    RecyclerView.ViewHolder retryBound =
+                                            tvResultRecycler.findViewHolderForAdapterPosition(
+                                                    position);
+                                    if (retryBound != null) retryBound.itemView.requestFocus();
+                                });
+                    }
+                });
     }
 
     void styleFilter(Button b, String key, boolean focused) {
         boolean selected = key.equals(activeFilter);
+        int stateBits = (selected ? 1 : 0) | (focused ? 2 : 0);
+        Integer prevState = renderedFilterStates.get(key);
+        if (prevState != null && prevState.intValue() == stateBits) return;
+        renderedFilterStates.put(key, Integer.valueOf(stateBits));
         b.setSelected(selected);
-        b.setTypeface(null, selected ? Typeface.BOLD : Typeface.NORMAL);
-        FocusMotion.style(
-                a,
-                b,
-                focused,
-                selected ? 0xff465c76 : 0xff272f3a,
-                MainActivity.WHITE,
-                17,
-                selected ? MainActivity.WHITE : 0xffc2cbd7,
-                MainActivity.DARK,
-                true,
-                1.035f);
+        b.setTypeface(null, (selected || focused) ? Typeface.BOLD : Typeface.NORMAL);
+        if (a.isTvDevice()) {
+            GradientDrawable bg = filterBgs.get(key);
+            if (bg != null) {
+                if (focused && selected) {
+                    bg.setColor(Color.WHITE);
+                    bg.setStroke(Math.max(2, a.dp(2.5f)), 0xff5fa8ff);
+                } else if (focused) {
+                    bg.setColor(0xff253042);
+                    bg.setStroke(Math.max(2, a.dp(2.5f)), Color.WHITE);
+                } else if (selected) {
+                    bg.setColor(BG_FILTER_SELECTED);
+                    bg.setStroke(Math.max(1, a.dp(1.2f)), BORDER_FILTER_SELECTED);
+                } else {
+                    bg.setColor(BG_FILTER);
+                    bg.setStroke(Math.max(1, a.dp(1)), 0x1effffff);
+                }
+            }
+            if (focused && selected) {
+                b.setTextColor(TEXT_ON_LIGHT);
+            } else if (focused) {
+                b.setTextColor(Color.WHITE);
+            } else if (selected) {
+                b.setTextColor(TEXT_PRIMARY);
+            } else {
+                b.setTextColor(TEXT_SECONDARY);
+            }
+        } else {
+            FocusMotion.style(
+                    a,
+                    b,
+                    focused,
+                    selected ? 0xff465c76 : 0xff272f3a,
+                    MainActivity.WHITE,
+                    17,
+                    selected ? MainActivity.WHITE : 0xffc2cbd7,
+                    MainActivity.DARK,
+                    true,
+                    1.035f);
+        }
     }
 
     boolean hasVerification() {
@@ -1788,34 +4043,68 @@ public final class GlobalSearchScreen implements AutoCloseable {
         return false;
     }
 
+    private List<SourceResult> orderedSourceResults() {
+        List<SourceResult> ordered = new ArrayList<>(results.size());
+        Set<String> seen = new HashSet<>();
+        for (Cms.Site site : searchSites) {
+            if (site == null) continue;
+            SourceResult sr = results.get(site.key);
+            if (sr != null && seen.add(site.key)) ordered.add(sr);
+        }
+        for (SourceResult sr : results.values()) {
+            if (sr != null && sr.site != null && seen.add(sr.site.key)) ordered.add(sr);
+        }
+        return ordered;
+    }
+
+    private List<TvSearchMatcher.RankedHit> collectRankedHitsForFilter(String filterKey) {
+        if (submitted.isEmpty() || results.isEmpty()) return Collections.emptyList();
+        String preferredSite = a.prefs == null ? "" : a.prefs.getString(Prefs.SELECTED_SITE, "");
+        return TvSearchMatcher.collectAndRank(
+                matchMode, submitted, orderedSourceResults(), filterKey, preferredSite, a.phonetic);
+    }
+
+    private List<TvSearchMatcher.RankedHit> collectCurrentRankedHits() {
+        return collectRankedHitsForFilter(activeFilter);
+    }
+
     void updateFilterLabels() {
+        int totalVideos = -1;
         for (Map.Entry<String, Button> entry : filterButtons.entrySet()) {
             Button b = entry.getValue();
             String key = entry.getKey();
             if (a.isTvDevice()) {
                 String suffix;
                 if (key.isEmpty()) {
-                    int count = 0;
-                    for (SourceResult result : results.values()) count += result.videos.size();
+                    if (totalVideos < 0) {
+                        totalVideos = collectRankedHitsForFilter("").size();
+                    }
                     suffix =
                             finished < sourceCount
-                                    ? " · 搜索中"
-                                    : count == 0
+                                    ? (totalVideos > 0 ? " " + totalVideos + "…" : " · 搜索中")
+                                    : totalVideos == 0
                                                     && (failed > 0
                                                             || timedOut > 0
                                                             || busy > 0
                                                             || hasVerification())
-                                            ? " · 未完成"
-                                            : " " + count;
+                                            ? " 0"
+                                            : " " + totalVideos;
                 } else {
                     SourceResult result = results.get(key);
+                    boolean hasMore =
+                            result != null && result.pages != null && result.pages.hasMore();
+                    int siteCount = result == null ? 0 : collectRankedHitsForFilter(key).size();
                     suffix =
                             result == null
                                     ? " · 搜索中"
                                     : result.outcome == SearchCoordinator.Outcome.RESULT
                                                     || result.outcome
                                                             == SearchCoordinator.Outcome.EMPTY
-                                            ? " " + result.videos.size()
+                                            ? (hasMore
+                                                    ? (siteCount == 0
+                                                            ? " · 待加载"
+                                                            : " " + siteCount + "+")
+                                                    : " " + siteCount)
                                             : result.outcome == SearchCoordinator.Outcome.TIMEOUT
                                                     ? " · 超时"
                                                     : result.outcome
@@ -1828,15 +4117,21 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                                                     ? " · 未完成"
                                                                     : " · 失败";
                 }
-                b.setText(filterNames.get(key) + suffix);
+                String fullText = filterNames.get(key) + suffix;
+                if (!fullText.equals(renderedFilterLabels.get(key))) {
+                    renderedFilterLabels.put(key, fullText);
+                    b.setText(fullText);
+                }
             }
             styleFilter(b, key, b.hasFocus());
         }
     }
 
     void resetGrid() {
+        if (a.isTvDevice()) return;
         resultBody.removeAllViews();
         displayed.clear();
+        displayedItems.clear();
         lastRow = null;
         resultGrid = a.vertical();
         resultGrid.setClipChildren(false);
@@ -1844,29 +4139,17 @@ public final class GlobalSearchScreen implements AutoCloseable {
         emptyResult = a.text("等待匹配结果…", 15, MainActivity.MUTED);
         emptyResult.setPadding(a.dp(8), a.dp(24), 0, 0);
         resultBody.addView(emptyResult);
+        switchFuzzyBtn =
+                a.navButton(
+                        "切换到模糊搜索",
+                        "search-switch-fuzzy",
+                        () -> setMatchMode(TvSearchMatcher.Mode.FUZZY, true));
+        switchFuzzyBtn.setVisibility(View.GONE);
+        a.addButton(resultBody, switchFuzzyBtn);
         retrySource = a.navButton("重新搜索此源", "search-retry-source", this::retrySelected);
         retrySource.setVisibility(View.GONE);
         a.addButton(resultBody, retrySource);
-        moreResults =
-                a.navButton(
-                        "显示更多结果",
-                        "search-more-results",
-                        () -> {
-                            if (!current()) return;
-                            int available = 0;
-                            for (SourceResult r : results.values())
-                                if (activeFilter.isEmpty() || activeFilter.equals(r.site.key))
-                                    available += r.videos.size();
-                            if (available <= shownLimit) loadNextPage();
-                            else {
-                                shownLimit =
-                                        shownLimit > Integer.MAX_VALUE - 24
-                                                ? Integer.MAX_VALUE
-                                                : shownLimit + 24;
-                                focusNewResults = true;
-                                renderResults();
-                            }
-                        });
+        moreResults = a.navButton("显示更多结果", "search-more-results", this::triggerMoreResults);
         moreResults.setVisibility(View.GONE);
         a.addButton(resultBody, moreResults);
         resultHint = a.text("已显示当前取得的结果。", 12, MainActivity.MUTED);
@@ -1875,85 +4158,385 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     void renderResults() {
-        if (resultGrid == null) return;
-        renderFilters();
-        renderPasses++;
-        int available = 0, added = 0;
-        boolean remaining = false;
-        for (SourceResult source : results.values())
-            if (activeFilter.isEmpty() || source.site.key.equals(activeFilter))
-                for (int i = 0; i < source.videos.size(); i++) {
-                    available++;
-                    if (available > shownLimit) continue;
-                    Cms.Video video = source.videos.get(i);
-                    String key = source.site.key + ":" + video.id;
-                    if (displayed.contains(key)) continue;
-                    if (added >= 4) {
-                        remaining = true;
-                        continue;
-                    }
-                    if (displayed.size() % columns == 0 || lastRow == null) {
-                        lastRow = a.row();
-                        lastRow.setGravity(Gravity.TOP);
-                        lastRow.setClipChildren(false);
-                        resultGrid.addView(lastRow);
-                        for (int column = 0; column < columns; column++) {
-                            LinearLayout.LayoutParams blank =
-                                    new LinearLayout.LayoutParams(0, 1, 1);
-                            blank.setMargins(a.dp(3), a.dp(3), a.dp(8), a.dp(13));
-                            lastRow.addView(new View(a), blank);
-                        }
-                    }
-                    LinearLayout card = posterCards.get(key);
-                    if (card == null) {
-                        card = makeCard(source, video);
-                        posterCards.put(key, card);
-                    }
-                    if (card.getParent() instanceof ViewGroup)
-                        ((ViewGroup) card.getParent()).removeView(card);
-                    int column = displayed.size() % columns;
-                    LinearLayout.LayoutParams cell = new LinearLayout.LayoutParams(0, -2, 1);
-                    cell.setMargins(a.dp(3), a.dp(3), a.dp(8), a.dp(13));
-                    if (column < lastRow.getChildCount()) {
-                        lastRow.removeViewAt(column);
-                        lastRow.addView(card, column, cell);
-                    } else {
-                        lastRow.addView(card, cell);
-                    }
-                    displayed.add(key);
-                    added++;
-                    if (focusNewResults) {
-                        card.requestFocus();
-                        focusNewResults = false;
-                    }
+        if (a.isTvDevice()) {
+            renderTvResults();
+            return;
+        }
+        renderLegacyResults();
+    }
+
+    /**
+     * Projects the visible poster-wall slice from canonical {@code ranked} hits while protecting
+     * the currently focused card from eviction or index shift during passive background arrivals
+     * (such as a late single-source pagination callback after the user switched to "全部").
+     *
+     * <p>New higher-priority items remain in the source cache and {@code ranked}; they immediately
+     * take rank #1 on explicit filter switches, pagination expansion on the active view, leaving
+     * the poster wall, or active re-search.
+     */
+    static List<TvSearchMatcher.RankedHit> projectVisibleHits(
+            List<TvSearchMatcher.RankedHit> ranked,
+            int shownLimit,
+            List<String> previousDisplayedKeys,
+            String focusedKey,
+            boolean preserveFocusedPosition) {
+        if (ranked == null || ranked.isEmpty() || shownLimit <= 0) {
+            return Collections.emptyList();
+        }
+        int showCount = Math.min(ranked.size(), shownLimit);
+        List<TvSearchMatcher.RankedHit> canonical = new ArrayList<>(ranked.subList(0, showCount));
+        if (!preserveFocusedPosition
+                || focusedKey == null
+                || focusedKey.isEmpty()
+                || previousDisplayedKeys == null
+                || previousDisplayedKeys.isEmpty()) {
+            return canonical;
+        }
+        int oldFocusIdx = previousDisplayedKeys.indexOf(focusedKey);
+        if (oldFocusIdx < 0 || oldFocusIdx >= showCount) {
+            return canonical;
+        }
+        Map<String, TvSearchMatcher.RankedHit> byKey = new LinkedHashMap<>(ranked.size() * 2);
+        for (TvSearchMatcher.RankedHit hit : ranked) {
+            byKey.put(hit.stableKey(), hit);
+        }
+        if (!byKey.containsKey(focusedKey)) {
+            return canonical;
+        }
+        int newFocusIdx = -1;
+        for (int i = 0; i < canonical.size(); i++) {
+            if (focusedKey.equals(canonical.get(i).stableKey())) {
+                newFocusIdx = i;
+                break;
+            }
+        }
+        boolean prefixUnchanged = newFocusIdx == oldFocusIdx;
+        if (prefixUnchanged) {
+            for (int i = 0; i <= oldFocusIdx; i++) {
+                if (!previousDisplayedKeys.get(i).equals(canonical.get(i).stableKey())) {
+                    prefixUnchanged = false;
+                    break;
                 }
+            }
+        }
+        if (prefixUnchanged) {
+            return canonical;
+        }
+        List<TvSearchMatcher.RankedHit> stabilized = new ArrayList<>(showCount);
+        Set<String> included = new LinkedHashSet<>(showCount * 2);
+        for (String prevKey : previousDisplayedKeys) {
+            if (stabilized.size() >= showCount) break;
+            TvSearchMatcher.RankedHit hit = byKey.get(prevKey);
+            if (hit != null && included.add(prevKey)) {
+                stabilized.add(hit);
+            }
+        }
+        for (TvSearchMatcher.RankedHit hit : ranked) {
+            if (stabilized.size() >= showCount) break;
+            if (included.add(hit.stableKey())) {
+                stabilized.add(hit);
+            }
+        }
+        return stabilized;
+    }
+
+    private static boolean sameHitOrder(
+            List<TvSearchMatcher.RankedHit> a, List<TvSearchMatcher.RankedHit> b, int count) {
+        if (a == null || b == null || a.size() < count || b.size() < count) return false;
+        for (int i = 0; i < count; i++) {
+            if (!a.get(i).stableKey().equals(b.get(i).stableKey())) return false;
+        }
+        return true;
+    }
+
+    private void renderTvResults() {
+        if (tvResultRecycler == null || tvResultAdapter == null) return;
+        long renderStart = android.os.SystemClock.elapsedRealtime();
+        if (submitted.isEmpty()) {
+            deferredRerankPending = false;
+            if (tvResultRecycler != null) tvResultRecycler.setVisibility(View.GONE);
+            if (tvStateContainer != null) tvStateContainer.setVisibility(View.GONE);
+            if (tvFooterRow != null) tvFooterRow.setVisibility(View.GONE);
+            if (filterScrollView != null) filterScrollView.setVisibility(View.GONE);
+            updateResultHeader();
+            return;
+        }
+        if (tvRecentScroll != null) tvRecentScroll.setVisibility(View.GONE);
+        if (tvRecentContainer != null) tvRecentContainer.setVisibility(View.GONE);
+        if (filterButtons.isEmpty() && sourceCount > 0) renderFilters();
+        renderPasses++;
+
+        // Preserve focus strictly on the same siteKey:vodId without letting slow arrivals evict or
+        // shift it!
+        String currentWallFocusTag = focusedTag(tvResultRecycler);
+        boolean hadWallFocus = currentWallFocusTag != null;
+        String currentWallFocusKey =
+                hadWallFocus && currentWallFocusTag.startsWith("global-result:")
+                        ? currentWallFocusTag.substring("global-result:".length())
+                        : "";
+        boolean preserveFocusedPosition =
+                hadWallFocus && !restoringResults && !pendingPaginationFocus && !focusNewResults;
+
+        List<TvSearchMatcher.RankedHit> ranked = collectCurrentRankedHits();
+        int available = ranked.size();
+        int showCount = Math.min(available, shownLimit);
+        List<TvSearchMatcher.RankedHit> visible =
+                projectVisibleHits(
+                        ranked,
+                        shownLimit,
+                        new ArrayList<>(displayed),
+                        currentWallFocusKey,
+                        preserveFocusedPosition);
+        deferredRerankPending =
+                preserveFocusedPosition
+                        && showCount > 0
+                        && !sameHitOrder(visible, ranked, showCount);
+
+        displayed.clear();
+        displayedItems.clear();
+        for (int i = 0; i < visible.size(); i++) {
+            TvSearchMatcher.RankedHit hit = visible.get(i);
+            displayed.add(hit.stableKey());
+            if (hit.site != null && hit.video != null) {
+                displayedItems.add(new TvSearchBudget.ProtectedItem(hit.site.key, hit.video.id));
+            }
+        }
+
+        tvResultAdapter.submitList(visible);
+
+        if (visible.isEmpty()) {
+            tvResultRecycler.setVisibility(View.GONE);
+            tvStateContainer.setVisibility(View.VISIBLE);
+            bindEmptyOrErrorState();
+        } else {
+            tvStateContainer.setVisibility(View.GONE);
+            tvResultRecycler.setVisibility(View.VISIBLE);
+            if (restoringResults) {
+                restoringResults = false;
+                String targetTag = resolveResumeFocusTag();
+                if (savedRecyclerPos >= 0 && savedRecyclerPos < visible.size()) {
+                    tvResultLayout.scrollToPositionWithOffset(
+                            savedRecyclerPos, savedRecyclerOffset);
+                }
+                if (targetTag != null && !targetTag.isEmpty()) {
+                    int idx = tvResultAdapter.indexOfTag(targetTag);
+                    if (idx >= 0) focusCardAt(idx);
+                }
+            } else if (pendingPaginationFocus) {
+                pendingPaginationFocus = false;
+                int targetIdx =
+                        resolvePaginationFocusIndex(
+                                visible,
+                                pendingPaginationPrevKeys,
+                                pendingPaginationTargetIndex,
+                                pendingPaginationAnchorKey);
+                pendingPaginationPrevKeys = Collections.emptySet();
+                pendingPaginationTargetIndex = -1;
+                pendingPaginationAnchorKey = "";
+                if (targetIdx >= 0 && targetIdx < visible.size()) {
+                    sourceFocus.put(
+                            activeFilter, "global-result:" + visible.get(targetIdx).stableKey());
+                    focusCardAt(targetIdx);
+                }
+            } else if (focusNewResults) {
+                focusNewResults = false;
+                focusCardAt(0);
+            } else if (hadWallFocus) {
+                // Only re-anchor if focus stayed inside wall and needs exact key preservation.
+                int idx = tvResultAdapter.indexOfTag(currentWallFocusTag);
+                if (idx >= 0 && tvResultRecycler.findFocus() == null) {
+                    focusCardAt(idx);
+                }
+            }
+        }
+
+        boolean localMore = available > shownLimit;
+        boolean allTabBudgetExhausted = isCurrentAllTabBudgetExhausted(available);
+        SourceResult next = nextPageSource(available);
+        boolean showMoreBtn = localMore || next != null || pageRequests.get() != null;
+        moreResults.setVisibility(showMoreBtn ? View.VISIBLE : View.GONE);
+        moreResults.setEnabled(pageRequests.get() == null || localMore);
+        moreResults.setText(
+                localMore
+                        ? "显示更多已取得结果 (" + (available - shownLimit) + ")"
+                        : pageRequests.get() != null
+                                ? "正在读取更多结果…"
+                                : next != null && next.site.key.equals(pageFailureSource)
+                                        ? pageFailureReason + " · 重试"
+                                        : "读取来源更多结果");
+
+        boolean limited = false;
+        boolean anySourceHasMore = false;
+        for (SourceResult r : results.values()) {
+            if ((activeFilter.isEmpty() || activeFilter.equals(r.site.key)) && r.pages != null) {
+                if (r.pages.limited) limited = true;
+                if (r.pages.hasMore()) anySourceHasMore = true;
+            }
+        }
+        boolean showHint =
+                !localMore
+                        && next == null
+                        && (allTabBudgetExhausted || finished >= sourceCount)
+                        && !visible.isEmpty();
+        int currentGlobalCap = TvSearchBudget.globalCap(a.isTvDevice(), isLowRamTv());
+        resultHint.setText(
+                allTabBudgetExhausted && anySourceHasMore
+                        ? "已达全部结果内存上限（" + currentGlobalCap + " 条），请切换到顶部具体来源继续加载更多"
+                        : globalBudgetCapped && activeFilter.isEmpty()
+                                ? "已按电视内存上限保留精选结果，可切换来源继续查找"
+                                : limited ? "当前来源已达内存保留上限，请缩小关键词" : "已显示全部匹配结果");
+        resultHint.setVisibility(showHint ? View.VISIBLE : View.GONE);
+        tvFooterRow.setVisibility((showMoreBtn || showHint) ? View.VISIBLE : View.GONE);
+
+        updateResultHeader();
+        long renderElapsed = android.os.SystemClock.elapsedRealtime() - renderStart;
+        totalRenderUiMs += renderElapsed;
+        if (renderElapsed > maxRenderUiMs) maxRenderUiMs = renderElapsed;
+    }
+
+    private void bindEmptyOrErrorState() {
+        SourceResult selected = results.get(activeFilter);
+        boolean selectedDeferred =
+                selected != null && selected.pages != null && selected.pages.hasMore();
+        boolean allFailed = activeFilter.isEmpty() && allSourcesFailed();
+        boolean doneAll = finished >= sourceCount && sourceCount > 0;
+
+        boolean showSwitchFuzzy = false;
+        boolean showRetryAll = false;
+        boolean showRetryOne = false;
+
+        if (sourceCount == 0) {
+            emptyResult.setText("没有可搜索来源，请先在设置中导入配置并启用片源。");
+        } else if (!activeFilter.isEmpty()) {
+            if (selected == null) {
+                emptyResult.setText("正在等待此来源的" + matchMode.label + "结果…");
+            } else if (selectedDeferred) {
+                emptyResult.setText(
+                        pageRequests.get() != null ? "正在读取此来源的后续分页…" : "当前页已过滤无关项，此来源仍有后续分页可继续查找。");
+            } else if (selected.outcome == SearchCoordinator.Outcome.VERIFICATION_REQUIRED) {
+                emptyResult.setText("此片源搜索需要完成网站验证码，暂时无法返回结果。可切换其他来源或重试。");
+                showRetryOne = true;
+            } else if (selected.outcome == SearchCoordinator.Outcome.FAILED) {
+                emptyResult.setText("此源请求失败或返回无效响应，并非确认无内容。可重试或切换其他来源。");
+                showRetryOne = true;
+            } else if (selected.outcome == SearchCoordinator.Outcome.TIMEOUT) {
+                emptyResult.setText("此源搜索超时，可单独重试。");
+                showRetryOne = true;
+            } else if (selected.outcome == SearchCoordinator.Outcome.BUSY) {
+                emptyResult.setText("此源尚未完成，可单独重试。");
+                showRetryOne = true;
+            } else if (matchMode == TvSearchMatcher.Mode.EXACT) {
+                emptyResult.setText("此来源没有与“" + submitted + "”完整匹配的片名。");
+                showSwitchFuzzy = true;
+                showRetryOne = true;
+            } else {
+                emptyResult.setText("此来源已响应，但没有与“" + submitted + "”相关的结果。");
+                showRetryOne = true;
+            }
+        } else {
+            // "全部" filter active
+            if (!doneAll) {
+                emptyResult.setText(
+                        "正在"
+                                + matchMode.label
+                                + "全部 "
+                                + sourceCount
+                                + " 个来源（已完成 "
+                                + finished
+                                + "/"
+                                + sourceCount
+                                + "）…");
+            } else if (allFailed) {
+                emptyResult.setText("全部可用来源请求失败或超时，并非确认没有内容。请检查网络后重试。");
+                showRetryAll = true;
+            } else if (nextPageSource() != null) {
+                emptyResult.setText("当前页结果均不符合匹配规则，仍有来源包含后续分页，可点击下方继续查找。");
+                showSwitchFuzzy = (matchMode == TvSearchMatcher.Mode.EXACT);
+            } else if (matchMode == TvSearchMatcher.Mode.EXACT) {
+                emptyResult.setText(
+                        "未找到与“" + submitted + "”完整匹配的片名。\n如需匹配续集、别名扩展、片名片段或拼音首字母，可切换到模糊搜索。");
+                showSwitchFuzzy = true;
+            } else {
+                emptyResult.setText("未找到与“" + submitted + "”相关的片源结果，可尝试更换或缩短关键词。");
+            }
+        }
+
+        if (switchFuzzyBtn != null) {
+            switchFuzzyBtn.setVisibility(showSwitchFuzzy ? View.VISIBLE : View.GONE);
+        }
+        if (retryAllBtn != null) {
+            retryAllBtn.setVisibility(showRetryAll ? View.VISIBLE : View.GONE);
+        }
+        if (retrySource != null) {
+            retrySource.setVisibility(showRetryOne ? View.VISIBLE : View.GONE);
+            retrySource.setEnabled(retryCoordinator == null);
+        }
+    }
+
+    private void renderLegacyResults() {
+        if (resultGrid == null) return;
+        long renderStart = android.os.SystemClock.elapsedRealtime();
+        if (filterButtons.isEmpty()) renderFilters();
+        renderPasses++;
+        List<TvSearchMatcher.RankedHit> ranked = collectCurrentRankedHits();
+        int available = ranked.size(), added = 0;
+        boolean remaining = false;
+        for (int i = 0; i < ranked.size(); i++) {
+            if (i + 1 > shownLimit) continue;
+            TvSearchMatcher.RankedHit hit = ranked.get(i);
+            String key = hit.stableKey();
+            if (displayed.contains(key)) continue;
+            if (added >= 4) {
+                remaining = true;
+                continue;
+            }
+            if (displayed.size() % columns == 0 || lastRow == null) {
+                lastRow = a.row();
+                lastRow.setGravity(Gravity.TOP);
+                lastRow.setClipChildren(false);
+                resultGrid.addView(lastRow);
+                for (int column = 0; column < columns; column++) {
+                    LinearLayout.LayoutParams blank = new LinearLayout.LayoutParams(0, 1, 1);
+                    blank.setMargins(a.dp(3), a.dp(3), a.dp(8), a.dp(13));
+                    lastRow.addView(new View(a), blank);
+                }
+            }
+            LinearLayout card = posterCards.get(key);
+            if (card == null) {
+                card = makeCard(hit.site, hit.video);
+                posterCards.put(key, card);
+            }
+            if (card.getParent() instanceof ViewGroup)
+                ((ViewGroup) card.getParent()).removeView(card);
+            int column = displayed.size() % columns;
+            LinearLayout.LayoutParams cell = new LinearLayout.LayoutParams(0, -2, 1);
+            cell.setMargins(a.dp(3), a.dp(3), a.dp(8), a.dp(13));
+            if (column < lastRow.getChildCount()) {
+                lastRow.removeViewAt(column);
+                lastRow.addView(card, column, cell);
+            } else {
+                lastRow.addView(card, cell);
+            }
+            displayed.add(key);
+            if (hit.site != null && hit.video != null) {
+                displayedItems.add(new TvSearchBudget.ProtectedItem(hit.site.key, hit.video.id));
+            }
+            added++;
+            if (focusNewResults) {
+                card.requestFocus();
+                focusNewResults = false;
+            }
+        }
         emptyResult.setVisibility(displayed.isEmpty() ? View.VISIBLE : View.GONE);
         if (displayed.isEmpty()) {
-            SourceResult selected = results.get(activeFilter);
-            emptyResult.setText(
-                    selected == null
-                            ? (!activeFilter.isEmpty() || finished < sourceCount
-                                    ? "正在等待此来源的搜索结果…"
-                                    : "本次未获得可显示的结果。可选择上方来源查看具体状态。")
-                            : selected.outcome == SearchCoordinator.Outcome.VERIFICATION_REQUIRED
-                                    ? "此片源搜索需要完成网站验证码，暂时无法返回结果。可先选择其他片源。"
-                                    : selected.outcome == SearchCoordinator.Outcome.FAILED
-                                            ? "此源请求失败或返回无效响应，并非确认没有内容。可重试或检查配置。"
-                                            : selected.outcome == SearchCoordinator.Outcome.TIMEOUT
-                                                    ? "此源搜索超时，可单独重试。"
-                                                    : selected.outcome
-                                                                    == SearchCoordinator.Outcome
-                                                                            .BUSY
-                                                            ? "此源尚未完成，可单独重试。"
-                                                            : "此源已响应，但没有匹配结果。可更换关键词再试。");
+            bindEmptyOrErrorState();
+        } else {
+            if (switchFuzzyBtn != null) switchFuzzyBtn.setVisibility(View.GONE);
+            if (retrySource != null) retrySource.setVisibility(View.GONE);
         }
-        retrySource.setVisibility(
-                !activeFilter.isEmpty() && results.containsKey(activeFilter) && displayed.isEmpty()
-                        ? View.VISIBLE
-                        : View.GONE);
-        retrySource.setEnabled(retryCoordinator == null);
         boolean localMore = available > shownLimit;
-        SourceResult next = nextPageSource();
+        boolean allTabBudgetExhausted = isCurrentAllTabBudgetExhausted(available);
+        SourceResult next = nextPageSource(available);
         moreResults.setVisibility(
                 localMore || next != null || pageRequests.get() != null ? View.VISIBLE : View.GONE);
         moreResults.setEnabled(pageRequests.get() == null || localMore);
@@ -1961,18 +4544,19 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 localMore
                         ? "显示更多已取得结果"
                         : pageRequests.get() != null
-                                ? "正在读取下一页…"
+                                ? "正在读取更多结果…"
                                 : next != null && next.site.key.equals(pageFailureSource)
                                         ? pageFailureReason + " · 重试"
-                                        : "读取来源下一页");
-        boolean limited = false;
-        for (SourceResult r : results.values())
-            if ((activeFilter.isEmpty() || activeFilter.equals(r.site.key))
-                    && r.pages != null
-                    && r.pages.limited) limited = true;
-        resultHint.setText(limited ? "部分来源已达5000条保留上限，请缩小关键词继续查找。" : "已显示当前取得的结果；没有更多已确认的来源分页。");
+                                        : "读取来源更多结果");
+        if (allTabBudgetExhausted) {
+            int currentGlobalCap = TvSearchBudget.globalCap(a.isTvDevice(), isLowRamTv());
+            resultHint.setText("已达全部结果内存上限（" + currentGlobalCap + " 条），请切换到顶部具体来源继续加载更多");
+        }
         resultHint.setVisibility(
-                !remaining && !localMore && next == null && finished >= sourceCount
+                !remaining
+                                && !localMore
+                                && next == null
+                                && (allTabBudgetExhausted || finished >= sourceCount)
                         ? View.VISIBLE
                         : View.GONE);
         if (!remaining && restoringResults) {
@@ -1989,6 +4573,9 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         if (current() && serial == searchSerial) resultScroll.scrollTo(0, scroll);
                     });
         }
+        long renderElapsed = android.os.SystemClock.elapsedRealtime() - renderStart;
+        totalRenderUiMs += renderElapsed;
+        if (renderElapsed > maxRenderUiMs) maxRenderUiMs = renderElapsed;
         if (remaining && pendingRender == null) {
             final int serial = searchSerial;
             pendingRender =
@@ -2000,7 +4587,494 @@ public final class GlobalSearchScreen implements AutoCloseable {
         }
     }
 
-    LinearLayout makeCard(SourceResult source, Cms.Video video) {
+    private String formatCardMeta(Cms.Video video, Cms.Site site) {
+        String sourceName = clean(site == null ? "" : site.name);
+        String year = video == null || video.year == null ? "" : video.year.trim();
+        if (!year.isEmpty()) return year + " · " + sourceName;
+        return sourceName;
+    }
+
+    /**
+     * Pre-baked GPU-lightweight theme shared across all TV search poster cards. Eliminates per-card
+     * {@code setClipToOutline(true)} stencil clipping, {@code GradientDrawable} stroke tessellation,
+     * and full-poster bilinear scaling on Mali-450 GPUs while keeping crisp rounded corners and
+     * Apple TV focus rings.
+     */
+    private static final class TvSearchArtTheme {
+        final int artW, artH;
+        final int cornerSizePx;
+        final float strokePx;
+        final Rect cornerSrcTl = new Rect();
+        final Rect cornerSrcTr = new Rect();
+        final Rect cornerSrcBl = new Rect();
+        final Rect cornerSrcBr = new Rect();
+        final Paint placeholderPaint = new Paint();
+        final Paint focusEdgePaint = new Paint();
+        final Paint badgeBgPaint = new Paint();
+        final Paint badgeTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final float badgePadH, badgePadV, badgeMargin, badgeBoxH, badgeBaseline;
+        final Bitmap normalCornerAtlas;
+        final Bitmap focusRingCornerAtlas;
+
+        TvSearchArtTheme(MainActivity a, int artW, int artH) {
+            this.artW = Math.max(1, artW);
+            this.artH = Math.max(1, artH);
+            int radius = Math.max(4, Math.min(a.dp(10), Math.min(this.artW, this.artH) / 3));
+            this.cornerSizePx = radius;
+            this.strokePx = Math.max(2f, a.dp(2.5f));
+
+            cornerSrcTl.set(0, 0, radius, radius);
+            cornerSrcTr.set(radius, 0, radius * 2, radius);
+            cornerSrcBl.set(0, radius, radius, radius * 2);
+            cornerSrcBr.set(radius, radius, radius * 2, radius * 2);
+
+            placeholderPaint.setStyle(Paint.Style.FILL);
+            placeholderPaint.setColor(0xff252c35);
+
+            focusEdgePaint.setStyle(Paint.Style.FILL);
+            focusEdgePaint.setColor(Color.WHITE);
+
+            badgeBgPaint.setStyle(Paint.Style.FILL);
+            badgeBgPaint.setColor(0xd010141c);
+
+            float scaledDensity = a.getResources().getDisplayMetrics().scaledDensity;
+            badgeTextPaint.setColor(0xfffbbf24);
+            badgeTextPaint.setTypeface(Typeface.DEFAULT_BOLD);
+            badgeTextPaint.setTextSize(10.5f * scaledDensity);
+            Paint.FontMetrics fm = badgeTextPaint.getFontMetrics();
+            this.badgePadH = a.dp(6);
+            this.badgePadV = a.dp(2.5f);
+            this.badgeMargin = a.dp(6);
+            this.badgeBaseline = -fm.ascent;
+            this.badgeBoxH = (fm.descent - fm.ascent) + badgePadV * 2f;
+
+            this.normalCornerAtlas = buildCornerAtlas(radius, false);
+            this.focusRingCornerAtlas = buildCornerAtlas(radius, true);
+        }
+
+        private Bitmap buildCornerAtlas(int r, boolean withFocusRing) {
+            int full = r * 2;
+            Bitmap bmp = Bitmap.createBitmap(full, full, Bitmap.Config.ARGB_8888);
+            Canvas c = new Canvas(bmp);
+            c.drawColor(BG_PAGE);
+            Paint clearPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            clearPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.CLEAR));
+            c.drawRoundRect(new RectF(0f, 0f, full, full), r, r, clearPaint);
+            if (withFocusRing) {
+                Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                ringPaint.setStyle(Paint.Style.STROKE);
+                ringPaint.setStrokeWidth(strokePx);
+                ringPaint.setColor(Color.WHITE);
+                float hs = strokePx * 0.5f;
+                float innerR = Math.max(1f, r - hs);
+                c.drawRoundRect(new RectF(hs, hs, full - hs, full - hs), innerR, innerR, ringPaint);
+            }
+            return bmp;
+        }
+    }
+
+    /** Single leaf View replacing 5 nested poster/badge/clip/focus-ring Views per TV search card. */
+    private static final class TvSearchPosterArtView extends View {
+        final TvSearchArtTheme t;
+        final Paint posterPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+        final Rect srcRect = new Rect();
+        final RectF dstRect = new RectF();
+        final RectF dstTl = new RectF();
+        final RectF dstTr = new RectF();
+        final RectF dstBl = new RectF();
+        final RectF dstBr = new RectF();
+        final RectF badgeRect = new RectF();
+        Bitmap posterBitmap;
+        boolean hasSrcRect;
+        boolean artFocused;
+        String badgeText = "";
+
+        TvSearchPosterArtView(MainActivity a, TvSearchArtTheme theme) {
+            super(a);
+            this.t = theme;
+            dstRect.set(0f, 0f, t.artW, t.artH);
+            float cs = t.cornerSizePx;
+            dstTl.set(0f, 0f, cs, cs);
+            dstTr.set(t.artW - cs, 0f, t.artW, cs);
+            dstBl.set(0f, t.artH - cs, cs, t.artH);
+            dstBr.set(t.artW - cs, t.artH - cs, t.artW, t.artH);
+        }
+
+        void clearPoster() {
+            posterBitmap = null;
+            hasSrcRect = false;
+            badgeText = "";
+            artFocused = false;
+        }
+
+        void setBadgeText(String text) {
+            String next = text == null ? "" : text;
+            if (next.equals(badgeText)) return;
+            badgeText = next;
+            if (!badgeText.isEmpty()) {
+                float tw = t.badgeTextPaint.measureText(badgeText);
+                float bw = tw + t.badgePadH * 2f;
+                badgeRect.set(
+                        t.artW - t.badgeMargin - bw,
+                        t.badgeMargin,
+                        t.artW - t.badgeMargin,
+                        t.badgeMargin + t.badgeBoxH);
+            }
+            invalidate();
+        }
+
+        void setArtFocused(boolean focused) {
+            if (this.artFocused == focused) return;
+            this.artFocused = focused;
+            invalidate();
+        }
+
+        void setPosterBitmap(Bitmap bmp) {
+            if (this.posterBitmap == bmp) return;
+            if (bmp == null || bmp.isRecycled() || bmp.getWidth() <= 0 || bmp.getHeight() <= 0) {
+                this.posterBitmap = null;
+                this.hasSrcRect = false;
+                invalidate();
+                return;
+            }
+            this.posterBitmap = bmp;
+            int bw = bmp.getWidth();
+            int bh = bmp.getHeight();
+            float targetRatio = (float) t.artW / (float) Math.max(1, t.artH);
+            float bmpRatio = (float) bw / (float) bh;
+            if (bmpRatio > targetRatio) {
+                int cropW = Math.max(1, Math.min(bw, Math.round(bh * targetRatio)));
+                int left = (bw - cropW) / 2;
+                srcRect.set(left, 0, left + cropW, bh);
+            } else {
+                int cropH =
+                        Math.max(1, Math.min(bh, Math.round(bw / Math.max(0.01f, targetRatio))));
+                int top = (bh - cropH) / 2;
+                srcRect.set(0, top, bw, top + cropH);
+            }
+            this.hasSrcRect = true;
+            invalidate();
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            setMeasuredDimension(t.artW, t.artH);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            if (posterBitmap != null && !posterBitmap.isRecycled() && hasSrcRect) {
+                canvas.drawBitmap(posterBitmap, srcRect, dstRect, posterPaint);
+            } else {
+                canvas.drawRect(dstRect, t.placeholderPaint);
+            }
+            if (!badgeText.isEmpty()) {
+                canvas.drawRect(badgeRect, t.badgeBgPaint);
+                canvas.drawText(
+                        badgeText,
+                        badgeRect.left + t.badgePadH,
+                        badgeRect.top + t.badgePadV + t.badgeBaseline,
+                        t.badgeTextPaint);
+            }
+            Bitmap corners = artFocused ? t.focusRingCornerAtlas : t.normalCornerAtlas;
+            if (corners != null && !corners.isRecycled()) {
+                canvas.drawBitmap(corners, t.cornerSrcTl, dstTl, null);
+                canvas.drawBitmap(corners, t.cornerSrcTr, dstTr, null);
+                canvas.drawBitmap(corners, t.cornerSrcBl, dstBl, null);
+                canvas.drawBitmap(corners, t.cornerSrcBr, dstBr, null);
+            }
+            if (artFocused) {
+                float cs = t.cornerSizePx;
+                float sw = t.strokePx;
+                canvas.drawRect(cs, 0f, t.artW - cs, sw, t.focusEdgePaint);
+                canvas.drawRect(cs, t.artH - sw, t.artW - cs, t.artH, t.focusEdgePaint);
+                canvas.drawRect(0f, cs, sw, t.artH - cs, t.focusEdgePaint);
+                canvas.drawRect(t.artW - sw, cs, t.artW, t.artH - cs, t.focusEdgePaint);
+            }
+        }
+    }
+
+    /** Lightweight DiffUtil-backed RecyclerView adapter for TV 2:3 Apple TV poster wall. */
+    private final class TvSearchPosterAdapter
+            extends RecyclerView.Adapter<TvSearchPosterAdapter.CardHolder> {
+        private final List<TvSearchMatcher.RankedHit> items = new ArrayList<>();
+        private TvSearchArtTheme artTheme;
+
+        private TvSearchArtTheme ensureArtTheme() {
+            if (artTheme == null
+                    || artTheme.artW != tvCardPosterWidthPx
+                    || artTheme.artH != tvCardPosterHeightPx) {
+                artTheme = new TvSearchArtTheme(a, tvCardPosterWidthPx, tvCardPosterHeightPx);
+            }
+            return artTheme;
+        }
+
+        void clearAll() {
+            int n = items.size();
+            if (n == 0) return;
+            items.clear();
+            notifyItemRangeRemoved(0, n);
+        }
+
+        void submitList(final List<TvSearchMatcher.RankedHit> next) {
+            final List<TvSearchMatcher.RankedHit> oldList = new ArrayList<>(items);
+            final List<TvSearchMatcher.RankedHit> newList =
+                    next == null ? Collections.emptyList() : next;
+            DiffUtil.DiffResult diff =
+                    DiffUtil.calculateDiff(
+                            new DiffUtil.Callback() {
+                                @Override
+                                public int getOldListSize() {
+                                    return oldList.size();
+                                }
+
+                                @Override
+                                public int getNewListSize() {
+                                    return newList.size();
+                                }
+
+                                @Override
+                                public boolean areItemsTheSame(int oldPos, int newPos) {
+                                    return oldList.get(oldPos)
+                                            .hitId()
+                                            .equals(newList.get(newPos).hitId());
+                                }
+
+                                @Override
+                                public boolean areContentsTheSame(int oldPos, int newPos) {
+                                    TvSearchMatcher.RankedHit o = oldList.get(oldPos);
+                                    TvSearchMatcher.RankedHit n = newList.get(newPos);
+                                    return TextUtils.equals(o.video.title, n.video.title)
+                                            && TextUtils.equals(o.video.year, n.video.year)
+                                            && TextUtils.equals(o.video.poster, n.video.poster)
+                                            && TextUtils.equals(o.site.name, n.site.name);
+                                }
+                            },
+                            true);
+            items.clear();
+            items.addAll(newList);
+            diff.dispatchUpdatesTo(this);
+        }
+
+        int indexOfTag(String fullTag) {
+            if (fullTag == null) return -1;
+            for (int i = 0; i < items.size(); i++) {
+                if (("global-result:" + items.get(i).stableKey()).equals(fullTag)) return i;
+            }
+            return -1;
+        }
+
+        @Override
+        public int getItemCount() {
+            return items.size();
+        }
+
+        @Override
+        public CardHolder onCreateViewHolder(ViewGroup parent, int viewType) {
+            LinearLayout card = a.vertical();
+            card.setGravity(Gravity.CENTER_HORIZONTAL);
+            card.setClipChildren(true);
+            card.setClipToPadding(false);
+            card.setPadding(a.dp(5), a.dp(5), a.dp(5), a.dp(10));
+            card.setFocusable(true);
+            card.setFocusableInTouchMode(true);
+            card.setClickable(true);
+            UiCompat.setDefaultFocusHighlightEnabled(card, false);
+
+            TvSearchPosterArtView posterArt = new TvSearchPosterArtView(a, ensureArtTheme());
+            LinearLayout.LayoutParams posterLp =
+                    new LinearLayout.LayoutParams(tvCardPosterWidthPx, tvCardPosterHeightPx);
+            posterLp.gravity = Gravity.CENTER_HORIZONTAL;
+            card.addView(posterArt, posterLp);
+
+            TextView title = a.text("", 13.5f, 0xffd7e0ec);
+            title.setTypeface(null, Typeface.BOLD);
+            title.setMaxLines(2);
+            title.setEllipsize(TextUtils.TruncateAt.END);
+            title.setLineSpacing(a.dp(1.5f), 1f);
+            title.setIncludeFontPadding(false);
+            LinearLayout.LayoutParams titleLp =
+                    new LinearLayout.LayoutParams(tvCardPosterWidthPx, -2);
+            titleLp.topMargin = a.dp(7);
+            card.addView(title, titleLp);
+
+            TextView meta = a.text("", 11.5f, TEXT_MUTED);
+            meta.setSingleLine(true);
+            meta.setEllipsize(TextUtils.TruncateAt.END);
+            meta.setIncludeFontPadding(false);
+            LinearLayout.LayoutParams metaLp =
+                    new LinearLayout.LayoutParams(tvCardPosterWidthPx, -2);
+            metaLp.topMargin = a.dp(3);
+            card.addView(meta, metaLp);
+
+            RecyclerView.LayoutParams cellLp =
+                    new RecyclerView.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT);
+            cellLp.setMargins(0, 0, 0, a.dp(4));
+            card.setLayoutParams(cellLp);
+
+            return new CardHolder(card, posterArt, title, meta);
+        }
+
+        @Override
+        public void onBindViewHolder(final CardHolder holder, int position) {
+            final TvSearchMatcher.RankedHit hit = items.get(position);
+            final Cms.Site site = hit.site;
+            final Cms.Video video = hit.video;
+            final String cardTag = "global-result:" + hit.stableKey();
+
+            holder.boundKey = hit.stableKey();
+            final int seq = ++holder.bindSeq;
+            holder.itemView.setTag(cardTag);
+            holder.title.setText(video.title == null ? "" : video.title);
+            holder.meta.setText(formatCardMeta(video, site));
+            holder.itemView.setContentDescription(
+                    (video.title == null ? "" : video.title) + " " + formatCardMeta(video, site));
+
+            final int scope = searchArtworkScope;
+            ImageLoader.unbindBitmapTarget(holder.posterArt);
+            Bitmap cached =
+                    ImageLoader.cachedPosterBitmap(
+                            a, video.poster, tvCardPosterWidthPx, tvCardPosterHeightPx);
+            holder.posterArt.setPosterBitmap(cached);
+            if (cached == null && video.poster != null && !video.poster.isEmpty()) {
+                ImageLoader.loadPosterBitmap(
+                        a,
+                        video.poster,
+                        tvCardPosterWidthPx,
+                        tvCardPosterHeightPx,
+                        pageTicket,
+                        scope,
+                        holder.posterArt,
+                        bmp -> {
+                            if (current()
+                                    && holder.bindSeq == seq
+                                    && scope == searchArtworkScope
+                                    && !ImageLoader.isScopeCancelled(scope)) {
+                                holder.posterArt.setPosterBitmap(bmp);
+                            }
+                        });
+            }
+
+            // Show immediate / RAM-cached Douban rating with zero background HTTP thread storm
+            // during active TV remote browsing.
+            String badgeLabel = "";
+            if (!SourceController.isConfigOrNetdiskActionCard(site, video)) {
+                double score = DoubanScoreRepository.extractImmediateScore(video);
+                if (score < 2.0 && !a.privateMode) {
+                    String lookupKey =
+                            DoubanScoreRepository.normalizeLookupKey(video.title, video.year);
+                    DoubanScoreRepository.CacheEntry entry =
+                            DoubanScoreRepository.getCached(a, lookupKey);
+                    if (entry != null && entry.score >= 2.0) {
+                        score = entry.score;
+                    }
+                }
+                if (score >= 2.0) {
+                    badgeLabel = DoubanScoreRepository.formatBadgeText(score);
+                }
+            }
+            holder.posterArt.setBadgeText(badgeLabel);
+
+            holder.applyFocusVisual(holder.itemView.hasFocus(), false);
+
+            final String query = submitted;
+            holder.itemView.setOnClickListener(
+                    v -> {
+                        if (!current()) return;
+                        if (!a.isSiteEnabledInMultiSource(site.key)) {
+                            a.toast("该片源所属订阅已停用，请先重新启用来源");
+                            return;
+                        }
+                        sourceFocus.put(activeFilter, cardTag);
+                        rememberSourcePosition();
+                        saveHistory(query);
+                        a.openListing(site, video);
+                    });
+            holder.itemView.setOnFocusChangeListener(
+                    (v, focused) -> {
+                        if (focused) {
+                            sourceFocus.put(activeFilter, cardTag);
+                            deferPendingPhoneticLearn();
+                        } else if (deferredRerankPending && tvResultRecycler != null) {
+                            tvResultRecycler.post(
+                                    () -> {
+                                        if (current()
+                                                && deferredRerankPending
+                                                && focusedTag(tvResultRecycler) == null) {
+                                            renderTvResults();
+                                        }
+                                    });
+                        }
+                        holder.applyFocusVisual(focused, !a.reduced);
+                    });
+            holder.itemView.setOnKeyListener(
+                    (v, keyCode, event) -> {
+                        if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                        int pos = holder.getBindingAdapterPosition();
+                        if (pos == RecyclerView.NO_POSITION) return false;
+                        if (keyCode == KeyEvent.KEYCODE_DPAD_UP && pos < columns) {
+                            Button tab = filterButtons.get(activeFilter);
+                            if (tab != null && tab.isShown()) {
+                                tab.requestFocus();
+                                return true;
+                            }
+                        } else if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT && (pos % columns) == 0) {
+                            return restoreLeftFocus();
+                        } else if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                                && (((pos + 1) % columns) == 0 || pos == items.size() - 1)) {
+                            return true;
+                        } else if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+                                && pos + columns >= items.size()) {
+                            if (moreResults != null
+                                    && moreResults.getVisibility() == View.VISIBLE) {
+                                moreResults.requestFocus();
+                                return true;
+                            }
+                        }
+                        return false;
+                    });
+        }
+
+        @Override
+        public void onViewRecycled(CardHolder holder) {
+            super.onViewRecycled(holder);
+            holder.bindSeq++;
+            ImageLoader.unbindBitmapTarget(holder.posterArt);
+            holder.posterArt.clearPoster();
+            holder.itemView.setOnClickListener(null);
+            holder.itemView.setOnFocusChangeListener(null);
+            holder.itemView.setOnKeyListener(null);
+        }
+
+        final class CardHolder extends RecyclerView.ViewHolder {
+            final TvSearchPosterArtView posterArt;
+            final TextView title;
+            final TextView meta;
+            String boundKey = "";
+            int bindSeq;
+
+            CardHolder(
+                    View itemView, TvSearchPosterArtView posterArt, TextView title, TextView meta) {
+                super(itemView);
+                this.posterArt = posterArt;
+                this.title = title;
+                this.meta = meta;
+            }
+
+            void applyFocusVisual(boolean focused, boolean animate) {
+                // Single-View pre-baked rounded focus ring + crisp text luminance contrast: zero
+                // layout passes, zero stencil clip masks, zero path tessellation, zero texture
+                // scaling.
+                posterArt.setArtFocused(focused);
+                title.setTextColor(focused ? TEXT_PRIMARY : 0xffcfd9e6);
+                meta.setTextColor(focused ? 0xffc6d4e6 : TEXT_MUTED);
+            }
+        }
+    }
+
+    LinearLayout makeCard(final Cms.Site site, final Cms.Video video) {
         LinearLayout card = a.vertical();
         card.setPadding(a.dp(4), a.dp(4), a.dp(4), a.dp(8));
         ImageView poster = new ImageView(a);
@@ -2010,39 +5084,27 @@ public final class GlobalSearchScreen implements AutoCloseable {
             poster.setBackground(a.bg(0xff25252a, 9));
             poster.setClipToOutline(true);
         }
-        int posterWidth =
-                a.isTvDevice()
-                        ? Math.max(
-                                70,
-                                Math.min(
-                                        110,
-                                        (int)
-                                                        ((a.windowWidth()
-                                                                                / a.getResources()
-                                                                                        .getDisplayMetrics()
-                                                                                        .density
-                                                                        - 360)
-                                                                / columns)
-                                                - 15))
-                        : 110;
+        int posterWidth = 110;
         LinearLayout.LayoutParams posterSize =
                 new LinearLayout.LayoutParams(a.dp(posterWidth), a.dp(posterWidth * 3 / 2));
         posterSize.gravity = Gravity.CENTER_HORIZONTAL;
-        boolean showDoubanBadge = !SourceController.isConfigOrNetdiskActionCard(source.site, video);
+        boolean badge = !SourceController.isConfigOrNetdiskActionCard(site, video);
+        int scope = searchArtworkScope;
         FrameLayout posterWrap =
-                TvV17PosterCard.wrapArtworkWithDoubanBadge(a, poster, video, showDoubanBadge);
+                TvV17PosterCard.wrapArtworkWithDoubanBadge(a, poster, video, badge, scope);
         card.addView(posterWrap, posterSize);
-        a.poster(video.poster, poster);
+        ImageLoader.poster(a, video.poster, poster, false, scope);
         TextView title = a.text(video.title, 14, MainActivity.WHITE);
-        title.setSingleLine(true);
-        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        title.setMaxLines(2);
+        title.setEllipsize(TextUtils.TruncateAt.END);
         title.setPadding(a.dp(2), a.dp(6), 0, 0);
         card.addView(title);
-        TextView origin = a.text(clean(source.site.name), 11, MainActivity.MUTED);
+        TextView origin = a.text(formatCardMeta(video, site), 11, MainActivity.MUTED);
         origin.setSingleLine(true);
-        origin.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        origin.setEllipsize(TextUtils.TruncateAt.END);
         card.addView(origin);
-        card.setTag("global-result:" + source.site.key + ":" + video.id);
+        final String cardResultKey = TvSearchMatcher.stableKey(site.key, video.id);
+        card.setTag("global-result:" + cardResultKey);
         card.setFocusable(a.isTvDevice());
         card.setFocusableInTouchMode(a.isTvDevice());
         card.setClickable(true);
@@ -2052,8 +5114,12 @@ public final class GlobalSearchScreen implements AutoCloseable {
         card.setOnClickListener(
                 view -> {
                     if (!current()) return;
+                    if (!a.isSiteEnabledInMultiSource(site.key)) {
+                        a.toast("该片源所属订阅已停用，请先重新启用来源");
+                        return;
+                    }
                     saveHistory(query);
-                    a.openListing(source.site, video);
+                    a.openListing(site, video);
                 });
         card.setOnFocusChangeListener(
                 (view, selected) -> {
@@ -2072,28 +5138,11 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                 true,
                                 1.035f);
                 });
-        if (a.isTvDevice())
-            card.setOnKeyListener(
-                    (v, key, event) -> {
-                        if (key == KeyEvent.KEYCODE_DPAD_UP
-                                && event.getAction() == KeyEvent.ACTION_DOWN) {
-                            int index =
-                                    new ArrayList<>(displayed)
-                                            .indexOf(source.site.key + ":" + video.id);
-                            if (index >= 0 && index < columns) {
-                                Button tab = filterButtons.get(activeFilter);
-                                if (tab != null) {
-                                    tab.requestFocus();
-                                    return true;
-                                }
-                            }
-                        }
-                        return false;
-                    });
         return card;
     }
 
     String focusedTag(ViewGroup group) {
+        if (group == null) return null;
         View focus = a.getCurrentFocus();
         if (focus == null || focus.getTag() == null) return null;
         View parent = focus;
@@ -2111,71 +5160,85 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 : title.replaceAll("[\\p{So}\\p{Cs}]", "").replace('┃', ' ').trim();
     }
 
+    private final Object qrLock = new Object();
+    private static String cachedQrKey = "";
+    private static Bitmap cachedQrBitmap;
+
     String ensureQrServer(boolean forceRefresh) throws Exception {
-        if (!forceRefresh
-                && qrServer != null
-                && !qrServer.expired()
-                && qrAddress != null
-                && !qrAddress.isEmpty()) {
+        synchronized (qrLock) {
+            if (!forceRefresh
+                    && qrServer != null
+                    && !qrServer.expired()
+                    && qrAddress != null
+                    && !qrAddress.isEmpty()) {
+                return qrAddress;
+            }
+            closeQrServer();
+            String ip = PhoneConfigDialog.lanAddress();
+            final int generation = qrGeneration;
+            qrServer =
+                    new SearchInputServer(
+                            new SearchInputServer.Listener() {
+                                @Override
+                                public void onKeyword(String keyword, boolean submitNow) {
+                                    a.ui.post(
+                                            () -> {
+                                                if (!current()
+                                                        || keyboard == null
+                                                        || generation != qrGeneration
+                                                        || qrServer == null
+                                                        || qrServer.expired()) return;
+                                                if (submitNow) {
+                                                    if (qrDialog != null && qrDialog.isShowing()) {
+                                                        qrDialog.dismiss();
+                                                    }
+                                                    TvQrInputHelper.dismissActive();
+                                                }
+                                                imeDraft.clear();
+                                                keyboard.set(keyword == null ? "" : keyword);
+                                                changed();
+                                                if (submitNow
+                                                        && keyword != null
+                                                        && !keyword.isEmpty()) {
+                                                    submit(true);
+                                                    a.toast("已接收手机输入：" + keyword);
+                                                } else if (keyword == null || keyword.isEmpty()) {
+                                                    a.toast("已清空电视搜索框");
+                                                } else {
+                                                    a.toast("已同步文字：" + keyword);
+                                                }
+                                            });
+                                }
+
+                                @Override
+                                public List<String> recentKeywords() {
+                                    return !current() || generation != qrGeneration || a.privateMode
+                                            ? Collections.emptyList()
+                                            : history();
+                                }
+
+                                @Override
+                                public String currentKeyword() {
+                                    return !current()
+                                                    || generation != qrGeneration
+                                                    || keyboard == null
+                                            ? ""
+                                            : keyboard.query().trim();
+                                }
+                            });
+            qrAddress = qrServer.address(ip);
             return qrAddress;
         }
-        closeQrServer();
-        String ip = PhoneConfigDialog.lanAddress();
-        final int generation = qrGeneration;
-        qrServer =
-                new SearchInputServer(
-                        new SearchInputServer.Listener() {
-                            @Override
-                            public void onKeyword(String keyword, boolean submitNow) {
-                                a.ui.post(
-                                        () -> {
-                                            if (!current()
-                                                    || keyboard == null
-                                                    || generation != qrGeneration
-                                                    || qrServer == null
-                                                    || qrServer.expired()) return;
-                                            if (submitNow) {
-                                                if (qrDialog != null && qrDialog.isShowing()) {
-                                                    qrDialog.dismiss();
-                                                }
-                                                TvQrInputHelper.dismissActive();
-                                            }
-                                            imeDraft.clear();
-                                            keyboard.set(keyword == null ? "" : keyword);
-                                            changed();
-                                            if (submitNow
-                                                    && keyword != null
-                                                    && !keyword.isEmpty()) {
-                                                submit(true);
-                                                a.toast("已接收手机输入：" + keyword);
-                                            } else if (keyword == null || keyword.isEmpty()) {
-                                                a.toast("已清空电视搜索框");
-                                            } else {
-                                                a.toast("已同步文字：" + keyword);
-                                            }
-                                        });
-                            }
-
-                            @Override
-                            public List<String> recentKeywords() {
-                                return !current() || generation != qrGeneration || a.privateMode
-                                        ? Collections.emptyList()
-                                        : history();
-                            }
-
-                            @Override
-                            public String currentKeyword() {
-                                return !current() || generation != qrGeneration || keyboard == null
-                                        ? ""
-                                        : keyboard.query().trim();
-                            }
-                        });
-        qrAddress = qrServer.address(ip);
-        return qrAddress;
     }
 
     Bitmap createQrBitmap(String content, int sizePx) throws Exception {
         int px = Math.max(96, sizePx);
+        String key = content + "|" + px;
+        synchronized (qrLock) {
+            if (key.equals(cachedQrKey) && cachedQrBitmap != null && !cachedQrBitmap.isRecycled()) {
+                return cachedQrBitmap;
+            }
+        }
         BitMatrix matrix = new QRCodeWriter().encode(content, BarcodeFormat.QR_CODE, px, px);
         int[] pixels = new int[px * px];
         for (int y = 0; y < px; y++) {
@@ -2183,7 +5246,12 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 pixels[y * px + x] = matrix.get(x, y) ? Color.BLACK : Color.WHITE;
             }
         }
-        return Bitmap.createBitmap(pixels, px, px, Bitmap.Config.ARGB_8888);
+        Bitmap bmp = Bitmap.createBitmap(pixels, px, px, Bitmap.Config.ARGB_8888);
+        synchronized (qrLock) {
+            cachedQrKey = key;
+            cachedQrBitmap = bmp;
+        }
+        return bmp;
     }
 
     void showQrDialog(boolean forceRefresh) {
@@ -2233,60 +5301,31 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     void closeQrServer() {
-        qrGeneration++;
-        if (qrServer != null) {
-            qrServer.close();
-            qrServer = null;
+        synchronized (qrLock) {
+            qrGeneration++;
+            if (qrServer != null) {
+                qrServer.close();
+                qrServer = null;
+            }
+            qrAddress = "";
         }
-        qrAddress = "";
     }
 
     void showHistory() {
         if (!current()) return;
-        resultBody.removeAllViews();
-        try {
-            String address = ensureQrServer(false);
-            LinearLayout card = a.row();
-            card.setTag("search-inline-qr-card");
-            card.setGravity(Gravity.CENTER_VERTICAL);
-            card.setPadding(a.dp(14), a.dp(12), a.dp(16), a.dp(12));
-            GradientDrawable cardBg = a.bg(0xff1b1d25, 14);
-            cardBg.setStroke(Math.max(1, a.dp(1)), 0x22ffffff);
-            card.setBackground(cardBg);
-            int qrSize = a.dp(104);
-            ImageView qr = new ImageView(a);
-            qr.setTag("search-inline-qr");
-            qr.setContentDescription("手机扫码输入二维码");
-            qr.setImageBitmap(createQrBitmap(address, qrSize));
-            qr.setPadding(a.dp(5), a.dp(5), a.dp(5), a.dp(5));
-            qr.setBackground(a.bg(Color.WHITE, 9));
-            card.addView(qr, new LinearLayout.LayoutParams(qrSize + a.dp(10), qrSize + a.dp(10)));
-            LinearLayout info = a.vertical();
-            info.setPadding(a.dp(16), 0, 0, 0);
-            TextView title = a.text("手机扫码打字输入", 16, MainActivity.WHITE);
-            title.setTypeface(null, Typeface.BOLD);
-            info.addView(title);
-            TextView desc =
-                    a.text("手机与电视连接同一 Wi-Fi / 局域网，扫码即可在手机上输入片名并直接在电视搜索。", 13, MainActivity.MUTED);
-            desc.setLineSpacing(a.dp(3), 1f);
-            desc.setPadding(0, a.dp(4), 0, a.dp(6));
-            info.addView(desc);
-            TextView addrView = a.text(address, 11.5f, 0xff7cb8ff);
-            addrView.setSingleLine(true);
-            addrView.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-            info.addView(addrView);
-            card.addView(info, new LinearLayout.LayoutParams(0, -2, 1));
-            LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(-1, -2);
-            cardLp.bottomMargin = a.dp(16);
-            resultBody.addView(card, cardLp);
-        } catch (Exception ignored) {
+        if (a.isTvDevice()) {
+            showTvHistory();
+            return;
         }
+        resultBody.removeAllViews();
         resultBody.addView(a.text("最近搜索", 17, MainActivity.WHITE));
         List<String> history = history();
         if (history.isEmpty()) {
             TextView hint =
                     a.text(
-                            "支持中文、首拼和全拼，例如 st / santi。\n也可以输入字母、数字、选择拼音候选字，或使用手机扫码直接打字。",
+                            a.privateMode
+                                    ? "隐私模式已开启，不保存也不显示历史搜索词。"
+                                    : "默认精准匹配完整片名；可按需切换模糊搜索，支持拼音、首字母和片名片段。",
                             15,
                             MainActivity.MUTED);
             hint.setLineSpacing(a.dp(6), 1);
@@ -2294,7 +5333,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
             resultBody.addView(hint);
             return;
         }
-        for (String value : history) {
+        for (final String value : history) {
             Button recent =
                     a.navButton(
                             value,
@@ -2320,6 +5359,291 @@ public final class GlobalSearchScreen implements AutoCloseable {
         a.addButton(resultBody, clear);
     }
 
+    private List<Cms.Video> collectTvHotRecommendations() {
+        TvCuratedHome.Catalog catalog = TvCuratedHome.peekOrSeed(a.privateMode ? null : a);
+        List<Cms.Video> merged = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        if (catalog != null) {
+            int maxDramas = Math.min(5, catalog.hotDramas.size());
+            for (int i = 0; i < maxDramas; i++) {
+                Cms.Video v = catalog.hotDramas.get(i);
+                if (v != null && v.title != null && !v.title.trim().isEmpty()) {
+                    String key = TvSearchMatcher.normalizeStrict(v.title);
+                    if (!key.isEmpty() && seen.add(key)) merged.add(v);
+                }
+            }
+            int maxMovies = Math.min(4, catalog.hotMovies.size());
+            for (int i = 0; i < maxMovies && merged.size() < 8; i++) {
+                Cms.Video v = catalog.hotMovies.get(i);
+                if (v != null && v.title != null && !v.title.trim().isEmpty()) {
+                    String key = TvSearchMatcher.normalizeStrict(v.title);
+                    if (!key.isEmpty() && seen.add(key)) merged.add(v);
+                }
+            }
+            for (int i = maxDramas; i < catalog.hotDramas.size() && merged.size() < 8; i++) {
+                Cms.Video v = catalog.hotDramas.get(i);
+                if (v != null && v.title != null && !v.title.trim().isEmpty()) {
+                    String key = TvSearchMatcher.normalizeStrict(v.title);
+                    if (!key.isEmpty() && seen.add(key)) merged.add(v);
+                }
+            }
+        }
+        return merged;
+    }
+
+    private void showTvHistory() {
+        if (tvRecentContainer == null) return;
+        if (tvResultRecycler != null) tvResultRecycler.setVisibility(View.GONE);
+        if (tvStateContainer != null) tvStateContainer.setVisibility(View.GONE);
+        if (tvFooterRow != null) tvFooterRow.setVisibility(View.GONE);
+        if (filterScrollView != null) filterScrollView.setVisibility(View.GONE);
+        if (tvRecentScroll != null) {
+            tvRecentScroll.setVisibility(View.VISIBLE);
+            tvRecentScroll.scrollTo(0, 0);
+        }
+        tvRecentContainer.removeAllViews();
+        tvRecentContainer.setVisibility(View.VISIBLE);
+        updateResultHeader();
+
+        if (a.privateMode) {
+            TextView priv = a.text("隐私模式已开启 · 不记录也不展示历史搜索词，仍可从下方热门推荐快速查找。", 13, TEXT_SECONDARY);
+            priv.setLineSpacing(a.dp(4), 1f);
+            LinearLayout.LayoutParams privLp = new LinearLayout.LayoutParams(-1, -2);
+            privLp.bottomMargin = a.dp(12);
+            tvRecentContainer.addView(priv, privLp);
+        } else {
+            List<String> history = history();
+            if (!history.isEmpty()) {
+                LinearLayout recentHead = a.row();
+                recentHead.setGravity(Gravity.CENTER_VERTICAL);
+                recentHead.setClipChildren(false);
+                recentHead.setClipToPadding(false);
+                TextView recTitle = a.text("最近搜索", 14.5f, TEXT_PRIMARY);
+                recTitle.setTypeface(null, Typeface.BOLD);
+                recTitle.setIncludeFontPadding(false);
+                recentHead.addView(recTitle, new LinearLayout.LayoutParams(0, -2, 1));
+
+                Button clearBtn =
+                        makeTvActionPill(
+                                "清除记录",
+                                "search-clear-history",
+                                false,
+                                () -> {
+                                    if (!current()) return;
+                                    a.prefs.edit().remove(Prefs.GLOBAL_SEARCH_HISTORY).apply();
+                                    showHistory();
+                                });
+                clearBtn.setTextSize(11.5f);
+                clearBtn.setPadding(a.dp(12), 0, a.dp(12), 0);
+                recentHead.addView(clearBtn, new LinearLayout.LayoutParams(-2, a.dp(30)));
+                LinearLayout.LayoutParams rhLp = new LinearLayout.LayoutParams(-1, -2);
+                rhLp.bottomMargin = a.dp(8);
+                tvRecentContainer.addView(recentHead, rhLp);
+
+                int perRow = columns >= 4 ? 4 : 3;
+                LinearLayout chipRow = null;
+                for (int i = 0; i < history.size(); i++) {
+                    final String value = history.get(i);
+                    final boolean isRowStart = (i % perRow == 0);
+                    if (isRowStart) {
+                        chipRow = a.row();
+                        chipRow.setClipChildren(false);
+                        chipRow.setClipToPadding(false);
+                        LinearLayout.LayoutParams rLp = new LinearLayout.LayoutParams(-1, -2);
+                        rLp.bottomMargin = a.dp(8);
+                        tvRecentContainer.addView(chipRow, rLp);
+                    }
+                    final Button chip = new Button(a);
+                    chip.setText(value);
+                    chip.setTag("search-history:" + value);
+                    chip.setAllCaps(false);
+                    chip.setIncludeFontPadding(false);
+                    chip.setStateListAnimator(null);
+                    chip.setOutlineProvider(null);
+                    chip.setSingleLine(true);
+                    chip.setEllipsize(TextUtils.TruncateAt.END);
+                    chip.setMaxWidth(a.dp(180));
+                    chip.setMinWidth(a.dp(66));
+                    chip.setMinimumWidth(a.dp(66));
+                    chip.setMinHeight(0);
+                    chip.setMinimumHeight(0);
+                    chip.setTextSize(13f);
+                    chip.setPadding(a.dp(15), 0, a.dp(15), 0);
+                    final GradientDrawable bg = new GradientDrawable();
+                    bg.setColor(BG_FILTER);
+                    bg.setCornerRadius(a.dp(17));
+                    bg.setStroke(Math.max(1, a.dp(1)), 0x26ffffff);
+                    chip.setBackground(bg);
+                    chip.setTextColor(TEXT_PRIMARY);
+                    UiCompat.setDefaultFocusHighlightEnabled(chip, false);
+                    chip.setFocusable(true);
+                    chip.setFocusableInTouchMode(true);
+                    chip.setOnClickListener(
+                            v -> {
+                                if (!current()) return;
+                                imeDraft.clear();
+                                keyboard.set(value);
+                                changed();
+                                submit();
+                            });
+                    chip.setOnFocusChangeListener(
+                            (v, focused) -> {
+                                bg.setColor(focused ? Color.WHITE : BG_FILTER);
+                                bg.setStroke(
+                                        focused ? Math.max(2, a.dp(2.5f)) : Math.max(1, a.dp(1)),
+                                        focused ? Color.WHITE : 0x26ffffff);
+                                chip.setTextColor(focused ? TEXT_ON_LIGHT : TEXT_PRIMARY);
+                            });
+                    if (isRowStart) {
+                        chip.setOnKeyListener(
+                                (v, keyCode, event) -> {
+                                    if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+                                            && event.getAction() == KeyEvent.ACTION_DOWN) {
+                                        return restoreLeftFocus();
+                                    }
+                                    return false;
+                                });
+                    }
+                    LinearLayout.LayoutParams cLp = new LinearLayout.LayoutParams(-2, a.dp(34));
+                    cLp.rightMargin = a.dp(9);
+                    chipRow.addView(chip, cLp);
+                }
+            }
+        }
+
+        // Apple TV Trending / Hot Shows Discovery Grid (zero CMS source calls on blank search!)
+        List<Cms.Video> hotList = collectTvHotRecommendations();
+        if (!hotList.isEmpty()) {
+            LinearLayout hotHead = a.row();
+            hotHead.setGravity(Gravity.CENTER_VERTICAL);
+            TextView hotTitle = a.text("热门推荐", 15f, TEXT_PRIMARY);
+            hotTitle.setTypeface(null, Typeface.BOLD);
+            hotTitle.setIncludeFontPadding(false);
+            hotHead.addView(hotTitle, new LinearLayout.LayoutParams(-2, -2));
+            TextView hotSub = a.text("  ·  热门剧集与电影，确认即搜", 11.5f, TEXT_MUTED);
+            hotSub.setSingleLine(true);
+            hotSub.setEllipsize(TextUtils.TruncateAt.END);
+            hotSub.setIncludeFontPadding(false);
+            hotHead.addView(hotSub, new LinearLayout.LayoutParams(0, -2, 1));
+            LinearLayout.LayoutParams hhLp = new LinearLayout.LayoutParams(-1, -2);
+            hhLp.topMargin = a.dp(8);
+            hhLp.bottomMargin = a.dp(10);
+            tvRecentContainer.addView(hotHead, hhLp);
+
+            final int hotCols = 2;
+            LinearLayout row = null;
+            for (int i = 0; i < hotList.size(); i++) {
+                final Cms.Video item = hotList.get(i);
+                final String hotQuery = item.title.trim();
+                final boolean rowStart = (i % hotCols == 0);
+                if (rowStart) {
+                    row = a.row();
+                    row.setClipChildren(false);
+                    row.setClipToPadding(false);
+                    LinearLayout.LayoutParams rl = new LinearLayout.LayoutParams(-1, -2);
+                    rl.bottomMargin = a.dp(9);
+                    tvRecentContainer.addView(row, rl);
+                }
+                final LinearLayout tile = a.row();
+                tile.setTag("search-hot:" + hotQuery);
+                tile.setGravity(Gravity.CENTER_VERTICAL);
+                tile.setPadding(a.dp(13), a.dp(10), a.dp(13), a.dp(10));
+                tile.setFocusable(true);
+                tile.setFocusableInTouchMode(true);
+                tile.setClickable(true);
+                UiCompat.setDefaultFocusHighlightEnabled(tile, false);
+                final GradientDrawable tileBg = new GradientDrawable();
+                tileBg.setColor(BG_HOT_CARD);
+                tileBg.setCornerRadius(a.dp(13));
+                tileBg.setStroke(Math.max(1, a.dp(1)), BORDER_HOT_CARD);
+                tile.setBackground(tileBg);
+
+                final int rankNum = i + 1;
+                final int rankIdleColor = rankNum <= 3 ? 0xfff5c16c : TEXT_MUTED;
+                final TextView rankView =
+                        a.text(String.format(Locale.ROOT, "%02d", rankNum), 14f, rankIdleColor);
+                rankView.setTypeface(null, Typeface.BOLD);
+                rankView.setIncludeFontPadding(false);
+                LinearLayout.LayoutParams rkLp = new LinearLayout.LayoutParams(a.dp(28), -2);
+                rkLp.rightMargin = a.dp(8);
+                tile.addView(rankView, rkLp);
+
+                LinearLayout textCol = a.vertical();
+                final TextView nameView = a.text(hotQuery, 13.5f, TEXT_PRIMARY);
+                nameView.setTypeface(null, Typeface.BOLD);
+                nameView.setSingleLine(true);
+                nameView.setEllipsize(TextUtils.TruncateAt.END);
+                nameView.setIncludeFontPadding(false);
+                textCol.addView(nameView, new LinearLayout.LayoutParams(-1, -2));
+
+                StringBuilder metaSb = new StringBuilder();
+                if (item.year != null && !item.year.trim().isEmpty()) {
+                    metaSb.append(item.year.trim());
+                }
+                if (item.genre != null && !item.genre.trim().isEmpty()) {
+                    if (metaSb.length() > 0) metaSb.append(" · ");
+                    metaSb.append(item.genre.trim());
+                }
+                if (item.doubanScore != null && !item.doubanScore.trim().isEmpty()) {
+                    if (metaSb.length() > 0) metaSb.append(" · ");
+                    metaSb.append("豆 ").append(item.doubanScore.trim());
+                }
+                final TextView subView =
+                        a.text(metaSb.length() > 0 ? metaSb.toString() : "热门推荐", 11f, TEXT_MUTED);
+                subView.setSingleLine(true);
+                subView.setEllipsize(TextUtils.TruncateAt.END);
+                subView.setIncludeFontPadding(false);
+                LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(-1, -2);
+                subLp.topMargin = a.dp(3);
+                textCol.addView(subView, subLp);
+                tile.addView(textCol, new LinearLayout.LayoutParams(0, -2, 1));
+
+                final TextView chevron = a.text("›", 16f, TEXT_MUTED);
+                chevron.setIncludeFontPadding(false);
+                LinearLayout.LayoutParams chevLp = new LinearLayout.LayoutParams(-2, -2);
+                chevLp.leftMargin = a.dp(8);
+                tile.addView(chevron, chevLp);
+
+                tile.setContentDescription(hotQuery + " " + subView.getText());
+                tile.setOnClickListener(
+                        v -> {
+                            if (!current()) return;
+                            imeDraft.clear();
+                            keyboard.set(hotQuery);
+                            changed();
+                            submit();
+                        });
+                tile.setOnFocusChangeListener(
+                        (v, focused) -> {
+                            tileBg.setColor(focused ? Color.WHITE : BG_HOT_CARD);
+                            tileBg.setStroke(
+                                    focused ? Math.max(2, a.dp(2.5f)) : Math.max(1, a.dp(1)),
+                                    focused ? Color.WHITE : BORDER_HOT_CARD);
+                            rankView.setTextColor(focused ? 0xffb4690e : rankIdleColor);
+                            nameView.setTextColor(focused ? TEXT_ON_LIGHT : TEXT_PRIMARY);
+                            subView.setTextColor(focused ? 0xff465568 : TEXT_MUTED);
+                            chevron.setTextColor(focused ? TEXT_ON_LIGHT : TEXT_MUTED);
+                        });
+                if (rowStart) {
+                    tile.setOnKeyListener(
+                            (v, keyCode, event) -> {
+                                if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+                                        && event.getAction() == KeyEvent.ACTION_DOWN) {
+                                    return restoreLeftFocus();
+                                }
+                                return false;
+                            });
+                }
+                LinearLayout.LayoutParams tLp = new LinearLayout.LayoutParams(0, -2, 1f);
+                if (rowStart) tLp.rightMargin = a.dp(10);
+                row.addView(tile, tLp);
+            }
+            if (hotList.size() % hotCols != 0 && row != null) {
+                row.addView(new View(a), new LinearLayout.LayoutParams(0, 1, 1f));
+            }
+        }
+    }
+
     List<String> history() {
         List<String> out = new ArrayList<>();
         if (!current() || a.privateMode) return out;
@@ -2335,13 +5659,43 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     void saveHistory(String query) {
-        if (!current() || a.privateMode) return;
+        if (!current() || a.privateMode || TvSearchMatcher.isBlankQuery(query)) return;
+        query = query.trim();
         List<String> previous = history();
         previous.remove(query);
         previous.add(0, query);
         JSONArray list = new JSONArray();
         for (int i = 0; i < Math.min(8, previous.size()); i++) list.put(previous.get(i));
         a.prefs.edit().putString(Prefs.GLOBAL_SEARCH_HISTORY, list.toString()).apply();
+    }
+
+    private View buildTvSearchGlyph() {
+        View glyph =
+                new View(a) {
+                    private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+                    @Override
+                    protected void onDraw(Canvas canvas) {
+                        super.onDraw(canvas);
+                        int w = getWidth();
+                        int h = getHeight();
+                        if (w <= 0 || h <= 0) return;
+                        float s = Math.min(w, h) * 0.62f;
+                        float cx = w * 0.48f;
+                        float cy = h * 0.45f;
+                        float r = s * 0.36f;
+                        p.setStyle(Paint.Style.STROKE);
+                        p.setStrokeWidth(Math.max(1.8f, s * 0.12f));
+                        p.setStrokeCap(Paint.Cap.ROUND);
+                        p.setColor(TEXT_MUTED);
+                        canvas.drawCircle(cx, cy, r, p);
+                        float d = r * 0.72f;
+                        canvas.drawLine(cx + d, cy + d, cx + r * 1.42f, cy + r * 1.42f, p);
+                    }
+                };
+        glyph.setFocusable(false);
+        glyph.setClickable(false);
+        return glyph;
     }
 
     private View buildTvQrIconButton() {
@@ -2357,7 +5711,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         int w = getWidth();
                         int h = getHeight();
                         if (w <= 0 || h <= 0) return;
-                        int tint = hasFocus() ? 0xff0b0e14 : 0xf2f5f5f7;
+                        int tint = hasFocus() ? TEXT_ON_LIGHT : 0xffe6edf7;
                         float s = Math.min(w, h) * 0.56f;
                         float ox = (w - s) * 0.5f;
                         float oy = (h - s) * 0.5f;
@@ -2371,14 +5725,10 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         fillPaint.setStyle(Paint.Style.FILL);
                         fillPaint.setColor(tint);
 
-                        // Top-left finder
                         drawFinder(canvas, ox, oy, unit * 3f, cr);
-                        // Top-right finder
                         drawFinder(canvas, ox + unit * 4f, oy, unit * 3f, cr);
-                        // Bottom-left finder
                         drawFinder(canvas, ox, oy + unit * 4f, unit * 3f, cr);
 
-                        // Bottom-right QR data modules
                         drawDot(canvas, ox + unit * 4.0f, oy + unit * 4.0f, unit * 1.1f);
                         drawDot(canvas, ox + unit * 5.9f, oy + unit * 4.0f, unit * 1.1f);
                         drawDot(canvas, ox + unit * 4.95f, oy + unit * 4.95f, unit * 1.1f);
@@ -2409,7 +5759,11 @@ public final class GlobalSearchScreen implements AutoCloseable {
         iconBtn.setFocusableInTouchMode(true);
         iconBtn.setClickable(true);
         UiCompat.setDefaultFocusHighlightEnabled(iconBtn, false);
-        iconBtn.setBackground(TvV17Surface.rounded(0x26ffffff, a.dp(10), 0x34ffffff, a.dp(1)));
+        final GradientDrawable qrBg = new GradientDrawable();
+        qrBg.setColor(BG_KEY);
+        qrBg.setCornerRadius(a.dp(8));
+        qrBg.setStroke(Math.max(1, a.dp(1)), 0x26ffffff);
+        iconBtn.setBackground(qrBg);
         a.pressFeedback(iconBtn);
         iconBtn.setOnClickListener(
                 v -> {
@@ -2422,26 +5776,88 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 });
         iconBtn.setOnFocusChangeListener(
                 (v, focused) -> {
-                    FocusMotion.unclipAncestors(iconBtn);
-                    iconBtn.setBackground(
-                            TvV17Surface.rounded(
-                                    focused ? 0xffffffff : 0x26ffffff,
-                                    a.dp(10),
-                                    focused ? 0xffffffff : 0x34ffffff,
-                                    a.dp(1)));
-                    UiCompat.setElevation(iconBtn, focused ? a.dp(6) : 0);
-                    iconBtn.animate()
-                            .scaleX(focused ? 1.07f : 1f)
-                            .scaleY(focused ? 1.07f : 1f)
-                            .setDuration(a.reduced ? 0 : 120)
-                            .start();
+                    if (focused) lastLeftFocusTag = "search-qr-button";
+                    qrBg.setColor(focused ? Color.WHITE : BG_KEY);
+                    qrBg.setStroke(
+                            focused ? Math.max(2, a.dp(2)) : Math.max(1, a.dp(1)),
+                            focused ? Color.WHITE : 0x26ffffff);
                     iconBtn.invalidate();
+                });
+        iconBtn.setOnKeyListener(
+                (v, keyCode, event) -> {
+                    if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                            && event.getAction() == KeyEvent.ACTION_DOWN) {
+                        return focusRightFromLeft();
+                    }
+                    return false;
                 });
         return iconBtn;
     }
 
+    /**
+     * Suspends background search/QR activity when pushing a child Detail screen above Search on TV
+     * while keeping {@code retainedRoot} attached in {@code tvStage} for fast BACK resume.
+     */
+    void pauseForChildPage() {
+        cancelSuggestions();
+        if (imeActive && keyboard != null && contextMatches()) {
+            readImeDraft();
+            imeDraft.close(keyboard);
+        }
+        imeActive = false;
+        if (pendingImeRead != null) {
+            a.ui.removeCallbacks(pendingImeRead);
+            pendingImeRead = null;
+        }
+        closed = true;
+        if (qrDialog != null && qrDialog.isShowing()) {
+            qrDialog.dismiss();
+        }
+        qrDialog = null;
+        TvQrInputHelper.dismissActive();
+        closeQrServer();
+        rememberSourcePosition();
+        if (resultScroll != null) savedResultScroll = resultScroll.getScrollY();
+        if (pendingInputClick != null) {
+            a.ui.removeCallbacks(pendingInputClick);
+            pendingInputClick = null;
+        }
+        hideSystemIme();
+        if (pendingSearch != null) {
+            a.ui.removeCallbacks(pendingSearch);
+            pendingSearch = null;
+        }
+        boolean hadPendingRender = pendingRender != null;
+        searchSerial++;
+        cancelWork();
+        boolean markedAnyBusy = false;
+        if (contextMatches()
+                && !submitted.isEmpty()
+                && resultConfig == a.config
+                && resultPrivateMode == a.privateMode) {
+            for (Cms.Site site : searchSites)
+                if (!results.containsKey(site.key)) {
+                    results.put(
+                            site.key,
+                            new SourceResult(
+                                    site, Collections.emptyList(), SearchCoordinator.Outcome.BUSY));
+                    finished++;
+                    busy++;
+                    markedAnyBusy = true;
+                }
+        }
+        boolean unrendered = hasUnrenderedResults();
+        resumeSyncNeeded = hadPendingRender || markedAnyBusy || unrendered;
+        resumeResultsSyncNeeded = hadPendingRender || unrendered;
+        cacheResults();
+    }
+
     @Override
     public void close() {
+        retainedRoot = null;
+        retainedBody = null;
+        resumeSyncNeeded = false;
+        resumeResultsSyncNeeded = false;
         cancelSuggestions();
         if (imeActive && keyboard != null && contextMatches()) {
             readImeDraft();
@@ -2473,7 +5889,6 @@ public final class GlobalSearchScreen implements AutoCloseable {
         clearCards();
         searchSerial++;
         cancelWork();
-        // Requests cancelled while opening another page remain retryable on return.
         if (contextMatches()
                 && !submitted.isEmpty()
                 && resultConfig == a.config

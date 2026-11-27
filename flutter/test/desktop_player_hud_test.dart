@@ -107,6 +107,9 @@ class _DeskFakePlayer extends Fake implements Player {
   final List<double> rates = <double>[];
   final List<double> volumes = <double>[];
   int playOrPauseCalls = 0;
+  int playCalls = 0;
+  int pauseCalls = 0;
+  int get playToggleCalls => playOrPauseCalls + playCalls + pauseCalls;
   bool disposed = false;
 
   @override
@@ -135,12 +138,14 @@ class _DeskFakePlayer extends Fake implements Player {
   Future<void> stop() async => _state.playingValue = false;
   @override
   Future<void> play() async {
+    playCalls++;
     _state.playingValue = true;
     if (!disposed) _stream.playingCtrl.add(true);
   }
 
   @override
   Future<void> pause() async {
+    pauseCalls++;
     _state.playingValue = false;
     if (!disposed) _stream.playingCtrl.add(false);
   }
@@ -343,10 +348,12 @@ void main() {
         expect(fullscreenToggleCount, 1);
 
         // Space -> toggles play/pause (not swallowed by any HUD button!)
-        final prevPlayPause = player.playOrPauseCalls;
+        final prevPlayPause = player.playToggleCalls;
+        final wasPlaying = player.state.playing;
         await tester.sendKeyEvent(LogicalKeyboardKey.space);
         await tester.pump(const Duration(milliseconds: 30));
-        expect(player.playOrPauseCalls, prevPlayPause + 1);
+        expect(player.playToggleCalls, prevPlayPause + 1);
+        expect(player.state.playing, !wasPlaying);
 
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump(const Duration(milliseconds: 100));

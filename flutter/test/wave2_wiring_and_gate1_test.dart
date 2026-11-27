@@ -23,6 +23,7 @@ import 'package:marco_movie/ui/danmu/danmu_layer.dart';
 import 'package:marco_movie/ui/danmu/danmu_settings_sheet.dart';
 import 'package:marco_movie/ui/ios_liquid_glass.dart';
 import 'package:marco_movie/ui/ios_settings.dart';
+import 'package:marco_movie/ui/official_channel_notice.dart';
 import 'package:marco_movie/ui/onboarding/first_play_gesture_hint.dart';
 import 'package:marco_movie/ui/onboarding/onboarding_prefs.dart';
 import 'package:marco_movie/ui/onboarding/onboarding_screen.dart';
@@ -489,12 +490,18 @@ void main() {
         );
         expect(find.byKey(const Key('ios-player-more-button')), findsOneWidget);
 
-        // Bottom-dock danmu settings button -> opens DanmuSettingsSheet popover
+        // Bottom-dock danmu/subtitle button -> opens unified popover -> tap danmu settings -> opens DanmuSettingsSheet cleanly
         final dockBtn = find.byKey(const ValueKey('ios-dock-action-danmu'));
         expect(dockBtn, findsOneWidget);
         await tester.tap(dockBtn);
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 350));
+        final danmuSettingsEntry = find.text('弹幕样式、字号与屏蔽设置');
+        if (danmuSettingsEntry.evaluate().isNotEmpty) {
+          await tester.tap(danmuSettingsEntry);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 350));
+        }
         expect(find.byType(DanmuSettingsSheet), findsOneWidget);
 
         // Toggling the danmu switch inside DanmuSettingsSheet enables danmu
@@ -611,6 +618,15 @@ void main() {
         await tester.pump(const Duration(milliseconds: 300));
         await tester.pump(const Duration(milliseconds: 300));
 
+        // First-launch official channel & author anti-tamper dialog shows first
+        expect(find.byType(OfficialChannelNoticeDialog), findsOneWidget);
+        await tester.tap(
+          find.byKey(const ValueKey('official-channel-notice-confirm')),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.pump(const Duration(milliseconds: 300));
+
         // Standalone OnboardingScreen route is presented on fresh install
         expect(find.byType(OnboardingScreen), findsOneWidget);
         // Primary CTA uses IosNativeGlassButton
@@ -624,6 +640,10 @@ void main() {
 
         final prefs = await OnboardingPrefs.load();
         expect(prefs.doneVersion, OnboardingPrefs.currentVersion);
+        expect(
+          prefs.officialChannelNoticeVersion,
+          OnboardingPrefs.currentOfficialChannelNoticeVersion,
+        );
 
         // Navigate to Settings -> 关于与更新 -> verify '重新查看新手引导' entry exists
         await tester.tap(find.text('设置').last);
@@ -637,7 +657,8 @@ void main() {
             findsOneWidget);
         expect(find.text('重新查看新手引导'), findsOneWidget);
 
-        // OHOS guard: fresh launch skips OnboardingScreen completely
+        // OHOS guard: fresh launch still shows official channel notice once,
+        // and after acknowledging skips OnboardingScreen completely
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump();
         OhosRuntime.debugIsOhosOverride = true;
@@ -657,6 +678,12 @@ void main() {
         );
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 400));
+        expect(find.byType(OfficialChannelNoticeDialog), findsOneWidget);
+        await tester.tap(
+          find.byKey(const ValueKey('official-channel-notice-confirm')),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 350));
         expect(find.byType(OnboardingScreen), findsNothing);
       },
     );
@@ -703,7 +730,7 @@ void main() {
     );
 
     testWidgets(
-      'L-01: replaying onboarding preserves user glassBlurLevel (light / deep) when adjusting text scale or toggling reduceTransparency',
+      'L-01: replaying onboarding on iOS walks the 5-page Apple feature tour and preserves user glassBlurLevel (light / deep)',
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
       (tester) async {
         tester.view.devicePixelRatio = 1.0;
@@ -723,6 +750,8 @@ void main() {
           final strength = savedPreset.$2;
           SharedPreferences.setMockInitialValues(<String, Object>{
             OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+            OnboardingPrefs.officialChannelNoticeVersionKey:
+                OnboardingPrefs.currentOfficialChannelNoticeVersion,
             StorageService.keyGlassBlurLevel: level,
             StorageService.keyGlassBlurStrength: strength,
           });
@@ -757,6 +786,84 @@ void main() {
           await tester.ensureVisible(replayEntry);
           await tester.pumpAndSettle();
           await tester.tap(replayEntry);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 450));
+          expect(find.byType(OnboardingScreen), findsOneWidget);
+          expect(find.byKey(const Key('ios_onboarding_flow')), findsOneWidget);
+
+          // Walk all 5 pages via onboarding_next_button (继续 x4 -> 开始使用)
+          for (var i = 0; i < 5; i++) {
+            await tester.tap(find.byKey(const Key('onboarding_next_button')));
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 420));
+          }
+          expect(find.byType(OnboardingScreen), findsNothing);
+          expect(storage.glassBlurLevel, level);
+          expect(storage.glassBlurStrength, closeTo(strength, 0.01));
+          expect(GlassworkBackdrop.reduceTransparency.value, isFalse);
+
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        }
+      },
+    );
+
+    testWidgets(
+      'L-01 (desktop/macOS): replaying onboarding preserves user glassBlurLevel (light / deep) when adjusting text scale or toggling reduceTransparency',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(1200, 820);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+          GlassworkBackdrop.reduceTransparency.value = false;
+          GlassworkBackdrop.intensity.value = 0.68;
+        });
+
+        for (final savedPreset in const <(String, double)>[
+          ('light', 0.35),
+          ('deep', 1.0),
+        ]) {
+          final level = savedPreset.$1;
+          final strength = savedPreset.$2;
+          SharedPreferences.setMockInitialValues(<String, Object>{
+            OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+            OnboardingPrefs.officialChannelNoticeVersionKey:
+                OnboardingPrefs.currentOfficialChannelNoticeVersion,
+            StorageService.keyGlassBlurLevel: level,
+            StorageService.keyGlassBlurStrength: strength,
+          });
+          final storage = await StorageService.init();
+          expect(storage.glassBlurLevel, level);
+
+          await tester.pumpWidget(
+            MaterialApp(
+              home: AdaptiveShell(
+                storage: storage,
+                client: CmsClient(
+                  client: MockClient(
+                    (_) async => http.Response('{"class":[],"list":[]}', 200),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+          expect(find.byType(OnboardingScreen), findsNothing);
+
+          // Open Settings -> 重新查看新手引导
+          await tester.tap(find.text('设置').last);
+          await tester.pumpAndSettle();
+          final replayRow = find.text('重新查看新手引导');
+          await tester.scrollUntilVisible(
+            replayRow,
+            300,
+            scrollable: find.byType(Scrollable).last,
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(replayRow);
           await tester.pump();
           await tester.pump(const Duration(milliseconds: 400));
           expect(find.byType(OnboardingScreen), findsOneWidget);
@@ -1083,11 +1190,17 @@ void main() {
         final firstCache = initialLayer.segmentCache!;
         expect(firstCache.isDisposed, isFalse);
 
-        // Open DanmuSettingsSheet and update serverUrls live (triggers _rebuildDanmuPipeline
-        // on the production debugDanmuProvider == null branch!).
+        // Open DanmuSettingsSheet via unified danmu/subtitle popover and update serverUrls live
+        // (triggers _rebuildDanmuPipeline on the production debugDanmuProvider == null branch!).
         await tester.tap(find.byKey(const ValueKey('ios-dock-action-danmu')));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 350));
+        final danmuSettingsEntry = find.text('弹幕样式、字号与屏蔽设置');
+        if (danmuSettingsEntry.evaluate().isNotEmpty) {
+          await tester.tap(danmuSettingsEntry);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 350));
+        }
 
         final serverField = find.descendant(
           of: find.byType(DanmuSettingsSheet),

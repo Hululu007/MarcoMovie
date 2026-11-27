@@ -164,6 +164,8 @@ class ScrapedEpisodeInfo {
   final int? effectiveEpisodeNumber;
   final bool isSpecial;
   final String specialTag;
+  final String partTag;
+  final String dateKey;
   final String qualityTag;
   final String displayLabel;
   final double confidence;
@@ -187,6 +189,8 @@ class ScrapedEpisodeInfo {
     this.effectiveEpisodeNumber,
     this.isSpecial = false,
     this.specialTag = '',
+    this.partTag = '',
+    this.dateKey = '',
     this.qualityTag = '',
     required this.displayLabel,
     this.confidence = 0.0,
@@ -209,6 +213,25 @@ class ScrapedEpisodeInfo {
   int? get resolvedEpisodeNumber => (isSpecial || needsConfirmation)
       ? null
       : (effectiveEpisodeNumber ?? rawEpisodeNumber);
+
+  /// Human-readable suffix for split parts (`上`/`下`/`中`/`Part N`).
+  String get partDisplaySuffix {
+    switch (partTag) {
+      case 'part1':
+        return '（上）';
+      case 'part2':
+        return '（下）';
+      case 'part_mid':
+        return '（中）';
+      case 'final':
+        return '（终）';
+      default:
+        if (partTag.startsWith('part') && partTag.length > 4) {
+          return ' Part${partTag.substring(4)}';
+        }
+        return '';
+    }
+  }
 
   /// Canonical short season/episode badge (`S02E10`, `第 10 集`, `预告`, `待确认`).
   String get formattedSeasonEpisode {
@@ -251,6 +274,8 @@ class ScrapedEpisodeInfo {
       effectiveEpisodeNumber: effectiveEpisodeNumber,
       isSpecial: isSpecial,
       specialTag: specialTag,
+      partTag: partTag,
+      dateKey: dateKey,
       qualityTag: qualityTag,
       displayLabel: displayLabel,
       confidence: confidence,
@@ -329,6 +354,37 @@ class LineEpisodeScrapeResult {
       growable: false,
     );
   }
+}
+
+/// Outcome of matching the currently playing episode from one [CmsLine] to
+/// another [CmsLine]. Progress should only be inherited when [kind] is
+/// [CrossLineEpisodeMatchKind.matched].
+enum CrossLineEpisodeMatchKind {
+  matched,
+  unmatched,
+  ambiguous,
+}
+
+/// Structured result returned by [SeriesScraper.matchEpisodeAcrossLines].
+class CrossLineEpisodeMatch {
+  final CrossLineEpisodeMatchKind kind;
+  final int? episodeIndex;
+  final String reason;
+
+  const CrossLineEpisodeMatch.matched(int index, {this.reason = ''})
+      : kind = CrossLineEpisodeMatchKind.matched,
+        episodeIndex = index;
+
+  const CrossLineEpisodeMatch.unmatched({this.reason = ''})
+      : kind = CrossLineEpisodeMatchKind.unmatched,
+        episodeIndex = null;
+
+  const CrossLineEpisodeMatch.ambiguous({this.reason = ''})
+      : kind = CrossLineEpisodeMatchKind.ambiguous,
+        episodeIndex = null;
+
+  bool get isMatched =>
+      kind == CrossLineEpisodeMatchKind.matched && episodeIndex != null;
 }
 
 /// Search candidate returned by in-series manual scraping (Douban / Bangumi /
@@ -809,11 +865,40 @@ class SeriesScraper {
   // ---------------------------------------------------------------------------
 
   static final RegExp _specialKeywordRe = RegExp(
-    r'(?:预告|抢先看|片花|花絮|特辑|彩蛋|幕后|采访|访谈|宣发|宣传片|定档|先导片?|总集篇|精编|纯享|加更|合集说明|群聊|二维码|广告|'
-    r'番外|特别篇|剧场版|'
-    r'(?<![A-Za-z])(?:SP|OVA|OAD|PV|CM|OP|ED|MV|OST|NCOP|NCED|Trailer|Preview|Teaser|Extras?)(?![A-Za-z]))',
+    r'(?:预告|抢先看|片花|花絮|特辑|特典|彩蛋|幕后|采访|访谈|宣发|宣传片|定档|先导片?|总集篇|精编|纯享|加更|合集说明|群聊|二维码|广告|'
+    r'番外|特别篇|剧场版|小剧场|片头曲|片尾曲|主题曲|'
+    r'(?<![A-Za-z])(?:SP|OVA|OAD|PV|CM|OP|ED|MV|OST|NCOP|NCED|Trailer|Preview|Teaser|Extras?|Bonus|Making|Behind)(?![A-Za-z]))',
     caseSensitive: false,
   );
+
+  static final RegExp _seasonOnlyRe = RegExp(
+    r'(?:第\s*0*([0-9一二三四五六七八九十两兩]{1,4})\s*[季部]|(?:^|[^A-Za-z0-9])(?:season\s*0*(\d{1,2})|[Ss]0*(\d{1,2})(?![0-9A-Za-z])))',
+    caseSensitive: false,
+  );
+
+  /// Extracts an explicit season number from [text] (e.g. `S02E05`, `Season 2`,
+  /// `第2季`, `第二季`), or `null` when none is present.
+  static int? extractSeasonNumber(String text) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return null;
+    final normalized = normalizeSequelNumerals(trimmed);
+    final seMatch = RegExp(
+      r'(?:^|[^A-Za-z0-9])[Ss]0*(\d{1,2})[\s._\-]*[Ee][Pp]?0*\d{1,4}(?![0-9])',
+    ).firstMatch(normalized);
+    if (seMatch != null) {
+      final n = int.tryParse(seMatch.group(1)!);
+      if (n != null && n > 0 && n <= 99) return n;
+    }
+    final m = _seasonOnlyRe.firstMatch(normalized);
+    if (m != null) {
+      final raw = m.group(1) ?? m.group(2) ?? m.group(3);
+      if (raw != null) {
+        final n = _parseChineseInt(raw.replaceAll('兩', '两'));
+        if (n != null && n > 0 && n <= 99) return n;
+      }
+    }
+    return null;
+  }
 
   static final RegExp _techNoiseRe = RegExp(
     r'\[\s*\d+(?:\.\d+)?\s*[KMGT]?B\s*\]|'
@@ -1206,11 +1291,16 @@ class SeriesScraper {
       withoutSeries = withoutSeries.substring(sharedPrefix.length).trim();
     }
 
+    // Extract explicit season number and full calendar date (`2026-03-15` / `20260315`).
+    int? seasonNum = extractSeasonNumber(withoutSeries);
+    final dateKey = extractFullDateKey(withoutSeries);
+
+    // 2. Detect explicit specials / trailers / previews / SP / OVA / extras / 特典.
     final specialMatch = _specialKeywordRe.firstMatch(withoutSeries);
     if (specialMatch != null) {
       final matchedToken = specialMatch.group(0)!.trim();
       final spNumMatch = RegExp(
-        '(?:${RegExp.escape(matchedToken)})\\s*0*(\\d{1,3})',
+        '(?:${RegExp.escape(matchedToken)})\\s*[-_.]?\\s*0*(\\d{1,3})',
         caseSensitive: false,
       ).firstMatch(withoutSeries);
       final spTag = spNumMatch != null
@@ -1222,7 +1312,7 @@ class SeriesScraper {
           .replaceAll(RegExp(r'\s+'), ' ')
           .trim();
       return (
-        season: null,
+        season: seasonNum,
         ep: null,
         endEp: null,
         isSpecial: true,
@@ -1235,13 +1325,15 @@ class SeriesScraper {
       );
     }
 
-    int? seasonNum;
-    final cnSeason = RegExp(
-      r'第\s*([0-9一二三四五六七八九十两]+)\s*[季部]',
-    ).firstMatch(withoutSeries);
-    if (cnSeason != null) {
-      final n = _parseChineseInt(cnSeason.group(1)!);
-      if (n != null && n > 0 && n <= 99) seasonNum = n;
+    // 3. Extract explicit season number if present (`S02E05`, `第2季`).
+    if (seasonNum == null) {
+      final cnSeason = RegExp(
+        r'第\s*([0-9一二三四五六七八九十两]+)\s*[季部]',
+      ).firstMatch(withoutSeries);
+      if (cnSeason != null) {
+        final n = _parseChineseInt(cnSeason.group(1)!);
+        if (n != null && n > 0 && n <= 99) seasonNum = n;
+      }
     }
     if (seasonNum == null) {
       final enSeason = RegExp(
@@ -1288,9 +1380,35 @@ class SeriesScraper {
       }
     }
 
-    // Strip technical noise & release years before looser numeric patterns.
+    // Pattern D (elevated before loose numeric stripping): full calendar date
+    // episodes (`2026-03-15期`, `2026.03.15期`, `2026-03-15`, `20260315期`) or
+    // explicit `第X期` variety issues. Keep full date as primary identity so
+    // day-of-month `15` is never mistaken for Episode 15.
+    if (rawEp == null &&
+        (dateKey.isNotEmpty || RegExp(r'第\s*\d+\s*期').hasMatch(withoutSeries))) {
+      final cleanVariety = withoutSeries
+          .replaceAll(_techNoiseRe, ' ')
+          .replaceAll(RegExp(r'\s+'), ' ')
+          .trim();
+      return (
+        season: seasonNum,
+        ep: null,
+        endEp: null,
+        isSpecial: false,
+        specialTag: '',
+        cleanSpecialLabel: '',
+        confidence: dateKey.isNotEmpty ? 0.85 : 0.7,
+        hasExplicitMarker: false,
+        isVarietyDate: true,
+        varietyLabel: cleanVariety.isNotEmpty ? cleanVariety : trimmed,
+      );
+    }
+
+    // Strip technical noise, release years & part numbers before looser numeric patterns.
     final denoised = withoutSeries
         .replaceAll(_techNoiseRe, ' ')
+        .replaceAll(_partMarkerRe, ' ')
+        // Remove standalone 4-digit years (1950-2039) when bounded.
         .replaceAll(
           RegExp(r'(?<![0-9])(?:19[5-9]\d|20[0-3]\d)(?![0-9])'),
           ' ',
@@ -1319,27 +1437,6 @@ class SeriesScraper {
         confidence = 0.95;
         explicitMarker = true;
       }
-    }
-
-    // Pattern D: Explicit variety show date issue (`20260315期`)
-    if (rawEp == null &&
-        RegExp(r'(?:19|20)\d{6}\s*期|第\s*\d+\s*期').hasMatch(withoutSeries)) {
-      final cleanVariety = withoutSeries
-          .replaceAll(_techNoiseRe, ' ')
-          .replaceAll(RegExp(r'\s+'), ' ')
-          .trim();
-      return (
-        season: seasonNum,
-        ep: null,
-        endEp: null,
-        isSpecial: false,
-        specialTag: '',
-        cleanSpecialLabel: '',
-        confidence: 0.7,
-        hasExplicitMarker: false,
-        isVarietyDate: true,
-        varietyLabel: cleanVariety.isNotEmpty ? cleanVariety : trimmed,
-      );
     }
 
     // Pattern E: Bracketed episode number (`[180]`, `【05】`, `(12完)`)
@@ -2023,6 +2120,8 @@ class SeriesScraper {
     }
 
     // 6. Commit Priority 3 (Original filename & directory markers).
+    final partTag = extractEpisodePartTag(episode.name);
+    final dateKey = extractFullDateKey(episode.name);
     if (fileSig.isSpecial) {
       return ScrapedEpisodeInfo(
         originalIndex: originalIndex,
@@ -2033,6 +2132,8 @@ class SeriesScraper {
         rawEpisodeNumber: fileSig.ep,
         isSpecial: true,
         specialTag: fileSig.specialTag,
+        partTag: partTag,
+        dateKey: dateKey,
         qualityTag: qualityTag,
         displayLabel: fileSig.cleanSpecialLabel,
         confidence: fileSig.confidence,
@@ -2050,6 +2151,8 @@ class SeriesScraper {
         originalFileName: origFileName,
         stableKey: stableKey,
         seasonNumber: fileSig.season ?? dirSeason,
+        partTag: partTag,
+        dateKey: dateKey,
         qualityTag: qualityTag,
         displayLabel: fileSig.varietyLabel,
         confidence: fileSig.confidence,
@@ -2071,7 +2174,7 @@ class SeriesScraper {
       final basis = (dirSeason != null && fileSig.season == null)
           ? '目录与原文件名标记'
           : '原文件名标记';
-      return ScrapedEpisodeInfo(
+      final info = ScrapedEpisodeInfo(
         originalIndex: originalIndex,
         rawName: episode.name,
         originalFileName: origFileName,
@@ -2081,8 +2184,31 @@ class SeriesScraper {
         endEpisodeNumber: fileSig.endEp,
         effectiveEpisodeNumber: effective,
         isSpecial: false,
+        partTag: partTag,
+        dateKey: dateKey,
         qualityTag: qualityTag,
         displayLabel: label,
+        confidence: fileSig.confidence,
+        status: EpisodeRecognitionStatus.autoMatched,
+        evidenceSource: basis,
+        evidenceDetails: details,
+        recognizedWorkTitle: recognizedWork,
+      );
+      if (partTag.isEmpty) return info;
+      return ScrapedEpisodeInfo(
+        originalIndex: info.originalIndex,
+        rawName: info.rawName,
+        originalFileName: info.originalFileName,
+        stableKey: info.stableKey,
+        seasonNumber: info.seasonNumber,
+        rawEpisodeNumber: info.rawEpisodeNumber,
+        endEpisodeNumber: info.endEpisodeNumber,
+        effectiveEpisodeNumber: info.effectiveEpisodeNumber,
+        isSpecial: false,
+        partTag: partTag,
+        dateKey: dateKey,
+        qualityTag: qualityTag,
+        displayLabel: '$label${info.partDisplaySuffix}',
         confidence: fileSig.confidence,
         status: EpisodeRecognitionStatus.autoMatched,
         evidenceSource: basis,
@@ -2098,6 +2224,8 @@ class SeriesScraper {
       originalFileName: origFileName,
       stableKey: stableKey,
       seasonNumber: fileSig.season ?? dirSeason,
+      partTag: partTag,
+      dateKey: dateKey,
       qualityTag: qualityTag,
       displayLabel: '待确认',
       confidence: 0.0,
@@ -2464,6 +2592,524 @@ class SeriesScraper {
       if (epCompatFallback != null) return epCompatFallback;
     }
     return null;
+  }
+
+  static final RegExp _delimitedFullDateRe = RegExp(
+    r'(?<!\d)((?:19|20)\d{2})[.\-/年_](0?[1-9]|1[0-2])[.\-/月_](0?[1-9]|[12]\d|3[01])(?:\s*[日期])?(?!\d)',
+  );
+
+  static final RegExp _compactFullDateRe = RegExp(
+    r'(?<!\d)((?:19|20)\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(?![0-9])',
+  );
+
+  static final RegExp _partMarkerRe = RegExp(
+    r'(?:上集|中集|下集|前篇|中篇|后篇|上篇|下篇|上部|中部|下部|上卷|中卷|下卷|完结篇|终篇|最终篇|[（(\[【]\s*[上中下]\s*[)）\]】]|(?<![A-Za-z0-9])(?:part|pt|disc|cd)\.?\s*(?:0*\d+|III|II|I)(?![A-Za-z0-9]))',
+    caseSensitive: false,
+  );
+
+  static final RegExp _singleMovieFeatureNoiseRe = RegExp(
+    r'(?:正片|完整版?|未删减版?|抢先版?|蓝光|原盘|超清|高清|标清|枪版|国语|粤语|英语|日语|韩语|中字|双语|中英双字|国粤双语|臻彩|杜比视界|杜比|高码|修复版?|独播|电影|全片|TC|TS|HD|BD|DVD|4K|2K|8K|1080[pP]|2160[pP]|720[pP]|HDR10\+?|HDR|SDR)',
+    caseSensitive: false,
+  );
+
+  /// Extracts a normalized 8-digit calendar date (`YYYYMMDD`) whenever an
+  /// episode label includes a full date (`2026-03-15期`, `2026.03.15期`,
+  /// `2026-03-15`, `20260315期`). Returns `''` when absent.
+  static String extractFullDateKey(String rawName) {
+    final m1 = _delimitedFullDateRe.firstMatch(rawName);
+    if (m1 != null) {
+      final y = m1.group(1)!;
+      final mo = m1.group(2)!.padLeft(2, '0');
+      final d = m1.group(3)!.padLeft(2, '0');
+      return '$y$mo$d';
+    }
+    final m2 = _compactFullDateRe.firstMatch(rawName);
+    if (m2 != null) {
+      return '${m2.group(1)!}${m2.group(2)!}${m2.group(3)!}';
+    }
+    return '';
+  }
+
+  /// Extracts a normalized split-part tag (`part1`, `part2`, `part_mid`,
+  /// `part3`..`part9`, `final`) shared between Detail episode aggregation and
+  /// Player cross-line/cross-site matching. Returns `''` when absent.
+  static String extractEpisodePartTag(String rawName) {
+    final s = rawName.trim();
+    if (s.isEmpty) return '';
+    final enNum = RegExp(
+      r'(?<![A-Za-z0-9])(?:part|pt|disc|cd)\.?\s*0*([1-9])(?![A-Za-z0-9])',
+      caseSensitive: false,
+    ).firstMatch(s);
+    if (enNum != null) {
+      return 'part${enNum.group(1)!}';
+    }
+    final enRoman = RegExp(
+      r'(?<![A-Za-z0-9])(?:part|pt)\.?\s*(III|II|I)(?![A-Za-z0-9])',
+      caseSensitive: false,
+    ).firstMatch(s);
+    if (enRoman != null) {
+      return switch (enRoman.group(1)!.toUpperCase()) {
+        'I' => 'part1',
+        'II' => 'part2',
+        'III' => 'part3',
+        _ => '',
+      };
+    }
+    if (RegExp(
+      r'(?:上篇|上部|上卷|上集|前篇|前部|[（(\[【]\s*上\s*[)）\]】]|(?<=[集话話回期章节\d])\s*上(?:\s*$|[（(\[【\s._\-]))',
+    ).hasMatch(s)) {
+      return 'part1';
+    }
+    if (RegExp(
+      r'(?:下篇|下部|下卷|下集|后篇|后部|[（(\[【]\s*下\s*[)）\]】]|(?<=[集话話回期章节\d])\s*下(?:\s*$|[（(\[【\s._\-]))',
+    ).hasMatch(s)) {
+      return 'part2';
+    }
+    if (RegExp(
+      r'(?:中篇|中部|中卷|中集|[（(\[【]\s*中\s*[)）\]】]|(?<=[集话話回期章节\d])\s*中(?:\s*$|[（(\[【\s._\-]))',
+    ).hasMatch(s)) {
+      return 'part_mid';
+    }
+    if (RegExp(r'(?:完结篇|终篇|最终篇)').hasMatch(s)) {
+      return 'final';
+    }
+    return '';
+  }
+
+  static String? _extractVarietyDateKey(String rawName) {
+    final key = extractFullDateKey(rawName);
+    return key.isNotEmpty ? key : null;
+  }
+
+  static ({String category, int? number})? _extractSpecialIdentity(
+    ScrapedEpisodeInfo info,
+    String seriesTitle,
+  ) {
+    if (!info.isSpecial) return null;
+    final stripped = _stripSeriesTitleFromEpisode(
+      _stripFileExtension(info.rawName.trim()),
+      seriesTitle,
+    );
+    final lower = stripped.toLowerCase();
+    String category = '';
+    if (info.specialTag == '第0集' ||
+        RegExp(r'第\s*0+\s*[集话話回]|(?<![a-z0-9])ep?\.?\s*0+(?![0-9])')
+            .hasMatch(lower)) {
+      return (category: 'ep0', number: 0);
+    }
+    if (lower.contains('特典') ||
+        RegExp(r'(?<![a-z])(?:bonus|extras?)(?![a-z])').hasMatch(lower)) {
+      category = 'bonus';
+    } else if (lower.contains('预告') ||
+        lower.contains('先导') ||
+        lower.contains('抢先看') ||
+        lower.contains('定档') ||
+        RegExp(r'(?<![a-z])(?:trailer|preview|teaser)(?![a-z])')
+            .hasMatch(lower)) {
+      category = 'preview';
+    } else if (lower.contains('番外')) {
+      category = 'spinoff';
+    } else if (lower.contains('特别篇') ||
+        RegExp(r'(?<![a-z])sp(?![a-z])').hasMatch(lower)) {
+      category = 'special';
+    } else if (RegExp(r'(?<![a-z])ova(?![a-z])').hasMatch(lower)) {
+      category = 'ova';
+    } else if (RegExp(r'(?<![a-z])oad(?![a-z])').hasMatch(lower)) {
+      category = 'oad';
+    } else if (RegExp(r'(?<![a-z])pv(?![a-z])').hasMatch(lower)) {
+      category = 'pv';
+    } else if (lower.contains('花絮') ||
+        lower.contains('幕后') ||
+        lower.contains('片花') ||
+        RegExp(r'(?<![a-z])(?:making|behind)(?![a-z])').hasMatch(lower)) {
+      category = 'bts';
+    } else if (lower.contains('彩蛋')) {
+      category = 'easter_egg';
+    } else if (lower.contains('总集篇') || lower.contains('精编')) {
+      category = 'recap';
+    } else if (lower.contains('剧场版')) {
+      category = 'movie';
+    } else if (lower.contains('小剧场')) {
+      category = 'mini';
+    } else if (lower.contains('片头曲') ||
+        RegExp(r'(?<![a-z])(?:ncop|op)(?![a-z])').hasMatch(lower)) {
+      category = 'op';
+    } else if (lower.contains('片尾曲') ||
+        RegExp(r'(?<![a-z])(?:nced|ed)(?![a-z])').hasMatch(lower)) {
+      category = 'ed';
+    } else if (lower.contains('特辑')) {
+      category = 'featurette';
+    } else {
+      category = info.specialTag.trim().toLowerCase();
+    }
+    if (category.isEmpty) return null;
+
+    final denoised = stripped
+        .replaceAll(_techNoiseRe, ' ')
+        .replaceAll(RegExp(r'(?<![0-9])(?:19[5-9]\d|20[0-3]\d)(?![0-9])'), ' ')
+        .replaceAll(RegExp(r'第\s*[0-9一二三四五六七八九十两]+\s*[季部]'), ' ')
+        .replaceAll(RegExp(r'(?<![A-Za-z0-9])[Ss]0*\d{1,2}(?![A-Za-z0-9])'), ' ');
+    final numMatches = RegExp(r'(?<![0-9])0*(\d{1,3})(?![0-9])')
+        .allMatches(denoised)
+        .map((m) => int.tryParse(m.group(1)!))
+        .whereType<int>()
+        .toList();
+    final int? spNum = numMatches.length == 1 ? numMatches.single : null;
+    return (category: category, number: spNum);
+  }
+
+  static bool _looksLikeSingleFeatureLabel(String rawName, String seriesTitle) {
+    final trimmed = _stripFileExtension(rawName.trim());
+    if (trimmed.isEmpty) return true;
+    if (_partMarkerRe.hasMatch(trimmed)) return false;
+    final stripped = _stripSeriesTitleFromEpisode(trimmed, seriesTitle)
+        .replaceAll(_techNoiseRe, ' ')
+        .replaceAll(_singleMovieFeatureNoiseRe, ' ')
+        .replaceAll(RegExp(r'[\s_\-·:：()（）\[\]【】.]+'), '');
+    return stripped.isEmpty;
+  }
+
+  /// Matches the episode at [fromEpisodeIndex] in [fromLine] against
+  /// [targetLine] using scraped identity (unique URL / unique exact name /
+  /// `(season, episodeNumber)` / special identity / variety date / single-item
+  /// feature movie).
+  ///
+  /// Never guesses by raw array index. Returns [CrossLineEpisodeMatch.ambiguous]
+  /// or [CrossLineEpisodeMatch.unmatched] whenever a unique identity match
+  /// cannot be proven, so callers can let the user pick the episode manually
+  /// without silently inheriting playback progress to the wrong item.
+  static CrossLineEpisodeMatch matchEpisodeAcrossLines({
+    required CmsLine fromLine,
+    required int fromEpisodeIndex,
+    required CmsLine targetLine,
+    String seriesTitle = '',
+    SeriesScrapeOverride? override,
+  }) {
+    if (fromLine.episodes.isEmpty ||
+        targetLine.episodes.isEmpty ||
+        fromEpisodeIndex < 0 ||
+        fromEpisodeIndex >= fromLine.episodes.length) {
+      return const CrossLineEpisodeMatch.unmatched(reason: '线路剧集为空');
+    }
+    if (identical(fromLine, targetLine)) {
+      return CrossLineEpisodeMatch.matched(
+        fromEpisodeIndex,
+        reason: '同线路同集',
+      );
+    }
+
+    final epOffset = override?.episodeOffset ?? 0;
+    final manualOverrides =
+        override?.episodeNumberOverrides ?? const <String, int>{};
+    final fromScraped = scrapeLineEpisodes(
+      fromLine.episodes,
+      seriesTitle: seriesTitle,
+      episodeOffset: epOffset,
+      manualOverrides: manualOverrides,
+    );
+    final targetScraped = scrapeLineEpisodes(
+      targetLine.episodes,
+      seriesTitle: seriesTitle,
+      episodeOffset: epOffset,
+      manualOverrides: manualOverrides,
+    );
+
+    final srcEp = fromLine.episodes[fromEpisodeIndex];
+    final srcInfo = fromScraped.infoForOriginalIndex(fromEpisodeIndex);
+    if (srcInfo == null) {
+      return const CrossLineEpisodeMatch.unmatched(reason: '未找到原剧集');
+    }
+
+    final seriesSeason = extractSeasonNumber(seriesTitle);
+    final fromExplicitSeasons = <int>{
+      for (final info in fromScraped.byOriginalIndex)
+        if (!info.isSpecial && info.seasonNumber != null) info.seasonNumber!,
+    };
+    final targetExplicitSeasons = <int>{
+      for (final info in targetScraped.byOriginalIndex)
+        if (!info.isSpecial && info.seasonNumber != null) info.seasonNumber!,
+    };
+    final fromMultiSeason = fromExplicitSeasons.length >= 2;
+    final targetMultiSeason = targetExplicitSeasons.length >= 2;
+    final unionExplicitSeasons = <int>{
+      ...fromExplicitSeasons,
+      ...targetExplicitSeasons,
+    };
+    final eitherMultiSeason =
+        fromMultiSeason || targetMultiSeason || unionExplicitSeasons.length >= 2;
+
+    int? effectiveSeasonFor(
+      ScrapedEpisodeInfo info, {
+      required bool ownLineHasMultiSeason,
+    }) {
+      if (info.seasonNumber != null) return info.seasonNumber;
+      if (seriesSeason != null && !ownLineHasMultiSeason) return seriesSeason;
+      if (!eitherMultiSeason) return 1;
+      return null;
+    }
+
+    bool seasonsCompatible(ScrapedEpisodeInfo a, ScrapedEpisodeInfo b) {
+      if (a.isSpecial || b.isSpecial) {
+        if (a.seasonNumber != null &&
+            b.seasonNumber != null &&
+            a.seasonNumber != b.seasonNumber) {
+          return false;
+        }
+        return true;
+      }
+      if (a.seasonNumber != null &&
+          b.seasonNumber != null &&
+          a.seasonNumber != b.seasonNumber) {
+        return false;
+      }
+      final sa = effectiveSeasonFor(a, ownLineHasMultiSeason: fromMultiSeason);
+      final sb =
+          effectiveSeasonFor(b, ownLineHasMultiSeason: targetMultiSeason);
+      return sa != null && sb != null && sa == sb;
+    }
+
+    bool partsAndDatesCompatible(ScrapedEpisodeInfo a, ScrapedEpisodeInfo b) =>
+        a.partTag == b.partTag && a.dateKey == b.dateKey;
+
+    // 1. Unique non-empty URL identity match.
+    final srcUrl = srcEp.url.trim();
+    if (srcUrl.isNotEmpty) {
+      final srcUrlCount =
+          fromLine.episodes.where((e) => e.url.trim() == srcUrl).length;
+      if (srcUrlCount == 1) {
+        final targetUrlMatches = <int>[
+          for (var i = 0; i < targetLine.episodes.length; i++)
+            if (targetLine.episodes[i].url.trim() == srcUrl) i,
+        ];
+        if (targetUrlMatches.length == 1) {
+          final idx = targetUrlMatches.single;
+          final candInfo = targetScraped.infoForOriginalIndex(idx);
+          if (candInfo != null &&
+              candInfo.isSpecial == srcInfo.isSpecial &&
+              partsAndDatesCompatible(srcInfo, candInfo) &&
+              seasonsCompatible(srcInfo, candInfo)) {
+            return CrossLineEpisodeMatch.matched(idx, reason: '地址唯一匹配');
+          }
+        } else if (targetUrlMatches.length > 1) {
+          return const CrossLineEpisodeMatch.ambiguous(reason: '目标线路存在多个相同地址');
+        }
+      }
+    }
+
+    // 2. Exact trimmed name match when unique in both lines and consistent in
+    // special/season/part/date classification.
+    final trimmedName = srcEp.name.trim().toLowerCase();
+    if (trimmedName.isNotEmpty) {
+      final srcNameCount = fromLine.episodes
+          .where((e) => e.name.trim().toLowerCase() == trimmedName)
+          .length;
+      final targetNameMatches = <int>[
+        for (var i = 0; i < targetLine.episodes.length; i++)
+          if (targetLine.episodes[i].name.trim().toLowerCase() == trimmedName) i,
+      ];
+      if (srcNameCount == 1 && targetNameMatches.length == 1) {
+        final idx = targetNameMatches.single;
+        final candInfo = targetScraped.infoForOriginalIndex(idx);
+        if (candInfo != null &&
+            candInfo.isSpecial == srcInfo.isSpecial &&
+            partsAndDatesCompatible(srcInfo, candInfo) &&
+            (srcInfo.isSpecial ||
+                srcInfo.resolvedEpisodeNumber == null ||
+                seasonsCompatible(srcInfo, candInfo))) {
+          return CrossLineEpisodeMatch.matched(idx, reason: '名称唯一匹配');
+        }
+      } else if (targetNameMatches.length > 1) {
+        return const CrossLineEpisodeMatch.ambiguous(reason: '目标线路存在多个同名剧集');
+      }
+    }
+
+    // 3. Regular episode scraped `(season, episodeNumber, endEpisodeNumber, partTag, dateKey)`.
+    if (!srcInfo.isSpecial && srcInfo.resolvedEpisodeNumber != null) {
+      final srcNum = srcInfo.resolvedEpisodeNumber!;
+      final srcEnd = srcInfo.endEpisodeNumber;
+      final srcSeason = effectiveSeasonFor(
+        srcInfo,
+        ownLineHasMultiSeason: fromMultiSeason,
+      );
+
+      // Ensure source episode identity itself is unique within fromLine.
+      final sameInSource = fromScraped.byOriginalIndex.where((item) {
+        if (item.isSpecial ||
+            item.resolvedEpisodeNumber != srcNum ||
+            item.endEpisodeNumber != srcEnd ||
+            !partsAndDatesCompatible(srcInfo, item)) {
+          return false;
+        }
+        final itemSeason = effectiveSeasonFor(
+          item,
+          ownLineHasMultiSeason: fromMultiSeason,
+        );
+        return srcSeason != null && itemSeason == srcSeason;
+      }).length;
+      if (sameInSource > 1) {
+        return const CrossLineEpisodeMatch.ambiguous(reason: '当前线路存在重复集号');
+      }
+
+      final strictMatches = <int>[];
+      final sameNumAnySeason = <int>[];
+      for (final cand in targetScraped.byOriginalIndex) {
+        if (cand.isSpecial) continue;
+        if (cand.resolvedEpisodeNumber != srcNum) continue;
+        if (cand.endEpisodeNumber != srcEnd) continue;
+        if (!partsAndDatesCompatible(srcInfo, cand)) continue;
+        sameNumAnySeason.add(cand.originalIndex);
+        final candSeason = effectiveSeasonFor(
+          cand,
+          ownLineHasMultiSeason: targetMultiSeason,
+        );
+        if (srcSeason != null &&
+            candSeason != null &&
+            srcSeason == candSeason) {
+          strictMatches.add(cand.originalIndex);
+        }
+      }
+      if (strictMatches.length == 1) {
+        return CrossLineEpisodeMatch.matched(
+          strictMatches.single,
+          reason: '集号唯一匹配',
+        );
+      }
+      if (strictMatches.length > 1) {
+        return const CrossLineEpisodeMatch.ambiguous(reason: '目标线路存在多个同季同集号');
+      }
+      if (sameNumAnySeason.length > 1) {
+        return const CrossLineEpisodeMatch.ambiguous(reason: '跨季同集号无法唯一确定');
+      }
+      return const CrossLineEpisodeMatch.unmatched(reason: '目标线路未找到同季同集正片');
+    }
+
+    // 4. Special / Bonus / Trailer identity (never cross-matches regular episodes).
+    if (srcInfo.isSpecial) {
+      final srcKey = _extractSpecialIdentity(srcInfo, seriesTitle);
+      if (srcKey == null) {
+        return const CrossLineEpisodeMatch.unmatched(reason: '特典/特别篇无法唯一识别');
+      }
+      final sameSpecialInSource = fromScraped.byOriginalIndex.where((item) {
+        if (!item.isSpecial) return false;
+        final k = _extractSpecialIdentity(item, seriesTitle);
+        return k == srcKey &&
+            item.seasonNumber == srcInfo.seasonNumber &&
+            partsAndDatesCompatible(srcInfo, item);
+      }).length;
+      if (sameSpecialInSource > 1) {
+        return const CrossLineEpisodeMatch.ambiguous(reason: '当前线路存在多个同类特典');
+      }
+      final matches = <int>[];
+      for (final cand in targetScraped.byOriginalIndex) {
+        if (!cand.isSpecial) continue;
+        if (!partsAndDatesCompatible(srcInfo, cand)) continue;
+        if (srcInfo.seasonNumber != null &&
+            cand.seasonNumber != null &&
+            srcInfo.seasonNumber != cand.seasonNumber) {
+          continue;
+        }
+        final candKey = _extractSpecialIdentity(cand, seriesTitle);
+        if (candKey == srcKey) {
+          matches.add(cand.originalIndex);
+        }
+      }
+      if (matches.length == 1) {
+        return CrossLineEpisodeMatch.matched(
+          matches.single,
+          reason: '特典唯一匹配',
+        );
+      }
+      if (matches.length > 1) {
+        return const CrossLineEpisodeMatch.ambiguous(reason: '目标线路存在多个同类特典');
+      }
+      return const CrossLineEpisodeMatch.unmatched(reason: '目标线路未找到对应特典/预告');
+    }
+
+    // 5. Full calendar date issue (`2026-03-15期`, `2026.03.15`, `20260315期`)
+    // preserving part markers (`上篇`/`下篇`).
+    final srcDate = srcInfo.dateKey.isNotEmpty
+        ? srcInfo.dateKey
+        : (_extractVarietyDateKey(srcEp.name) ?? '');
+    if (srcDate.isNotEmpty) {
+      final srcDateCount = fromScraped.byOriginalIndex.where((item) {
+        final d = item.dateKey.isNotEmpty
+            ? item.dateKey
+            : (_extractVarietyDateKey(item.rawName) ?? '');
+        return !item.isSpecial && d == srcDate && item.partTag == srcInfo.partTag;
+      }).length;
+      final targetDateMatches = <int>[
+        for (var i = 0; i < targetLine.episodes.length; i++)
+          if (!targetScraped.byOriginalIndex[i].isSpecial &&
+              (targetScraped.byOriginalIndex[i].dateKey.isNotEmpty
+                      ? targetScraped.byOriginalIndex[i].dateKey
+                      : (_extractVarietyDateKey(targetLine.episodes[i].name) ??
+                          '')) ==
+                  srcDate &&
+              targetScraped.byOriginalIndex[i].partTag == srcInfo.partTag)
+            i,
+      ];
+      if (srcDateCount == 1 && targetDateMatches.length == 1) {
+        return CrossLineEpisodeMatch.matched(
+          targetDateMatches.single,
+          reason: '期号日期唯一匹配',
+        );
+      }
+      if (targetDateMatches.length > 1) {
+        return const CrossLineEpisodeMatch.ambiguous(reason: '目标线路存在多个同期节目');
+      }
+      return const CrossLineEpisodeMatch.unmatched(reason: '目标线路未找到同日期同分段期数');
+    }
+
+    // 6. Single-item feature movie edition labels (e.g. `HD中字` <-> `蓝光4K`).
+    if (fromLine.episodes.length == 1 && targetLine.episodes.length == 1) {
+      final candInfo = targetScraped.byOriginalIndex.first;
+      if (!candInfo.isSpecial &&
+          candInfo.resolvedEpisodeNumber == null &&
+          srcInfo.partTag.isEmpty &&
+          candInfo.partTag.isEmpty &&
+          srcInfo.dateKey.isEmpty &&
+          candInfo.dateKey.isEmpty &&
+          _looksLikeSingleFeatureLabel(srcEp.name, seriesTitle) &&
+          _looksLikeSingleFeatureLabel(
+            targetLine.episodes.first.name,
+            seriesTitle,
+          )) {
+        return const CrossLineEpisodeMatch.matched(0, reason: '单集影片匹配');
+      }
+    }
+
+    return const CrossLineEpisodeMatch.unmatched(reason: '无法唯一匹配目标剧集');
+  }
+
+  /// Returns `true` ONLY when [targetEpisodeIndex] in [targetLine] is
+  /// unambiguously the same episode as [fromEpisodeIndex] in [fromLine].
+  static bool isSameEpisodeAcrossLines({
+    required CmsLine fromLine,
+    required int fromEpisodeIndex,
+    required CmsLine targetLine,
+    required int targetEpisodeIndex,
+    String seriesTitle = '',
+    SeriesScrapeOverride? override,
+  }) {
+    if (fromLine.episodes.isEmpty ||
+        targetLine.episodes.isEmpty ||
+        fromEpisodeIndex < 0 ||
+        fromEpisodeIndex >= fromLine.episodes.length ||
+        targetEpisodeIndex < 0 ||
+        targetEpisodeIndex >= targetLine.episodes.length) {
+      return false;
+    }
+    if (identical(fromLine, targetLine)) {
+      return fromEpisodeIndex == targetEpisodeIndex;
+    }
+    final match = matchEpisodeAcrossLines(
+      fromLine: fromLine,
+      fromEpisodeIndex: fromEpisodeIndex,
+      targetLine: targetLine,
+      seriesTitle: seriesTitle,
+      override: override,
+    );
+    return match.isMatched && match.episodeIndex == targetEpisodeIndex;
   }
 
   // ---------------------------------------------------------------------------

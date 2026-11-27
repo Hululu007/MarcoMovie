@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -7,6 +8,8 @@ import '../core/models.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
 import 'ios_liquid_glass.dart';
+import 'motion/ios27_springs.dart';
+import 'motion/motion_tokens.dart';
 import 'poster_expand_route.dart';
 import 'poster_image.dart';
 
@@ -53,6 +56,8 @@ class CuratedDiscoverySection extends StatefulWidget {
   final bool loadLive;
   final List<String>? visibleSectionIds;
   final Color? headerInkOverride;
+  final Color? secondaryInkOverride;
+  final IosCuratedDockHost? dockHost;
 
   static const List<String> defaultDiscoverySectionIds = <String>[
     StorageService.homeSectionWidescreenRadar,
@@ -71,6 +76,8 @@ class CuratedDiscoverySection extends StatefulWidget {
     this.loadLive = true,
     this.visibleSectionIds,
     this.headerInkOverride,
+    this.secondaryInkOverride,
+    this.dockHost,
   });
 
   @override
@@ -88,6 +95,10 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
     super.initState();
     _syncFromCache();
     _sharedRevision.addListener(_onSharedUpdated);
+    CuratedDiscoveryService.warmupRevision.addListener(_onSharedUpdated);
+    if (!CuratedDiscoveryService.isInitialized) {
+      unawaited(CuratedDiscoveryService.warmFromDisk());
+    }
     if (widget.loadLive) {
       _ensureSharedRefresh();
     }
@@ -96,6 +107,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
   @override
   void dispose() {
     _sharedRevision.removeListener(_onSharedUpdated);
+    CuratedDiscoveryService.warmupRevision.removeListener(_onSharedUpdated);
     super.dispose();
   }
 
@@ -114,10 +126,11 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
     if (_sharedLiveFetch != null) return;
     _sharedLiveFetch = () async {
       try {
-        for (final spec in CuratedDiscoveryService.modules) {
-          await CuratedDiscoveryService.fetchModule(spec);
-          _sharedRevision.value++;
-        }
+        await CuratedDiscoveryService.refreshAllModules(
+          onModuleUpdated: () {
+            _sharedRevision.value++;
+          },
+        );
       } finally {
         _sharedLiveFetch = null;
       }
@@ -158,10 +171,20 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
   }) {
     HapticFeedback.mediumImpact();
     final items = customItems ?? _itemsFor(spec.id);
-    Navigator.of(context).push(
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final dockHost = widget.dockHost;
+    dockHost?.onCuratedEnter();
+    final routeFuture = Navigator.of(context).push<void>(
       PageRouteBuilder<void>(
-        transitionDuration: const Duration(milliseconds: 260),
-        reverseTransitionDuration: const Duration(milliseconds: 220),
+        settings: const RouteSettings(
+          name: IosRootTabNavigatorObserver.curatedRouteName,
+        ),
+        transitionDuration: reduceMotion
+            ? Ios27ConcentricGeometry.reducedMotionDuration
+            : MotionTokens.durationTransitionEnter,
+        reverseTransitionDuration: reduceMotion
+            ? Ios27ConcentricGeometry.reducedMotionDuration
+            : MotionTokens.durationStandard,
         pageBuilder: (_, __, ___) => _CuratedGravityWallPage(
           title: customTitle ?? spec.title,
           subtitle: spec.subtitle,
@@ -171,18 +194,31 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
           initialEntranceStyle: entranceStyle,
           onOpenVideo: widget.onOpenVideo,
           onOpenVideoFromCard: widget.onOpenVideoFromCard,
+          dockHost: dockHost,
         ),
-        transitionsBuilder: (_, animation, __, child) {
+        transitionsBuilder: (routeCtx, animation, __, child) {
+          final isReduced = MediaQuery.disableAnimationsOf(routeCtx);
+          final curved = CurvedAnimation(
+            parent: animation,
+            curve: isReduced ? Curves.linear : Ios27Spring.smooth.curve,
+            reverseCurve: isReduced ? Curves.linear : MotionTokens.curveAccelerate,
+          );
+          if (isReduced) {
+            return FadeTransition(opacity: curved, child: child);
+          }
           return FadeTransition(
-            opacity: CurvedAnimation(
-              parent: animation,
-              curve: Curves.easeOutCubic,
+            opacity: curved,
+            child: ScaleTransition(
+              scale: Tween<double>(begin: 0.965, end: 1.0).animate(curved),
+              child: child,
             ),
-            child: child,
           );
         },
       ),
     );
+    routeFuture.whenComplete(() {
+      dockHost?.onCuratedExit();
+    });
   }
 
   Widget? _buildDiscoverySlot(String sectionId, ApplePalette palette) {
@@ -196,6 +232,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
     final dcSpec = _specById('dc');
 
     final hdrInk = widget.headerInkOverride;
+    final subInk = widget.secondaryInkOverride;
     return switch (sectionId) {
       StorageService.homeSectionWidescreenRadar => _LandscapeDiscoveryShelf(
           key: Key('curated-module-${trendingSpec.id}'),
@@ -204,6 +241,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
           items: _itemsFor(trendingSpec.id),
           palette: palette,
           headerInkOverride: hdrInk,
+          secondaryInkOverride: subInk,
           onOpenAll: () => _openCollectionWithWall(
             trendingSpec,
             customTitle: '光影风向标',
@@ -219,6 +257,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
               palette: palette,
               badgeText: '藤蔓特辑',
               inkOverride: hdrInk,
+              secondaryInkOverride: subInk,
             ),
             const SizedBox(height: 10),
             SingleChildScrollView(
@@ -303,6 +342,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
           items: _itemsFor(cnHotSpec.id),
           palette: palette,
           headerInkOverride: hdrInk,
+          secondaryInkOverride: subInk,
           showRankBadges: true,
           onOpenAll: () => _openCollectionWithWall(
             cnHotSpec,
@@ -318,6 +358,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
               title: '灵感片单',
               palette: palette,
               inkOverride: hdrInk,
+              secondaryInkOverride: subInk,
             ),
             const SizedBox(height: 10),
             SingleChildScrollView(
@@ -384,6 +425,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
               palette: palette,
               badgeText: widget.hasUserSources ? '点播自动匹配片源' : '需添加片源播放',
               inkOverride: hdrInk,
+              secondaryInkOverride: subInk,
             ),
             const SizedBox(height: 10),
             SingleChildScrollView(
@@ -437,6 +479,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
               title: '口碑典藏馆',
               palette: palette,
               inkOverride: hdrInk,
+              secondaryInkOverride: subInk,
             ),
             const SizedBox(height: 10),
             SingleChildScrollView(
@@ -538,6 +581,7 @@ class _SectionHeaderRow extends StatelessWidget {
   final String? badgeText;
   final VoidCallback? onTapChevron;
   final Color? inkOverride;
+  final Color? secondaryInkOverride;
 
   const _SectionHeaderRow({
     required this.title,
@@ -545,14 +589,20 @@ class _SectionHeaderRow extends StatelessWidget {
     this.badgeText,
     this.onTapChevron,
     this.inkOverride,
+    this.secondaryInkOverride,
   });
 
   @override
   Widget build(BuildContext context) {
     final titleColor = inkOverride ?? palette.labelPrimary;
-    final chevronColor = inkOverride != null
-        ? inkOverride!.withValues(alpha: 0.72)
-        : palette.labelTertiary;
+    final chevronColor = secondaryInkOverride ??
+        (inkOverride != null
+            ? inkOverride!.withValues(alpha: 0.78)
+            : palette.labelSecondary);
+    final badgeFg = inkOverride ?? palette.accent;
+    final badgeBg = inkOverride != null
+        ? inkOverride!.withValues(alpha: 0.14)
+        : palette.accent.withValues(alpha: 0.12);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
@@ -572,7 +622,7 @@ class _SectionHeaderRow extends StatelessWidget {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 7.5, vertical: 2.5),
                 decoration: BoxDecoration(
-                  color: palette.accent.withValues(alpha: 0.12),
+                  color: badgeBg,
                   borderRadius: BorderRadius.circular(999),
                 ),
                 child: Text(
@@ -580,7 +630,7 @@ class _SectionHeaderRow extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    color: palette.accent,
+                    color: badgeFg,
                     fontSize: 10.5,
                     fontWeight: FontWeight.w600,
                   ),
@@ -613,6 +663,7 @@ class _PortraitDiscoveryShelf extends StatelessWidget {
   final List<CmsVideo> items;
   final ApplePalette palette;
   final Color? headerInkOverride;
+  final Color? secondaryInkOverride;
   final bool showRankBadges;
   final VoidCallback onOpenAll;
   final CuratedCardOpenCallback onOpenVideo;
@@ -624,6 +675,7 @@ class _PortraitDiscoveryShelf extends StatelessWidget {
     required this.items,
     required this.palette,
     this.headerInkOverride,
+    this.secondaryInkOverride,
     this.showRankBadges = false,
     required this.onOpenAll,
     required this.onOpenVideo,
@@ -640,6 +692,7 @@ class _PortraitDiscoveryShelf extends StatelessWidget {
           palette: palette,
           onTapChevron: onOpenAll,
           inkOverride: headerInkOverride,
+          secondaryInkOverride: secondaryInkOverride,
         ),
         const SizedBox(height: 10),
         SizedBox(
@@ -658,6 +711,8 @@ class _PortraitDiscoveryShelf extends StatelessWidget {
                 cardId: cid,
                 accentColor: accentColor,
                 palette: palette,
+                inkOverride: headerInkOverride,
+                secondaryInkOverride: secondaryInkOverride,
                 rankNumber: showRankBadges ? index + 1 : null,
                 onTap: (cardCtx) {
                   HapticFeedback.selectionClick();
@@ -679,6 +734,7 @@ class _LandscapeDiscoveryShelf extends StatelessWidget {
   final List<CmsVideo> items;
   final ApplePalette palette;
   final Color? headerInkOverride;
+  final Color? secondaryInkOverride;
   final VoidCallback onOpenAll;
   final CuratedCardOpenCallback onOpenVideo;
 
@@ -689,6 +745,7 @@ class _LandscapeDiscoveryShelf extends StatelessWidget {
     required this.items,
     required this.palette,
     this.headerInkOverride,
+    this.secondaryInkOverride,
     required this.onOpenAll,
     required this.onOpenVideo,
   });
@@ -704,6 +761,7 @@ class _LandscapeDiscoveryShelf extends StatelessWidget {
           palette: palette,
           onTapChevron: onOpenAll,
           inkOverride: headerInkOverride,
+          secondaryInkOverride: secondaryInkOverride,
         ),
         const SizedBox(height: 10),
         SizedBox(
@@ -721,6 +779,8 @@ class _LandscapeDiscoveryShelf extends StatelessWidget {
                 video: video,
                 cardId: cid,
                 palette: palette,
+                inkOverride: headerInkOverride,
+                secondaryInkOverride: secondaryInkOverride,
                 onTap: (cardCtx) {
                   HapticFeedback.selectionClick();
                   onOpenVideo(video, cardCtx, 14.0, cid);
@@ -738,12 +798,16 @@ class _CuratedLandscapeCard extends StatelessWidget {
   final CmsVideo video;
   final String cardId;
   final ApplePalette palette;
+  final Color? inkOverride;
+  final Color? secondaryInkOverride;
   final void Function(BuildContext cardContext) onTap;
 
   const _CuratedLandscapeCard({
     required this.video,
     required this.cardId,
     required this.palette,
+    this.inkOverride,
+    this.secondaryInkOverride,
     required this.onTap,
   });
 
@@ -808,6 +872,7 @@ class _CuratedLandscapeCard extends StatelessWidget {
                             fit: BoxFit.cover,
                             forBackdrop: true,
                             highRes: true,
+                            deferTitleScrape: true,
                             placeholder: _buildFallbackThumb(video.title, palette),
                           ),
                           Positioned.fill(
@@ -864,7 +929,7 @@ class _CuratedLandscapeCard extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                color: palette.labelPrimary,
+                color: inkOverride ?? palette.labelPrimary,
                 fontSize: 13.5,
                 fontWeight: FontWeight.w700,
                 letterSpacing: -0.15,
@@ -878,7 +943,10 @@ class _CuratedLandscapeCard extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    color: palette.labelTertiary,
+                    color: secondaryInkOverride ??
+                        (inkOverride != null
+                            ? inkOverride!.withValues(alpha: 0.84)
+                            : palette.labelSecondary),
                     fontSize: 11,
                   ),
                 ),
@@ -961,6 +1029,7 @@ class _EditorialCollectionCard extends StatelessWidget {
                         fit: BoxFit.cover,
                         forBackdrop: true,
                         highRes: true,
+                        deferTitleScrape: true,
                         placeholder: Container(color: tintBase),
                       ),
                     DecoratedBox(
@@ -1174,6 +1243,7 @@ class _EditorialMiniWideTile extends StatelessWidget {
                           year: video.year,
                           fit: BoxFit.cover,
                           forBackdrop: true,
+                          deferTitleScrape: true,
                           placeholder: Container(
                             color: Colors.black.withValues(alpha: 0.28),
                           ),
@@ -1460,6 +1530,7 @@ class _StudioFanCard extends StatelessWidget {
                               title: v.title,
                               year: v.year,
                               fit: BoxFit.cover,
+                              deferTitleScrape: true,
                               placeholder: Container(
                                 color: Colors.white.withValues(alpha: 0.08),
                               ),
@@ -1700,6 +1771,7 @@ class _StackedCategoryPill extends StatelessWidget {
                             title: stack[i].title,
                             year: stack[i].year,
                             fit: BoxFit.cover,
+                            deferTitleScrape: true,
                             placeholder: Container(
                               color: palette.groupedTertiary,
                             ),
@@ -1806,6 +1878,7 @@ class _PosterWallMosaicCard extends StatelessWidget {
                                           title: pool[(row * 4 + col) % pool.length].title,
                                           year: pool[(row * 4 + col) % pool.length].year,
                                           fit: BoxFit.cover,
+                                          deferTitleScrape: true,
                                           placeholder: Container(
                                             color: const Color(0xFF242731),
                                           ),
@@ -1929,6 +2002,8 @@ class _CuratedPosterCard extends StatelessWidget {
   final String cardId;
   final Color accentColor;
   final ApplePalette palette;
+  final Color? inkOverride;
+  final Color? secondaryInkOverride;
   final int? rankNumber;
   final void Function(BuildContext cardContext) onTap;
 
@@ -1937,6 +2012,8 @@ class _CuratedPosterCard extends StatelessWidget {
     required this.cardId,
     required this.accentColor,
     required this.palette,
+    this.inkOverride,
+    this.secondaryInkOverride,
     this.rankNumber,
     required this.onTap,
   });
@@ -1998,6 +2075,7 @@ class _CuratedPosterCard extends StatelessWidget {
                               fit: BoxFit.cover,
                               fadeIn: true,
                               highRes: true,
+                              deferTitleScrape: true,
                               placeholder: placeholder,
                             ),
                             if (rankNumber != null)
@@ -2072,7 +2150,7 @@ class _CuratedPosterCard extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                color: palette.labelPrimary,
+                color: inkOverride ?? palette.labelPrimary,
                 fontSize: 12.5,
                 fontWeight: FontWeight.w600,
               ),
@@ -2082,7 +2160,10 @@ class _CuratedPosterCard extends StatelessWidget {
                 video.year,
                 maxLines: 1,
                 style: TextStyle(
-                  color: palette.labelTertiary,
+                  color: secondaryInkOverride ??
+                      (inkOverride != null
+                          ? inkOverride!.withValues(alpha: 0.84)
+                          : palette.labelSecondary),
                   fontSize: 10.5,
                 ),
               ),
@@ -2114,6 +2195,7 @@ class _CuratedGravityWallPage extends StatefulWidget {
   final CuratedWallEntranceStyle initialEntranceStyle;
   final ValueChanged<CmsVideo> onOpenVideo;
   final CuratedCardOpenCallback? onOpenVideoFromCard;
+  final IosCuratedDockHost? dockHost;
 
   const _CuratedGravityWallPage({
     required this.title,
@@ -2124,6 +2206,7 @@ class _CuratedGravityWallPage extends StatefulWidget {
     this.initialEntranceStyle = CuratedWallEntranceStyle.blackHoleVortex,
     required this.onOpenVideo,
     this.onOpenVideoFromCard,
+    this.dockHost,
   });
 
   @override
@@ -2140,6 +2223,7 @@ class _CuratedGravityWallPageState extends State<_CuratedGravityWallPage>
   bool _playedHaptic2 = false;
   bool _playedHaptic3 = false;
   bool _initialized = false;
+  bool _userInteracted = false;
 
   static const int _maxAnimatedCards = 12;
   static const List<double> _stackAngles = [
@@ -2174,8 +2258,19 @@ class _CuratedGravityWallPageState extends State<_CuratedGravityWallPage>
     _activeStyle = widget.initialEntranceStyle;
     _ctrl = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1320),
+      duration: const Duration(milliseconds: 1450),
     )..addListener(_handleAnimationTick);
+  }
+
+  void _finishEntranceForInteraction() {
+    if (_userInteracted && _ctrl.value >= 0.999) return;
+    _userInteracted = true;
+    if (_ctrl.value < 1.0) {
+      _ctrl.value = 1.0;
+    }
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   @override
@@ -2292,19 +2387,29 @@ class _CuratedGravityWallPageState extends State<_CuratedGravityWallPage>
                 animation: _ctrl,
                 builder: (context, gridChild) {
                   final v = _ctrl.value;
-                  final gridOpacity =
-                      v >= 0.86 ? ((v - 0.86) / 0.14).clamp(0.0, 1.0) : 0.0;
-                  final overlayVisible = v < 0.995;
+                  final gridOpacity = _userInteracted
+                      ? 1.0
+                      : (v >= 0.86
+                          ? ((v - 0.86) / 0.14).clamp(0.0, 1.0)
+                          : 0.0);
+                  final overlayVisible = !_userInteracted && v < 0.995;
 
                   return Stack(
                     key: Key('curated-wall-style-${_activeStyle.name}'),
                     fit: StackFit.expand,
                     children: [
-                      IgnorePointer(
-                        ignoring: v < 0.92,
-                        child: Opacity(
-                          opacity: gridOpacity,
-                          child: gridChild,
+                      Listener(
+                        behavior: HitTestBehavior.translucent,
+                        onPointerDown: (_) => _finishEntranceForInteraction(),
+                        child: NotificationListener<ScrollStartNotification>(
+                          onNotification: (_) {
+                            _finishEntranceForInteraction();
+                            return false;
+                          },
+                          child: Opacity(
+                            opacity: gridOpacity,
+                            child: gridChild,
+                          ),
                         ),
                       ),
                       if (overlayVisible)
@@ -2527,6 +2632,49 @@ class _CuratedGravityWallPageState extends State<_CuratedGravityWallPage>
               ),
             ),
           ),
+          // 4. iOS Flutter-fallback collapsed Logo overlay when native root
+          //    chrome is inactive (iOS 14–25 / non-iOS26). Shares the exact
+          //    same dock state machine, scroll morph progress, and menu actions
+          //    while leaving the former full-bar area 100% click-through.
+          if (widget.dockHost != null)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: AnimatedBuilder(
+                animation: Listenable.merge([
+                  widget.dockHost!.useNativeRootChrome,
+                  widget.dockHost!.visibleOnCurated,
+                  widget.dockHost!.selectedTabIndex,
+                ]),
+                builder: (ctx, _) {
+                  final host = widget.dockHost!;
+                  final isCurrent = ModalRoute.of(ctx)?.isCurrent ?? true;
+                  final showFallbackDock =
+                      !host.useNativeRootChrome.value &&
+                      host.visibleOnCurated.value &&
+                      isCurrent;
+                  if (!showFallbackDock) {
+                    return const SizedBox.shrink();
+                  }
+                  return Center(
+                    heightFactor: 1,
+                    child: AppleLiquidGlassDock(
+                      key: const ValueKey('curated-fallback-dock'),
+                      selectedIndex: host.selectedTabIndex.value,
+                      onSelect: host.onSelectTab,
+                      isLandscape: false,
+                      items: host.items,
+                      onSearch: host.onSearch,
+                      onScrollToTop: host.onScrollToTop,
+                      collapsed: true,
+                      forceFlutterFallback: true,
+                      scrollProgress: host.progress,
+                    ),
+                  );
+                },
+              ),
+            ),
         ],
       ),
     );
@@ -2741,6 +2889,7 @@ class _CuratedGravityWallPageState extends State<_CuratedGravityWallPage>
                 year: video.year,
                 fit: BoxFit.cover,
                 highRes: true,
+                deferTitleScrape: true,
                 placeholder: _buildFallbackThumb(video.title, palette),
               ),
             ),

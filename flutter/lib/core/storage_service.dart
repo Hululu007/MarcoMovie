@@ -15,6 +15,7 @@ import 'cms_parser.dart';
 import 'csp_bridge.dart';
 import 'danmu/danmu_prefs.dart';
 import 'danmu/danmu_source_sync.dart';
+import 'episode_scraper.dart';
 import 'ios_avplayer_controller.dart';
 import 'ios_mpv_profile.dart';
 import 'local_media_proxy.dart';
@@ -28,6 +29,7 @@ import 'secure_credential_store.dart';
 import 'series_scraper.dart';
 import 'spider_plugin_registry.dart';
 import 'storage_file_store.dart';
+import 'windows_window_bounds.dart';
 
 export 'storage_file_store.dart';
 
@@ -37,6 +39,90 @@ typedef Pbkdf2ComputeRunner = Future<T> Function<T>(
 
 Future<T> _defaultIsolatePbkdf2Runner<T>(FutureOr<T> Function() computation) =>
     Isolate.run<T>(computation);
+
+/// Wraps a [SharedPreferences] instance with a per-key monotonic write epoch so
+/// transactional rollbacks can distinguish a later user write from an earlier
+/// transaction write even when both wrote the exact same value (e.g. `[]`).
+class _EpochTrackingPrefs implements SharedPreferences {
+  static final Expando<_EpochTrackingPrefs> _wrappers =
+      Expando<_EpochTrackingPrefs>();
+
+  static _EpochTrackingPrefs wrap(SharedPreferences prefs) {
+    if (prefs is _EpochTrackingPrefs) return prefs;
+    return _wrappers[prefs] ??= _EpochTrackingPrefs._(prefs);
+  }
+
+  final SharedPreferences raw;
+  int _nextEpoch = 0;
+  final Map<String, int> _epochs = <String, int>{};
+
+  _EpochTrackingPrefs._(this.raw);
+
+  int epochOf(String key) => _epochs[key] ?? 0;
+
+  void _bump(String key) {
+    _epochs[key] = ++_nextEpoch;
+  }
+
+  Future<bool> _track(String key, Future<bool> Function() op) async {
+    final ok = await op();
+    if (ok) _bump(key);
+    return ok;
+  }
+
+  @override
+  Set<String> getKeys() => raw.getKeys();
+  @override
+  Object? get(String key) => raw.get(key);
+  @override
+  bool? getBool(String key) => raw.getBool(key);
+  @override
+  int? getInt(String key) => raw.getInt(key);
+  @override
+  double? getDouble(String key) => raw.getDouble(key);
+  @override
+  String? getString(String key) => raw.getString(key);
+  @override
+  bool containsKey(String key) => raw.containsKey(key);
+  @override
+  List<String>? getStringList(String key) => raw.getStringList(key);
+  @override
+  Future<bool> setBool(String key, bool value) =>
+      _track(key, () => raw.setBool(key, value));
+  @override
+  Future<bool> setInt(String key, int value) =>
+      _track(key, () => raw.setInt(key, value));
+  @override
+  Future<bool> setDouble(String key, double value) =>
+      _track(key, () => raw.setDouble(key, value));
+  @override
+  Future<bool> setString(String key, String value) =>
+      _track(key, () => raw.setString(key, value));
+  @override
+  Future<bool> setStringList(String key, List<String> value) =>
+      _track(key, () => raw.setStringList(key, value));
+  @override
+  Future<bool> remove(String key) => _track(key, () => raw.remove(key));
+  @override
+  // ignore: deprecated_member_use
+  Future<bool> commit() => raw.commit();
+  @override
+  Future<bool> clear() async {
+    final existing = raw.getKeys().toList(growable: false);
+    final ok = await raw.clear();
+    if (ok) {
+      for (final key in existing) {
+        _bump(key);
+      }
+      for (final key in _epochs.keys.toList(growable: false)) {
+        _bump(key);
+      }
+    }
+    return ok;
+  }
+  @override
+  Future<void> reload() => raw.reload();
+}
 
 /// Persistent preferences and backup serializer compatible with Android `Prefs.java`.
 class StorageService {
@@ -92,6 +178,39 @@ class StorageService {
   static const String keyPlaySpeed = 'play_speed';
   static const String keyAutoNext = 'auto_next';
   static const String keySkipIntroSec = 'skip_intro_sec';
+  static const String keyIosPlayerToolbarItems = 'ios_player_toolbar_items_v1';
+
+  /// Default iOS player primary toolbar button order:
+  /// 选集、线路、倍速、弹幕/字幕、画面、播放器、音轨、片头片尾、更多.
+  static const List<String> defaultIosPlayerToolbarItems = <String>[
+    'episodes',
+    'lines',
+    'speed',
+    'danmu_subtitle',
+    'aspect',
+    'engine',
+    'audio',
+    'skip_intro_outro',
+    'more',
+  ];
+
+  /// Complete catalog of supported iOS player toolbar action IDs.
+  static const List<String> allIosPlayerToolbarItems = <String>[
+    'episodes',
+    'lines',
+    'speed',
+    'danmu_subtitle',
+    'aspect',
+    'engine',
+    'audio',
+    'skip_intro_outro',
+    'fullscreen',
+    'loudness',
+    'anime4k',
+    'sleep_timer',
+    'pip',
+    'more',
+  ];
   static const String keySkipOutroSec = 'skip_outro_sec';
   static const String keyRepeatMode = 'repeat_mode';
   static const String keyQuarkCookie = 'netdisk_quark_cookie';
@@ -99,6 +218,16 @@ class StorageService {
   static const String keyBaiduCookie = 'netdisk_baidu_cookie';
   static const String keyAliToken = 'netdisk_ali_token';
   static const String keyDriveOrder = 'netdisk_drive_order';
+  static const String keyDriveOrderCustomized =
+      'netdisk_drive_order_customized';
+  static const String keyPrioritizeLoggedInDrives =
+      'netdisk_prioritize_logged_in';
+  static const List<String> defaultDriveOrder = <String>[
+    'quark',
+    'uc',
+    'baidu',
+    'ali',
+  ];
   static const String keyDepots = 'saved_depots';
   static const String keyActiveDepotName = 'active_depot_name';
   static const String keySubscriptions = 'saved_subscriptions';
@@ -143,6 +272,9 @@ class StorageService {
   ];
   static const String keyCardSubtitleMode = 'card_subtitle_mode';
   static const String keyPreferredQuality = 'preferred_quality';
+  static const String keyAutoHardwareQuality = 'auto_hardware_quality';
+  static const String keyLastHardwareProfileSummary =
+      'last_hardware_profile_summary';
   static const String keyDefaultAspectMode = 'default_aspect_mode';
   static const String keyPlayerKernel = 'player_kernel';
   static const String keyWebdavUrl = 'webdav_url';
@@ -168,6 +300,7 @@ class StorageService {
   static const String keySpiderAdapterPacks = 'spider_adapter_packs_v1';
   static const String keyWindowsCloseAction = 'windows_close_action';
   static const String keyWindowsSearchLayout = 'windows_search_layout';
+  static const String keyWindowsWindowBounds = WindowsWindowBounds.prefKey;
   static const String keySpiderGatewayEnabled = 'spider_gateway_enabled';
   static const String keySpiderGatewayUrl = 'spider_gateway_url';
   static const String keySpiderGatewayDeviceName = 'spider_gateway_device_name';
@@ -180,18 +313,22 @@ class StorageService {
   static const String keyCachedAdHosts = 'cached_ad_hosts_v1';
   static const String keyHlsAdStripEnabled = 'hls_ad_strip_enabled';
   static const String keyDiskCacheMaxMb = 'disk_cache_max_mb';
+  static const String keyEpisodeScrapeOverrides = 'episode_scrape_overrides_v1';
+  static const int maxEpisodeScrapeRecords = 300;
   static const List<int> allowedDiskCacheMbOptions = <int>[0, 256, 512, 1024, 2048];
   static const int defaultDiskCacheMaxMb = 512;
   static const int maxVideoSkipRecords = 500;
   static const String _subscriptionsFileName = 'subscriptions.json';
   static const String _watchHistoryFileName = 'watch_history.json';
+  static const String keyWatchHistoryPrefsPendingFlush =
+      'watch_history_prefs_pending_flush';
   static const List<Duration> _atomicRenameRetryDelays = <Duration>[
     Duration(milliseconds: 20),
     Duration(milliseconds: 50),
     Duration(milliseconds: 100),
   ];
 
-  final SharedPreferences _prefs;
+  final _EpochTrackingPrefs _prefs;
   final Directory? _explicitDataDirectory;
   final StorageFileStore _fileStore;
   @visibleForTesting
@@ -217,6 +354,10 @@ class StorageService {
   final ValueNotifier<bool> credentialMigrationFailureNotifier =
       ValueNotifier<bool>(false);
   bool _historyCorrupted = false;
+  List<int>? _quarantinedHistoryBytes;
+  final Set<String> _unconfirmedQuarantinePrefKeys = <String>{};
+  int _quarantineSequence = 0;
+  int _historyWriteEpoch = 0;
   bool get isHistoryCorrupted => _historyCorrupted;
   bool _subscriptionsCorrupted = false;
   bool _subscriptionsCorruptionNoticeConsumed = false;
@@ -307,7 +448,7 @@ class StorageService {
   int get lastHistoryAutoPushMsForTesting => _lastHistoryAutoPushMs;
   static final Expando<QuarkAccountProvider> _quarkProviders = Expando();
   static final Expando<Map<String, String>> _credentialCaches = Expando();
-  QuarkAccountProvider get quarkAccounts => _quarkProviders[_prefs] ??=
+  QuarkAccountProvider get quarkAccounts => _quarkProviders[_prefs.raw] ??=
       QuarkAccountProvider(
         readCredential: () => getNetdiskCred('quark'),
         writeCredential: (value) => _writeSecret(keyQuarkCookie, value),
@@ -315,7 +456,7 @@ class StorageService {
   final SecureCredentialStore _secureStore;
   final Pbkdf2ComputeRunner _pbkdf2Runner;
   Map<String, String> get _credentialCache =>
-      _credentialCaches[_prefs] ??= <String, String>{};
+      _credentialCaches[_prefs.raw] ??= <String, String>{};
 
   Future<void> _writeSecret(String key, String value) async {
     final hadPrevious = _credentialCache.containsKey(key);
@@ -346,15 +487,25 @@ class StorageService {
   @visibleForTesting
   StorageFileStore get fileStoreForTesting => _fileStore;
   Future<void> _mutationQueue = Future<void>.value();
+  Future<void> _credentialHydrationFuture = Future<void>.value();
+
+  /// Completes once Keychain / secure-store credential hydration has finished.
+  /// Immediately complete unless [StorageService.init] was invoked with
+  /// `deferSecureCredentialHydration: true` to keep cold launch non-blocking.
+  Future<void> waitForCredentialsReady() => _credentialHydrationFuture;
+
   CmsConfig? _cachedConfig;
+  List<CmsSite>? _cachedAllKnownOfflineSites;
   Set<String>? _cachedPrivateKeys;
   int _configRevision = 0;
+  final ValueNotifier<int> configRevisionNotifier = ValueNotifier<int>(0);
   List<WatchHistoryEntry>? _historyCache;
   List<WatchHistoryEntry>? _allHistoryCache;
   List<SubscriptionEntry>? _subscriptionsCache;
 
   int _lastHistoryDiskWriteMs = 0;
   bool _historyDirty = false;
+  bool _historyFlushShouldSync = false;
   Timer? _historyFlushTimer;
 
   int get configRevision => _configRevision;
@@ -366,10 +517,12 @@ class StorageService {
 
   void _invalidateConfigCache() {
     _cachedConfig = null;
+    _cachedAllKnownOfflineSites = null;
     _cachedPrivateKeys = null;
     _historyCache = null;
     _subscriptionsCache = null;
     _configRevision++;
+    configRevisionNotifier.value = _configRevision;
   }
 
   static String _resolveOrAssignTestNamespaceSync(SharedPreferences prefs) {
@@ -488,12 +641,13 @@ class StorageService {
   }
 
   StorageService._internal(
-    this._prefs, {
+    SharedPreferences prefs, {
     required Directory? explicitDataDirectory,
     required StorageFileStore fileStore,
     required SecureCredentialStore secureStore,
     Pbkdf2ComputeRunner? pbkdf2Runner,
-  })  : _explicitDataDirectory = explicitDataDirectory,
+  })  : _prefs = _EpochTrackingPrefs.wrap(prefs),
+        _explicitDataDirectory = explicitDataDirectory,
         _fileStore = fileStore,
         _secureStore = secureStore,
         _pbkdf2Runner = pbkdf2Runner ?? _defaultIsolatePbkdf2Runner {
@@ -557,15 +711,27 @@ class StorageService {
     Error.throwWithStackTrace(lastError!, lastStack!);
   }
 
-  Future<void> _initializeStorage() async {
+  Future<void> _initializeStorage({
+    bool deferSecureCredentialHydration = false,
+  }) async {
     try {
       await _fileStore.ensureInitialized();
     } on Object catch (e) {
       debugPrint('StorageService: ensureInitialized warning: $e');
     }
     await _cleanupLeftoverTempFiles();
-    await _migrateCredentialsIfNeeded();
+    if (deferSecureCredentialHydration) {
+      final hydration = _migrateCredentialsIfNeeded().catchError((Object e) {
+        debugPrint('StorageService: deferred credential hydration warning: $e');
+      });
+      _credentialHydrationFuture = hydration;
+      unawaited(hydration);
+    } else {
+      await _migrateCredentialsIfNeeded();
+      _credentialHydrationFuture = Future<void>.value();
+    }
     await _migrateFromPrefsIfNeeded();
+    await migrateLegacyDriveOrderIfNeeded();
     _hydrateSpiderExtensions();
     getSubscriptions();
   }
@@ -591,10 +757,11 @@ class StorageService {
   }
 
   Future<void> _migrateCredentialsIfNeeded() async {
+    const secureOpTimeout = Duration(seconds: 2);
     final store = _secureStore;
     if (store is DefaultSecureCredentialStore) {
       try {
-        await store.ensureInitialized();
+        await store.ensureInitialized().timeout(secureOpTimeout);
       } on Object catch (e) {
         debugPrint('StorageService: ensureInitialized secure store failed: $e');
       }
@@ -612,7 +779,7 @@ class StorageService {
         _credentialCache[key] = plain;
         try {
           if (plain.isNotEmpty) {
-            await _secureStore.write(key, plain);
+            await _secureStore.write(key, plain).timeout(secureOpTimeout);
           }
           await _prefs.remove(key);
         } on Object catch (e) {
@@ -620,7 +787,7 @@ class StorageService {
         }
       } else {
         try {
-          final secVal = await _secureStore.read(key);
+          final secVal = await _secureStore.read(key).timeout(secureOpTimeout);
           if (secVal != null && secVal.isNotEmpty) {
             _credentialCache[key] = secVal;
           }
@@ -715,7 +882,8 @@ class StorageService {
       return dir;
     }
     try {
-      final support = await getApplicationSupportDirectory();
+      final support = await getApplicationSupportDirectory()
+          .timeout(const Duration(seconds: 2));
       final dir = Directory('${support.path}/data');
       _cachedProductionDataDir = dir;
       return dir;
@@ -728,13 +896,44 @@ class StorageService {
     }
   }
 
+  static Future<SharedPreferences> _loadSharedPreferencesWithRetry({
+    Future<SharedPreferences> Function()? loader,
+  }) async {
+    final fn = loader ?? SharedPreferences.getInstance;
+    const retryDelays = <Duration>[
+      Duration(milliseconds: 60),
+      Duration(milliseconds: 160),
+      Duration(milliseconds: 320),
+      Duration(milliseconds: 500),
+    ];
+    Object? lastError;
+    StackTrace? lastStack;
+    for (var attempt = 0; attempt <= retryDelays.length; attempt++) {
+      try {
+        return await fn().timeout(const Duration(seconds: 3));
+      } on Object catch (error, stackTrace) {
+        lastError = error;
+        lastStack = stackTrace;
+        debugPrint(
+          'StorageService: SharedPreferences init attempt ${attempt + 1} failed: $error',
+        );
+        if (attempt < retryDelays.length) {
+          await Future<void>.delayed(retryDelays[attempt]);
+        }
+      }
+    }
+    Error.throwWithStackTrace(lastError!, lastStack!);
+  }
+
   static Future<StorageService> init({
     Directory? dataDirectory,
     SecureCredentialStore? secureStore,
     StorageFileStore? fileStore,
     Pbkdf2ComputeRunner? pbkdf2Runner,
+    bool deferSecureCredentialHydration = false,
+    @visibleForTesting Future<SharedPreferences> Function()? prefsLoader,
   }) async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await _loadSharedPreferencesWithRetry(loader: prefsLoader);
     final explicitDir = dataDirectory ?? debugOverrideDataDirectory;
     final isFlutterTest = Platform.environment.containsKey('FLUTTER_TEST');
 
@@ -754,7 +953,9 @@ class StorageService {
             ),
         pbkdf2Runner: pbkdf2Runner,
       );
-      await service._initializeStorage();
+      await service._initializeStorage(
+        deferSecureCredentialHydration: deferSecureCredentialHydration,
+      );
       return service;
     }
 
@@ -768,7 +969,9 @@ class StorageService {
       fileStore: fileStore,
       pbkdf2Runner: pbkdf2Runner,
     );
-    await service._initializeStorage();
+    await service._initializeStorage(
+      deferSecureCredentialHydration: deferSecureCredentialHydration,
+    );
     return service;
   }
   String get configOrigin => _prefs.getString(keyOrigin) ?? '';
@@ -867,6 +1070,10 @@ class StorageService {
       _prefs.getString(keyCardSubtitleMode) ?? 'remarks';
   String get preferredQuality =>
       _prefs.getString(keyPreferredQuality) ?? '4k_netdisk';
+  bool get autoHardwareQualityEnabled =>
+      _prefs.getBool(keyAutoHardwareQuality) ?? true;
+  String get lastHardwareProfileSummary =>
+      _prefs.getString(keyLastHardwareProfileSummary) ?? '';
   String get defaultAspectMode =>
       _prefs.getString(keyDefaultAspectMode) ?? 'contain';
   String get playerKernel =>
@@ -899,7 +1106,7 @@ class StorageService {
       (_prefs.getInt(keyMediaDiskCacheLimitMb) ?? 256).clamp(0, 4096);
   List<CmsSniffRule> getSavedSniffRules() {
     final loaded = loadSavedConfig();
-    if (loaded != null && loaded.rules.isNotEmpty) return loaded.rules;
+    if (loaded != null) return loaded.rules;
     final raw = _prefs.getString(keyCmsSniffRules);
     if (raw == null || raw.trim().isEmpty) return const [];
     try {
@@ -916,7 +1123,7 @@ class StorageService {
 
   List<String> getSavedAdRules() {
     final loaded = loadSavedConfig();
-    if (loaded != null && loaded.ads.isNotEmpty) return loaded.ads;
+    if (loaded != null) return loaded.ads;
     final raw = _prefs.getString(keyCmsAds);
     if (raw == null || raw.trim().isEmpty) return const [];
     try {
@@ -948,6 +1155,8 @@ class StorageService {
         .toLowerCase();
     return saved == 'list' ? 'list' : 'grid';
   }
+  WindowsWindowBounds? get windowsWindowBounds =>
+      WindowsWindowBounds.tryParseJson(_prefs.getString(keyWindowsWindowBounds));
   bool get hlsAdStripEnabled =>
       _prefs.getBool(keyHlsAdStripEnabled) ??
       _prefs.getBool(keyHlsAdRemovalEnabled) ??
@@ -972,8 +1181,8 @@ class StorageService {
     await DiskBlockCache.instance.setMaxMegabytes(normalized);
   }
   List<CmsSniffRule> get cachedSniffRules {
-    final loaded = loadSavedConfig()?.rules;
-    if (loaded != null && loaded.isNotEmpty) return loaded;
+    final loaded = loadSavedConfig();
+    if (loaded != null) return loaded.rules;
     final raw = _prefs.getString(keyCachedSniffRules);
     if (raw == null || raw.trim().isEmpty) return const <CmsSniffRule>[];
     try {
@@ -988,32 +1197,44 @@ class StorageService {
     }
   }
   List<String> get cachedAdDomains {
-    final loaded = loadSavedConfig()?.ads;
-    if (loaded != null && loaded.isNotEmpty) return loaded;
+    final loaded = loadSavedConfig();
+    if (loaded != null) return loaded.ads;
     return _prefs.getStringList(keyCachedAdHosts) ?? const <String>[];
   }
-  Future<void> _persistSniffAndAdsCache(CmsConfig? config) async {
+  Future<void> _persistSniffAndAdsCache(
+    CmsConfig? config, {
+    Future<void> Function(String key, String value, String label)? setString,
+    Future<void> Function(String key, List<String> value, String label)?
+        setStringList,
+    Future<void> Function(String key, String label)? removeKey,
+  }) async {
+    final writeString =
+        setString ?? (String k, String v, String _) => _prefs.setString(k, v);
+    final writeStringList = setStringList ??
+        (String k, List<String> v, String _) => _prefs.setStringList(k, v);
+    final deleteKey =
+        removeKey ?? (String k, String _) => _prefs.remove(k);
     if (config == null) {
-      await _prefs.remove(keyCachedSniffRules);
-      await _prefs.remove(keyCachedAdHosts);
-      await _prefs.remove(keyCmsSniffRules);
-      await _prefs.remove(keyCmsAds);
+      await deleteKey(keyCachedSniffRules, '嗅探规则缓存');
+      await deleteKey(keyCachedAdHosts, '广告过滤域名缓存');
+      await deleteKey(keyCmsSniffRules, 'CMS 嗅探规则缓存');
+      await deleteKey(keyCmsAds, 'CMS 广告规则缓存');
       return;
     }
     if (config.rules.isEmpty) {
-      await _prefs.remove(keyCachedSniffRules);
-      await _prefs.remove(keyCmsSniffRules);
+      await deleteKey(keyCachedSniffRules, '嗅探规则缓存');
+      await deleteKey(keyCmsSniffRules, 'CMS 嗅探规则缓存');
     } else {
       final encodedRules = jsonEncode([for (final r in config.rules) r.toJson()]);
-      await _prefs.setString(keyCachedSniffRules, encodedRules);
-      await _prefs.setString(keyCmsSniffRules, encodedRules);
+      await writeString(keyCachedSniffRules, encodedRules, '嗅探规则缓存');
+      await writeString(keyCmsSniffRules, encodedRules, 'CMS 嗅探规则缓存');
     }
     if (config.ads.isEmpty) {
-      await _prefs.remove(keyCachedAdHosts);
-      await _prefs.remove(keyCmsAds);
+      await deleteKey(keyCachedAdHosts, '广告过滤域名缓存');
+      await deleteKey(keyCmsAds, 'CMS 广告规则缓存');
     } else {
-      await _prefs.setStringList(keyCachedAdHosts, config.ads);
-      await _prefs.setString(keyCmsAds, jsonEncode(config.ads));
+      await writeStringList(keyCachedAdHosts, config.ads, '广告过滤域名缓存');
+      await writeString(keyCmsAds, jsonEncode(config.ads), 'CMS 广告规则缓存');
     }
   }
   String get quarkCookie =>
@@ -1025,18 +1246,145 @@ class StorageService {
   String get aliToken =>
       _credentialCache[keyAliToken] ?? _prefs.getString(keyAliToken) ?? '';
   List<String> get driveOrder {
-    const defaults = ['quark', 'uc', 'baidu', 'ali'];
+    const defaults = defaultDriveOrder;
     final raw = _prefs.getStringList(keyDriveOrder);
     if (raw == null || raw.isEmpty) return defaults;
-    final out = <String>[
-      for (final d in raw)
-        if (defaults.contains(d)) d,
-    ];
+    final out = <String>[];
+    for (final d in raw) {
+      if (defaults.contains(d) && !out.contains(d)) {
+        out.add(d);
+      }
+    }
     for (final d in defaults) {
       if (!out.contains(d)) out.add(d);
     }
     return out;
   }
+
+  bool get hasCustomDriveOrder {
+    if (_prefs.containsKey(keyDriveOrderCustomized)) {
+      return _prefs.getBool(keyDriveOrderCustomized) ?? false;
+    }
+    // Legacy upgrade migration: earlier versions persisted a non-default
+    // `netdisk_drive_order` without writing `netdisk_drive_order_customized`.
+    // Preserve that user customization so ConfigCenterBridge never overwrites it.
+    final raw = _prefs.getStringList(keyDriveOrder);
+    if (raw == null || raw.isEmpty) return false;
+    final current = driveOrder;
+    return current.join(',') != defaultDriveOrder.join(',');
+  }
+
+  /// One-time migration for legacy upgrades that saved a non-default
+  /// `netdisk_drive_order` before `keyDriveOrderCustomized` existed.
+  Future<void> migrateLegacyDriveOrderIfNeeded() async {
+    if (_prefs.containsKey(keyDriveOrderCustomized)) return;
+    final raw = _prefs.getStringList(keyDriveOrder);
+    if (raw == null || raw.isEmpty) return;
+    final current = driveOrder;
+    if (current.join(',') != defaultDriveOrder.join(',')) {
+      await _prefs.setBool(keyDriveOrderCustomized, true);
+    }
+  }
+
+  bool get prioritizeLoggedInDrives =>
+      _prefs.getBool(keyPrioritizeLoggedInDrives) ?? true;
+
+  bool get hasAnyNetdiskLoggedIn =>
+      defaultDriveOrder.any((d) => isNetdiskLoggedIn(d));
+
+  /// Returns [driveOrder] with logged-in drives placed ahead of unauthenticated
+  /// drives when [prioritizeLoggedInDrives] is enabled, while preserving the
+  /// user's manual relative ordering within each group.
+  List<String> get effectiveDriveOrder {
+    final base = driveOrder;
+    if (!prioritizeLoggedInDrives || !hasAnyNetdiskLoggedIn) {
+      return base;
+    }
+    return <String>[
+      for (final d in base)
+        if (isNetdiskLoggedIn(d)) d,
+      for (final d in base)
+        if (!isNetdiskLoggedIn(d)) d,
+    ];
+  }
+
+  /// Detects which canonical netdisk provider (`quark` / `uc` / `baidu` / `ali`)
+  /// a [CmsLine] belongs to based on its display name and episode URLs.
+  static String? detectNetdiskDriveKey(
+    String lineName, {
+    Iterable<CmsEpisode> episodes = const <CmsEpisode>[],
+  }) {
+    final lower = lineName.trim().toLowerCase();
+    if (lower.contains('夸父') ||
+        lower.contains('夸克') ||
+        lower.contains('quark')) {
+      return 'quark';
+    }
+    if (lower.contains('优汐') ||
+        lower.contains('uc网盘') ||
+        lower.contains('uc原画') ||
+        lower.contains('uc4k') ||
+        RegExp(r'(^|[^a-z0-9])uc([^a-z0-9]|$)').hasMatch(lower)) {
+      return 'uc';
+    }
+    if (lower.contains('嘟嘟') ||
+        lower.contains('百度') ||
+        lower.contains('baidu') ||
+        RegExp(r'(^|[^a-z0-9])bd([^a-z0-9]|$)').hasMatch(lower)) {
+      return 'baidu';
+    }
+    if (lower.contains('阿狸') ||
+        lower.contains('阿里') ||
+        lower.contains('alipan') ||
+        lower.contains('aliyun') ||
+        RegExp(r'(^|[^a-z0-9])ali([^a-z0-9]|$)').hasMatch(lower)) {
+      return 'ali';
+    }
+    for (final ep in episodes.take(4)) {
+      final cp = ep.cloudProvider;
+      if (cp != null && defaultDriveOrder.contains(cp)) {
+        return cp;
+      }
+      final uri = Uri.tryParse(ep.url.trim());
+      if (uri != null) {
+        final host = uri.host.toLowerCase();
+        if (host == 'pan.quark.cn' ||
+            host == 'drive.quark.cn' ||
+            host.endsWith('.quark.cn')) {
+          return 'quark';
+        }
+        if (host == 'drive.uc.cn' || host.endsWith('.uc.cn')) {
+          return 'uc';
+        }
+        if (host == 'pan.baidu.com' || host == 'yun.baidu.com') {
+          return 'baidu';
+        }
+        if (host == 'www.alipan.com' ||
+            host == 'alipan.com' ||
+            host == 'www.aliyundrive.com' ||
+            host == 'aliyundrive.com') {
+          return 'ali';
+        }
+      }
+    }
+    return null;
+  }
+
+  static String driveShortLabelZh(String driveKey) => switch (driveKey) {
+    'quark' => '夸克',
+    'uc' => 'UC',
+    'baidu' => '百度',
+    'ali' => '阿里',
+    _ => driveKey,
+  };
+
+  static String driveAliasLabelZh(String driveKey) => switch (driveKey) {
+    'quark' => '夸父',
+    'uc' => '优汐',
+    'baidu' => '嘟嘟',
+    'ali' => '阿狸',
+    _ => driveKey,
+  };
   List<CmsDepot> getSavedDepots() {
     final raw = _prefs.getString(keyDepots) ?? '[]';
     try {
@@ -1701,6 +2049,7 @@ class StorageService {
       }
     }
     await saveSubscriptions(next);
+    _invalidateConfigCache();
     if (tombsChanged) {
       await _writeSyncTombstones(tombs);
     }
@@ -1726,6 +2075,7 @@ class StorageService {
           s,
     ];
     await saveSubscriptions(next);
+    _invalidateConfigCache();
     if (touchedPublic && webdavSyncSubs) {
       scheduleAutoWebdavSync(immediate: true, nowMs: now);
     }
@@ -2229,6 +2579,85 @@ class StorageService {
     );
     _cachedConfig = result;
     return result;
+  }
+
+  /// Returns all known sites across ALL persisted subscriptions (including
+  /// disabled subscriptions and hidden/removed sites) with active
+  /// [SiteOverride]s applied, preserving each site's original `sourceKey` and
+  /// `sourceApi` so offline download privacy checks never miss disabled or
+  /// API-overridden subscriptions.
+  List<CmsSite> loadAllKnownSitesForOfflinePrivacy() {
+    if (_cachedAllKnownOfflineSites != null) {
+      return _cachedAllKnownOfflineSites!;
+    }
+    final allSubs = getSubscriptions();
+    final aliases = _savedAliases();
+    final rawSites = <CmsSite>[];
+    if (_hasAuthoritativeSubscriptions) {
+      if (allSubs.isEmpty) {
+        _cachedAllKnownOfflineSites = const <CmsSite>[];
+        return _cachedAllKnownOfflineSites!;
+      }
+      final seenSiteKeys = <String>{};
+      for (final sub in allSubs) {
+        if (sub.rawContent.trim().isEmpty) continue;
+        try {
+          final parsed = CmsParser.parseConfig(
+            sub.rawContent,
+            origin: sub.url,
+            defaultGroup: sub.group,
+            isPrivate: sub.isEffectivelyPrivate,
+            subscriptionId: sub.id,
+            defaultName: sub.name,
+          );
+          for (final site in parsed.sites) {
+            var uniqueKey =
+                aliases[jsonEncode([sub.id, site.key, site.api])] ?? site.key;
+            if (!seenSiteKeys.add(uniqueKey)) {
+              uniqueKey = '${site.key}_${sub.id}';
+              seenSiteKeys.add(uniqueKey);
+            }
+            rawSites.add(
+              site.copyWith(
+                key: uniqueKey,
+                group: site.group.isEmpty ? sub.group : site.group,
+                isPrivate: site.isEffectivelyPrivate || sub.isEffectivelyPrivate,
+                subscriptionId: sub.id,
+              ),
+            );
+          }
+        } on Object catch (e) {
+          debugPrint(
+            'StorageService: skip malformed subscription ${sub.id} for offline privacy: $e',
+          );
+        }
+      }
+    } else {
+      final legacy = _loadImportedConfig();
+      if (legacy != null) {
+        rawSites.addAll(legacy.sites);
+      }
+    }
+    if (rawSites.isEmpty) {
+      _cachedAllKnownOfflineSites = const <CmsSite>[];
+      return _cachedAllKnownOfflineSites!;
+    }
+    final identities = _pickerIdentities(rawSites);
+    final rawOverrides = _readSiteOverrides();
+    final canonicalOverrides = <String, SiteOverride>{
+      for (final entry in rawOverrides.entries)
+        (identities[entry.key] ?? entry.key): entry.value,
+    };
+    final effective = <CmsSite>[
+      for (final s in rawSites)
+        (() {
+          final id = _siteIdentity(s);
+          final ov = canonicalOverrides[id];
+          return ov != null ? ov.applyTo(s) : s;
+        })(),
+    ];
+    _cachedAllKnownOfflineSites = List<CmsSite>.unmodifiable(effective);
+    return _cachedAllKnownOfflineSites!;
   }
 
   CmsConfig? _loadImportedConfig() {
@@ -2758,6 +3187,12 @@ class StorageService {
   Future<void> setPreferredQuality(String quality) async {
     await _prefs.setString(keyPreferredQuality, quality.trim());
   }
+  Future<void> setAutoHardwareQualityEnabled(bool enabled) async {
+    await _prefs.setBool(keyAutoHardwareQuality, enabled);
+  }
+  Future<void> setLastHardwareProfileSummary(String summary) async {
+    await _prefs.setString(keyLastHardwareProfileSummary, summary.trim());
+  }
   Future<void> setDefaultAspectMode(String mode) async {
     await _prefs.setString(keyDefaultAspectMode, mode.trim());
   }
@@ -2814,6 +3249,14 @@ class StorageService {
     await _prefs.setString(keyWindowsSearchLayout, normalized);
   }
 
+  Future<void> setWindowsWindowBounds(WindowsWindowBounds? bounds) async {
+    if (bounds == null || !bounds.isValid) {
+      await _prefs.remove(keyWindowsWindowBounds);
+      return;
+    }
+    await _prefs.setString(keyWindowsWindowBounds, bounds.toJsonString());
+  }
+
   Future<void> setTvAmbientTheme(String themeId) async {
     const allowed = {'aurora', 'twilight', 'ocean', 'amber', 'nebula', 'frost'};
     final normalized = themeId.trim().toLowerCase();
@@ -2836,63 +3279,183 @@ class StorageService {
     await _prefs.setBool(keyTvAmbientPosterSync, enabled);
   }
   /// Selects the recommended line index from [lines] based on [preferredQuality]
-  /// and the user's configured Netdisk drive order.
+  /// and the user's manually configured Netdisk drive priority ([effectiveDriveOrder]).
   int pickRecommendedLineIndex(List<CmsLine> lines) {
-    final preferred = lines.indexWhere((line) => line.name == preferredLineName && line.episodes.isNotEmpty);
+    final preferred = lines.indexWhere(
+      (line) => line.name == preferredLineName && line.episodes.isNotEmpty,
+    );
     if (preferred >= 0) return preferred;
     if (lines.isEmpty) return 0;
-    final pref = preferredQuality;
-    if (pref == 'auto') return 0;
-    bool isNetdiskLine(String name) {
-      final n = name.toLowerCase();
-      return n.contains('4k') ||
-          n.contains('原画') ||
-          n.contains('夸父') ||
-          n.contains('夸克') ||
-          n.contains('优汐') ||
-          n.contains('uc') ||
-          n.contains('嘟嘟') ||
-          n.contains('百度') ||
-          n.contains('阿狸') ||
-          n.contains('阿里');
+
+    int firstNonEmptyOrZero() {
+      final idx = lines.indexWhere((l) => l.episodes.isNotEmpty);
+      return idx >= 0 ? idx : 0;
     }
-    if (pref == '4k_netdisk') {
-      // First check according to driveOrder
-      for (final drive in driveOrder) {
-        final alias = switch (drive) {
-          'quark' => '夸',
-          'uc' => '优',
-          'baidu' => '嘟',
-          'ali' => '阿',
-          _ => '',
-        };
-        if (alias.isNotEmpty) {
-          final idx = lines.indexWhere((l) => l.name.contains(alias));
-          if (idx >= 0) return idx;
+
+    final pref = preferredQuality;
+    if (pref == 'default') {
+      return firstNonEmptyOrZero();
+    }
+    if (pref == 'auto' && !hasCustomDriveOrder && !hasAnyNetdiskLoggedIn) {
+      return firstNonEmptyOrZero();
+    }
+
+    bool isNetdiskLine(CmsLine line) {
+      if (detectNetdiskDriveKey(line.name, episodes: line.episodes) != null) {
+        return true;
+      }
+      for (final ep in line.episodes.take(4)) {
+        final uri = Uri.tryParse(ep.url.trim());
+        if (uri == null) continue;
+        final scheme = uri.scheme.toLowerCase();
+        if (scheme == 'mmcloud' ||
+            scheme == 'mmwogg' ||
+            scheme == 'mmquark' ||
+            scheme == 'push') {
+          return true;
+        }
+        final host = uri.host.toLowerCase();
+        if (host == 'cloud.189.cn' ||
+            host == '115.com' ||
+            host.endsWith('.115.com') ||
+            host.endsWith('.115cdn.com') ||
+            host == 'www.123pan.com' ||
+            host == '123pan.com' ||
+            host == 'www.123684.com' ||
+            host == 'pan.xunlei.com' ||
+            host == 'mypikpak.com') {
+          return true;
         }
       }
-      final idx = lines.indexWhere((l) => isNetdiskLine(l.name));
-      if (idx >= 0) return idx;
-    } else if (pref == '1080p_direct') {
-      final idx = lines.indexWhere(
-        (l) =>
-            !isNetdiskLine(l.name) &&
-            (l.name.contains('蓝光') ||
-                l.name.contains('超清') ||
-                l.name.contains('1080') ||
-                l.name.contains('暴风') ||
-                l.name.contains('天堂') ||
-                l.name.contains('非凡') ||
-                l.name.contains('量子')),
-      );
-      if (idx >= 0) return idx;
-      final nonNetdisk = lines.indexWhere((l) => !isNetdiskLine(l.name));
-      if (nonNetdisk >= 0) return nonNetdisk;
-    } else if (pref == 'fast_hls') {
-      final idx = lines.indexWhere((l) => !isNetdiskLine(l.name));
-      if (idx >= 0) return idx;
+      final n = line.name.toLowerCase();
+      return n.contains('网盘') ||
+          n.contains('云盘') ||
+          n.contains('天翼') ||
+          n.contains('115') ||
+          n.contains('123盘') ||
+          n.contains('迅雷') ||
+          n.contains('pikpak');
     }
-    return 0;
+
+    int qualityTierScore(CmsLine line) {
+      final n = line.name.toLowerCase();
+      final sampleUrl =
+          line.episodes.isNotEmpty ? line.episodes.first.url.toLowerCase() : '';
+      final sampleName =
+          line.episodes.isNotEmpty ? line.episodes.first.name.toLowerCase() : '';
+      final blob = '$n $sampleName';
+      if (blob.contains('原画') ||
+          blob.contains('4k') ||
+          blob.contains('2160') ||
+          blob.contains('uhd') ||
+          blob.contains('杜比') ||
+          blob.contains('hdr') ||
+          sampleUrl.contains('2160') ||
+          sampleUrl.contains('4k')) {
+        return 4;
+      }
+      if (blob.contains('蓝光') ||
+          blob.contains('1080') ||
+          blob.contains('fhd') ||
+          blob.contains('超清') ||
+          n.contains('暴风') ||
+          n.contains('天堂') ||
+          n.contains('非凡') ||
+          n.contains('量子')) {
+        return 3;
+      }
+      if (blob.contains('720') || blob.contains('高清') || blob.contains('hd')) {
+        return 2;
+      }
+      if (blob.contains('枪版') ||
+          blob.contains('抢先') ||
+          RegExp(r'(^|[^a-z])(ts|tc)([^a-z]|$)').hasMatch(blob)) {
+        return 0;
+      }
+      return 1;
+    }
+
+    int? pickHighestQuality(Iterable<int> candidates) {
+      int? bestIdx;
+      var bestScore = -1;
+      for (final idx in candidates) {
+        final score = qualityTierScore(lines[idx]);
+        if (score > bestScore) {
+          bestScore = score;
+          bestIdx = idx;
+        }
+      }
+      return bestIdx;
+    }
+
+    bool isHlsDirectLine(CmsLine line) {
+      if (isNetdiskLine(line)) return false;
+      final n = line.name.toLowerCase();
+      if (n.contains('m3u8') || n.contains('hls')) return true;
+      for (final ep in line.episodes.take(4)) {
+        final u = ep.url.toLowerCase();
+        if (u.contains('.m3u8') || u.contains('m3u8')) return true;
+      }
+      return false;
+    }
+
+    int? matchByDriveOrder() {
+      for (final drive in effectiveDriveOrder) {
+        final matching = <int>[
+          for (var i = 0; i < lines.length; i++)
+            if (lines[i].episodes.isNotEmpty &&
+                detectNetdiskDriveKey(lines[i].name, episodes: lines[i].episodes) ==
+                    drive)
+              i,
+        ];
+        final best = pickHighestQuality(matching);
+        if (best != null) return best;
+      }
+      for (final drive in effectiveDriveOrder) {
+        final idx = lines.indexWhere(
+          (l) => detectNetdiskDriveKey(l.name, episodes: l.episodes) == drive,
+        );
+        if (idx >= 0) return idx;
+      }
+      return null;
+    }
+
+    if (pref == '4k_netdisk' || pref == 'auto') {
+      final byDrive = matchByDriveOrder();
+      if (byDrive != null) return byDrive;
+      final otherNetdisk = pickHighestQuality([
+        for (var i = 0; i < lines.length; i++)
+          if (lines[i].episodes.isNotEmpty && isNetdiskLine(lines[i])) i,
+      ]);
+      if (otherNetdisk != null) return otherNetdisk;
+      final anyNetdisk = lines.indexWhere(isNetdiskLine);
+      if (anyNetdisk >= 0) return anyNetdisk;
+      final bestDirect = pickHighestQuality([
+        for (var i = 0; i < lines.length; i++)
+          if (lines[i].episodes.isNotEmpty) i,
+      ]);
+      return bestDirect ?? firstNonEmptyOrZero();
+    } else if (pref == '1080p_direct') {
+      final bestDirect = pickHighestQuality([
+        for (var i = 0; i < lines.length; i++)
+          if (lines[i].episodes.isNotEmpty && !isNetdiskLine(lines[i])) i,
+      ]);
+      if (bestDirect != null) return bestDirect;
+      return matchByDriveOrder() ?? firstNonEmptyOrZero();
+    } else if (pref == 'fast_hls') {
+      final bestHls = pickHighestQuality([
+        for (var i = 0; i < lines.length; i++)
+          if (lines[i].episodes.isNotEmpty && isHlsDirectLine(lines[i])) i,
+      ]);
+      if (bestHls != null) return bestHls;
+      final bestDirect = pickHighestQuality([
+        for (var i = 0; i < lines.length; i++)
+          if (lines[i].episodes.isNotEmpty && !isNetdiskLine(lines[i])) i,
+      ]);
+      if (bestDirect != null) return bestDirect;
+      return matchByDriveOrder() ?? firstNonEmptyOrZero();
+    }
+    return firstNonEmptyOrZero();
   }
   String getNetdiskCred(String driveKey) {
     switch (driveKey) {
@@ -2940,8 +3503,155 @@ class StorageService {
     }
     unawaited(CatPawHost.instance.syncNetdiskConfig());
   }
-  Future<void> setDriveOrder(List<String> order) async {
-    await _prefs.setStringList(keyDriveOrder, order);
+  /// Scores a multi-quality playback variant by resolution/codec quality tier.
+  static int rankQualityVariantScore(CmsEpisode v) {
+    final lower = '${v.name} ${v.url}'.toLowerCase();
+    if (lower.contains('原画') || lower.contains('raw') || lower.contains('original')) {
+      return 100;
+    }
+    if (lower.contains('4k') || lower.contains('2160') || lower.contains('uhd')) {
+      return 90;
+    }
+    if (lower.contains('2k') || lower.contains('1440')) {
+      return 80;
+    }
+    if (lower.contains('蓝光') || lower.contains('高码') || lower.contains('hdr')) {
+      return 75;
+    }
+    if (lower.contains('超清') || lower.contains('super') || lower.contains('1080')) {
+      return 60;
+    }
+    if (lower.contains('高清') || lower.contains('high') || lower.contains('720')) {
+      return 40;
+    }
+    if (lower.contains('标清') || lower.contains('low') || lower.contains('480')) {
+      return 20;
+    }
+    return 10;
+  }
+
+  static String? detectVariantNetdiskDriveKey(CmsEpisode v) {
+    final byName = detectNetdiskDriveKey(v.name, episodes: <CmsEpisode>[v]);
+    if (byName != null) return byName;
+    final lowerUrl = v.url.trim().toLowerCase();
+    if (lowerUrl.contains('quark.cn') || lowerUrl.contains('quarks')) {
+      return 'quark';
+    }
+    if (lowerUrl.contains('uc.cn') || lowerUrl.contains('drive.uc')) {
+      return 'uc';
+    }
+    if (lowerUrl.contains('baidu.com') || lowerUrl.contains('baidupcs')) {
+      return 'baidu';
+    }
+    if (lowerUrl.contains('aliyundrive') || lowerUrl.contains('alipan.com')) {
+      return 'ali';
+    }
+    return null;
+  }
+
+  /// Orders multi-quality playback [variants] according to [preferredQuality]
+  /// (`default`, `auto`, `4k_netdisk`, `1080p_direct`, `fast_hls`) and
+  /// [effectiveDriveOrder] (logged-in & manual netdisk provider priority),
+  /// while preserving original site order on ties or when `default` is selected.
+  List<CmsEpisode> orderQualityVariants(List<CmsEpisode> variants) {
+    if (variants.length <= 1) return List<CmsEpisode>.of(variants);
+    final pref = preferredQuality;
+    if (pref == 'default') {
+      return List<CmsEpisode>.of(variants);
+    }
+    if (pref == 'auto' && !hasCustomDriveOrder && !hasAnyNetdiskLoggedIn) {
+      return List<CmsEpisode>.of(variants);
+    }
+
+    final driveOrderList = effectiveDriveOrder;
+    final indexed = <({
+      CmsEpisode ep,
+      int origIdx,
+      int qualityScore,
+      String? driveKey,
+      bool isNetdisk,
+      int driveRank,
+    })>[];
+
+    for (var i = 0; i < variants.length; i++) {
+      final v = variants[i];
+      final dk = detectVariantNetdiskDriveKey(v);
+      final lower = v.name.toLowerCase();
+      final isNetdisk = dk != null || lower.contains('网盘');
+      final rank = dk != null ? driveOrderList.indexOf(dk) : -1;
+      indexed.add((
+        ep: v,
+        origIdx: i,
+        qualityScore: rankQualityVariantScore(v),
+        driveKey: dk,
+        isNetdisk: isNetdisk,
+        driveRank: rank >= 0 ? rank : 99,
+      ));
+    }
+
+    indexed.sort((a, b) {
+      if (pref == '1080p_direct' || pref == 'fast_hls') {
+        if (a.isNetdisk != b.isNetdisk) {
+          return a.isNetdisk ? 1 : -1;
+        }
+        if (!a.isNetdisk) {
+          final qCmp = b.qualityScore.compareTo(a.qualityScore);
+          if (qCmp != 0) return qCmp;
+          return a.origIdx.compareTo(b.origIdx);
+        }
+        final dCmp = a.driveRank.compareTo(b.driveRank);
+        if (dCmp != 0) return dCmp;
+        final qCmp = b.qualityScore.compareTo(a.qualityScore);
+        if (qCmp != 0) return qCmp;
+        return a.origIdx.compareTo(b.origIdx);
+      }
+
+      // `4k_netdisk` & `auto` (with custom/logged-in drive preference):
+      // Prefer highest quality tier first; within the same quality tier,
+      // prefer configured netdisk drive order (`effectiveDriveOrder`) over
+      // lower-priority providers, then preserve upstream order.
+      final qCmp = b.qualityScore.compareTo(a.qualityScore);
+      if (qCmp != 0) return qCmp;
+      if (a.driveRank != b.driveRank) {
+        return a.driveRank.compareTo(b.driveRank);
+      }
+      if (a.isNetdisk != b.isNetdisk) {
+        return a.isNetdisk ? -1 : 1;
+      }
+      return a.origIdx.compareTo(b.origIdx);
+    });
+
+    return indexed.map((e) => e.ep).toList(growable: false);
+  }
+
+  Future<void> setDriveOrder(
+    List<String> order, {
+    bool markCustomized = true,
+  }) async {
+    final normalized = <String>[];
+    for (final d in order) {
+      if (defaultDriveOrder.contains(d) && !normalized.contains(d)) {
+        normalized.add(d);
+      }
+    }
+    for (final d in defaultDriveOrder) {
+      if (!normalized.contains(d)) normalized.add(d);
+    }
+    await _prefs.setStringList(keyDriveOrder, normalized);
+    if (markCustomized) {
+      await _prefs.setBool(keyDriveOrderCustomized, true);
+    } else if (!_prefs.containsKey(keyDriveOrderCustomized)) {
+      await _prefs.setBool(keyDriveOrderCustomized, false);
+    }
+  }
+
+  Future<void> resetDriveOrder() async {
+    await _prefs.setStringList(keyDriveOrder, defaultDriveOrder);
+    await _prefs.setBool(keyDriveOrderCustomized, false);
+  }
+
+  Future<void> setPrioritizeLoggedInDrives(bool enabled) async {
+    await _prefs.setBool(keyPrioritizeLoggedInDrives, enabled);
   }
   Set<String> _privateSiteKeySet() {
     if (_cachedPrivateKeys != null) return _cachedPrivateKeys!;
@@ -2957,40 +3667,196 @@ class StorageService {
     _cachedPrivateKeys = keys;
     return keys;
   }
-  void _handleHistoryCorruption(String? rawCorruptString, {List<int>? rawBytes}) {
-    final alreadyCorrupted = _historyCorrupted;
+  static bool _bytesEqual(List<int>? a, List<int>? b) {
+    if (a == null || b == null || a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  static bool _isLosslessUtf8(String? text, List<int> rawBytes) {
+    if (text == null) return false;
+    return _bytesEqual(utf8.encode(text), rawBytes);
+  }
+
+  bool _hasQuarantineMatching(List<int> targetBytes, String? targetText) {
+    try {
+      for (final file in _fileStore.listFileNamesSync()) {
+        if (!file.startsWith('watch_history_corrupt_')) continue;
+        try {
+          if (_bytesEqual(_fileStore.readBytesSync(file), targetBytes)) {
+            return true;
+          }
+        } on Object {
+          // Skip unreadable archive candidate and continue scanning.
+        }
+      }
+    } on Object {
+      // Fall through to SharedPreferences quarantine check.
+    }
+    if (targetText != null &&
+        targetText.isNotEmpty &&
+        _isLosslessUtf8(targetText, targetBytes)) {
+      for (final key in _prefs.getKeys()) {
+        if (!key.startsWith('watch_history_corrupt_')) continue;
+        if (_unconfirmedQuarantinePrefKeys.contains(key)) continue;
+        final val = _prefs.getString(key);
+        if (val != null && _bytesEqual(utf8.encode(val), targetBytes)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  String _nextHistoryQuarantineBaseName() {
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    var base = 'watch_history_corrupt_$ts';
+    while (_fileStore.existsSync('$base.json') || _prefs.containsKey(base)) {
+      base = 'watch_history_corrupt_${ts}_${++_quarantineSequence}';
+    }
+    return base;
+  }
+
+  bool _handleHistoryCorruption(String? rawCorruptString, {List<int>? rawBytes}) {
     _historyCorrupted = true;
     historyCorruptionNotifier.value = true;
     unawaited(_prefs.setBool(keyHistoryCorrupted, true));
-    if (alreadyCorrupted) return;
-    final ts = DateTime.now().millisecondsSinceEpoch;
-    if (rawCorruptString != null && rawCorruptString.isNotEmpty) {
-      unawaited(_prefs.setString('watch_history_corrupt_$ts', rawCorruptString));
+
+    List<int>? bytesToQuarantine = rawBytes;
+    if (bytesToQuarantine == null &&
+        _fileStore.existsSync(_watchHistoryFileName)) {
+      try {
+        bytesToQuarantine = _fileStore.readBytesSync(_watchHistoryFileName);
+      } on Object catch (e) {
+        debugPrint('StorageService: read corrupt watch_history bytes failed: $e');
+      }
     }
+    String? stringToQuarantine = rawCorruptString;
+    if ((stringToQuarantine == null || stringToQuarantine.isEmpty) &&
+        bytesToQuarantine != null &&
+        bytesToQuarantine.isNotEmpty) {
+      stringToQuarantine = utf8.decode(bytesToQuarantine, allowMalformed: true);
+    }
+    final payloadBytes =
+        (bytesToQuarantine != null && bytesToQuarantine.isNotEmpty)
+            ? List<int>.unmodifiable(bytesToQuarantine)
+            : (stringToQuarantine != null && stringToQuarantine.isNotEmpty
+                  ? List<int>.unmodifiable(utf8.encode(stringToQuarantine))
+                  : null);
+    if (payloadBytes == null || payloadBytes.isEmpty) {
+      return false;
+    }
+    if (_bytesEqual(_quarantinedHistoryBytes, payloadBytes) ||
+        _hasQuarantineMatching(payloadBytes, stringToQuarantine)) {
+      _quarantinedHistoryBytes = payloadBytes;
+      return true;
+    }
+
+    final isLosslessUtf8 = _isLosslessUtf8(stringToQuarantine, payloadBytes);
+    final archiveBase = _nextHistoryQuarantineBaseName();
+    var confirmedFile = false;
     try {
-      List<int>? bytesToQuarantine = rawBytes;
-      if (bytesToQuarantine == null &&
-          _fileStore.existsSync(_watchHistoryFileName)) {
-        try {
-          bytesToQuarantine = _fileStore.readBytesSync(_watchHistoryFileName);
-        } on Object catch (e) {
-          debugPrint('StorageService: read corrupt watch_history bytes failed: $e');
-        }
-      }
-      if (bytesToQuarantine != null && bytesToQuarantine.isNotEmpty) {
-        _fileStore.writeBytesSync(
-          'watch_history_corrupt_$ts.json',
-          bytesToQuarantine,
-        );
-      } else if (rawCorruptString != null && rawCorruptString.isNotEmpty) {
-        _fileStore.writeBytesSync(
-          'watch_history_corrupt_$ts.json',
-          utf8.encode(rawCorruptString),
-        );
-      }
+      _fileStore.writeBytesSync('$archiveBase.json', payloadBytes);
+      confirmedFile = true;
+      _quarantinedHistoryBytes = payloadBytes;
     } on Object catch (e) {
       debugPrint('StorageService: quarantine watch_history failed: $e');
     }
+    if (stringToQuarantine != null && stringToQuarantine.isNotEmpty) {
+      // Only confirm the prefs quarantine after the asynchronous write resolves
+      // to `true` AND the UTF-8 string round-trips the exact raw bytes losslessly;
+      // lossy replacement text (e.g. malformed UTF-8 -> U+FFFD) is written only as
+      // a best-effort diagnostic copy and never satisfies exact-byte quarantine.
+      _unconfirmedQuarantinePrefKeys.add(archiveBase);
+      unawaited(
+        _prefs.setString(archiveBase, stringToQuarantine).then(
+          (ok) {
+            if (ok) {
+              _unconfirmedQuarantinePrefKeys.remove(archiveBase);
+              if (isLosslessUtf8) {
+                _quarantinedHistoryBytes = payloadBytes;
+              }
+            }
+          },
+          onError: (_) {},
+        ),
+      );
+    }
+    return confirmedFile;
+  }
+
+  /// Ensures the CURRENT local watch-history bytes are confirmed preserved
+  /// byte-for-byte in a quarantine archive before an explicit backup restore
+  /// overwrites `watch_history.json` after a prior corruption/read failure.
+  /// Older archives, unconfirmed async writes, or lossy UTF-8 replacement text
+  /// do NOT satisfy this check.
+  Future<bool> _ensureHistoryQuarantinedBeforeOverwrite() async {
+    final fileExists = _fileStore.existsSync(_watchHistoryFileName);
+    final rawPrefs = _prefs.getString(keyWatchHistory);
+    if (!fileExists && (rawPrefs == null || rawPrefs.trim().isEmpty)) {
+      return true;
+    }
+
+    List<int>? bytesToQuarantine;
+    if (fileExists) {
+      try {
+        bytesToQuarantine = _fileStore.readBytesSync(_watchHistoryFileName);
+      } on Object catch (e) {
+        debugPrint(
+          'StorageService: retry read corrupt watch_history bytes failed: $e',
+        );
+        return false;
+      }
+    }
+    final stringToQuarantine =
+        (bytesToQuarantine != null && bytesToQuarantine.isNotEmpty)
+            ? utf8.decode(bytesToQuarantine, allowMalformed: true)
+            : rawPrefs;
+    final payloadBytes =
+        (bytesToQuarantine != null && bytesToQuarantine.isNotEmpty)
+            ? List<int>.unmodifiable(bytesToQuarantine)
+            : (stringToQuarantine != null && stringToQuarantine.isNotEmpty
+                  ? List<int>.unmodifiable(utf8.encode(stringToQuarantine))
+                  : null);
+    if (payloadBytes == null || payloadBytes.isEmpty) {
+      return true;
+    }
+    if (_bytesEqual(_quarantinedHistoryBytes, payloadBytes) ||
+        _hasQuarantineMatching(payloadBytes, stringToQuarantine)) {
+      _quarantinedHistoryBytes = payloadBytes;
+      return true;
+    }
+
+    final isLosslessUtf8 = _isLosslessUtf8(stringToQuarantine, payloadBytes);
+    final archiveBase = _nextHistoryQuarantineBaseName();
+    var savedFile = false;
+    var savedPrefs = false;
+    try {
+      _fileStore.writeBytesSync('$archiveBase.json', payloadBytes);
+      savedFile = true;
+    } on Object catch (e) {
+      debugPrint('StorageService: retry quarantine file write failed: $e');
+    }
+    if (stringToQuarantine != null &&
+        stringToQuarantine.isNotEmpty &&
+        (isLosslessUtf8 || !savedFile)) {
+      _unconfirmedQuarantinePrefKeys.add(archiveBase);
+      try {
+        savedPrefs = await _prefs.setString(archiveBase, stringToQuarantine);
+        if (savedPrefs) {
+          _unconfirmedQuarantinePrefKeys.remove(archiveBase);
+        }
+      } on Object catch (e) {
+        debugPrint('StorageService: retry quarantine prefs write failed: $e');
+      }
+    }
+    if (savedFile || (savedPrefs && isLosslessUtf8)) {
+      _quarantinedHistoryBytes = payloadBytes;
+      return true;
+    }
+    return false;
   }
 
   List<WatchHistoryEntry> _readRawWatchHistory() {
@@ -2999,7 +3865,9 @@ class StorageService {
       _allHistoryCache = const [];
       return const [];
     }
-    if (_fileStore.existsSync(_watchHistoryFileName)) {
+    final preferPrefsFallback =
+        _prefs.getBool(keyWatchHistoryPrefsPendingFlush) == true;
+    if (!preferPrefsFallback && _fileStore.existsSync(_watchHistoryFileName)) {
       List<int>? rawBytes;
       try {
         rawBytes = _fileStore.readBytesSync(_watchHistoryFileName);
@@ -3016,12 +3884,25 @@ class StorageService {
         if (decoded is! List) {
           throw const FormatException('watch_history is not a JSON array');
         }
+        var needsSanitizeFlush = false;
         final entries = decoded
             .whereType<Map>()
-            .map((m) => WatchHistoryEntry.fromJson(Map<String, dynamic>.from(m)))
+            .map((m) {
+              if ((m['episodeUrl'] ?? '').toString().trim().isNotEmpty) {
+                needsSanitizeFlush = true;
+              }
+              final rawMid = (m['episodeMediaId'] ?? '').toString().trim();
+              if (rawMid.isNotEmpty && !WatchHistoryEntry.isCanonicalMediaId(rawMid)) {
+                needsSanitizeFlush = true;
+              }
+              return WatchHistoryEntry.fromJson(Map<String, dynamic>.from(m));
+            })
             .where((e) => e.site.isNotEmpty && e.id.isNotEmpty)
             .toList();
         _allHistoryCache = entries;
+        if (needsSanitizeFlush) {
+          _scheduleHistorySelfHealFlush();
+        }
         return entries;
       } on Object catch (e) {
         debugPrint('StorageService: _readRawWatchHistory file failed: $e');
@@ -3044,6 +3925,9 @@ class StorageService {
     final raw = _prefs.getString(keyWatchHistory);
     if (raw == null || raw.trim().isEmpty || raw.trim() == '[]') {
       _allHistoryCache = const [];
+      if (preferPrefsFallback) {
+        _scheduleHistorySelfHealFlush();
+      }
       return const [];
     }
     try {
@@ -3051,12 +3935,25 @@ class StorageService {
       if (decoded is! List) {
         throw const FormatException('watch_history is not a JSON array');
       }
+      var needsSanitizeFlush = preferPrefsFallback;
       final entries = decoded
           .whereType<Map>()
-          .map((m) => WatchHistoryEntry.fromJson(Map<String, dynamic>.from(m)))
+          .map((m) {
+            if ((m['episodeUrl'] ?? '').toString().trim().isNotEmpty) {
+              needsSanitizeFlush = true;
+            }
+            final rawMid = (m['episodeMediaId'] ?? '').toString().trim();
+            if (rawMid.isNotEmpty && !WatchHistoryEntry.isCanonicalMediaId(rawMid)) {
+              needsSanitizeFlush = true;
+            }
+            return WatchHistoryEntry.fromJson(Map<String, dynamic>.from(m));
+          })
           .where((e) => e.site.isNotEmpty && e.id.isNotEmpty)
           .toList();
       _allHistoryCache = entries;
+      if (needsSanitizeFlush) {
+        _scheduleHistorySelfHealFlush();
+      }
       return entries;
     } on Object catch (e) {
       debugPrint('StorageService: _readRawWatchHistory prefs failed: $e');
@@ -3079,13 +3976,65 @@ class StorageService {
     return result;
   }
 
+  /// Serializes background history self-heal/migration flushes through
+  /// `_runSequentialMutation` with a write-epoch check so a slow/stale heal
+  /// snapshot can NEVER race with or overwrite a subsequent `clearWatchHistory`,
+  /// `removeWatchHistoryItem`, `upsertWatchHistory`, or `importBackupJson`.
+  void _scheduleHistorySelfHealFlush() {
+    final expectedEpoch = _historyWriteEpoch;
+    unawaited(
+      _runSequentialMutation(() async {
+        if (_historyCorrupted || _historyWriteEpoch != expectedEpoch) return;
+        await _flushHistoryToDisk();
+      }).catchError((_) {}),
+    );
+  }
+
   Future<void> _flushHistoryToDisk() async {
     if (_historyCorrupted) return;
     final list = _allHistoryCache ?? _readRawWatchHistory();
     final jsonStr = jsonEncode(list.map((e) => e.toJson()).toList());
     await _atomicWriteFile(_watchHistoryFileName, jsonStr);
-    // Keep watch_history mirror in prefs after file write succeeds (M-F3).
-    await _prefs.setString(keyWatchHistory, jsonStr);
+    // Primary `watch_history.json` is now durably committed on disk.
+    // Keep the secondary SharedPreferences mirror best-effort so a mirror
+    // failure never falsely reports rollback while disk has already committed.
+    try {
+      await _prefs.setString(keyWatchHistory, jsonStr);
+    } on Object catch (e) {
+      debugPrint('StorageService: watch_history prefs mirror skipped: $e');
+    }
+    if (_prefs.getBool(keyWatchHistoryPrefsPendingFlush) == true) {
+      final cleared =
+          await _prefs.setBool(keyWatchHistoryPrefsPendingFlush, false);
+      if (!cleared) {
+        throw StateError('无法清除观看历史待回刷标记');
+      }
+    }
+  }
+
+  void _scheduleDeferredHistoryFlush({bool triggerSync = false}) {
+    if (triggerSync) {
+      _historyFlushShouldSync = true;
+    }
+    if (_historyFlushTimer != null && _historyFlushTimer!.isActive) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final elapsed = now - _lastHistoryDiskWriteMs;
+    final remainingMs = elapsed >= 30000 ? 0 : (30000 - elapsed).clamp(0, 30000);
+    _historyFlushTimer = Timer(Duration(milliseconds: remainingMs), () {
+      _runSequentialMutation(() async {
+        _historyFlushTimer = null;
+        if (_historyDirty && !_historyCorrupted) {
+          final shouldSync = _historyFlushShouldSync;
+          await _flushHistoryToDisk();
+          _lastHistoryDiskWriteMs = DateTime.now().millisecondsSinceEpoch;
+          _historyDirty = false;
+          _historyFlushShouldSync = false;
+          if (shouldSync) {
+            scheduleAutoWebdavSync();
+          }
+        }
+      });
+    });
   }
 
   Future<void> _handleHistoryPersistence({
@@ -3102,6 +4051,7 @@ class StorageService {
       await _flushHistoryToDisk();
       _lastHistoryDiskWriteMs = now;
       _historyDirty = false;
+      _historyFlushShouldSync = false;
       if (!isPrivate && triggerSync) {
         scheduleAutoWebdavSync(immediate: effectiveSyncImmediate, nowMs: now);
       }
@@ -3114,26 +4064,13 @@ class StorageService {
       await _flushHistoryToDisk();
       _lastHistoryDiskWriteMs = now;
       _historyDirty = false;
+      _historyFlushShouldSync = false;
       if (!isPrivate && triggerSync) {
         scheduleAutoWebdavSync(immediate: effectiveSyncImmediate, nowMs: now);
       }
     } else {
       _historyDirty = true;
-      if (_historyFlushTimer == null || !_historyFlushTimer!.isActive) {
-        final remainingMs = 30000 - (now - _lastHistoryDiskWriteMs);
-        _historyFlushTimer = Timer(Duration(milliseconds: remainingMs), () {
-          _runSequentialMutation(() async {
-            if (_historyDirty) {
-              await _flushHistoryToDisk();
-              _lastHistoryDiskWriteMs = DateTime.now().millisecondsSinceEpoch;
-              _historyDirty = false;
-              if (!isPrivate && triggerSync) {
-                scheduleAutoWebdavSync();
-              }
-            }
-          });
-        });
-      }
+      _scheduleDeferredHistoryFlush(triggerSync: !isPrivate && triggerSync);
     }
   }
 
@@ -3152,6 +4089,7 @@ class StorageService {
         await _flushHistoryToDisk();
         _lastHistoryDiskWriteMs = DateTime.now().millisecondsSinceEpoch;
         _historyDirty = false;
+        _historyFlushShouldSync = false;
       }
     });
   }
@@ -3182,6 +4120,7 @@ class StorageService {
           combined.removeRange(CmsParser.maxHistoryEntries, combined.length);
         }
         _allHistoryCache = combined;
+        _historyWriteEpoch++;
         watchHistoryRevision.value++;
         await _handleHistoryPersistence(
           immediate: immediate,
@@ -3200,6 +4139,7 @@ class StorageService {
       }
       _allHistoryCache = combined;
       _historyCache = List.unmodifiable(updatedPublic);
+      _historyWriteEpoch++;
       watchHistoryRevision.value++;
       await _handleHistoryPersistence(
         immediate: immediate,
@@ -3210,25 +4150,111 @@ class StorageService {
     });
   }
 
+  /// Restores a previously deleted watch-history entry (e.g. Undo) with a
+  /// strictly newer sync revision timestamp than any prior deletion tombstone
+  /// while preserving the user's exact playback position, duration, and media
+  /// identity so subsequent cross-device sync converges to the restored state.
+  Future<void> restoreWatchHistoryEntry(WatchHistoryEntry entry) {
+    return _runSequentialMutation(() async {
+      if (_historyCorrupted) return;
+      final tombs = _readSyncTombstones();
+      final tombKey = 'hist:${entry.key}';
+      final prevTomb = tombs[tombKey] ?? 0;
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      var restoredUpdated = nowMs;
+      if (entry.updated + 1 > restoredUpdated) {
+        restoredUpdated = entry.updated + 1;
+      }
+      if (prevTomb + 1 > restoredUpdated) {
+        restoredUpdated = prevTomb + 1;
+      }
+      if (tombs.remove(tombKey) != null) {
+        await _writeSyncTombstones(tombs);
+      }
+      final restored = WatchHistoryEntry(
+        site: entry.site,
+        id: entry.id,
+        title: entry.title,
+        poster: entry.poster,
+        line: entry.line,
+        lineId: entry.lineId,
+        episode: entry.episode,
+        episodeMediaId: entry.effectiveMediaId,
+        index: entry.index,
+        position: entry.position,
+        duration: entry.duration,
+        updated: restoredUpdated,
+      );
+      final privKeys = _privateSiteKeySet();
+      final isPrivate = privKeys.contains(restored.site);
+      final allRaw = _allHistoryCache ?? _readRawWatchHistory();
+      if (isPrivate) {
+        final combined = CmsParser.upsertHistory(allRaw, restored);
+        _allHistoryCache = combined;
+        _historyCache = null;
+        _historyWriteEpoch++;
+        watchHistoryRevision.value++;
+        await _handleHistoryPersistence(
+          immediate: true,
+          isPrivate: true,
+          triggerSync: false,
+          syncImmediate: false,
+        );
+        return;
+      }
+      final localPublic =
+          allRaw.where((e) => !privKeys.contains(e.site)).toList();
+      final localPrivate =
+          allRaw.where((e) => privKeys.contains(e.site)).toList();
+      final updatedPublic = CmsParser.upsertHistory(localPublic, restored);
+      final combined = [...updatedPublic, ...localPrivate]
+        ..sort((a, b) => b.updated.compareTo(a.updated));
+      if (combined.length > CmsParser.maxHistoryEntries) {
+        combined.removeRange(CmsParser.maxHistoryEntries, combined.length);
+      }
+      _allHistoryCache = combined;
+      _historyCache = List.unmodifiable(updatedPublic);
+      _historyWriteEpoch++;
+      watchHistoryRevision.value++;
+      await _handleHistoryPersistence(
+        immediate: true,
+        isPrivate: false,
+        triggerSync: true,
+        syncImmediate: true,
+      );
+    });
+  }
+
   Future<void> removeWatchHistoryItem(String siteKey, String videoId) {
     return _runSequentialMutation(() async {
       if (_historyCorrupted) return;
       final targetKey = '$siteKey\n$videoId';
       final allRaw = _allHistoryCache ?? _readRawWatchHistory();
+      var maxRemovedUpdated = 0;
+      for (final e in allRaw) {
+        if (e.key == targetKey && e.updated > maxRemovedUpdated) {
+          maxRemovedUpdated = e.updated;
+        }
+      }
+      final tombs = _readSyncTombstones();
+      final prevTomb = tombs['hist:$targetKey'] ?? 0;
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      final deleteRev = max(
+        nowMs,
+        max(maxRemovedUpdated + 1, prevTomb + 1),
+      );
       final updated =
           allRaw.where((e) => e.key != targetKey).toList(growable: false);
       _historyCache = null;
       _allHistoryCache = updated;
+      _historyWriteEpoch++;
       _historyFlushTimer?.cancel();
       _historyFlushTimer = null;
       _historyDirty = false;
       await _flushHistoryToDisk();
-      _lastHistoryDiskWriteMs = DateTime.now().millisecondsSinceEpoch;
+      _lastHistoryDiskWriteMs = nowMs;
       watchHistoryRevision.value++;
-      await _recordSyncTombstone(
-        'hist:$targetKey',
-        DateTime.now().millisecondsSinceEpoch,
-      );
+      await _recordSyncTombstone('hist:$targetKey', deleteRev);
       if (!_privateSiteKeySet().contains(siteKey)) {
         scheduleAutoWebdavSync(immediate: true);
       }
@@ -3242,7 +4268,9 @@ class StorageService {
       if (existing.isNotEmpty) {
         final tombs = _readSyncTombstones();
         for (final e in existing) {
-          tombs['hist:${e.key}'] = now;
+          final k = 'hist:${e.key}';
+          final prevTomb = tombs[k] ?? 0;
+          tombs[k] = max(now, max(e.updated + 1, prevTomb + 1));
         }
         await _writeSyncTombstones(tombs);
       }
@@ -3251,7 +4279,9 @@ class StorageService {
       _historyDirty = false;
       _historyCache = const [];
       _allHistoryCache = const [];
+      _historyWriteEpoch++;
       _historyCorrupted = false;
+      _quarantinedHistoryBytes = null;
       historyCorruptionNotifier.value = false;
       await _prefs.setBool(keyHistoryCorrupted, false);
       await _flushHistoryToDisk();
@@ -3799,7 +4829,6 @@ class StorageService {
         }
       }
     }
-    if (windowsAppearance != null) await WindowsAppearancePreferences.restore(_prefs, windowsAppearance);
     for (final key in _appearanceStrings) {
       if (settings.containsKey(key) && settings[key] is! String) throw const FormatException('外观设置格式无效');
     }
@@ -3841,156 +4870,583 @@ class StorageService {
                 !incomingIds.contains((jsonDecode(identity) as List).first)))) {
       throw const FormatException('线路管理记录与订阅不匹配');
     }
-    if (updatedSubs != null || incoming.isNotEmpty) {
-      final privateSubs = getSubscriptions().where((s) => s.isEffectivelyPrivate).toList();
-      final privateIds = privateSubs.map((s) => s.id).toSet();
-      if (incoming.any((s) => privateIds.contains(s.id))) throw const FormatException('订阅标识冲突');
-      await saveSubscriptions([...incoming, ...privateSubs]);
-      if (incoming.isEmpty) {
-        await _prefs.remove(keyRawConfig);
-        await _prefs.remove(keyOrigin);
+
+    // Validate & prepare watch-history payload BEFORE mutating any preference
+    // or file on disk so a failure anywhere in the bundle rolls back atomically.
+    List<WatchHistoryEntry>? parsedHistoryEntries;
+    String? sanitizedHistoryJson;
+    if (nextHistory != null) {
+      final decodedHist = jsonDecode(nextHistory);
+      if (decodedHist is List) {
+        final entries = decodedHist
+            .whereType<Map>()
+            .map((m) => WatchHistoryEntry.fromJson(Map<String, dynamic>.from(m)))
+            .where((e) => e.site.isNotEmpty && e.id.isNotEmpty)
+            .toList();
+        parsedHistoryEntries = entries;
+        sanitizedHistoryJson =
+            jsonEncode(entries.map((e) => e.toJson()).toList());
       }
     }
-    final privateSubIds = getSubscriptions().where((s) => s.isEffectivelyPrivate).map((s) => s.id).toSet();
-    final retainedAliases = _savedAliases()..removeWhere((key, _) {
-      try {
-        return !privateSubIds.contains((jsonDecode(key) as List).first);
-      } on Object catch (e) {
-        debugPrint('StorageService: prune invalid site alias key: $e');
+
+    final prevCorrupted = _historyCorrupted;
+    final prevQuarantinedBytes = _quarantinedHistoryBytes;
+    final prevAllCache = _allHistoryCache;
+    final prevPublicCache = _historyCache;
+    final prevDirty = _historyDirty;
+    final prevLastHistoryDiskWriteMs = _lastHistoryDiskWriteMs;
+    final prevHistoryFlushShouldSync = _historyFlushShouldSync;
+    final prevSubsCache = _subscriptionsCache;
+
+    if (sanitizedHistoryJson != null && prevCorrupted) {
+      // Retry quarantine before mutating any state or overwriting
+      // `watch_history.json` in case the initial corruption detection happened
+      // while the file was temporarily unreadable or only a lossy prefs copy
+      // could be written.
+      final quarantined = await _ensureHistoryQuarantinedBeforeOverwrite();
+      if (!quarantined) {
+        throw StateError('原观看历史文件尚未完成隔离保全，已中止导入覆盖');
+      }
+    }
+
+    // Track ONLY preference keys actually mutated by this backup transaction
+    // (recording both pre-transaction state and the value written by this
+    // transaction). On rollback, ONLY undo keys owned by this transaction so
+    // concurrent independent user changes (such as WebDAV sync toggles) are
+    // never clobbered.
+    final txOrigPrefs = <String, ({bool existed, Object? value})>{};
+    final txWrittenPrefs = <String, ({bool removed, Object? value})>{};
+    final txWriteEpochs = <String, int>{};
+
+    bool prefValEquals(Object? a, Object? b) {
+      if (a is List && b is List) {
+        if (a.length != b.length) return false;
+        for (var i = 0; i < a.length; i++) {
+          if (a[i] != b[i]) return false;
+        }
         return true;
       }
-    });
-    retainedAliases.addAll(aliases);
-    await _prefs.setString(_siteAliases, jsonEncode(retainedAliases));
-    for (final entry in pickerEdits.entries) {
-      final retainedPrivate = (_prefs.getStringList(entry.key) ?? []).where(privateIdentities.contains);
-      await _prefs.setStringList(entry.key, [...entry.value, ...retainedPrivate]);
+      return a == b;
     }
-    if (incomingOverrides != null) {
-      final retainedPrivateOverrides = <String, Map<String, dynamic>>{};
-      for (final entry in _readSiteOverrides().entries) {
-        if (privateIdentities.contains(entry.key)) {
-          retainedPrivateOverrides[entry.key] = entry.value.toJson();
+
+    void recordPrefTouch(
+      String key, {
+      bool removed = false,
+      Object? nextValue,
+    }) {
+      txOrigPrefs.putIfAbsent(
+        key,
+        () => (
+          existed: _prefs.containsKey(key),
+          value: _prefs.get(key),
+        ),
+      );
+      txWrittenPrefs[key] = (removed: removed, value: nextValue);
+      txWriteEpochs[key] = _prefs.epochOf(key);
+    }
+
+    Future<void> setPrefStringChecked(
+      String key,
+      String value,
+      String label,
+    ) async {
+      recordPrefTouch(key, nextValue: value);
+      final ok = await _prefs.setString(key, value);
+      if (!ok) throw StateError('无法持久化$label');
+      txWriteEpochs[key] = _prefs.epochOf(key);
+    }
+
+    Future<void> setPrefBoolChecked(
+      String key,
+      bool value,
+      String label,
+    ) async {
+      recordPrefTouch(key, nextValue: value);
+      final ok = await _prefs.setBool(key, value);
+      if (!ok) throw StateError('无法持久化$label');
+      txWriteEpochs[key] = _prefs.epochOf(key);
+    }
+
+    Future<void> setPrefIntChecked(
+      String key,
+      int value,
+      String label,
+    ) async {
+      recordPrefTouch(key, nextValue: value);
+      final ok = await _prefs.setInt(key, value);
+      if (!ok) throw StateError('无法持久化$label');
+      txWriteEpochs[key] = _prefs.epochOf(key);
+    }
+
+    Future<void> setPrefDoubleChecked(
+      String key,
+      double value,
+      String label,
+    ) async {
+      recordPrefTouch(key, nextValue: value);
+      final ok = await _prefs.setDouble(key, value);
+      if (!ok) throw StateError('无法持久化$label');
+      txWriteEpochs[key] = _prefs.epochOf(key);
+    }
+
+    Future<void> setPrefStringListChecked(
+      String key,
+      List<String> value,
+      String label,
+    ) async {
+      final copy = List<String>.unmodifiable(value);
+      recordPrefTouch(key, nextValue: copy);
+      final ok = await _prefs.setStringList(key, copy);
+      if (!ok) throw StateError('无法持久化$label');
+      txWriteEpochs[key] = _prefs.epochOf(key);
+    }
+
+    Future<void> removePrefChecked(String key, String label) async {
+      recordPrefTouch(key, removed: true);
+      final ok = await _prefs.remove(key);
+      if (!ok) throw StateError('无法清除$label');
+      txWriteEpochs[key] = _prefs.epochOf(key);
+    }
+
+    final hadPrevHistoryFile = _fileStore.existsSync(_watchHistoryFileName);
+    List<int>? prevHistoryDiskBytes;
+    if (hadPrevHistoryFile) {
+      try {
+        prevHistoryDiskBytes = List<int>.unmodifiable(
+          _fileStore.readBytesSync(_watchHistoryFileName),
+        );
+      } on Object {
+        prevHistoryDiskBytes = null;
+      }
+    }
+    final hadPrevSubsFile = _fileStore.existsSync(_subscriptionsFileName);
+    List<int>? prevSubsDiskBytes;
+    if (hadPrevSubsFile) {
+      try {
+        prevSubsDiskBytes = List<int>.unmodifiable(
+          _fileStore.readBytesSync(_subscriptionsFileName),
+        );
+      } on Object {
+        prevSubsDiskBytes = null;
+      }
+    }
+
+    var historyDiskCommitted = false;
+    var historyStateMutated = false;
+    var subsDiskCommitted = false;
+
+    Future<void> rollbackBackupImport() async {
+      if (historyDiskCommitted) {
+        try {
+          if (prevHistoryDiskBytes != null) {
+            _fileStore.writeBytesSync(
+              _watchHistoryFileName,
+              prevHistoryDiskBytes,
+            );
+          } else if (!hadPrevHistoryFile) {
+            await _fileStore.deleteFile(_watchHistoryFileName);
+          }
+        } on Object catch (e) {
+          debugPrint('StorageService: rollback watch_history.json failed: $e');
         }
       }
-      for (final entry in incomingOverrides.entries) {
-        retainedPrivateOverrides[entry.key] = entry.value.toJson();
-      }
-      await _prefs.setString(_siteOverrides, jsonEncode(retainedPrivateOverrides));
-    }
-    for (final key in _appearanceStrings) {
-      if (settings[key] is String) await _prefs.setString(key, settings[key] as String);
-    }
-    for (final key in _appearanceBooleans) {
-      if (settings[key] is bool) await _prefs.setBool(key, settings[key] as bool);
-    }
-    for (final key in [keySkipIntroSec, keySkipOutroSec]) {
-      final value = settings[key];
-      if (value is int && value >= 0 && value <= 600) await _prefs.setInt(key, value);
-    }
-    if (['off','one','all'].contains(settings[keyRepeatMode])) await setRepeatMode(settings[keyRepeatMode] as String);
-    CmsConfig? parsedConfig = decoded.parsedConfig;
-    if (decoded.rawConfig.isNotEmpty) {
-      await _prefs.setString(keyRawConfig, decoded.rawConfig);
-      await _prefs.setString(keyOrigin, decoded.origin);
-      if (parsedConfig != null) {
-        final availSites = parsedConfig.publicAvailableSites;
-        if (!availSites.any((s) => s.key == selectedSiteKey)) {
-          if (availSites.isNotEmpty) {
-            final fallbackSite = availSites.firstWhere(
-              (s) => !CspBridge.isBannerNoticeSite(s),
-              orElse: () => availSites.first,
+      if (subsDiskCommitted) {
+        try {
+          if (prevSubsDiskBytes != null) {
+            _fileStore.writeBytesSync(
+              _subscriptionsFileName,
+              prevSubsDiskBytes,
             );
-            await _prefs.setString(keySelectedSite, fallbackSite.key);
+          } else if (!hadPrevSubsFile) {
+            await _fileStore.deleteFile(_subscriptionsFileName);
+          }
+        } on Object catch (e) {
+          debugPrint('StorageService: rollback subscriptions.json failed: $e');
+        }
+      }
+
+      var needsPrefsReload = false;
+      for (final entry in txOrigPrefs.entries) {
+        final key = entry.key;
+        final orig = entry.value;
+        final written = txWrittenPrefs[key];
+        final txEpoch = txWriteEpochs[key];
+        final curExists = _prefs.containsKey(key);
+        final curVal = _prefs.get(key);
+        // Preserve any concurrent user write that superseded this transaction's
+        // write while we were suspended on async I/O—including when the user
+        // later wrote the exact same value (such as clearing search history to
+        // `[]` after the backup also wrote `[]`).
+        if (txEpoch != null && _prefs.epochOf(key) != txEpoch) {
+          continue;
+        }
+        if (written != null) {
+          if (written.removed) {
+            if (curExists && (!orig.existed || !prefValEquals(curVal, orig.value))) {
+              continue;
+            }
           } else {
-            await _prefs.setString(keySelectedSite, '');
+            if (curExists &&
+                !prefValEquals(curVal, written.value) &&
+                (!orig.existed || !prefValEquals(curVal, orig.value))) {
+              continue;
+            }
+          }
+        }
+        if (!orig.existed && !curExists) continue;
+        if (orig.existed && curExists && prefValEquals(curVal, orig.value)) {
+          continue;
+        }
+        try {
+          bool ok = true;
+          if (!orig.existed || orig.value == null) {
+            ok = await _prefs.remove(key);
+          } else if (orig.value is String) {
+            ok = await _prefs.setString(key, orig.value as String);
+          } else if (orig.value is bool) {
+            ok = await _prefs.setBool(key, orig.value as bool);
+          } else if (orig.value is int) {
+            ok = await _prefs.setInt(key, orig.value as int);
+          } else if (orig.value is double) {
+            ok = await _prefs.setDouble(key, orig.value as double);
+          } else if (orig.value is List<String>) {
+            ok = await _prefs.setStringList(key, orig.value as List<String>);
+          } else if (orig.value is List) {
+            ok = await _prefs.setStringList(
+              key,
+              (orig.value as List).map((e) => '$e').toList(),
+            );
+          }
+          if (!ok) needsPrefsReload = true;
+        } on Object catch (_) {
+          needsPrefsReload = true;
+        }
+      }
+      if (needsPrefsReload) {
+        try {
+          await _prefs.reload();
+        } on Object catch (_) {}
+      }
+
+      _invalidateConfigCache();
+      _subscriptionsCache = prevSubsCache;
+      if (historyStateMutated) {
+        _allHistoryCache = prevAllCache;
+        _historyCache = prevPublicCache;
+        _historyDirty = prevDirty;
+        _lastHistoryDiskWriteMs = prevLastHistoryDiskWriteMs;
+        _historyFlushShouldSync = prevHistoryFlushShouldSync;
+        _historyCorrupted = prevCorrupted;
+        _quarantinedHistoryBytes = prevQuarantinedBytes;
+        historyCorruptionNotifier.value = prevCorrupted;
+        _historyWriteEpoch++;
+        if (prevDirty && !prevCorrupted) {
+          _scheduleDeferredHistoryFlush(
+            triggerSync: prevHistoryFlushShouldSync,
+          );
+        }
+      }
+    }
+
+    try {
+      if (windowsAppearance != null) {
+        await WindowsAppearancePreferences.restore(
+          _prefs,
+          windowsAppearance,
+          setString: setPrefStringChecked,
+          setDouble: setPrefDoubleChecked,
+        );
+      }
+      if (updatedSubs != null || incoming.isNotEmpty) {
+        final privateSubs =
+            getSubscriptions().where((s) => s.isEffectivelyPrivate).toList();
+        final privateIds = privateSubs.map((s) => s.id).toSet();
+        if (incoming.any((s) => privateIds.contains(s.id))) {
+          throw const FormatException('订阅标识冲突');
+        }
+        final mergedSubs = [...incoming, ...privateSubs];
+        recordPrefTouch(
+          keySubscriptions,
+          nextValue: jsonEncode(mergedSubs.map((s) => s.toJson()).toList()),
+        );
+        await saveSubscriptions(mergedSubs);
+        txWriteEpochs[keySubscriptions] = _prefs.epochOf(keySubscriptions);
+        subsDiskCommitted = true;
+        if (incoming.isEmpty) {
+          await removePrefChecked(keyRawConfig, '配置内容');
+          await removePrefChecked(keyOrigin, '配置来源');
+        }
+      }
+      final privateSubIds = getSubscriptions()
+          .where((s) => s.isEffectivelyPrivate)
+          .map((s) => s.id)
+          .toSet();
+      final retainedAliases = _savedAliases()..removeWhere((key, _) {
+        try {
+          return !privateSubIds.contains((jsonDecode(key) as List).first);
+        } on Object catch (e) {
+          debugPrint('StorageService: prune invalid site alias key: $e');
+          return true;
+        }
+      });
+      retainedAliases.addAll(aliases);
+      await setPrefStringChecked(
+        _siteAliases,
+        jsonEncode(retainedAliases),
+        '来源别名',
+      );
+      for (final entry in pickerEdits.entries) {
+        final retainedPrivate =
+            (_prefs.getStringList(entry.key) ?? []).where(privateIdentities.contains);
+        await setPrefStringListChecked(
+          entry.key,
+          [...entry.value, ...retainedPrivate],
+          '线路管理记录',
+        );
+      }
+      if (incomingOverrides != null) {
+        final retainedPrivateOverrides = <String, Map<String, dynamic>>{};
+        for (final entry in _readSiteOverrides().entries) {
+          if (privateIdentities.contains(entry.key)) {
+            retainedPrivateOverrides[entry.key] = entry.value.toJson();
+          }
+        }
+        for (final entry in incomingOverrides.entries) {
+          retainedPrivateOverrides[entry.key] = entry.value.toJson();
+        }
+        await setPrefStringChecked(
+          _siteOverrides,
+          jsonEncode(retainedPrivateOverrides),
+          '线路覆盖设置',
+        );
+      }
+      for (final key in _appearanceStrings) {
+        if (settings[key] is String) {
+          await setPrefStringChecked(key, settings[key] as String, '外观设置');
+        }
+      }
+      for (final key in _appearanceBooleans) {
+        if (settings[key] is bool) {
+          await setPrefBoolChecked(key, settings[key] as bool, '外观设置');
+        }
+      }
+      for (final key in [keySkipIntroSec, keySkipOutroSec]) {
+        final value = settings[key];
+        if (value is int && value >= 0 && value <= 600) {
+          await setPrefIntChecked(key, value, '跳过片头片尾设置');
+        }
+      }
+      if (['off', 'one', 'all'].contains(settings[keyRepeatMode])) {
+        await setPrefStringChecked(
+          keyRepeatMode,
+          settings[keyRepeatMode] as String,
+          '循环播放设置',
+        );
+      }
+      CmsConfig? parsedConfig = decoded.parsedConfig;
+      if (decoded.rawConfig.isNotEmpty) {
+        await setPrefStringChecked(keyRawConfig, decoded.rawConfig, '配置内容');
+        await setPrefStringChecked(keyOrigin, decoded.origin, '配置来源');
+        if (parsedConfig != null) {
+          final availSites = parsedConfig.publicAvailableSites;
+          if (!availSites.any((s) => s.key == selectedSiteKey)) {
+            if (availSites.isNotEmpty) {
+              final fallbackSite = availSites.firstWhere(
+                (s) => !CspBridge.isBannerNoticeSite(s),
+                orElse: () => availSites.first,
+              );
+              await setPrefStringChecked(
+                keySelectedSite,
+                fallbackSite.key,
+                '当前片源',
+              );
+            } else {
+              await setPrefStringChecked(keySelectedSite, '', '当前片源');
+            }
           }
         }
       }
-    }
-    _invalidateConfigCache();
-    final restoredConfig = loadSavedConfig();
-    final restoredPublicAvail =
-        restoredConfig?.publicAvailableSites ?? const <CmsSite>[];
-    if (settings[keyPreferredSite] is String) {
-      final key = (settings[keyPreferredSite] as String).trim();
-      final exists =
-          key.isNotEmpty && restoredPublicAvail.any((s) => s.key == key);
-      await setPreferredSiteKey(exists ? key : '');
-    }
-    if (settings[keySelectedSite] is String) {
-      final candidate = (settings[keySelectedSite] as String).trim();
-      if (candidate.isNotEmpty &&
-          restoredPublicAvail.any((s) => s.key == candidate)) {
-        await setSelectedSiteKey(candidate);
-      } else if (!restoredPublicAvail.any((s) => s.key == selectedSiteKey)) {
-        if (restoredPublicAvail.isNotEmpty) {
-          final fallbackSite = restoredPublicAvail.firstWhere(
-            (s) => !CspBridge.isBannerNoticeSite(s),
-            orElse: () => restoredPublicAvail.first,
-          );
-          await setSelectedSiteKey(fallbackSite.key);
-        } else {
-          await setSelectedSiteKey('');
+      _invalidateConfigCache();
+      final restoredConfig = loadSavedConfig();
+      final restoredPublicAvail =
+          restoredConfig?.publicAvailableSites ?? const <CmsSite>[];
+      if (settings[keyPreferredSite] is String) {
+        final key = (settings[keyPreferredSite] as String).trim();
+        final exists =
+            key.isNotEmpty && restoredPublicAvail.any((s) => s.key == key);
+        await setPrefStringChecked(
+          keyPreferredSite,
+          exists ? key : '',
+          '偏好源设置',
+        );
+      }
+      if (settings[keySelectedSite] is String) {
+        final candidate = (settings[keySelectedSite] as String).trim();
+        if (candidate.isNotEmpty &&
+            restoredPublicAvail.any((s) => s.key == candidate)) {
+          await setPrefStringChecked(keySelectedSite, candidate, '当前片源');
+        } else if (!restoredPublicAvail.any((s) => s.key == selectedSiteKey)) {
+          if (restoredPublicAvail.isNotEmpty) {
+            final fallbackSite = restoredPublicAvail.firstWhere(
+              (s) => !CspBridge.isBannerNoticeSite(s),
+              orElse: () => restoredPublicAvail.first,
+            );
+            await setPrefStringChecked(
+              keySelectedSite,
+              fallbackSite.key,
+              '当前片源',
+            );
+          } else {
+            await setPrefStringChecked(keySelectedSite, '', '当前片源');
+          }
         }
       }
-    }
-    if (nextHistory != null) {
-      _historyFlushTimer?.cancel();
-      _historyFlushTimer = null;
-      _historyDirty = false;
-      _historyCache = null;
-      try {
-        final decodedHist = jsonDecode(nextHistory);
-        if (decodedHist is List) {
-          final entries = decodedHist
-              .whereType<Map>()
-              .map((m) => WatchHistoryEntry.fromJson(Map<String, dynamic>.from(m)))
-              .where((e) => e.site.isNotEmpty && e.id.isNotEmpty)
-              .toList();
-          _allHistoryCache = entries;
-          await _flushHistoryToDisk();
+      if (sanitizedHistoryJson != null && parsedHistoryEntries != null) {
+        historyStateMutated = true;
+        _historyFlushTimer?.cancel();
+        _historyFlushTimer = null;
+        _historyDirty = false;
+        _historyFlushShouldSync = false;
+        _historyCache = null;
+        _allHistoryCache = parsedHistoryEntries;
+        _historyWriteEpoch++;
+        _historyCorrupted = false;
+        historyCorruptionNotifier.value = false;
+        await setPrefBoolChecked(
+          keyHistoryCorrupted,
+          false,
+          '观看历史损坏状态标记',
+        );
+        try {
+          await _atomicWriteFile(_watchHistoryFileName, sanitizedHistoryJson);
+          historyDiskCommitted = true;
           _lastHistoryDiskWriteMs = DateTime.now().millisecondsSinceEpoch;
+          // Secondary SharedPreferences mirror is best-effort once disk
+          // commit has succeeded; cold start reads `watch_history.json`
+          // whenever `keyWatchHistoryPrefsPendingFlush` is not `true`.
+          try {
+            recordPrefTouch(keyWatchHistory, nextValue: sanitizedHistoryJson);
+            if (await _prefs.setString(keyWatchHistory, sanitizedHistoryJson)) {
+              txWriteEpochs[keyWatchHistory] = _prefs.epochOf(keyWatchHistory);
+            }
+          } on Object catch (mirrorErr) {
+            debugPrint(
+              'StorageService: importBackupJson prefs mirror skipped after disk commit: $mirrorErr',
+            );
+          }
+          if (_prefs.getBool(keyWatchHistoryPrefsPendingFlush) == true) {
+            await setPrefBoolChecked(
+              keyWatchHistoryPrefsPendingFlush,
+              false,
+              '观看历史待回刷标记',
+            );
+          }
+        } on Object catch (e) {
+          if (historyDiskCommitted) {
+            rethrow;
+          }
+          debugPrint(
+            'StorageService: importBackupJson history flush fallback: $e',
+          );
+          await setPrefStringChecked(
+            keyWatchHistory,
+            sanitizedHistoryJson,
+            '规范化后的观看历史: $e',
+          );
+          await setPrefBoolChecked(
+            keyWatchHistoryPrefsPendingFlush,
+            true,
+            '观看历史待回刷标记: $e',
+          );
         }
-      } on Object catch (e) {
-        debugPrint('StorageService: importBackupJson history flush fallback: $e');
-        await _prefs.setString(keyWatchHistory, nextHistory);
       }
-      watchHistoryRevision.value++;
-    }
-    if (nextFavorites != null) {
-      await _prefs.setString(keyFavorites, nextFavorites);
-    }
-    if (nextSearch != null) {
-      await _prefs.setString(keySearchHistory, nextSearch);
-    }
-    if (settings[keyEpisodesDescending] is bool) {
-      await setEpisodesDescending(settings[keyEpisodesDescending] as bool);
-    }
-    if (settings[keyPlaySpeed] is num) {
-      final speed = (settings[keyPlaySpeed] as num).toDouble();
-      if (speed >= minPlaySpeed && speed <= maxPlaySpeed) {
-        await setPlaySpeed(speed);
+      if (nextFavorites != null) {
+        await setPrefStringChecked(keyFavorites, nextFavorites, '收藏数据');
       }
+      if (nextSearch != null) {
+        await setPrefStringChecked(keySearchHistory, nextSearch, '搜索历史');
+      }
+      if (settings[keyEpisodesDescending] is bool) {
+        await setPrefBoolChecked(
+          keyEpisodesDescending,
+          settings[keyEpisodesDescending] as bool,
+          '剧集排序设置',
+        );
+      }
+      if (settings[keyPlaySpeed] is num) {
+        final speed = (settings[keyPlaySpeed] as num).toDouble();
+        if (speed >= minPlaySpeed && speed <= maxPlaySpeed) {
+          await setPrefDoubleChecked(keyPlaySpeed, speed, '倍速设置');
+        }
+      }
+      if (settings[keyAutoNext] is bool) {
+        await setPrefBoolChecked(
+          keyAutoNext,
+          settings[keyAutoNext] as bool,
+          '自动连播设置',
+        );
+      }
+      // Normalize legacy single-key (`hls_ad_removal_enabled`) and newer
+      // dual-key (`hls_ad_strip_enabled`) backups together so settings UI and
+      // player initialization always read the same boolean value.
+      final bool? normalizedHlsAd = settings[keyHlsAdStripEnabled] is bool
+          ? settings[keyHlsAdStripEnabled] as bool
+          : (settings[keyHlsAdRemovalEnabled] is bool
+                ? settings[keyHlsAdRemovalEnabled] as bool
+                : null);
+      if (normalizedHlsAd != null) {
+        await setPrefBoolChecked(
+          keyHlsAdRemovalEnabled,
+          normalizedHlsAd,
+          '去广告设置',
+        );
+        await setPrefBoolChecked(
+          keyHlsAdStripEnabled,
+          normalizedHlsAd,
+          'HLS 过滤设置',
+        );
+      }
+      if (settings[keyMediaDiskCacheLimitMb] is int) {
+        await setPrefIntChecked(
+          keyMediaDiskCacheLimitMb,
+          (settings[keyMediaDiskCacheLimitMb] as int).clamp(0, 4096),
+          '媒体缓存上限设置',
+        );
+      }
+      int? normalizedDiskCacheMaxMb;
+      if (settings[keyDiskCacheMaxMb] is int) {
+        final mb = settings[keyDiskCacheMaxMb] as int;
+        normalizedDiskCacheMaxMb = allowedDiskCacheMbOptions.contains(mb)
+            ? mb
+            : (mb <= 0 ? 0 : defaultDiskCacheMaxMb);
+        await setPrefIntChecked(
+          keyDiskCacheMaxMb,
+          normalizedDiskCacheMaxMb,
+          '磁盘缓存上限设置',
+        );
+      }
+      final finalConfig = loadSavedConfig();
+      await _persistSniffAndAdsCache(
+        finalConfig,
+        setString: setPrefStringChecked,
+        setStringList: setPrefStringListChecked,
+        removeKey: removePrefChecked,
+      );
+      if (normalizedHlsAd != null) {
+        LocalMediaLease.defaultHlsAdStripEnabled = normalizedHlsAd;
+      }
+      if (normalizedDiskCacheMaxMb != null) {
+        await DiskBlockCache.instance.setMaxMegabytes(normalizedDiskCacheMaxMb);
+      }
+      if (sanitizedHistoryJson != null) {
+        _quarantinedHistoryBytes = null;
+        watchHistoryRevision.value++;
+      }
+      return finalConfig;
+    } on Object {
+      await rollbackBackupImport();
+      rethrow;
     }
-    if (settings[keyAutoNext] is bool) {
-      await setAutoNext(settings[keyAutoNext] as bool);
-    }
-    if (settings[keyHlsAdRemovalEnabled] is bool) {
-      await setHlsAdRemovalEnabled(settings[keyHlsAdRemovalEnabled] as bool);
-    }
-    if (settings[keyHlsAdStripEnabled] is bool) {
-      await setHlsAdStripEnabled(settings[keyHlsAdStripEnabled] as bool);
-    }
-    if (settings[keyMediaDiskCacheLimitMb] is int) {
-      await setMediaDiskCacheLimitMb(settings[keyMediaDiskCacheLimitMb] as int);
-    }
-    if (settings[keyDiskCacheMaxMb] is int) {
-      await setDiskCacheMaxMb(settings[keyDiskCacheMaxMb] as int);
-    }
-    final finalConfig = loadSavedConfig();
-    await _persistSniffAndAdsCache(finalConfig);
-    return finalConfig;
   }
 
   // ===========================================================================
@@ -4457,11 +5913,15 @@ class StorageService {
           decoded['history'] ??
           decoded['watchHistory'];
       if (rh is List) {
-        preservedRemoteHist = rh;
+        final sanitized = <Map<String, dynamic>>[];
         for (final item in rh.whereType<Map>()) {
           final e = WatchHistoryEntry.fromJson(Map<String, dynamic>.from(item));
-          if (e.site.isNotEmpty && e.id.isNotEmpty) remoteHist.add(e);
+          if (e.site.isNotEmpty && e.id.isNotEmpty) {
+            remoteHist.add(e);
+            sanitized.add(e.toJson());
+          }
         }
+        preservedRemoteHist = sanitized;
       }
       final rf = decoded['favorites'];
       if (rf is List) {
@@ -4895,6 +6355,7 @@ class StorageService {
       _historyDirty = false;
       _historyCache = null;
       _allHistoryCache = combinedAllHist;
+      _historyWriteEpoch++;
       await _flushHistoryToDisk();
       _lastHistoryDiskWriteMs = DateTime.now().millisecondsSinceEpoch;
       await _prefs.setString(keyFavorites, nextFavsJson);
@@ -6040,6 +7501,66 @@ class StorageService {
     _invalidateConfigCache();
   }
 
+  Map<String, dynamic> _loadEpisodeScrapeOverrideMap() {
+    final raw = _prefs.getString(keyEpisodeScrapeOverrides);
+    if (raw == null || raw.trim().isEmpty) return <String, dynamic>{};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        return Map<String, dynamic>.from(decoded);
+      }
+    } catch (_) {}
+    return <String, dynamic>{};
+  }
+
+  /// Reads the saved per-series [EpisodeScrapeOverride] (or defaults if none).
+  EpisodeScrapeOverride getEpisodeScrapeOverride({
+    required String siteKey,
+    required String videoId,
+    required String videoTitle,
+  }) {
+    final map = _loadEpisodeScrapeOverrideMap();
+    if (map.isEmpty) return const EpisodeScrapeOverride();
+    final primaryKey = EpisodeScraper.storageKey(
+      siteKey: siteKey,
+      videoId: videoId,
+      videoTitle: videoTitle,
+    );
+    final raw = map[primaryKey] ??
+        map[EpisodeScraper.storageKey(
+          siteKey: '',
+          videoId: '',
+          videoTitle: videoTitle,
+        )];
+    if (raw is Map) {
+      return EpisodeScrapeOverride.fromJson(Map<String, dynamic>.from(raw));
+    }
+    return const EpisodeScrapeOverride();
+  }
+
+  /// Persists or clears the per-series [EpisodeScrapeOverride].
+  Future<void> setEpisodeScrapeOverride({
+    required String siteKey,
+    required String videoId,
+    required String videoTitle,
+    required EpisodeScrapeOverride override,
+  }) async {
+    final map = _loadEpisodeScrapeOverrideMap();
+    final key = EpisodeScraper.storageKey(
+      siteKey: siteKey,
+      videoId: videoId,
+      videoTitle: videoTitle,
+    );
+    map.remove(key);
+    if (!override.isDefault) {
+      map[key] = override.toJson();
+      while (map.length > maxEpisodeScrapeRecords) {
+        map.remove(map.keys.first);
+      }
+    }
+    await _prefs.setString(keyEpisodeScrapeOverrides, jsonEncode(map));
+  }
+
   /// Revision counter incremented whenever a series scrape binding or episode
   /// calibration override is saved or cleared.
   final ValueNotifier<int> seriesScrapeRevision = ValueNotifier<int>(0);
@@ -6137,5 +7658,44 @@ class StorageService {
 
   Future<void> clearMacosWindowBounds() async {
     await _prefs.remove(MacosWindowBounds.prefKey);
+  }
+
+  /// Normalizes a user-configured iOS player toolbar action list, migrating
+  /// legacy `'danmu'` -> `'danmu_subtitle'` and ensuring `'more'` is always
+  /// present so customization/settings remain reachable.
+  static List<String> normalizeIosPlayerToolbarItems(Iterable<String>? raw) {
+    if (raw == null) return defaultIosPlayerToolbarItems;
+    final allowed = allIosPlayerToolbarItems.toSet();
+    final seen = <String>{};
+    final out = <String>[];
+    for (final item in raw) {
+      var id = item.trim().toLowerCase();
+      if (id == 'danmu' || id == 'subtitle') id = 'danmu_subtitle';
+      if (id == 'tracks') id = 'audio';
+      if (id.isEmpty || !allowed.contains(id)) continue;
+      if (seen.add(id)) out.add(id);
+    }
+    if (out.isEmpty) return defaultIosPlayerToolbarItems;
+    if (!seen.contains('more')) {
+      out.add('more');
+    }
+    return List<String>.unmodifiable(out);
+  }
+
+  List<String> get iosPlayerToolbarItems {
+    final stored = _prefs.getStringList(keyIosPlayerToolbarItems);
+    if (stored == null || stored.isEmpty) {
+      return defaultIosPlayerToolbarItems;
+    }
+    return normalizeIosPlayerToolbarItems(stored);
+  }
+
+  Future<void> setIosPlayerToolbarItems(List<String> items) async {
+    final normalized = normalizeIosPlayerToolbarItems(items);
+    await _prefs.setStringList(keyIosPlayerToolbarItems, normalized);
+  }
+
+  Future<void> resetIosPlayerToolbarItems() async {
+    await _prefs.remove(keyIosPlayerToolbarItems);
   }
 }

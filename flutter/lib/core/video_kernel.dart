@@ -1,5 +1,6 @@
 // Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -536,6 +537,22 @@ class OhosPlatformPlayer extends PlatformPlayer {
 /// Windows `MdkPlatformPlayer` (`libmdk` D3D11/MFT/DXVA iGPU-friendly engine),
 /// or `OhosPlatformPlayer` (`AVPlayer` + GPU Texture) on HarmonyOS NEXT.
 class VideoKernel {
+  static bool _mediaKitInitialized = false;
+
+  /// Ensures `media_kit` (`libmpv`) is initialized once before creating a
+  /// native [Player]. Safe to invoke lazily on iOS so `Mpv.framework` does not
+  /// block cold launch before Flutter paints its first frame.
+  static void ensureMediaKitInitialized() {
+    if (_mediaKitInitialized || OhosRuntime.isOhos) return;
+    _mediaKitInitialized = true;
+    try {
+      MediaKit.ensureInitialized();
+    } catch (e) {
+      _mediaKitInitialized = false;
+      debugPrint('VideoKernel: MediaKit init warning: $e');
+    }
+  }
+
   final Player player;
   final VideoController? mediaKitController;
   final OhosPlatformPlayer? ohosPlatform;
@@ -560,6 +577,7 @@ class VideoKernel {
     required String hwdec,
     VideoKernelMode? mode,
     WindowsPlaybackEngine windowsEngine = WindowsPlaybackEngine.mpv,
+    bool useIosMdk = false,
     String kernelStrategy = 'exo',
     MdkNativeBackend? debugMdkBackend,
   }) {
@@ -602,9 +620,15 @@ class VideoKernel {
       );
     }
 
+    final canCreateIosMdk = defaultTargetPlatform == TargetPlatform.iOS &&
+        useIosMdk &&
+        (!Platform.environment.containsKey('FLUTTER_TEST') ||
+            debugMdkBackend != null);
+
     if (!kIsWeb &&
-        defaultTargetPlatform == TargetPlatform.windows &&
-        windowsEngine == WindowsPlaybackEngine.mdk) {
+        ((defaultTargetPlatform == TargetPlatform.windows &&
+                windowsEngine == WindowsPlaybackEngine.mdk) ||
+            canCreateIosMdk)) {
       final mdkPlayer = MdkPlatformPlayer(
         kernelStrategy: kernelStrategy,
         debugBackend: debugMdkBackend,
@@ -617,6 +641,7 @@ class VideoKernel {
       );
     }
 
+    ensureMediaKitInitialized();
     final nativePlayer = Player();
     return VideoKernel._(
       player: nativePlayer,

@@ -22,7 +22,19 @@ class Ios26PlayerGlassMetrics {
   static const double scrubberTrackIdleHeightPt = 5.0;
   static const double scrubberTrackExpandedHeightPt = 12.0;
   static const double dockCapsuleRadiusPt = 24.0;
-  static const int maxPrimaryDockActions = 10;
+  static const int maxPrimaryDockActions = 14;
+
+  static const List<String> defaultToolbarItems = <String>[
+    'episodes',
+    'lines',
+    'speed',
+    'danmu_subtitle',
+    'aspect',
+    'engine',
+    'audio',
+    'skip_intro_outro',
+    'more',
+  ];
 
   /// Computes a concentric inner radius inside an outer surface padded by [inset].
   static double concentricRadius(double outerRadius, double inset) {
@@ -119,6 +131,23 @@ class IosPlayerChrome extends StatefulWidget {
   final VoidCallback? onVocalLoudnessTap;
   final ValueChanged<Rect?>? onVocalLoudnessAnchoredTap;
 
+  // Customizable primary toolbar items, multi-version movie mode & symmetrical AI button.
+  final List<String> toolbarItems;
+  final bool isMultiVersionMovie;
+  final bool subtitleOverlayActive;
+  final bool anime4kActive;
+  final bool showAiAssistantButton;
+  final VoidCallback? onAiAssistantTap;
+  final ValueChanged<Rect?>? onAiAssistantAnchoredTap;
+  final VoidCallback? onAudioTracksTap;
+  final ValueChanged<Rect?>? onAudioTracksAnchoredTap;
+  final VoidCallback? onSkipIntroOutroTap;
+  final ValueChanged<Rect?>? onSkipIntroOutroAnchoredTap;
+  final VoidCallback? onAnime4kTap;
+  final ValueChanged<Rect?>? onAnime4kAnchoredTap;
+  final VoidCallback? onSleepTimerTap;
+  final ValueChanged<Rect?>? onSleepTimerAnchoredTap;
+
   const IosPlayerChrome({
     super.key,
     required this.title,
@@ -189,6 +218,21 @@ class IosPlayerChrome extends StatefulWidget {
     this.vocalLoudnessActive = false,
     this.onVocalLoudnessTap,
     this.onVocalLoudnessAnchoredTap,
+    this.toolbarItems = Ios26PlayerGlassMetrics.defaultToolbarItems,
+    this.isMultiVersionMovie = false,
+    this.subtitleOverlayActive = false,
+    this.anime4kActive = false,
+    this.showAiAssistantButton = false,
+    this.onAiAssistantTap,
+    this.onAiAssistantAnchoredTap,
+    this.onAudioTracksTap,
+    this.onAudioTracksAnchoredTap,
+    this.onSkipIntroOutroTap,
+    this.onSkipIntroOutroAnchoredTap,
+    this.onAnime4kTap,
+    this.onAnime4kAnchoredTap,
+    this.onSleepTimerTap,
+    this.onSleepTimerAnchoredTap,
   });
 
   static String formatTimestamp(Duration d) {
@@ -215,10 +259,12 @@ class IosPlayerChrome extends StatefulWidget {
 
 class _IosPlayerChromeState extends State<IosPlayerChrome> {
   final GlobalKey _castAnchorKey = GlobalKey();
-  final GlobalKey _pipAnchorKey = GlobalKey();
+  final GlobalKey _topPipAnchorKey = GlobalKey();
+  final GlobalKey _dockPipAnchorKey = GlobalKey();
   final GlobalKey _favoriteAnchorKey = GlobalKey();
   final GlobalKey _downloadAnchorKey = GlobalKey();
-  final GlobalKey _moreAnchorKey = GlobalKey();
+  final GlobalKey _topMoreAnchorKey = GlobalKey();
+  final GlobalKey _dockMoreAnchorKey = GlobalKey();
   final GlobalKey _episodesAnchorKey = GlobalKey();
   final GlobalKey _linesAnchorKey = GlobalKey();
   final GlobalKey _speedAnchorKey = GlobalKey();
@@ -227,6 +273,10 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
   final GlobalKey _tracksAnchorKey = GlobalKey();
   final GlobalKey _engineAnchorKey = GlobalKey();
   final GlobalKey _loudnessAnchorKey = GlobalKey();
+  final GlobalKey _skipAnchorKey = GlobalKey();
+  final GlobalKey _anime4kAnchorKey = GlobalKey();
+  final GlobalKey _sleepAnchorKey = GlobalKey();
+  final GlobalKey _aiAssistantAnchorKey = GlobalKey();
 
   void _triggerAnchored(
     GlobalKey anchorKey,
@@ -265,25 +315,45 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
         final width = constraints.maxWidth;
         final isCompactWidth = width < 440;
         final isUltraCompact = width < 340;
+        final mediaPadding = MediaQuery.paddingOf(context);
+        final mediaViewPadding = MediaQuery.viewPaddingOf(context);
+        final gestureInsets = MediaQuery.systemGestureInsetsOf(context);
+        final screenSize = MediaQuery.sizeOf(context);
+        final isPadLike = screenSize.shortestSide >= 600 ||
+            (screenSize.height >= 900 && screenSize.width >= 300);
+
+        // Always respect live safe areas (both padding and viewPadding) so
+        // transient iPad status bars, multitasking "..." pills, and bottom
+        // Home indicators never overlap interactive controls.
+        final liveTopSafe = math.max(mediaPadding.top, mediaViewPadding.top);
+        final liveBottomSafe = math.max(
+          math.max(mediaPadding.bottom, mediaViewPadding.bottom),
+          gestureInsets.bottom,
+        );
+        final liveLeftSafe = math.max(mediaPadding.left, mediaViewPadding.left);
+        final liveRightSafe =
+            math.max(mediaPadding.right, mediaViewPadding.right);
+
         final horizInset =
             widget.isLandscape ? 18.0 : (isUltraCompact ? 10.0 : 14.0);
-        final topInset = widget.isLandscape ? 10.0 : 10.0;
-        final safeBottom = MediaQuery.paddingOf(context).bottom;
-        final bottomInset = widget.isLandscape
-            ? math.max(5.0, safeBottom * 0.28)
-            : math.max(10.0, safeBottom * 0.55);
+        final topInset = liveTopSafe > 0
+            ? liveTopSafe + (widget.isLandscape ? 8.0 : 10.0)
+            : (isPadLike ? 34.0 : 10.0);
+        final bottomInset = liveBottomSafe > 0
+            ? liveBottomSafe + (widget.isLandscape ? 8.0 : 10.0)
+            : (isPadLike ? 24.0 : (widget.isLandscape ? 8.0 : 10.0));
 
         return SizedBox.expand(
           child: Stack(
             fit: StackFit.expand,
             children: [
               // Subtle cinema gradient scrims for guaranteed typography legibility.
-              const Positioned(
+              Positioned(
                 top: 0,
                 left: 0,
                 right: 0,
-                height: 98,
-                child: IgnorePointer(
+                height: topInset + 88.0,
+                child: const IgnorePointer(
                   child: DecoratedBox(
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
@@ -295,12 +365,12 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                   ),
                 ),
               ),
-              const Positioned(
+              Positioned(
                 bottom: 0,
                 left: 0,
                 right: 0,
-                height: 126,
-                child: IgnorePointer(
+                height: bottomInset + 118.0,
+                child: const IgnorePointer(
                   child: DecoratedBox(
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
@@ -313,8 +383,11 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                 ),
               ),
 
-              SafeArea(
-                bottom: false,
+              Padding(
+                padding: EdgeInsets.only(
+                  left: liveLeftSafe,
+                  right: liveRightSafe,
+                ),
                 child: Stack(
                   key: const Key('ios-player-chrome-root'),
                   fit: StackFit.expand,
@@ -324,12 +397,16 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                     //    Center: title + compact micro spec badges (never stretched!)
                     //    Right: Cast / Favorite / Download / More
                     Positioned(
+                      key: const Key('ios-player-top-header-box'),
                       left: horizInset,
                       right: horizInset,
                       top: topInset,
                       child: _buildTopSpatialHeader(
                         context,
-                        width: width,
+                        width: math.max(
+                          200.0,
+                          width - liveLeftSafe - liveRightSafe,
+                        ),
                         isCompactWidth: isCompactWidth,
                         isUltraCompact: isUltraCompact,
                         ios26Visual: ios26Visual,
@@ -352,6 +429,23 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                       ),
                     ),
 
+                    // 2b. Symmetrical Right-Edge AI Assistant Button
+                    if (widget.showAiAssistantButton && !widget.isLive)
+                      Positioned(
+                        right: horizInset,
+                        top: 0,
+                        bottom: 0,
+                        child: Center(
+                          child: _buildRightAiAssistantButton(
+                            size: Ios26PlayerGlassMetrics.leftLockCirclePt,
+                            iconSize: 18,
+                            ios26Visual: ios26Visual,
+                            reduceTransparency: reduceTransparency,
+                            reduceMotion: reduceMotion,
+                          ),
+                        ),
+                      ),
+
                     // 3. Center Refractive Transport (56pt / 76pt / 56pt)
                     if (!widget.loading && !widget.buffering && !widget.hasError)
                       Center(
@@ -366,6 +460,7 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                     // 4. Unified Compact Bottom Liquid Glass Deck (Req 2)
                     //    Progress bar + primary toolbar fused into ONE low-height capsule.
                     Positioned(
+                      key: const Key('ios-player-bottom-deck-box'),
                       left: horizInset,
                       right: horizInset,
                       bottom: bottomInset,
@@ -375,7 +470,10 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                             maxWidth: widget.isLandscape ? 736.0 : 560.0,
                           ),
                           child: _buildUnifiedBottomDeck(
-                            width: width,
+                            width: math.max(
+                              200.0,
+                              width - liveLeftSafe - liveRightSafe,
+                            ),
                             ios26Visual: ios26Visual,
                             reduceTransparency: reduceTransparency,
                             reduceMotion: reduceMotion,
@@ -461,6 +559,7 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                     width: 34,
                     height: 34,
                     borderRadius: 17,
+                    isCircle: true,
                     ios26Visual: ios26Visual,
                     reduceTransparency: reduceTransparency,
                     child: const Center(
@@ -474,15 +573,44 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                 ),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Text(
-                    widget.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                    ),
+                  child: Row(
+                    children: [
+                      if (widget.isLive) ...[
+                        Container(
+                          key: const Key('ios-portrait-live-badge'),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 5.5,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: AppleColors.systemRed,
+                            borderRadius: BorderRadius.circular(5),
+                          ),
+                          child: const Text(
+                            'LIVE',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 9.5,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.4,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
+                      Expanded(
+                        child: Text(
+                          widget.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
                 const SizedBox(width: 6),
@@ -520,16 +648,17 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                     widget.onLockTap();
                   },
                   child: _IosSpatialGlassSurface(
-                    width: 34,
-                    height: 34,
-                    borderRadius: 17,
+                    width: 32,
+                    height: 32,
+                    borderRadius: 16,
+                    isCircle: true,
                     ios26Visual: ios26Visual,
                     reduceTransparency: reduceTransparency,
                     child: const Center(
                       child: Icon(
                         CupertinoIcons.lock_open_fill,
                         color: Colors.white,
-                        size: 16,
+                        size: 15,
                       ),
                     ),
                   ),
@@ -538,6 +667,21 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
             ),
           ),
         ),
+        if (widget.showAiAssistantButton && !widget.isLive)
+          Positioned(
+            right: 10,
+            top: 0,
+            bottom: 0,
+            child: Center(
+              child: _buildRightAiAssistantButton(
+                size: 32,
+                iconSize: 15,
+                ios26Visual: ios26Visual,
+                reduceTransparency: reduceTransparency,
+                reduceMotion: reduceMotion,
+              ),
+            ),
+          ),
         // Center play/pause button
         if (!widget.loading && !widget.buffering && !widget.hasError)
           Center(
@@ -577,10 +721,12 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
             onPointerDown: (_) => widget.onInteraction(),
             child: _IosSpatialGlassSurface(
               key: const Key('player-tool-dock-portrait'),
-              borderRadius: 16,
+              height: 36,
+              borderRadius: 18,
+              isCapsule: true,
               ios26Visual: ios26Visual,
               reduceTransparency: reduceTransparency,
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
               child: Row(
                 children: [
                   if (!widget.isLive)
@@ -605,16 +751,16 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                       ),
                     )
                   else
-                    const Expanded(
+                    Expanded(
                       child: Row(
                         children: [
-                          Icon(
+                          const Icon(
                             CupertinoIcons.dot_radiowaves_left_right,
                             color: AppleColors.systemRed,
                             size: 14,
                           ),
-                          SizedBox(width: 5),
-                          Text(
+                          const SizedBox(width: 5),
+                          const Text(
                             '正在直播',
                             style: TextStyle(
                               color: Colors.white,
@@ -622,6 +768,31 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                               fontWeight: FontWeight.w600,
                             ),
                           ),
+                          if (widget.episodeName.trim().isNotEmpty) ...[
+                            const SizedBox(width: 8),
+                            Flexible(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 7,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withValues(alpha: 0.16),
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                                child: Text(
+                                  widget.episodeName.trim(),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Color(0xEBFFFFFF),
+                                    fontSize: 10.5,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                     ),
@@ -673,6 +844,7 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
             width: Ios26PlayerGlassMetrics.leftLockCirclePt,
             height: Ios26PlayerGlassMetrics.leftLockCirclePt,
             borderRadius: Ios26PlayerGlassMetrics.leftLockCirclePt * 0.5,
+            isCircle: true,
             ios26Visual: ios26Visual,
             reduceTransparency: reduceTransparency,
             child: const Center(
@@ -680,6 +852,68 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                 CupertinoIcons.lock_open_fill,
                 color: AppleColors.labelPrimary,
                 size: 18,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRightAiAssistantButton({
+    required double size,
+    required double iconSize,
+    required bool ios26Visual,
+    required bool reduceTransparency,
+    required bool reduceMotion,
+  }) {
+    final active = widget.subtitleOverlayActive;
+    return KeyedSubtree(
+      key: _aiAssistantAnchorKey,
+      child: Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: (_) => widget.onInteraction(),
+        child: Semantics(
+          button: true,
+          label: 'AI 观影助手',
+          child: _IosRefractivePressButton(
+            key: const Key('player-ai-assistant-button'),
+            reduceMotion: reduceMotion,
+            onTap: () => _triggerAnchored(
+              _aiAssistantAnchorKey,
+              widget.onAiAssistantAnchoredTap,
+              widget.onAiAssistantTap,
+            ),
+            child: _IosSpatialGlassSurface(
+              width: size,
+              height: size,
+              borderRadius: size * 0.5,
+              isCircle: true,
+              ios26Visual: ios26Visual,
+              reduceTransparency: reduceTransparency,
+              tint: active ? AppleColors.systemIndigo : null,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  Icon(
+                    CupertinoIcons.sparkles,
+                    color: active ? Colors.white : AppleColors.labelPrimary,
+                    size: iconSize,
+                  ),
+                  if (active)
+                    Positioned(
+                      right: size * 0.18,
+                      top: size * 0.18,
+                      child: Container(
+                        width: 6,
+                        height: 6,
+                        decoration: const BoxDecoration(
+                          color: AppleColors.systemCyan,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
           ),
@@ -724,6 +958,8 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                   ? Ios26PlayerGlassMetrics.topCapsuleHeightPt
                   : null,
               borderRadius: Ios26PlayerGlassMetrics.topCapsuleRadiusPt,
+              isCircle: isCompactWidth,
+              isCapsule: !isCompactWidth,
               ios26Visual: ios26Visual,
               reduceTransparency: reduceTransparency,
               padding: isCompactWidth
@@ -905,20 +1141,25 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
       if (widget.onPipTap != null || widget.onPipAnchoredTap != null)
         _buildTopCircleButton(
           key: const Key('ios-player-pip-button'),
-          anchorKey: _pipAnchorKey,
+          anchorKey: _topPipAnchorKey,
           size: buttonSize,
           iconSize: iconSize,
           icon: widget.isPipActive
               ? CupertinoIcons.rectangle_fill_on_rectangle_fill
               : CupertinoIcons.rectangle_on_rectangle,
+          iconWidget: _IosPipIcon(
+            size: iconSize + 1.5,
+            color: widget.isPipActive ? Colors.white : AppleColors.labelPrimary,
+            active: widget.isPipActive,
+          ),
           active: widget.isPipActive,
           activeTint: AppleColors.systemBlue,
-          semanticLabel: '画中画',
+          semanticLabel: widget.isPipActive ? '退出画中画' : '画中画',
           ios26Visual: ios26Visual,
           reduceTransparency: reduceTransparency,
           reduceMotion: reduceMotion,
           onTap: () => _triggerAnchored(
-            _pipAnchorKey,
+            _topPipAnchorKey,
             widget.onPipAnchoredTap,
             widget.onPipTap,
           ),
@@ -983,7 +1224,7 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
       if (includeMore)
         _buildTopCircleButton(
           key: const Key('ios-player-more-button'),
-          anchorKey: _moreAnchorKey,
+          anchorKey: _topMoreAnchorKey,
           size: buttonSize,
           iconSize: iconSize,
           icon: CupertinoIcons.ellipsis,
@@ -995,7 +1236,7 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
           reduceTransparency: reduceTransparency,
           reduceMotion: reduceMotion,
           onTap: () => _triggerAnchored(
-            _moreAnchorKey,
+            _topMoreAnchorKey,
             widget.onMoreAnchoredTap,
             widget.onMoreTap,
           ),
@@ -1019,6 +1260,7 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
     required double size,
     required double iconSize,
     required IconData icon,
+    Widget? iconWidget,
     required bool active,
     required Color activeTint,
     required String semanticLabel,
@@ -1047,11 +1289,12 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
             child: Stack(
               alignment: Alignment.center,
               children: [
-                Icon(
-                  icon,
-                  color: active ? Colors.white : AppleColors.labelPrimary,
-                  size: iconSize,
-                ),
+                iconWidget ??
+                    Icon(
+                      icon,
+                      color: active ? Colors.white : AppleColors.labelPrimary,
+                      size: iconSize,
+                    ),
                 if (showDot)
                   Positioned(
                     right: 7,
@@ -1164,28 +1407,26 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
     );
   }
 
-  /// Req 2: Single fused compact Liquid Glass deck combining the fluid
-  /// scrubber bar and compact horizontal toolbar (~72pt total height).
-  Widget _buildUnifiedBottomDeck({
-    required double width,
-    required bool ios26Visual,
-    required bool reduceTransparency,
-    required bool reduceMotion,
-  }) {
-    final actions = <_IosDockAction>[
-      _IosDockAction(
-        id: 'episodes',
-        anchorKey: _episodesAnchorKey,
-        icon: CupertinoIcons.square_grid_2x2_fill,
-        label: widget.isLive ? '信号' : '选集',
-        onTap: () => _triggerAnchored(
-          _episodesAnchorKey,
-          widget.onEpisodesAnchoredTap,
-          widget.onEpisodesTap,
-        ),
-      ),
-      if (widget.hasMultipleLines || !widget.isLive)
-        _IosDockAction(
+  _IosDockAction? _resolveToolbarAction(String rawId) {
+    final id = rawId.trim().toLowerCase();
+    switch (id) {
+      case 'episodes':
+        return _IosDockAction(
+          id: 'episodes',
+          anchorKey: _episodesAnchorKey,
+          icon: CupertinoIcons.square_grid_2x2_fill,
+          label: widget.isLive
+              ? '信号'
+              : (widget.isMultiVersionMovie ? '版本' : '选集'),
+          onTap: () => _triggerAnchored(
+            _episodesAnchorKey,
+            widget.onEpisodesAnchoredTap,
+            widget.onEpisodesTap,
+          ),
+        );
+      case 'lines':
+        if (!widget.hasMultipleLines && widget.isLive) return null;
+        return _IosDockAction(
           id: 'lines',
           anchorKey: _linesAnchorKey,
           icon: widget.isLive
@@ -1197,115 +1438,199 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
             widget.onLinesAnchoredTap,
             widget.onLinesTap,
           ),
-        ),
-      if (!widget.isLive)
-        _IosDockAction(
+        );
+      case 'speed':
+        if (widget.isLive) return null;
+        final nonDefaultSpeed = (widget.playbackSpeed - 1.0).abs() > 0.01;
+        return _IosDockAction(
           id: 'speed',
           anchorKey: _speedAnchorKey,
           icon: CupertinoIcons.speedometer,
-          label: IosPlayerChrome.formatSpeedBadge(widget.playbackSpeed),
-          active: (widget.playbackSpeed - 1.0).abs() > 0.01,
+          label: nonDefaultSpeed
+              ? IosPlayerChrome.formatSpeedBadge(widget.playbackSpeed)
+              : '倍速',
+          active: nonDefaultSpeed,
           onTap: () => _triggerAnchored(
             _speedAnchorKey,
             widget.onSpeedAnchoredTap,
             widget.onSpeedTap,
           ),
-        ),
-      _IosDockAction(
-        id: 'danmu',
-        anchorKey: _danmuAnchorKey,
-        icon: CupertinoIcons.chat_bubble_text_fill,
-        label: '弹幕',
-        active: widget.danmuEnabled,
-        onTap: () => _triggerAnchored(
-          _danmuAnchorKey,
-          widget.onDanmuSettingsAnchoredTap,
-          widget.onDanmuSettingsTap,
-        ),
-      ),
-      _IosDockAction(
-        id: 'aspect',
-        anchorKey: _aspectAnchorKey,
-        icon: CupertinoIcons.slider_horizontal_3,
-        label: '画面',
-        onTap: () => _triggerAnchored(
-          _aspectAnchorKey,
-          widget.onAspectAnchoredTap,
-          widget.onAspectAndStrategyTap,
-        ),
-      ),
-      _IosDockAction(
-        key: const Key('ios-player-tracks-button'),
-        id: 'tracks',
-        anchorKey: _tracksAnchorKey,
-        icon: CupertinoIcons.captions_bubble_fill,
-        label: '音轨',
-        onTap: () => _triggerAnchored(
-          _tracksAnchorKey,
-          widget.onAudioSubtitleAnchoredTap,
-          widget.onAudioSubtitleTap,
-        ),
-      ),
-      if (widget.onVocalLoudnessTap != null ||
-          widget.onVocalLoudnessAnchoredTap != null)
-        _IosDockAction(
-          key: const Key('ios-player-loudness-button'),
+        );
+      case 'danmu_subtitle':
+      case 'danmu':
+        return _IosDockAction(
+          key: const ValueKey('ios-dock-action-danmu'),
+          id: 'danmu_subtitle',
+          anchorKey: _danmuAnchorKey,
+          icon: CupertinoIcons.captions_bubble_fill,
+          label: widget.isLive ? '弹幕' : '弹幕/字幕',
+          active: widget.danmuEnabled || widget.subtitleOverlayActive,
+          onTap: () => _triggerAnchored(
+            _danmuAnchorKey,
+            widget.onDanmuSettingsAnchoredTap,
+            widget.onDanmuSettingsTap,
+          ),
+        );
+      case 'aspect':
+        return _IosDockAction(
+          id: 'aspect',
+          anchorKey: _aspectAnchorKey,
+          icon: CupertinoIcons.slider_horizontal_3,
+          label: '画面',
+          onTap: () => _triggerAnchored(
+            _aspectAnchorKey,
+            widget.onAspectAnchoredTap,
+            widget.onAspectAndStrategyTap,
+          ),
+        );
+      case 'engine':
+        return _IosDockAction(
+          id: 'engine',
+          anchorKey: _engineAnchorKey,
+          icon: CupertinoIcons.play_rectangle_fill,
+          label: '播放器',
+          active: widget.engineLabel.toUpperCase().contains('MDK'),
+          onTap: () => _triggerAnchored(
+            _engineAnchorKey,
+            widget.onEngineSwitchAnchoredTap,
+            widget.onEngineSwitchTap,
+          ),
+        );
+      case 'audio':
+        return _IosDockAction(
+          id: 'audio',
+          anchorKey: _tracksAnchorKey,
+          icon: CupertinoIcons.speaker_2_fill,
+          label: '音轨',
+          onTap: () => _triggerAnchored(
+            _tracksAnchorKey,
+            widget.onAudioTracksAnchoredTap ?? widget.onAudioSubtitleAnchoredTap,
+            widget.onAudioTracksTap ?? widget.onAudioSubtitleTap,
+          ),
+        );
+      case 'skip_intro_outro':
+        if (widget.isLive) return null;
+        return _IosDockAction(
+          id: 'skip_intro_outro',
+          anchorKey: _skipAnchorKey,
+          icon: CupertinoIcons.forward_end_alt_fill,
+          label: '片头片尾',
+          active: widget.skipIntroSec > 0 || widget.skipOutroSec > 0,
+          onTap: () => _triggerAnchored(
+            _skipAnchorKey,
+            widget.onSkipIntroOutroAnchoredTap,
+            widget.onSkipIntroOutroTap,
+          ),
+        );
+      case 'fullscreen':
+        return _IosDockAction(
+          key: const Key('player-fullscreen-toggle'),
+          id: 'fullscreen',
+          icon: widget.isLandscape
+              ? CupertinoIcons.fullscreen_exit
+              : CupertinoIcons.fullscreen,
+          label: widget.isLandscape ? '竖屏' : '全屏',
+          onTap: () {
+            widget.onInteraction();
+            widget.onFullscreenToggle();
+          },
+        );
+      case 'loudness':
+        return _IosDockAction(
           id: 'loudness',
           anchorKey: _loudnessAnchorKey,
           icon: CupertinoIcons.waveform_path_ecg,
-          label: widget.vocalLoudnessLabel == '关闭'
-              ? '响度'
-              : widget.vocalLoudnessLabel,
+          label: '响度',
           active: widget.vocalLoudnessActive,
           onTap: () => _triggerAnchored(
             _loudnessAnchorKey,
             widget.onVocalLoudnessAnchoredTap,
             widget.onVocalLoudnessTap,
           ),
-        ),
-      if (widget.onEngineSwitchTap != null ||
-          widget.onEngineSwitchAnchoredTap != null)
-        _IosDockAction(
-          key: const Key('ios-player-engine-button'),
-          id: 'engine',
-          anchorKey: _engineAnchorKey,
-          icon: widget.isAvPlayerActive
-              ? CupertinoIcons.play_rectangle_fill
-              : CupertinoIcons.gear_alt_fill,
-          label: widget.engineLabel,
-          active: widget.isAvPlayerActive,
+        );
+      case 'anime4k':
+        if (widget.isLive) return null;
+        return _IosDockAction(
+          id: 'anime4k',
+          anchorKey: _anime4kAnchorKey,
+          icon: CupertinoIcons.wand_stars,
+          label: '超分',
+          active: widget.anime4kActive,
           onTap: () => _triggerAnchored(
-            _engineAnchorKey,
-            widget.onEngineSwitchAnchoredTap,
-            widget.onEngineSwitchTap,
+            _anime4kAnchorKey,
+            widget.onAnime4kAnchoredTap,
+            widget.onAnime4kTap,
           ),
-        ),
-      _IosDockAction(
-        key: const Key('player-fullscreen-toggle'),
-        id: 'fullscreen',
-        icon: widget.isLandscape
-            ? CupertinoIcons.fullscreen_exit
-            : CupertinoIcons.fullscreen,
-        label: widget.isLandscape ? '竖屏' : '全屏',
-        onTap: () {
-          widget.onInteraction();
-          widget.onFullscreenToggle();
-        },
-      ),
-      _IosDockAction(
-        key: const Key('ios-player-more-button'),
-        id: 'more',
-        anchorKey: _moreAnchorKey,
-        icon: CupertinoIcons.ellipsis,
-        label: '更多',
-        active: widget.sleepTimerActive,
-        onTap: () => _triggerAnchored(
-          _moreAnchorKey,
-          widget.onMoreAnchoredTap,
-          widget.onMoreTap,
-        ),
-      ),
-    ];
+        );
+      case 'sleep_timer':
+        return _IosDockAction(
+          id: 'sleep_timer',
+          anchorKey: _sleepAnchorKey,
+          icon: CupertinoIcons.moon_zzz_fill,
+          label: '定时',
+          active: widget.sleepTimerActive,
+          onTap: () => _triggerAnchored(
+            _sleepAnchorKey,
+            widget.onSleepTimerAnchoredTap,
+            widget.onSleepTimerTap,
+          ),
+        );
+      case 'pip':
+        return _IosDockAction(
+          key: const Key('ios-player-dock-pip-button'),
+          id: 'pip',
+          anchorKey: _dockPipAnchorKey,
+          icon: CupertinoIcons.rectangle_on_rectangle,
+          label: '画中画',
+          active: widget.isPipActive,
+          onTap: () => _triggerAnchored(
+            _dockPipAnchorKey,
+            widget.onPipAnchoredTap,
+            widget.onPipTap,
+          ),
+        );
+      case 'more':
+        return _IosDockAction(
+          key: const Key('ios-player-more-button'),
+          id: 'more',
+          anchorKey: _dockMoreAnchorKey,
+          icon: CupertinoIcons.ellipsis,
+          label: '更多',
+          active: widget.sleepTimerActive || widget.vocalLoudnessActive,
+          onTap: () => _triggerAnchored(
+            _dockMoreAnchorKey,
+            widget.onMoreAnchoredTap,
+            widget.onMoreTap,
+          ),
+        );
+      default:
+        return null;
+    }
+  }
+
+  /// Req 2: Single fused compact Liquid Glass deck combining the fluid
+  /// scrubber bar and customizable horizontal toolbar (~72pt total height).
+  Widget _buildUnifiedBottomDeck({
+    required double width,
+    required bool ios26Visual,
+    required bool reduceTransparency,
+    required bool reduceMotion,
+  }) {
+    final configuredIds = widget.toolbarItems.isEmpty
+        ? Ios26PlayerGlassMetrics.defaultToolbarItems
+        : widget.toolbarItems;
+    final seenIds = <String>{};
+    final actions = <_IosDockAction>[];
+    for (final rawId in configuredIds) {
+      final resolved = _resolveToolbarAction(rawId);
+      if (resolved != null && seenIds.add(resolved.id)) {
+        actions.add(resolved);
+      }
+    }
+    if (!seenIds.contains('more')) {
+      final moreAct = _resolveToolbarAction('more');
+      if (moreAct != null) actions.add(moreAct);
+    }
 
     final bounded = actions
         .take(Ios26PlayerGlassMetrics.maxPrimaryDockActions)
@@ -1313,7 +1638,10 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
     final dockKey = widget.isLandscape
         ? const Key('ios-player-primary-dock')
         : const Key('player-tool-dock-portrait');
-    final useScrollable = width < 480 || (width < 600 && bounded.length > 8);
+    final deckMaxWidth =
+        math.min(width, widget.isLandscape ? 768.0 : 560.0) - 28.0;
+    final useScrollable =
+        width < 520 || deckMaxWidth < (bounded.length * 72.0);
     final innerPillRadius = Ios26PlayerGlassMetrics.concentricRadius(
       Ios26PlayerGlassMetrics.dockCapsuleRadiusPt,
       5.0,
@@ -1323,11 +1651,12 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
       for (var i = 0; i < bounded.length; i++)
         useScrollable
             ? Padding(
-                padding: EdgeInsets.only(left: i == 0 ? 0 : 4),
+                padding: EdgeInsets.only(left: i == 0 ? 0 : 6),
                 child: _buildCompactDockPill(
                   bounded[i],
                   reduceMotion: reduceMotion,
                   pillRadius: innerPillRadius,
+                  horizontalPadding: 7.5,
                 ),
               )
             : Expanded(
@@ -1345,9 +1674,15 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
       child: _IosSpatialGlassSurface(
         key: dockKey,
         borderRadius: Ios26PlayerGlassMetrics.dockCapsuleRadiusPt,
+        isCapsule: widget.isLive,
         ios26Visual: ios26Visual,
         reduceTransparency: reduceTransparency,
-        padding: const EdgeInsets.fromLTRB(12, 4, 12, 5),
+        padding: EdgeInsets.fromLTRB(
+          14,
+          widget.isLive ? 5 : 5,
+          14,
+          widget.isLive ? 5 : 6,
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -1405,6 +1740,7 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
     _IosDockAction action, {
     required bool reduceMotion,
     double pillRadius = 14.0,
+    double horizontalPadding = 5.0,
   }) {
     final fg = action.active ? AppleColors.systemCyan : AppleColors.labelPrimary;
     final button = _IosRefractivePressButton(
@@ -1413,14 +1749,12 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
       onTap: action.onTap,
       child: Container(
         height: 29,
-        padding: const EdgeInsets.symmetric(horizontal: 5),
+        padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
         decoration: ShapeDecoration(
           color: action.active
-              ? AppleColors.systemBlue.withValues(alpha: 0.26)
+              ? AppleColors.systemBlue.withValues(alpha: 0.28)
               : Colors.transparent,
-          shape: ContinuousRectangleBorder(
-            borderRadius: BorderRadius.circular(pillRadius),
-          ),
+          shape: const StadiumBorder(),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -2031,6 +2365,8 @@ class _IosSpatialGlassSurface extends StatelessWidget {
   final bool reduceTransparency;
   final bool heroHighlight;
   final Color? tint;
+  final bool isCircle;
+  final bool isCapsule;
 
   const _IosSpatialGlassSurface({
     super.key,
@@ -2043,12 +2379,28 @@ class _IosSpatialGlassSurface extends StatelessWidget {
     this.padding,
     this.heroHighlight = false,
     this.tint,
+    this.isCircle = false,
+    this.isCapsule = false,
   });
+
+  ShapeBorder _resolveShape() {
+    final bool autoCircle = isCircle ||
+        (width != null &&
+            height != null &&
+            (width! - height!).abs() <= 0.5 &&
+            borderRadius >= width! * 0.45);
+    if (autoCircle) return const CircleBorder();
+    final bool autoCapsule = isCapsule ||
+        (height != null && borderRadius >= height! * 0.45);
+    if (autoCapsule) return const StadiumBorder();
+    return RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(borderRadius),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    final radius = BorderRadius.circular(borderRadius);
-    final shape = ContinuousRectangleBorder(borderRadius: radius);
+    final shape = _resolveShape();
 
     if (reduceTransparency) {
       final base = tint != null
@@ -2059,10 +2411,31 @@ class _IosSpatialGlassSurface extends StatelessWidget {
           : (heroHighlight
               ? const Color(0xF526272E)
               : const Color(0xF51E1E22));
+      final borderedShape = shape is CircleBorder
+          ? CircleBorder(
+              side: BorderSide(
+                color: Colors.white.withValues(alpha: 0.48),
+                width: 1.0,
+              ),
+            )
+          : shape is StadiumBorder
+              ? StadiumBorder(
+                  side: BorderSide(
+                    color: Colors.white.withValues(alpha: 0.48),
+                    width: 1.0,
+                  ),
+                )
+              : RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(borderRadius),
+                  side: BorderSide(
+                    color: Colors.white.withValues(alpha: 0.48),
+                    width: 1.0,
+                  ),
+                );
       return DecoratedBox(
-        decoration: BoxDecoration(
-          borderRadius: radius,
-          boxShadow: const [
+        decoration: ShapeDecoration(
+          shape: shape,
+          shadows: const [
             BoxShadow(
               color: Color(0x4D000000),
               blurRadius: 14,
@@ -2074,13 +2447,9 @@ class _IosSpatialGlassSurface extends StatelessWidget {
           width: width,
           height: height,
           padding: padding,
-          decoration: BoxDecoration(
-            borderRadius: radius,
+          decoration: ShapeDecoration(
+            shape: borderedShape,
             color: base,
-            border: Border.all(
-              color: Colors.white.withValues(alpha: 0.48),
-              width: 1.0,
-            ),
           ),
           child: child,
         ),
@@ -2253,4 +2622,110 @@ class _IosSpatialGlassSurface extends StatelessWidget {
       stops: [0.0, 0.52, 1.0],
     );
   }
+}
+
+/// Crisp Apple-style Picture-in-Picture glyph (rounded viewport + inset
+/// floating mini-window in bottom-right corner).
+class _IosPipIcon extends StatelessWidget {
+  final double size;
+  final Color color;
+  final bool active;
+
+  const _IosPipIcon({
+    required this.size,
+    required this.color,
+    this.active = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: size,
+      height: size,
+      child: CustomPaint(
+        painter: _IosPipIconPainter(color: color, active: active),
+      ),
+    );
+  }
+}
+
+class _IosPipIconPainter extends CustomPainter {
+  final Color color;
+  final bool active;
+
+  const _IosPipIconPainter({required this.color, required this.active});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final strokeW = (size.width * 0.095).clamp(1.3, 2.0);
+    final outerRect = RRect.fromRectAndRadius(
+      Rect.fromLTWH(
+        strokeW * 0.5,
+        size.height * 0.14,
+        size.width - strokeW,
+        size.height * 0.72,
+      ),
+      Radius.circular(size.width * 0.18),
+    );
+    final strokePaint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeW
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    canvas.drawRRect(outerRect, strokePaint);
+
+    final insetW = size.width * 0.44;
+    final insetH = size.height * 0.32;
+    final insetRect = RRect.fromRectAndRadius(
+      Rect.fromLTWH(
+        size.width - strokeW * 1.4 - insetW,
+        size.height * 0.86 - strokeW * 1.4 - insetH,
+        insetW,
+        insetH,
+      ),
+      Radius.circular(size.width * 0.10),
+    );
+    final fillPaint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
+    canvas.drawRRect(insetRect, fillPaint);
+
+    // Directional enter/exit micro-arrow in the upper-left area
+    final arrowStart = active
+        ? Offset(size.width * 0.42, size.height * 0.46)
+        : Offset(size.width * 0.24, size.height * 0.30);
+    final arrowEnd = active
+        ? Offset(size.width * 0.24, size.height * 0.30)
+        : Offset(size.width * 0.42, size.height * 0.46);
+    canvas.drawLine(arrowStart, arrowEnd, strokePaint);
+    final head = strokeW * 1.5;
+    if (active) {
+      canvas.drawLine(
+        arrowEnd,
+        Offset(arrowEnd.dx + head, arrowEnd.dy),
+        strokePaint,
+      );
+      canvas.drawLine(
+        arrowEnd,
+        Offset(arrowEnd.dx, arrowEnd.dy + head),
+        strokePaint,
+      );
+    } else {
+      canvas.drawLine(
+        arrowEnd,
+        Offset(arrowEnd.dx - head, arrowEnd.dy),
+        strokePaint,
+      );
+      canvas.drawLine(
+        arrowEnd,
+        Offset(arrowEnd.dx, arrowEnd.dy - head),
+        strokePaint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _IosPipIconPainter oldDelegate) =>
+      oldDelegate.color != color || oldDelegate.active != active;
 }

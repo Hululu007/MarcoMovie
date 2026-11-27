@@ -38,13 +38,39 @@ final class DanmakuView extends View implements AutoCloseable {
         void error(String message);
     }
 
+    interface SegmentEventListener {
+        void onSessionReady(boolean segmented, int knownTotalCount);
+
+        void onWindowReady(int windowIndex, int count);
+
+        void onError(String stage, Throwable error, String fallbackMessage);
+    }
+
     private static final Typeface DANMAKU_TYPEFACE = Typeface.create("sans-serif", Typeface.BOLD);
     private static final float MIN_BOTTOM_SAFE_INSET_DP = 44f;
 
     final Clock clock;
     final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
     final Paint strokePaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
-    final ExecutorService loader = Executors.newSingleThreadExecutor();
+    final ExecutorService loader = createLoaderExecutor();
+
+    private static ExecutorService createLoaderExecutor() {
+        java.util.concurrent.ThreadPoolExecutor pool =
+                new java.util.concurrent.ThreadPoolExecutor(
+                        1,
+                        1,
+                        15L,
+                        java.util.concurrent.TimeUnit.SECONDS,
+                        new java.util.concurrent.LinkedBlockingQueue<Runnable>(),
+                        r -> {
+                            Thread t = new Thread(r, "danmaku-loader");
+                            t.setDaemon(true);
+                            return t;
+                        });
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
+    }
+
     final LayoutEngine layoutEngine = new LayoutEngine();
     final FramePacingMonitor tvPacingMonitor = new FramePacingMonitor();
     final SmoothClock smoothClock = new SmoothClock();
@@ -201,10 +227,19 @@ final class DanmakuView extends View implements AutoCloseable {
     }
 
     void attachSegmentCache(DanmuSegmentCache cache) {
+        attachSegmentCache(cache, null);
+    }
+
+    void attachSegmentCache(
+            final DanmuSegmentCache cache, final SegmentEventListener hostListener) {
         if (segmentCache != null && segmentCache != cache) {
             segmentCache.setListener(null);
         }
         segmentCache = cache;
+        comments = Collections.emptyList();
+        legacyItems = Collections.emptyList();
+        filteredLegacyItems = Collections.emptyList();
+        frameItems.clear();
         layoutEngine.reset();
         if (cache != null) {
             cache.setTimeOffsetMs(timeOffsetMs);
@@ -213,17 +248,40 @@ final class DanmakuView extends View implements AutoCloseable {
                     new DanmuSegmentCache.Listener() {
                         @Override
                         public void onWindowReady(int windowIndex, int count) {
-                            if (!closed) postInvalidate();
+                            if (closed || segmentCache != cache) return;
+                            postInvalidate();
+                            if (hostListener != null) {
+                                hostListener.onWindowReady(windowIndex, count);
+                            }
                         }
 
                         @Override
                         public void onSessionReady(boolean segmented) {
-                            if (!closed) postInvalidate();
+                            if (closed || segmentCache != cache) return;
+                            postInvalidate();
+                            if (hostListener != null) {
+                                hostListener.onSessionReady(
+                                        segmented, cache.getKnownTotalCommentCount());
+                            }
                         }
 
                         @Override
                         public void onError(String message) {
-                            AppLog.w("DanmakuView", "Segmented danmu error: " + message, null);
+                            if (closed || segmentCache != cache) return;
+                            Throwable err = cache.getLastError();
+                            DanmuProvider.FailureInfo fi = DanmuProvider.FailureInfo.classify(err);
+                            String stage =
+                                    cache.getCurrentSession() == null
+                                            ? "open_session"
+                                            : "fetch_window";
+                            AppLog.w(
+                                    "DanmakuView",
+                                    DanmuProvider.FailureInfo.sanitizedDiagnostic(
+                                            stage, fi.httpStatus, "seg", 0),
+                                    null);
+                            if (hostListener != null) {
+                                hostListener.onError(stage, err, message);
+                            }
                         }
                     });
             invalidate();
@@ -236,6 +294,53 @@ final class DanmakuView extends View implements AutoCloseable {
             segmentCache = null;
         }
         layoutEngine.reset();
+    }
+
+    /** Immediately invalidates in-flight loads and wipes all displayed danmu text. */
+    void clearAll() {
+        request++;
+        detachSegmentCache();
+        comments = Collections.emptyList();
+        legacyItems = Collections.emptyList();
+        filteredLegacyItems = Collections.emptyList();
+        frameItems.clear();
+        layoutEngine.reset();
+        postInvalidate();
+    }
+
+    List<String> snapshotActiveTexts() {
+        List<String> out = new ArrayList<>();
+        ActiveSlot[] slots = layoutEngine.getSlots();
+        for (int i = 0; i < slots.length; i++) {
+            ActiveSlot s = slots[i];
+            if (s != null && s.active && s.text != null && !s.text.isEmpty()) {
+                out.add(s.text);
+            }
+        }
+        return out;
+    }
+
+    List<String> snapshotLoadedTexts(int max) {
+        List<String> out = new ArrayList<>();
+        int cap = Math.max(1, max);
+        DanmuSegmentCache cache = segmentCache;
+        if (cache != null) {
+            DanmuProvider.EpisodeSession sess = cache.getCurrentSession();
+            if (sess != null && !sess.preloadComments.isEmpty()) {
+                for (int i = 0; i < sess.preloadComments.size() && out.size() < cap; i++) {
+                    out.add(sess.preloadComments.get(i).text);
+                }
+                return out;
+            }
+            for (int i = 0; i < frameItems.size() && out.size() < cap; i++) {
+                out.add(frameItems.get(i).text);
+            }
+            return out;
+        }
+        for (int i = 0; i < legacyItems.size() && out.size() < cap; i++) {
+            out.add(legacyItems.get(i).text);
+        }
+        return out;
     }
 
     void onSeekInitiated() {
@@ -463,13 +568,15 @@ final class DanmakuView extends View implements AutoCloseable {
                     continue;
                 }
 
+                if (status == 429) {
+                    long retryAfterMs =
+                            DandanplayProvider.parseRetryAfterMs(
+                                    connection.getHeaderField("Retry-After"));
+                    throw new DanmuProvider.HttpStatusException(
+                            429, "弹幕请求被限流 (HTTP 429)", retryAfterMs);
+                }
                 if (status < 200 || status >= 300) {
-                    throw new IOException(
-                            "弹幕服务器返回 HTTP "
-                                    + status
-                                    + " ("
-                                    + describeUrlForLog(currentUrl.toString())
-                                    + ")");
+                    throw new DanmuProvider.HttpStatusException(status, "弹幕服务器返回 HTTP " + status);
                 }
 
                 String encoding = connection.getContentEncoding();
@@ -544,14 +651,18 @@ final class DanmakuView extends View implements AutoCloseable {
                                     }
                                 });
                     } catch (Exception error) {
+                        DanmuProvider.FailureInfo fi = DanmuProvider.FailureInfo.classify(error);
                         AppLog.w(
                                 "DanmakuView",
-                                "Failed to load danmaku: " + error.getMessage(),
-                                error);
+                                DanmuProvider.FailureInfo.sanitizedDiagnostic(
+                                        "direct_load", fi.httpStatus, "t" + ticket, 0),
+                                null);
+                        final String errMsg =
+                                fi.httpStatus > 0 ? fi.shortReason : "弹幕暂时不可用，可导入本地 XML / JSON 文件。";
                         post(
                                 () -> {
                                     if (!closed && ticket == request) {
-                                        listener.error("弹幕暂时不可用，可导入本地 XML / JSON 文件。");
+                                        listener.error(errMsg);
                                     }
                                 });
                     }

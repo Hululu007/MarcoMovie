@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'cms_parser.dart';
 import 'csp_rule_engines.dart';
+import 'episode_scraper.dart';
 import 'trailer_source.dart';
 import 'models.dart';
 import 'wogg_netdisk_adapter.dart';
@@ -56,9 +57,91 @@ class CspBridge {
     final name = site.name.trim();
     return lowerKey == 'cc' ||
         lowerKey == 'push_agent' ||
+        lowerApi == 'csp_about' ||
         lowerApi.startsWith('csp_push') ||
         name.contains('请勿信') ||
         isBannerNoticeSite(site);
+  }
+
+  /// Identifies auxiliary Douban group/search notice entries (e.g.
+  /// `csp_DoubanSearch` / `群...┃豆瓣搜索`) so primary `csp_Douban` or real VOD
+  /// sites are preferred when selecting the default Home source.
+  static bool isDoubanSearchUtilitySite(CmsSite site) {
+    final lowerApi = site.api.trim().toLowerCase();
+    final lowerKey = site.key.trim().toLowerCase();
+    return lowerApi == 'csp_doubansearch' ||
+        lowerKey.endsWith('_douban_search') ||
+        (isDoubanSite(site) &&
+            site.name.contains('群') &&
+            site.name.contains('搜索'));
+  }
+
+  /// True when [site] is a directly browseable & playable VOD/script/netdisk
+  /// source rather than a Douban recommendation list or utility entry.
+  static bool isPrimaryPlayableVodSite(CmsSite site) {
+    return site.supported &&
+        !isBannerNoticeSite(site) &&
+        !isPickerHiddenUtilitySite(site) &&
+        !isDoubanSite(site) &&
+        !isMyDriveSite(site);
+  }
+
+  /// Inspects newly imported subscriptions on non-Android platforms (iOS /
+  /// macOS / Windows) and returns a clear user-facing explanation when a
+  /// subscription consists primarily of custom/encrypted Android `spider.jar`
+  /// (`csp_*`) plugins that cannot execute inside Apple/desktop sandboxes.
+  static ({String title, String message})?
+      buildSubscriptionRuntimeLimitationNotice(
+    Iterable<SubscriptionEntry> entries,
+  ) {
+    int totalSites = 0;
+    int jarBlockedCount = 0;
+    int playableVodCount = 0;
+    int doubanCount = 0;
+    int liveCount = 0;
+    for (final entry in entries) {
+      if (entry.rawContent.trim().isEmpty) continue;
+      try {
+        final cfg = CmsParser.parseConfig(
+          entry.rawContent,
+          origin: entry.url,
+          defaultGroup: entry.group,
+          isPrivate: entry.isPrivate,
+          subscriptionId: entry.id,
+          defaultName: entry.name,
+        );
+        liveCount += cfg.lives.length;
+        for (final s in cfg.sites) {
+          if (isPickerHiddenUtilitySite(s)) continue;
+          totalSites++;
+          final status = s.capabilityStatus;
+          if (status == CmsSite.statusNeedsJar ||
+              status == CmsSite.statusAdapterMissing) {
+            jarBlockedCount++;
+          } else if (isPrimaryPlayableVodSite(s)) {
+            playableVodCount++;
+          } else if (s.supported && isDoubanSite(s)) {
+            doubanCount++;
+          }
+        }
+      } catch (_) {}
+    }
+    if (jarBlockedCount <= 0) return null;
+    if (playableVodCount > 0 && !(jarBlockedCount >= 5 && playableVodCount * 8 < jarBlockedCount)) {
+      return null;
+    }
+    final livePart = liveCount > 0 ? '与 $liveCount 个直播源' : '';
+    final usablePart = (liveCount > 0 || doubanCount > 0 || playableVodCount > 0)
+        ? '已识别的${playableVodCount > 0 ? " $playableVodCount 个兼容站点、" : ""}'
+            '${doubanCount > 0 ? "豆瓣片单" : ""}'
+            '${doubanCount > 0 && liveCount > 0 ? "与" : ""}'
+            '${liveCount > 0 ? "直播频道" : ""}可正常浏览；'
+        : '';
+    return (
+      title: '订阅已解析（含安卓插件限制）',
+      message: '共识别 $totalSites 个站点$livePart，其中 $jarBlockedCount 个点播站依赖专属加密 Android JAR 插件（spider.jar），'
+          'iOS 系统沙盒无法直接运行安卓字节码。${usablePart}如需完整点播体验，建议添加标准 VOD / JS / XBPQ 订阅或连接网盘 / Emby。',
+    );
   }
 
   static String? guardAdapterFor(CmsSite site) => site.type != 3 ? null : const {
@@ -254,11 +337,18 @@ class CspBridge {
     return lowerApi.contains('mydrive') ||
         lowerApi.contains('panwebshare') ||
         lowerApi.contains('panconfig') ||
+        lowerApi.contains('configcenter') ||
+        lowerApi.contains('localconfig') ||
+        lowerApi.contains('wexconfig') ||
+        lowerApi.contains('wexokconfig') ||
         lowerApi.contains('mypan') ||
         lowerApi == 'csp_config' ||
         lowerApi == 'csp_configcenter' ||
         lowerApi.startsWith('csp_push') ||
         lowerKey.contains('mydrive') ||
+        lowerKey.contains('configcenter') ||
+        lowerKey.contains('wexconfig') ||
+        lowerKey.contains('panconfig') ||
         lowerKey == 'config' ||
         lowerKey == 'push_agent' ||
         lowerName.contains('我的云盘') ||
@@ -443,33 +533,9 @@ class CspBridge {
   }
 
   /// Extracts a 1-based episode number from Netdisk / VOD episode labels such as
-  /// `JJC.S01E02 [1.30GB]`, `E01 [5.38GB]`, `[4K HDR] 第03集`, or `第12集`.
+  /// `JJC.S01E02 [1.30GB]`, `E01 [5.38GB]`, `[4K HDR] 第03集`, `第五集`, or `第12集`.
   static int extractEpisodeNumber(String episodeName, int fallbackIndex) {
-    final stripped = episodeName
-        .replaceAll(RegExp(r'\[[^\]]*\]'), ' ')
-        .replaceAll(RegExp(r'\b(?:4[kK]|1080[pP]|2160[pP]|720[pP]|HDR\d*|x26[45]|H\.?26[45]|HEVC|AAC|DDP\d*(?:\.\d+)?)\b'), ' ')
-        .trim();
-    final seMatch = RegExp(r'[Ss]\d{1,2}[Ee](\d{1,4})').firstMatch(stripped);
-    if (seMatch != null) {
-      final n = int.tryParse(seMatch.group(1) ?? '');
-      if (n != null && n > 0) return n;
-    }
-    final cnMatch = RegExp(r'第\s*(\d{1,4})\s*[集话期章节回]').firstMatch(stripped);
-    if (cnMatch != null) {
-      final n = int.tryParse(cnMatch.group(1) ?? '');
-      if (n != null && n > 0) return n;
-    }
-    final epMatch = RegExp(r'(?:^|[^a-zA-Z0-9])[Ee][Pp]?(\d{1,4})(?!\d)').firstMatch(stripped);
-    if (epMatch != null) {
-      final n = int.tryParse(epMatch.group(1) ?? '');
-      if (n != null && n > 0) return n;
-    }
-    final numOnly = RegExp(r'^\s*#?(\d{1,4})(?:\s|$)').firstMatch(stripped);
-    if (numOnly != null) {
-      final n = int.tryParse(numOnly.group(1) ?? '');
-      if (n != null && n > 0) return n;
-    }
-    return fallbackIndex + 1;
+    return EpisodeScraper.extractEpisodeNumber(episodeName, fallbackIndex);
   }
 
   /// Finds the best matching episode index in [targetLine] for [sourceEpisodeName].

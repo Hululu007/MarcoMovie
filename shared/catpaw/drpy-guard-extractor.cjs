@@ -187,8 +187,8 @@ function zipMember(bytes, target, budget = { bytes: 0, entries: 0 }) {
   }
   if (end < 0 || bytes.readUInt32LE(end + 4) !== 0) fail();
   const count = bytes.readUInt16LE(end + 10), centralSize = bytes.readUInt32LE(end + 12), central = bytes.readUInt32LE(end + 16);
-  if (count !== bytes.readUInt16LE(end + 8) || !count || count > 512 || central + centralSize !== end) fail();
-  if ((budget.entries += count) > 512) fail();
+  if (count !== bytes.readUInt16LE(end + 8) || !count || count > 2048 || central + centralSize !== end) fail();
+  if ((budget.entries += count) > 2048) fail();
   let p = central, chosen;
   const names = new Set(), regions = [];
   for (let i = 0; i < count; i++) {
@@ -199,15 +199,17 @@ function zipMember(bytes, target, budget = { bytes: 0, entries: 0 }) {
     const nameLength = bytes.readUInt16LE(p + 28), extra = bytes.readUInt16LE(p + 30), comment = bytes.readUInt16LE(p + 32);
     const local = bytes.readUInt32LE(p + 42);
     bounds(bytes, p + 46, nameLength + extra + comment);
-    if (flags & ~0x0808 || ![0, 8].includes(method) || bytes.readUInt16LE(p + 34) || size > MAX || packed > MAX) fail();
-    if ((budget.bytes += size) > 32 * 1024 * 1024) fail();
+    // Allow bit 1-2 DEFLATE compression hints (0x0006), bit 3 data descriptor (0x0008),
+    // and bit 11 UTF-8 names (0x0800); strictly reject bit 0 encryption and unknown flags.
+    if (flags & ~0x080e || ![0, 8].includes(method) || bytes.readUInt16LE(p + 34) || size > MAX || packed > MAX) fail();
+    if ((budget.bytes += size) > 64 * 1024 * 1024) fail();
     const rawName = bytes.subarray(p + 46, p + 46 + nameLength);
     const name = rawName.toString('utf8');
     if (!name || !Buffer.from(name).equals(rawName) || name.includes('\\') || name.includes('\0') || name.startsWith('/') || name.split('/').some(s => s === '..' || s === '.')) fail();
     if (names.has(name)) fail();
     names.add(name);
     bounds(bytes, local, 30);
-    if (local >= central || bytes.readUInt32LE(local) !== 0x04034b50 || bytes.readUInt16LE(local + 6) !== flags || bytes.readUInt16LE(local + 8) !== method) fail();
+    if (local >= central || bytes.readUInt32LE(local) !== 0x04034b50 || (bytes.readUInt16LE(local + 6) & ~0x0006) !== (flags & ~0x0006) || bytes.readUInt16LE(local + 8) !== method) fail();
     const localName = bytes.readUInt16LE(local + 26), localExtra = bytes.readUInt16LE(local + 28), data = local + 30 + localName + localExtra;
     bounds(bytes, local + 30, localName + localExtra);
     if (!bytes.subarray(local + 30, local + 30 + localName).equals(rawName) || data + packed > central) fail();
@@ -280,13 +282,21 @@ class Dex {
   constructor(bytes) {
     this.bytes = bytes;
     bounds(bytes, 0, 112);
-    if (bytes.length > MAX || !bytes.subarray(0, 8).equals(Buffer.from('dex\n035\0')) || this.u32(32) !== bytes.length || this.u32(36) !== 112 || this.u32(40) !== 0x12345678) fail();
+    const magic = bytes.subarray(0, 8).toString('latin1');
+    const validMagic = magic === 'dex\n035\0' || magic === 'dex\n037\0' || magic === 'dex\n038\0' || magic === 'dex\n039\0' || magic === 'dex\n040\0';
+    if (bytes.length > MAX || !validMagic || this.u32(32) !== bytes.length || this.u32(36) !== 112 || this.u32(40) !== 0x12345678) fail();
     if (!crypto.createHash('sha1').update(bytes.subarray(32)).digest().equals(bytes.subarray(12, 32)) || adler32(bytes.subarray(12)) !== this.u32(8)) fail();
     this.strings = this.table(56, 4).map(p => this.string(this.u32(p)));
     this.types = this.table(64, 4).map(p => this.at(this.strings, this.u32(p)));
     this.protos = this.table(72, 12).map(p => [this.at(this.types, this.u32(p + 4)), this.u32(p + 8)]);
     this.fields = this.table(80, 8).map(p => [this.at(this.types, this.u16(p)), this.at(this.types, this.u16(p + 2)), this.at(this.strings, this.u32(p + 4))]);
     this.methods = this.table(88, 8).map(p => [this.at(this.types, this.u16(p)), this.at(this.protos, this.u16(p + 2)), this.at(this.strings, this.u32(p + 4))]);
+  }
+  classNames() {
+    if (!this._classNames) {
+      this._classNames = this.table(96, 32).map(p => this.at(this.types, this.u32(p)));
+    }
+    return this._classNames;
   }
   at(values, index) { if (!Number.isInteger(index) || index < 0 || index >= values.length) fail(); return values[index]; }
   u16(p) { bounds(this.bytes, p, 2); return this.bytes.readUInt16LE(p); }
@@ -626,6 +636,32 @@ class Dex {
       }
     }
     return { count, payloadUnit, values, maskBySlice, calls, byMethod };
+  }
+  extractAllClassLiterals(className) {
+    const methods = this.classMethods(className);
+    if (!methods) return null;
+    return methods.map(m => {
+      const list = [];
+      const atUnit = new Map();
+      for (let u = 0; u < m.size; ) {
+        const width = this.insnWidth(m.offset, u, m.size);
+        const ins = m.offset + 16 + u * 2;
+        const w0 = this.u16(ins), op = w0 & 0xff;
+        if (w0 !== 0x0100 && w0 !== 0x0200 && w0 !== 0x0300) {
+          if (op === 0x1a && u + 1 < m.size) {
+            const value = this.at(this.strings, this.u16(ins + 2));
+            list.push({ unit: u, value });
+            atUnit.set(u, value);
+          } else if (op === 0x1b && u + 2 < m.size) {
+            const value = this.at(this.strings, this.u32(ins + 2));
+            list.push({ unit: u, value });
+            atUnit.set(u, value);
+          }
+        }
+        u += width;
+      }
+      return { name: m.name, sig: m.sig, size: m.size, list, atUnit };
+    });
   }
   extractMethodLiterals(className, methodName) {
     const methods = this.classMethods(className);

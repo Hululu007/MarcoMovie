@@ -652,54 +652,254 @@ extension _WindowsShell on _AdaptiveShellState {
         ]),
       );
 
-  Widget _windowsHistoryCard(WatchHistoryEntry entry) => InkWell(
-      onTap: () => _openSyncedMediaEntry(
+  Widget _windowsHistoryCard(
+    WatchHistoryEntry entry, {
+    String? resolvedPosterOverride,
+  }) {
+    final resolvedPoster =
+        resolvedPosterOverride ?? _resolveHistoryPoster(entry);
+    final isDark = winDark(context);
+    final fraction = entry.complete
+        ? 1.0
+        : entry.progressFraction.clamp(0.0, 1.0);
+    final showProgress = entry.duration > 0 && fraction > 0.01;
+    final episodeTag = entry.episode.trim().isEmpty
+        ? '第 ${entry.index + 1} 集'
+        : entry.episode.trim();
+    final subtitle = iosHistoryCardSubtitle(entry);
+
+    Future<void> openContextMenu(TapDownDetails details) async {
+      final overlay =
+          Overlay.of(context).context.findRenderObject() as RenderBox?;
+      if (overlay == null) return;
+      final selected = await showMenu<String>(
+        context: context,
+        position: RelativeRect.fromRect(
+          details.globalPosition & const Size(1, 1),
+          Offset.zero & overlay.size,
+        ),
+        items: const <PopupMenuEntry<String>>[
+          PopupMenuItem<String>(
+            value: 'resume',
+            child: Row(
+              children: [
+                Icon(CupertinoIcons.play_fill, size: 15),
+                SizedBox(width: 8),
+                Text('继续播放'),
+              ],
+            ),
+          ),
+          PopupMenuItem<String>(
+            value: 'delete',
+            child: Row(
+              children: [
+                Icon(CupertinoIcons.trash, size: 15),
+                SizedBox(width: 8),
+                Text('删除记录'),
+              ],
+            ),
+          ),
+        ],
+      );
+      if (!mounted) return;
+      if (selected == 'resume') {
+        _openSyncedMediaEntry(
           siteKey: entry.site,
           videoId: entry.id,
           title: entry.title,
-          poster: _resolveHistoryPoster(entry)),
-      borderRadius: BorderRadius.circular(20),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        AspectRatio(
-            aspectRatio: 16 / 9,
-            child: ClipRRect(
-                borderRadius: BorderRadius.circular(20),
-                child: Stack(fit: StackFit.expand, children: [
-                  PosterImage(
-                      url: _resolveHistoryPoster(entry),
+          poster: resolvedPoster,
+        );
+      } else if (selected == 'delete') {
+        await _deleteWindowsHistoryEntryWithUndo(entry);
+      }
+    }
+
+    return GestureDetector(
+      onSecondaryTapDown: openContextMenu,
+      child: InkWell(
+        onTap: () => _openSyncedMediaEntry(
+          siteKey: entry.site,
+          videoId: entry.id,
+          title: entry.title,
+          poster: resolvedPoster,
+        ),
+        borderRadius: BorderRadius.circular(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            AspectRatio(
+              key: ValueKey('win-hist-poster-aspect-${entry.site}-${entry.id}'),
+              aspectRatio: 2 / 3,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    PosterImage(
+                      url: resolvedPoster,
                       title: entry.title,
                       placeholder: ColoredBox(
-                          color: Colors.white.withValues(alpha: .12))),
-                  const Positioned(
-                      right: 14,
-                      bottom: 14,
-                      child: CircleAvatar(
-                          radius: 16,
-                          backgroundColor: Color(0xDDEDF3FA),
-                          child: Icon(CupertinoIcons.play_fill,
-                              size: 13, color: Color(0xFF2B455F))))
-                ]))),
-        const SizedBox(height: 12),
-        Text(entry.title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style:
-                TextStyle(color: winInk(context), fontWeight: FontWeight.w600)),
-        const SizedBox(height: 5),
-        Text(
-            '${entry.episode} · 已看 ${Duration(milliseconds: entry.position).inMinutes} 分钟',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(color: winMuted(context), fontSize: 11)),
-        const SizedBox(height: 10),
-        ClipRRect(
-            borderRadius: BorderRadius.circular(3),
-            child: LinearProgressIndicator(
-                value: entry.progressFraction,
-                minHeight: 3,
-                color: const Color(0xFF6484AC),
-                backgroundColor: Colors.white24)),
-      ]));
+                        color: isDark
+                            ? Colors.white.withValues(alpha: .08)
+                            : const Color(0xFFE5E9F0),
+                        child: Center(
+                          child: Icon(
+                            CupertinoIcons.film,
+                            size: 28,
+                            color: winMuted(context).withValues(alpha: .45),
+                          ),
+                        ),
+                      ),
+                    ),
+                    // Subtle top-right quick delete action
+                    Positioned(
+                      top: 8,
+                      right: 8,
+                      child: Tooltip(
+                        message: '删除这条观看记录',
+                        child: Material(
+                          color: Colors.black.withValues(alpha: 0.46),
+                          shape: const CircleBorder(),
+                          clipBehavior: Clip.antiAlias,
+                          child: InkWell(
+                            key: ValueKey(
+                              'win-hist-delete-${entry.site}-${entry.id}',
+                            ),
+                            onTap: () =>
+                                _deleteWindowsHistoryEntryWithUndo(entry),
+                            child: const Padding(
+                              padding: EdgeInsets.all(6),
+                              child: Icon(
+                                CupertinoIcons.xmark,
+                                size: 12,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    // Bottom cinema gradient scrim with episode tag, play icon & progress bar
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: DecoratedBox(
+                        decoration: const BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: <Color>[
+                              Color(0x00000000),
+                              Color(0x990A0E15),
+                              Color(0xDE0A0E15),
+                            ],
+                          ),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(10, 26, 10, 10),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 7,
+                                        vertical: 3,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: Colors.black
+                                            .withValues(alpha: 0.42),
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: Text(
+                                        entry.complete
+                                            ? '$episodeTag · 已看完'
+                                            : episodeTag,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 10.8,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  const CircleAvatar(
+                                    radius: 13,
+                                    backgroundColor: Color(0xE6EDF3FA),
+                                    child: Icon(
+                                      CupertinoIcons.play_fill,
+                                      size: 11,
+                                      color: Color(0xFF1D3550),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              if (showProgress) ...[
+                                const SizedBox(height: 8),
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(3),
+                                  child: LinearProgressIndicator(
+                                    value: fraction,
+                                    minHeight: 3.2,
+                                    color: const Color(0xFF6FA8FF),
+                                    backgroundColor:
+                                        Colors.white.withValues(alpha: 0.24),
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    // Crisp cinema poster border
+                    IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: winSurfaceBorder(context),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 9),
+            Text(
+              entry.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: winInk(context),
+                fontSize: 13.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              subtitle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: winMuted(context),
+                fontSize: 11.2,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   static const double _windowsDiscoverAutoLoadThreshold = 420.0;
 
@@ -1313,12 +1513,37 @@ extension _WindowsShell on _AdaptiveShellState {
         _privateSessionUnlocked && _librarySegment == 2 ? 0 : _librarySegment;
     final history =
         _privateSessionUnlocked ? <WatchHistoryEntry>[] : _cachedWatchHistory;
-    final favorites =
-        widget.storage.getFavorites(forPrivate: _privateSessionUnlocked);
+    final favorites = segment == 0
+        ? widget.storage.getFavorites(forPrivate: _privateSessionUnlocked)
+        : const <FavoriteEntry>[];
+    Map<String, String>? historyPosterById;
+    Map<String, String>? historyPosterByTitle;
+    if (segment == 1 && history.any((e) => e.poster.trim().isEmpty)) {
+      historyPosterById = <String, String>{};
+      historyPosterByTitle = <String, String>{};
+      for (final f in widget.storage.getFavorites()) {
+        final p = f.poster.trim();
+        if (p.isEmpty) continue;
+        historyPosterById.putIfAbsent(f.id, () => p);
+        historyPosterByTitle.putIfAbsent(f.title, () => p);
+      }
+      for (final v in _homeVideos) {
+        final p = v.poster.trim();
+        if (p.isEmpty) continue;
+        historyPosterById[v.id] = p;
+        historyPosterByTitle[v.title] = p;
+      }
+    }
     return Padding(
         padding: EdgeInsets.fromLTRB(pad, 8, pad, 20),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           _windowsHeading('我的', actions: [
+            if (!_privateSessionUnlocked &&
+                AiLabPasscodeStore.instance.isUnlocked)
+              WinButton('AI 为你挑片',
+                  key: const ValueKey('windows-ai-picks-btn'),
+                  icon: CupertinoIcons.sparkles,
+                  onPressed: _openWindowsAiPicksDialog),
             if (!_privateSessionUnlocked)
               WinButton('多端同步',
                   icon: CupertinoIcons.cloud, onPressed: _openCloudSyncCenter)
@@ -1343,103 +1568,164 @@ extension _WindowsShell on _AdaptiveShellState {
           Expanded(
               child: segment == 2
                   ? _windowsDownloads()
-                  : LayoutBuilder(builder: (_, box) {
-                      final count = (box.maxWidth / 330).floor().clamp(2, 5);
-                      final cards = segment == 1
-                          ? [
-                              for (final item in history)
-                                _windowsHistoryCard(item)
-                            ]
-                          : [
-                              for (final f in favorites)
-                                InkWell(
-                                    onTap: () => _openSyncedMediaEntry(
-                                        siteKey: f.site,
-                                        videoId: f.id,
-                                        title: f.title,
-                                        poster: f.poster),
-                                    child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          AspectRatio(
-                                              aspectRatio: 16 / 9,
-                                              child: ClipRRect(
-                                                  borderRadius:
-                                                      BorderRadius.circular(20),
-                                                  child: PosterImage(
-                                                      url: f.poster,
-                                                      title:
-                                                          _privateSessionUnlocked
-                                                              ? ''
-                                                              : f.title,
-                                                      placeholder:
-                                                          const SizedBox
-                                                              .shrink()))),
-                                          const SizedBox(height: 13),
-                                          Text(f.title,
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: TextStyle(
-                                                  color: winInk(context),
-                                                  fontWeight: FontWeight.w600)),
-                                          Align(
-                                              alignment: Alignment.centerRight,
-                                              child: IconButton(
-                                                  tooltip: '取消收藏',
-                                                  icon: Icon(
-                                                      CupertinoIcons.heart_fill,
-                                                      color: winMuted(context),
-                                                      size: 17),
-                                                  onPressed: () async {
-                                                    await widget.storage
-                                                        .toggleFavorite(
-                                                            CmsSite(
-                                                                key: f.site,
-                                                                name: '',
-                                                                type: 0,
-                                                                api: '',
-                                                                isPrivate:
-                                                                    _privateSessionUnlocked),
-                                                            CmsVideo(
-                                                                id: f.id,
-                                                                title: f.title,
-                                                                poster:
-                                                                    f.poster));
-                                                    if (mounted)
-                                                      _updateWindowsState(
-                                                          () {});
-                                                  }))
-                                        ]))
-                            ];
-                      if (cards.isEmpty)
+                  : LayoutBuilder(builder: (ctx, box) {
+                      final isHistory = segment == 1;
+                      final itemCount =
+                          isHistory ? history.length : favorites.length;
+                      if (itemCount == 0) {
                         return _windowsEmpty(
-                            segment == 1 ? '还没有观看记录' : '收藏喜欢的影片',
+                            isHistory ? '还没有观看记录' : '收藏喜欢的影片',
                             '找到一部喜欢的影片，开始观看或加入收藏。',
                             action: () => _windowsNavigate('discover'),
                             button: '去发现');
-                      return SingleChildScrollView(
-                          child: Wrap(spacing: 24, runSpacing: 25, children: [
-                        for (final card in cards)
-                          SizedBox(
-                              width: (box.maxWidth - (count - 1) * 24) / count,
-                              child: card)
-                      ]));
+                      }
+                      final textScale = MediaQuery.textScalerOf(ctx)
+                          .scale(1.0)
+                          .clamp(1.0, 1.6);
+                      final int count;
+                      final double crossSpacing;
+                      final double mainSpacing;
+                      final double mediaHeight;
+                      final double mainAxisExtent;
+                      if (isHistory) {
+                        // 2:3 vertical cinema poster wall for Continue Watching
+                        count = (box.maxWidth / 215).floor().clamp(3, 6);
+                        crossSpacing = 18.0;
+                        mainSpacing = 22.0;
+                        final tileWidth =
+                            (box.maxWidth - (count - 1) * crossSpacing) / count;
+                        mediaHeight = tileWidth * 1.5;
+                        mainAxisExtent = mediaHeight + 58.0 * textScale;
+                      } else {
+                        count = (box.maxWidth / 330).floor().clamp(2, 5);
+                        crossSpacing = 24.0;
+                        mainSpacing = 25.0;
+                        final tileWidth =
+                            (box.maxWidth - (count - 1) * crossSpacing) / count;
+                        mediaHeight = tileWidth * 9 / 16;
+                        mainAxisExtent = mediaHeight + 86.0 * textScale;
+                      }
+                      return GridView.builder(
+                        key: PageStorageKey<String>(
+                          isHistory
+                              ? 'windows-library-history'
+                              : 'windows-library-favorites',
+                        ),
+                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: count,
+                          crossAxisSpacing: crossSpacing,
+                          mainAxisSpacing: mainSpacing,
+                          mainAxisExtent: mainAxisExtent,
+                        ),
+                        itemCount: itemCount,
+                        itemBuilder: (itemCtx, index) {
+                          if (isHistory) {
+                            final item = history[index];
+                            final directPoster = item.poster.trim();
+                            final resolvedPoster = directPoster.isNotEmpty
+                                ? directPoster
+                                : (historyPosterById?[item.id] ??
+                                    historyPosterByTitle?[item.title] ??
+                                    '');
+                            return KeyedSubtree(
+                              key: ValueKey('win-hist-${item.site}-${item.id}'),
+                              child: _windowsHistoryCard(
+                                item,
+                                resolvedPosterOverride: resolvedPoster,
+                              ),
+                            );
+                          }
+                          final f = favorites[index];
+                          return KeyedSubtree(
+                            key: ValueKey('win-fav-${f.site}-${f.id}'),
+                            child: _windowsFavoriteCard(f),
+                          );
+                        },
+                      );
                     })),
         ]));
   }
+
+  Widget _windowsFavoriteCard(FavoriteEntry f) => InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: () => _openSyncedMediaEntry(
+            siteKey: f.site,
+            videoId: f.id,
+            title: f.title,
+            poster: f.poster),
+        child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              AspectRatio(
+                  aspectRatio: 16 / 9,
+                  child: ClipRRect(
+                      borderRadius: BorderRadius.circular(20),
+                      child: PosterImage(
+                          url: f.poster,
+                          title: _privateSessionUnlocked ? '' : f.title,
+                          placeholder: const SizedBox.shrink()))),
+              const SizedBox(height: 13),
+              Text(f.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      color: winInk(context), fontWeight: FontWeight.w600)),
+              Align(
+                  alignment: Alignment.centerRight,
+                  child: IconButton(
+                      tooltip: '取消收藏',
+                      visualDensity: VisualDensity.compact,
+                      constraints: const BoxConstraints(
+                        minWidth: 36,
+                        minHeight: 36,
+                      ),
+                      padding: const EdgeInsets.all(6),
+                      icon: Icon(CupertinoIcons.heart_fill,
+                          color: winMuted(context), size: 17),
+                      onPressed: () async {
+                        await widget.storage.toggleFavorite(
+                            CmsSite(
+                                key: f.site,
+                                name: '',
+                                type: 0,
+                                api: '',
+                                isPrivate: _privateSessionUnlocked),
+                            CmsVideo(
+                                id: f.id, title: f.title, poster: f.poster));
+                        if (mounted) _updateWindowsState(() {});
+                      }))
+            ]),
+      );
 
   Widget _windowsDownloads() => AnimatedBuilder(
       animation: DownloadService.instance,
       builder: (context, _) {
         final service = DownloadService.instance;
-        if (!service.isReady)
+        if (service.isInitializing) {
+          return Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CupertinoActivityIndicator(radius: 12),
+                const SizedBox(height: 12),
+                Text(
+                  '正在恢复下载队列…',
+                  style: TextStyle(color: winMuted(context)),
+                ),
+              ],
+            ),
+          );
+        }
+        if (!service.isReady) {
           return _windowsEmpty('下载暂时不可用', '无法打开下载目录，请检查磁盘权限后重新启动应用。');
-        if (service.tasks.isEmpty)
+        }
+        final tasks = service.tasks;
+        if (tasks.isEmpty) {
           return _windowsEmpty('还没有下载任务', '在影片详情中选择下载，完成后就可以离线观看。');
+        }
         final active = service.activeCount;
         final hasPaused =
-            service.tasks.any((t) => t.status == DownloadStatus.paused);
+            tasks.any((t) => t.status == DownloadStatus.paused);
         return Column(children: [
           if (active > 0 || hasPaused)
             Row(children: [
@@ -1451,64 +1737,68 @@ extension _WindowsShell on _AdaptiveShellState {
             ]),
           Expanded(
               child: ListView.separated(
-                  itemCount: service.tasks.length,
+                  key: const PageStorageKey<String>('windows-library-downloads'),
+                  itemCount: tasks.length,
                   separatorBuilder: (_, __) => Divider(
                       color: winMuted(context).withValues(alpha: .13),
                       height: 32),
                   itemBuilder: (context, i) {
-                    final t = service.tasks[i];
+                    final t = tasks[i];
                     final done = t.status == DownloadStatus.completed;
                     final resume = t.status == DownloadStatus.paused ||
                         t.status == DownloadStatus.failed;
-                    return Row(children: [
-                      ClipRRect(
-                          borderRadius: BorderRadius.circular(15),
-                          child: SizedBox(
-                              width: 140,
-                              height: 85,
-                              child: PosterImage(
-                                  url: t.poster,
-                                  title: t.title,
-                                  placeholder: const SizedBox.shrink()))),
-                      const SizedBox(width: 24),
-                      Expanded(
-                          child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                            Text(t.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                    color: winInk(context),
-                                    fontSize: 17,
-                                    fontWeight: FontWeight.w600)),
-                            const SizedBox(height: 7),
-                            Text(
-                                '${t.episodeName} · ${DownloadService.statusLabel(t)}',
-                                style: TextStyle(
-                                    color: winMuted(context), fontSize: 12)),
-                            const SizedBox(height: 16),
-                            LinearProgressIndicator(
-                                value: t.progress.clamp(0, 1), minHeight: 3)
-                          ])),
-                      const SizedBox(width: 20),
-                      WinButton(
-                          done
-                              ? '播放'
-                              : resume
-                                  ? '继续'
-                                  : '暂停',
-                          onPressed: done
-                              ? () => _playDownloaded(t)
-                              : resume
-                                  ? () => service.resume(t.id)
-                                  : () => service.pause(t.id)),
-                      IconButton(
-                          tooltip: '删除下载',
-                          onPressed: () => _confirmDeleteDownload(t),
-                          icon: Icon(CupertinoIcons.trash,
-                              size: 18, color: winMuted(context)))
-                    ]);
+                    return KeyedSubtree(
+                      key: ValueKey('win-dl-${t.id}'),
+                      child: Row(children: [
+                        ClipRRect(
+                            borderRadius: BorderRadius.circular(15),
+                            child: SizedBox(
+                                width: 140,
+                                height: 85,
+                                child: PosterImage(
+                                    url: t.poster,
+                                    title: t.title,
+                                    placeholder: const SizedBox.shrink()))),
+                        const SizedBox(width: 24),
+                        Expanded(
+                            child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                              Text(t.title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                      color: winInk(context),
+                                      fontSize: 17,
+                                      fontWeight: FontWeight.w600)),
+                              const SizedBox(height: 7),
+                              Text(
+                                  '${t.episodeName} · ${DownloadService.statusLabel(t)}',
+                                  style: TextStyle(
+                                      color: winMuted(context), fontSize: 12)),
+                              const SizedBox(height: 16),
+                              LinearProgressIndicator(
+                                  value: t.progress.clamp(0, 1), minHeight: 3)
+                            ])),
+                        const SizedBox(width: 20),
+                        WinButton(
+                            done
+                                ? '播放'
+                                : resume
+                                    ? '继续'
+                                    : '暂停',
+                            onPressed: done
+                                ? () => _playDownloaded(t)
+                                : resume
+                                    ? () => service.resume(t.id)
+                                    : () => service.pause(t.id)),
+                        IconButton(
+                            tooltip: '删除下载',
+                            onPressed: () => _confirmDeleteDownload(t),
+                            icon: Icon(CupertinoIcons.trash,
+                                size: 18, color: winMuted(context)))
+                      ]),
+                    );
                   })),
           if (service.rootPath.isNotEmpty)
             Text('保存位置：${service.rootPath}',
@@ -1578,13 +1868,25 @@ extension _WindowsShell on _AdaptiveShellState {
                             liveGroups: displayGroups,
                             initialLiveChannel: selected,
                             embedded: true,
+                            debugPlayer: widget.debugPlayerFactoryForTest
+                                ?.call(embedded: true),
+                            debugVideoSurface: widget.debugVideoSurfaceForTest,
                             onEmbeddedClose: () => _updateWindowsState(
                                 () => _windowsLiveChannel = null),
-                            onEmbeddedExpand: () {
-                              _updateWindowsState(
-                                  () => _windowsLiveChannel = null);
+                            onEmbeddedExpandWithState: (state) {
+                              final targetChannel =
+                                  state.liveChannel ?? selected;
+                              final maxLine = targetChannel.urls.isEmpty
+                                  ? 0
+                                  : targetChannel.urls.length - 1;
+                              final targetLine =
+                                  state.episodeIndex.clamp(0, maxLine);
+                              _updateWindowsState(() {
+                                _windowsLiveChannel = null;
+                                _windowsLiveLine = targetLine;
+                              });
                               _openLiveChannelStream(
-                                  sources, selected, _windowsLiveLine);
+                                  sources, targetChannel, targetLine);
                             })))));
     final list = WinPanel(
         padding: const EdgeInsets.all(12),
@@ -1725,29 +2027,45 @@ extension _WindowsShell on _AdaptiveShellState {
   }
 
   Widget _windowsSettingsPage(double pad) {
-    const tabs = ['背景与外观', '首页与排版', '播放', '内容来源', '账号', '同步与备份', '更多设置'];
+    const tabs = [
+      '背景与外观',
+      '首页与排版',
+      '播放',
+      '内容来源',
+      '账号',
+      '同步与备份',
+      '更多设置',
+      'AI 实验室',
+    ];
     return Padding(
         padding: EdgeInsets.fromLTRB(pad, 8, pad, 24),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           _windowsHeading('设置', actions: [
+            WinButton('联系与反馈',
+                key: const ValueKey('windows-settings-contact-header-btn'),
+                icon: CupertinoIcons.chat_bubble_2,
+                onPressed: _openOfficialNoticeDialogFromSettings),
             WinButton('检查更新',
                 icon: CupertinoIcons.arrow_down_circle,
-                onPressed: _showUpdateCheckSheet)
+                onPressed: _showUpdateCheckSheet),
           ]),
           Expanded(
               child:
                   Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
             SizedBox(
                 width: 160,
-                child: ListView(children: [
-                  for (final label in tabs)
-                    Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: WinButton(label,
-                            selected: label == _windowsSettings,
-                            onPressed: () => _updateWindowsState(
-                                () => _windowsSettings = label)))
-                ])),
+                child: LayoutBuilder(builder: (_, navBox) {
+                  final gap = navBox.maxHeight < 410 ? 4.0 : 8.0;
+                  return ListView(children: [
+                    for (final label in tabs)
+                      Padding(
+                          padding: EdgeInsets.only(bottom: gap),
+                          child: WinButton(label,
+                              selected: label == _windowsSettings,
+                              onPressed: () => _updateWindowsState(
+                                  () => _windowsSettings = label)))
+                  ]);
+                })),
             const SizedBox(width: 30),
             Expanded(
                 child: SingleChildScrollView(child: WindowsSettingsRegion(child: _windowsSettingsContent()))),
@@ -1757,6 +2075,14 @@ extension _WindowsShell on _AdaptiveShellState {
 
   Widget _windowsSettingsContent() {
     if (_windowsSettings == '背景与外观') return const WindowsAppearanceSettings();
+    if (_windowsSettings == 'AI 实验室') {
+      return WindowsAiLabPanel(
+        urlOpener: widget.onOpenExternalUrlForTest,
+        onChanged: () {
+          if (mounted) _updateWindowsState(() {});
+        },
+      );
+    }
     if (_windowsSettings == '首页与排版')
       return _buildLayoutSettingsSection(
           context, () => _updateWindowsState(() {}));
@@ -1846,6 +2172,52 @@ extension _WindowsShell on _AdaptiveShellState {
                 icon: CupertinoIcons.sparkles,
                 onTap: () => _openOnboardingRoute(isReplay: true)),
         ]),
+        const SizedBox(height: 22),
+        WinSettingsGroup(
+          header: '联系反馈与官方交流',
+          footer: OfficialChannelInfo.antiTamperWarning,
+          children: [
+            Builder(
+              builder: (rowCtx) => WinSettingsRow(
+                key: const ValueKey('windows-settings-author-socials'),
+                title: '联系反馈作者（各社媒账号名）',
+                subtitle: OfficialChannelInfo.authorSocialSummary,
+                value: '复制',
+                icon: CupertinoIcons.person_crop_circle_badge_checkmark,
+                onTap: () => _copyAuthorSocialName(originContext: rowCtx),
+              ),
+            ),
+            Builder(
+              builder: (rowCtx) => WinSettingsRow(
+                key: const ValueKey('windows-settings-official-community'),
+                title: '官网交流群',
+                subtitle: OfficialChannelInfo.officialCommunityUrl,
+                value: '打开官网',
+                icon: CupertinoIcons.chat_bubble_2_fill,
+                onTap: () => _openOfficialCommunityLink(originContext: rowCtx),
+              ),
+            ),
+            Builder(
+              builder: (rowCtx) => WinSettingsRow(
+                key: const ValueKey('windows-settings-donate-support'),
+                title: '捐赠支持作者',
+                subtitle: 'Marco Movie 永久免费开源无广告，欢迎自愿请作者喝杯咖啡',
+                value: '前往捐赠',
+                icon: CupertinoIcons.heart_fill,
+                onTap: () => _openOfficialDonateLink(originContext: rowCtx),
+              ),
+            ),
+            WinSettingsRow(
+              key: const ValueKey('windows-settings-official-notice'),
+              title: '官方渠道安全声明',
+              subtitle:
+                  '认准 Marco 官网 ${OfficialChannelInfo.officialWebsiteDisplay}',
+              value: '查看',
+              icon: CupertinoIcons.shield_lefthalf_fill,
+              onTap: _openOfficialNoticeDialogFromSettings,
+            ),
+          ],
+        ),
       ]);
     if (_windowsSettings == '内容来源')
       return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1909,11 +2281,21 @@ extension _WindowsShell on _AdaptiveShellState {
       for (final row in _searchResults)
         '${row.$1.subscriptionId}:${row.$1.key}': row.$1,
     };
-    final results = _searchResults
-        .where((r) =>
-            _searchSiteFilterKey.isEmpty ||
-            '${r.$1.subscriptionId}:${r.$1.key}' == _searchSiteFilterKey)
-        .toList();
+    final preferredSiteKey = _activeSite == null
+        ? null
+        : '${_activeSite!.subscriptionId}:${_activeSite!.key}';
+    final allGroups = WorkAggregation.aggregateSearchResults(
+      results: _searchResults,
+      query: _searchController.text,
+      sourceLabelOf: (site) => site.name,
+      preferredSiteKey: preferredSiteKey,
+    );
+    final groups = _searchSiteFilterKey.isEmpty
+        ? allGroups
+        : allGroups
+            .map((g) => g.anchoredToSiteKey(_searchSiteFilterKey))
+            .whereType<AggregatedWorkGroup>()
+            .toList();
     final history =
         widget.storage.getSearchHistory(forPrivate: _privateSessionUnlocked);
     final isGridLayout = widget.storage.windowsSearchLayout != 'list';
@@ -1989,6 +2371,14 @@ extension _WindowsShell on _AdaptiveShellState {
                 WinButton('搜索',
                     selected: true,
                     onPressed: () => _runGlobalSearch(_searchController.text)),
+                if (!_privateSessionUnlocked &&
+                    AiLabPasscodeStore.instance.isUnlocked) ...[
+                  const SizedBox(width: 8),
+                  WinButton('AI 找片',
+                      key: const ValueKey('windows-ai-search-btn'),
+                      icon: CupertinoIcons.sparkles,
+                      onPressed: _openWindowsAiSearchDialog),
+                ],
               ])),
           const SizedBox(height: 14),
           if (!_searchPerformed && history.isNotEmpty)
@@ -2041,7 +2431,7 @@ extension _WindowsShell on _AdaptiveShellState {
                     ]))),
           const SizedBox(height: 16),
           Expanded(
-              child: results.isEmpty
+              child: groups.isEmpty
                   ? Center(
                       child: Text(
                           _searching
@@ -2052,8 +2442,8 @@ extension _WindowsShell on _AdaptiveShellState {
                           style: TextStyle(color: winMuted(context))))
                   : LayoutBuilder(
                       builder: (context, box) => isGridLayout
-                          ? _windowsSearchPosterGrid(results, box.maxWidth)
-                          : _windowsSearchAdaptiveList(results, box.maxWidth),
+                          ? _windowsSearchPosterGrid(groups, box.maxWidth)
+                          : _windowsSearchAdaptiveList(groups, box.maxWidth),
                     )),
         ]));
   }
@@ -2104,7 +2494,7 @@ extension _WindowsShell on _AdaptiveShellState {
   }
 
   Widget _windowsSearchPosterGrid(
-    List<(CmsSite, CmsVideo)> results,
+    List<AggregatedWorkGroup> groups,
     double maxWidth,
   ) {
     final densityScale = switch (widget.storage.gridDensity) {
@@ -2132,117 +2522,129 @@ extension _WindowsShell on _AdaptiveShellState {
           mainAxisSpacing: 20,
           mainAxisExtent: posterHeight + footerHeight,
         ),
-        itemCount: results.length,
+        itemCount: groups.length,
         itemBuilder: (context, i) {
-        final (site, video) = results[i];
-        final meta = [video.year, video.remarks]
-            .where((s) => s.trim().isNotEmpty)
-            .join(' · ');
-        return Material(
-          color: Colors.transparent,
-          child: InkWell(
-            key: ValueKey(
-              'windows-search-${site.subscriptionId}-${site.key}-${video.id}',
-            ),
-            onTap: () => _openVideoDetail(site, video),
-            borderRadius: BorderRadius.circular(18),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                SizedBox(
-                  height: posterHeight,
-                  width: double.infinity,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(16),
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        PosterImage(
-                          url: video.poster,
-                          title: site.isEffectivelyPrivate ? '' : video.title,
-                          year: video.year,
-                          placeholder: const ColoredBox(
-                            color: Color(0xFF1A202C),
-                            child: Center(
-                              child: Icon(
-                                CupertinoIcons.film,
-                                color: Color(0x44FFFFFF),
-                                size: 30,
-                              ),
-                            ),
-                          ),
-                        ),
-                        // Top-left source badge pill
-                        Positioned(
-                          top: 8,
-                          left: 8,
-                          right: 8,
-                          child: Align(
-                            alignment: Alignment.topLeft,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 7.5,
-                                vertical: 3,
-                              ),
-                              decoration: BoxDecoration(
-                                color: const Color(0xB80B0F17),
-                                borderRadius: BorderRadius.circular(7),
-                                border: Border.all(
-                                  color: Colors.white.withValues(alpha: 0.14),
-                                  width: 0.6,
-                                ),
-                              ),
-                              child: Text(
-                                site.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 10.5,
-                                  fontWeight: FontWeight.w500,
+          final group = groups[i];
+          final primary = group.primarySource;
+          final site = primary.site;
+          final video = primary.video;
+          final meta = [group.year, group.remarks]
+              .where((s) => s.trim().isNotEmpty)
+              .join(' · ');
+          final multiSource = group.sourceCount > 1;
+          return Material(
+            color: Colors.transparent,
+            child: InkWell(
+              key: ValueKey('windows-search-${group.cardKeySuffix}'),
+              onTap: () => _openVideoDetail(
+                site,
+                video,
+                initialSources: group.sources,
+              ),
+              borderRadius: BorderRadius.circular(18),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SizedBox(
+                    height: posterHeight,
+                    width: double.infinity,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(16),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          PosterImage(
+                            url: group.poster,
+                            title: site.isEffectivelyPrivate
+                                ? ''
+                                : group.displayTitle,
+                            year: group.year,
+                            placeholder: const ColoredBox(
+                              color: Color(0xFF1A202C),
+                              child: Center(
+                                child: Icon(
+                                  CupertinoIcons.film,
+                                  color: Color(0x44FFFFFF),
+                                  size: 30,
                                 ),
                               ),
                             ),
                           ),
-                        ),
-                      ],
+                          // Top-left aggregated source badge pill
+                          Positioned(
+                            top: 8,
+                            left: 8,
+                            right: 8,
+                            child: Align(
+                              alignment: Alignment.topLeft,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 7.5,
+                                  vertical: 3,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: multiSource
+                                      ? const Color(0xD91E5EFF)
+                                      : const Color(0xB80B0F17),
+                                  borderRadius: BorderRadius.circular(7),
+                                  border: Border.all(
+                                    color: Colors.white.withValues(
+                                      alpha: multiSource ? 0.28 : 0.14,
+                                    ),
+                                    width: 0.6,
+                                  ),
+                                ),
+                                child: Text(
+                                  group.sourceBadgeText,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 10.5,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(height: 9),
-                Text(
-                  video.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: winInk(context),
-                    fontSize: maxWidth >= 1000 ? 14 : 13,
-                    fontWeight: FontWeight.w600,
-                    height: 1.25,
+                  const SizedBox(height: 9),
+                  Text(
+                    group.displayTitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: winInk(context),
+                      fontSize: maxWidth >= 1000 ? 14 : 13,
+                      fontWeight: FontWeight.w600,
+                      height: 1.25,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  meta.isNotEmpty ? meta : site.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: winMuted(context),
-                    fontSize: 11.5,
-                    height: 1.2,
+                  const SizedBox(height: 3),
+                  Text(
+                    meta.isNotEmpty ? meta : group.sourceBadgeText,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: winMuted(context),
+                      fontSize: 11.5,
+                      height: 1.2,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-        );
-      },
+          );
+        },
       ),
     );
   }
 
   Widget _windowsSearchAdaptiveList(
-    List<(CmsSite, CmsVideo)> results,
+    List<AggregatedWorkGroup> groups,
     double maxWidth,
   ) {
     final twoColumns = maxWidth >= 1360;
@@ -2251,15 +2653,21 @@ extension _WindowsShell on _AdaptiveShellState {
     final thumbHeight = compact ? 74.0 : (twoColumns ? 96.0 : 106.0);
     final titleSize = compact ? 15.0 : (twoColumns ? 16.5 : 18.0);
 
-    Widget buildRow(CmsSite site, CmsVideo video) {
+    Widget buildRow(AggregatedWorkGroup group) {
+      final primary = group.primarySource;
+      final site = primary.site;
+      final video = primary.video;
+      final multiSource = group.sourceCount > 1;
       return WinPanel(
         padding: EdgeInsets.zero,
         radius: 18,
         child: InkWell(
-          key: ValueKey(
-            'windows-search-${site.subscriptionId}-${site.key}-${video.id}',
+          key: ValueKey('windows-search-${group.cardKeySuffix}'),
+          onTap: () => _openVideoDetail(
+            site,
+            video,
+            initialSources: group.sources,
           ),
-          onTap: () => _openVideoDetail(site, video),
           borderRadius: BorderRadius.circular(18),
           child: Padding(
             padding: EdgeInsets.all(compact ? 10 : 13),
@@ -2271,9 +2679,11 @@ extension _WindowsShell on _AdaptiveShellState {
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(12),
                     child: LandscapePosterImage(
-                      url: video.poster,
-                      title: site.isEffectivelyPrivate ? '' : video.title,
-                      year: video.year,
+                      url: group.poster,
+                      title: site.isEffectivelyPrivate
+                          ? ''
+                          : group.displayTitle,
+                      year: group.year,
                       allowExternalLookup: !site.isEffectivelyPrivate,
                       placeholder: const ColoredBox(color: Color(0x30273548)),
                     ),
@@ -2285,21 +2695,62 @@ extension _WindowsShell on _AdaptiveShellState {
                     mainAxisAlignment: MainAxisAlignment.center,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        video.title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: winInk(context),
-                          fontSize: titleSize,
-                          fontWeight: FontWeight.w600,
-                        ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              group.displayTitle,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: winInk(context),
+                                fontSize: titleSize,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          if (multiSource) ...[
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 2.5,
+                              ),
+                              decoration: BoxDecoration(
+                                color: winAccent(context).withValues(
+                                  alpha: winDark(context) ? 0.24 : 0.12,
+                                ),
+                                borderRadius: BorderRadius.circular(999),
+                                border: Border.all(
+                                  color: winAccent(context).withValues(
+                                    alpha: 0.45,
+                                  ),
+                                ),
+                              ),
+                              child: Text(
+                                group.sourceBadgeText,
+                                style: TextStyle(
+                                  color: winAccent(context),
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        [video.year, video.remarks, site.name]
-                            .where((v) => v.isNotEmpty)
-                            .join(' · '),
+                        [
+                          group.year,
+                          group.remarks,
+                          if (!multiSource) group.sourceBadgeText,
+                          if (multiSource)
+                            group.sources
+                                .map((s) => s.sourceLabel)
+                                .take(3)
+                                .join(' / '),
+                        ].where((v) => v.isNotEmpty).join(' · '),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
@@ -2334,8 +2785,8 @@ extension _WindowsShell on _AdaptiveShellState {
             mainAxisSpacing: 14,
             mainAxisExtent: thumbHeight + 28,
           ),
-          itemCount: results.length,
-          itemBuilder: (_, i) => buildRow(results[i].$1, results[i].$2),
+          itemCount: groups.length,
+          itemBuilder: (_, i) => buildRow(groups[i]),
         ),
       );
     }
@@ -2343,9 +2794,9 @@ extension _WindowsShell on _AdaptiveShellState {
       key: const ValueKey('windows-search-list-view'),
       child: ListView.separated(
         key: const PageStorageKey('windows-search-results'),
-        itemCount: results.length,
+        itemCount: groups.length,
         separatorBuilder: (_, __) => const SizedBox(height: 12),
-        itemBuilder: (_, i) => buildRow(results[i].$1, results[i].$2),
+        itemBuilder: (_, i) => buildRow(groups[i]),
       ),
     );
   }
@@ -2406,7 +2857,7 @@ class _WindowsPlaybackEnhancementGroupState
       header: 'Windows 播放引擎、画质与流媒体净化',
       footer: isMdk
           ? '当前已选用 MDK 核显兼容引擎：采用原生 D3D11 / MFT / DXVA 零拷贝硬解，显著降低 Intel / AMD 核显占用并提升 4K/HDR 流畅度；播放页右下角「更多」可随时热切引擎。'
-          : '高画质 HDR 映射档与人声响度增强适用于 MPV 引擎（核显轻薄本推荐切换为 MDK 核显兼容引擎）；切换后下次起播生效，播放中亦可在右下角实时热切。',
+          : '高画质 HDR 映射档与人声均衡增强适用于 MPV 引擎（MDK 引擎不应用此滤镜，核显轻薄本推荐切换为 MDK 核显兼容引擎）；切换后下次起播生效，播放中亦可在右下角实时热切。',
       children: [
         Padding(
           key: const ValueKey('windows-settings-playback-engine'),
@@ -2545,7 +2996,7 @@ class _WindowsPlaybackEnhancementGroupState
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          '音频响度与人声对白增强',
+                          '人声均衡与对白清晰增强',
                           style: TextStyle(
                             color: winInk(context),
                             fontSize: 14,

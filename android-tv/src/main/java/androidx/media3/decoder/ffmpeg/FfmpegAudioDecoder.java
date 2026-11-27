@@ -182,6 +182,9 @@ import java.util.List;
    */
   @Nullable
   private static byte[] getExtraData(String mimeType, List<byte[]> initializationData) {
+    if (initializationData == null || initializationData.isEmpty()) {
+      return null;
+    }
     switch (mimeType) {
       case MimeTypes.AUDIO_AAC:
       case MimeTypes.AUDIO_OPUS:
@@ -189,7 +192,7 @@ import java.util.List;
       case MimeTypes.AUDIO_ALAC:
         return getAlacExtraData(initializationData);
       case MimeTypes.AUDIO_VORBIS:
-        return getVorbisExtraData(initializationData);
+        return initializationData.size() >= 2 ? getVorbisExtraData(initializationData) : null;
       default:
         // Other codecs do not require extra data.
         return null;

@@ -3,13 +3,19 @@ import 'dart:math' as math;
 import 'dart:ui';
 import '../core/ohos_runtime.dart';
 import 'ios_liquid_glass.dart';
+import 'ios_press_slide_menu.dart';
 import 'motion/aurora_background.dart';
 import 'motion/ios27_springs.dart';
 import 'motion/motion_tokens.dart';
 import 'windows_appearance.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart'
-    show TargetPlatform, defaultTargetPlatform, kIsWeb;
+    show
+        TargetPlatform,
+        ValueListenable,
+        defaultTargetPlatform,
+        kIsWeb,
+        visibleForTesting;
 import 'package:flutter/gestures.dart' show DragStartBehavior;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -115,7 +121,12 @@ PageRoute<T> buildApplePageRoute<T>({
 /// with velocity-inherited left-edge swipe-back and Reduce Motion `150ms`
 /// opacity fade fallback.
 class Ios27PageRoute<T> extends CupertinoPageRoute<T> {
+  static int _interactiveGestureCount = 0;
+
   bool _routeDisposed = false;
+  bool _gestureDriven = false;
+  bool _settling = false;
+  NavigatorState? _gestureNavigator;
 
   Ios27PageRoute({
     required super.builder,
@@ -127,6 +138,7 @@ class Ios27PageRoute<T> extends CupertinoPageRoute<T> {
   @override
   void dispose() {
     _routeDisposed = true;
+    _releaseGestureState();
     super.dispose();
   }
 
@@ -135,6 +147,33 @@ class Ios27PageRoute<T> extends CupertinoPageRoute<T> {
 
   @override
   Duration get reverseTransitionDuration => Ios27Spring.smooth.nominalDuration;
+
+  void _beginEdgeSwipe(NavigatorState nav) {
+    if (_gestureDriven) return;
+    _gestureDriven = true;
+    _settling = false;
+    _gestureNavigator = nav;
+    _interactiveGestureCount++;
+    nav.didStartUserGesture();
+    changedInternalState();
+  }
+
+  void _releaseGestureState() {
+    if (!_gestureDriven) return;
+    _gestureDriven = false;
+    _settling = false;
+    if (_interactiveGestureCount > 0) {
+      _interactiveGestureCount--;
+    }
+    final nav = _gestureNavigator ?? navigator;
+    _gestureNavigator = null;
+    if (nav != null && nav.userGestureInProgress) {
+      nav.didStopUserGesture();
+    }
+    if (!_routeDisposed) {
+      changedInternalState();
+    }
+  }
 
   @override
   Widget buildTransitions(
@@ -153,20 +192,24 @@ class Ios27PageRoute<T> extends CupertinoPageRoute<T> {
         child: child,
       );
     }
-    final isGesture = navigator?.userGestureInProgress ?? false;
+    final navGesturing = navigator?.userGestureInProgress ?? false;
+    final useLinearPrimary = _gestureDriven || navGesturing;
+    final useLinearSecondary = _interactiveGestureCount > 0 || navGesturing;
     final springCurve = Ios27Spring.smooth.curve;
-    final primaryAnim = isGesture
+    final primaryAnim = useLinearPrimary
         ? animation
         : CurvedAnimation(
             parent: animation,
             curve: springCurve,
             reverseCurve: springCurve.flipped,
           );
-    final secondaryAnim = CurvedAnimation(
-      parent: secondaryAnimation,
-      curve: springCurve,
-      reverseCurve: springCurve.flipped,
-    );
+    final secondaryAnim = useLinearSecondary
+        ? secondaryAnimation
+        : CurvedAnimation(
+            parent: secondaryAnimation,
+            curve: springCurve,
+            reverseCurve: springCurve.flipped,
+          );
     final transition = CupertinoPageTransition(
       primaryRouteAnimation: primaryAnim,
       secondaryRouteAnimation: secondaryAnim,
@@ -183,6 +226,7 @@ class Ios27PageRoute<T> extends CupertinoPageRoute<T> {
   }
 
   void _updateEdgeSwipeProgress(double value) {
+    if (!_gestureDriven || _settling) return;
     controller?.value = value.clamp(0.0, 1.0);
   }
 
@@ -191,14 +235,21 @@ class Ios27PageRoute<T> extends CupertinoPageRoute<T> {
     required double width,
   }) {
     final ctrl = controller;
-    final nav = navigator;
-    if (ctrl == null || nav == null) return;
+    final nav = _gestureNavigator ?? navigator;
+    if (ctrl == null || nav == null || !_gestureDriven) {
+      _releaseGestureState();
+      return;
+    }
+    _settling = true;
     final safeW = math.max(1.0, width);
     final releaseVal = ctrl.value.clamp(0.0, 1.0);
     final shouldPop = velocityPxPerSec > 360.0 || releaseVal < 0.62;
     final normalizedVel = (-velocityPxPerSec / safeW).clamp(-8.0, 8.0);
     if (shouldPop) {
       nav.pop();
+      // Keep _gestureDriven & userGestureInProgress active for the entire
+      // velocity-inherited spring settle so buildTransitions NEVER swaps curves
+      // mid-flight (eliminating the mid-swipe backward jump).
       ctrl
           .animateWith(
             Ios27Spring.smooth.simulation(
@@ -211,30 +262,46 @@ class Ios27PageRoute<T> extends CupertinoPageRoute<T> {
         if (!_routeDisposed && ctrl.status != AnimationStatus.dismissed) {
           ctrl.reverse(from: 0.0);
         }
+        _releaseGestureState();
       });
     } else {
-      ctrl.animateWith(
-        Ios27Spring.smooth.simulation(
-          start: releaseVal,
-          end: 1.0,
-          velocity: normalizedVel,
-        ),
-      );
+      ctrl
+          .animateWith(
+            Ios27Spring.smooth.simulation(
+              start: releaseVal,
+              end: 1.0,
+              velocity: normalizedVel,
+            ),
+          )
+          .whenComplete(() {
+        if (!_routeDisposed && ctrl.status != AnimationStatus.completed) {
+          ctrl.forward(from: 1.0);
+        }
+        _releaseGestureState();
+      });
     }
-    nav.didStopUserGesture();
   }
 
   void _cancelEdgeSwipe() {
     final ctrl = controller;
-    if (ctrl != null) {
-      ctrl.animateWith(
-        Ios27Spring.smooth.simulation(
-          start: ctrl.value.clamp(0.0, 1.0),
-          end: 1.0,
-        ),
-      );
+    if (ctrl == null || !_gestureDriven) {
+      _releaseGestureState();
+      return;
     }
-    navigator?.didStopUserGesture();
+    _settling = true;
+    ctrl
+        .animateWith(
+          Ios27Spring.smooth.simulation(
+            start: ctrl.value.clamp(0.0, 1.0),
+            end: 1.0,
+          ),
+        )
+        .whenComplete(() {
+      if (!_routeDisposed && ctrl.status != AnimationStatus.completed) {
+        ctrl.forward(from: 1.0);
+      }
+      _releaseGestureState();
+    });
   }
 }
 
@@ -260,16 +327,13 @@ class _Ios27SwipeBackWrapperState<T> extends State<_Ios27SwipeBackWrapper<T>> {
   void dispose() {
     if (_dragging) {
       _dragging = false;
-      final nav = widget.route.navigator;
-      if (nav != null && nav.userGestureInProgress) {
-        nav.didStopUserGesture();
-      }
+      widget.route._releaseGestureState();
     }
     super.dispose();
   }
 
   void _onDragStart(DragStartDetails details) {
-    if (_dragging) return;
+    if (_dragging || widget.route._settling) return;
     final nav = widget.route.navigator;
     if (widget.route.isFirst ||
         !widget.route.isCurrent ||
@@ -278,10 +342,10 @@ class _Ios27SwipeBackWrapperState<T> extends State<_Ios27SwipeBackWrapper<T>> {
         nav.userGestureInProgress) {
       return;
     }
-    if (details.globalPosition.dx > 28.0) return;
+    if (details.globalPosition.dx > 32.0) return;
     _dragging = true;
     _dragDx = 0.0;
-    nav.didStartUserGesture();
+    widget.route._beginEdgeSwipe(nav);
   }
 
   void _onDragUpdate(DragUpdateDetails details) {
@@ -317,7 +381,7 @@ class _Ios27SwipeBackWrapperState<T> extends State<_Ios27SwipeBackWrapper<T>> {
           left: 0,
           top: 0,
           bottom: 0,
-          width: 24,
+          width: 28,
           child: GestureDetector(
             behavior: HitTestBehavior.translucent,
             dragStartBehavior: DragStartBehavior.down,
@@ -717,7 +781,12 @@ List<double> _saturationMatrix(double s) {
 }
 
 /// Glasswork dark material filter, from glass.css: 2px blur, 160% saturation, 80% brightness.
-ImageFilter liquidGlassFilter({double blur = 2, double saturation = 1.6, double brightness = .8}) {
+ImageFilter liquidGlassFilter({
+  double blur = 2,
+  double saturation = 1.6,
+  double brightness = .8,
+  TileMode tileMode = TileMode.mirror,
+}) {
   final matrix = _saturationMatrix(saturation);
   for (var i = 0; i < 15; i++) { matrix[i] *= brightness; }
   return ImageFilter.compose(
@@ -725,7 +794,7 @@ ImageFilter liquidGlassFilter({double blur = 2, double saturation = 1.6, double 
     inner: ImageFilter.blur(
       sigmaX: blur,
       sigmaY: blur,
-      tileMode: TileMode.mirror,
+      tileMode: tileMode,
     ),
   );
 }
@@ -803,6 +872,18 @@ class _LiquidRimPainter extends CustomPainter {
       old.lightMode != lightMode;
 }
 
+bool _isIosPlatform() =>
+    !kIsWeb && !OhosRuntime.isOhos && defaultTargetPlatform == TargetPlatform.iOS;
+
+bool _isIosLegacyGlassActive() =>
+    _isIosPlatform() && !IosLiquidGlassBridge.isAvailable;
+
+bool _isIosThermalDegraded() =>
+    _isIosPlatform() && IosLiquidGlassBridge.thermalThrottled;
+
+bool _isIosThermalElevated() =>
+    _isIosPlatform() && IosLiquidGlassBridge.thermalElevated;
+
 bool _isSystemReduceTransparencyActive() =>
     !OhosRuntime.isOhos && IosLiquidGlassBridge.reduceTransparency;
 
@@ -821,6 +902,43 @@ class GlassworkBackdrop extends StatefulWidget {
   const GlassworkBackdrop({super.key, required this.radius, required this.child});
   @override
   State<GlassworkBackdrop> createState() => _GlassworkBackdropState();
+
+  /// Pure render-cost policy for the Flutter-side glass material.
+  ///
+  /// iOS (every version, including the iOS 26/27 native Liquid Glass path):
+  /// - the 54-tap `glasswork.frag` lens shader is never used — it sampled the
+  ///   backdrop 54× per pixel at full Retina resolution under every dark
+  ///   glass card and was a major sustained GPU heat source on 120 Hz
+  ///   ProMotion iPhones (feedback: iPhone 17 Pro Max / iOS 27 / 0.7.8);
+  /// - Gaussian sigma is capped (`<= 10.0`) across ALL iOS versions with
+  ///   `TileMode.clamp` instead of the mirror-tiled 26pt surface blur;
+  /// - from thermal `.fair` upwards the sigma is capped further at `6.0`.
+  ///
+  /// Other platforms keep the original behaviour.
+  @visibleForTesting
+  static ({bool allowLensShader, double blurSigma, TileMode tileMode})
+      resolveRenderPolicy({
+    required double strength,
+    required bool isIos,
+    required bool iosLegacyGlass,
+    bool iosThermalElevated = false,
+  }) {
+    final s = strength.clamp(0.0, 1.0);
+    if (!isIos) {
+      return (
+        allowLensShader: true,
+        blurSigma: 1.5 + 24.5 * s,
+        tileMode: TileMode.mirror,
+      );
+    }
+    var sigma = 1.5 + 8.5 * s;
+    if (iosThermalElevated) sigma = math.min(sigma, 6.0);
+    return (
+      allowLensShader: false,
+      blurSigma: sigma,
+      tileMode: TileMode.clamp,
+    );
+  }
 }
 
 class _GlassworkBackdropState extends State<GlassworkBackdrop> {
@@ -831,11 +949,15 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
     GlassworkBackdrop.reduceTransparency,
     GlassworkBackdrop.intensity,
     IosLiquidGlassBridge.reduceTransparencyNotifier,
+    IosLiquidGlassBridge.available,
+    IosLiquidGlassBridge.thermalThrottledNotifier,
+    IosLiquidGlassBridge.thermalLevelNotifier,
   ]);
   @override
   void initState() {
     super.initState();
     if (!_isWindowsDesktop &&
+        !_isIosPlatform() &&
         !GlassworkBackdrop.reduceTransparency.value &&
         !_isSystemReduceTransparencyActive() &&
         ImageFilter.isShaderFilterSupported) {
@@ -873,8 +995,21 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
             MediaQuery.highContrastOf(context) ||
             MediaQuery.disableAnimationsOf(context);
         final winFastGlass = _isWindowsDesktop;
+        final isIos = _isIosPlatform();
+        final iosLegacyGlass = _isIosLegacyGlassActive();
+        final iosThermalDegraded = _isIosThermalDegraded();
+        final policy = GlassworkBackdrop.resolveRenderPolicy(
+          strength: strength,
+          isIos: isIos,
+          iosLegacyGlass: iosLegacyGlass,
+          iosThermalElevated: _isIosThermalElevated(),
+        );
+        final disableLensShader = winFastGlass ||
+            !policy.allowLensShader ||
+            iosLegacyGlass ||
+            iosThermalDegraded;
         if (!opaque &&
-            !winFastGlass &&
+            !disableLensShader &&
             isDark &&
             _shader == null &&
             !_loadingLens &&
@@ -884,10 +1019,12 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
         // Use true continuous optical blur + intensity-reactive translucency so
         // dragging the Liquid Glass slider from 0% to 100% produces an immediate,
         // clearly visible visual transformation in both Light and Dark themes.
-        // The dark lens shader is reserved for high-strength dark mode (>= 0.85)
-        // where its refractive rim shines without masking slider changes.
+        // The 54-tap dark lens shader is disabled on every iOS version (incl.
+        // the iOS 26/27 native Liquid Glass path) to prevent sustained Metal
+        // GPU heat on 120Hz ProMotion devices; elsewhere it stays reserved for
+        // high-strength dark mode.
         final useLensShader =
-            !winFastGlass && !opaque && isDark && _shader != null && strength >= 0.85;
+            !disableLensShader && !opaque && isDark && _shader != null && strength >= 0.85;
         final shader = useLensShader ? _shader : null;
         if (shader != null) {
           shader.setFloat(2, widget.radius);
@@ -896,11 +1033,14 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
             MediaQuery.devicePixelRatioOf(context) * (0.45 + 1.25 * strength),
           );
         }
-        final blurSigma = 1.5 + 24.5 * strength;
+        // On every iOS version (including iOS 26/27), cap Gaussian blur sigma
+        // (<= 10.0, and <= 6.0 from thermal `.fair`) with TileMode.clamp so
+        // 120Hz ProMotion devices do not burn GPU fill-rate on mirror blurs.
+        final blurSigma = policy.blurSigma;
         final Color veilColor;
         if (opaque) {
           veilColor = isDark ? const Color(0xF51E1E22) : const Color(0xFAFFFFFF);
-        } else if (winFastGlass) {
+        } else if (winFastGlass || iosThermalDegraded) {
           veilColor = isDark
               ? Color.fromRGBO(26, 28, 35, (0.93 - 0.34 * strength).clamp(0.55, 0.94))
               : Color.fromRGBO(255, 255, 255, (0.96 - 0.30 * strength).clamp(0.62, 0.96));
@@ -928,12 +1068,13 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
           );
         }
         return BackdropFilter(
-          enabled: !opaque && !winFastGlass,
+          enabled: !opaque && !winFastGlass && !iosThermalDegraded,
           filter: shader == null
               ? liquidGlassFilter(
                   blur: blurSigma,
                   saturation: isDark ? (1.05 + 0.85 * strength) : (1.08 + 0.45 * strength),
                   brightness: isDark ? (0.82 + 0.14 * strength) : 1.0,
+                  tileMode: policy.tileMode,
                 )
               : ImageFilter.shader(shader),
           // Keep the child at the same element-tree depth when the async GPU
@@ -1411,8 +1552,12 @@ class AppleLiquidGlassDock extends StatefulWidget {
   final List<IosNativeDockItem>? nativeItems;
   final VoidCallback? onSearch;
   final VoidCallback? onScrollToTop;
+  final List<IosSlideMenuAction> Function(int tabIndex)? tabMenuItemsBuilder;
+  final void Function(int tabIndex, String actionId)? onTabMenuAction;
   final bool hidden;
   final bool collapsed;
+  final bool forceFlutterFallback;
+  final ValueListenable<double>? scrollProgress;
 
   const AppleLiquidGlassDock({
     super.key,
@@ -1423,8 +1568,12 @@ class AppleLiquidGlassDock extends StatefulWidget {
     this.nativeItems,
     this.onSearch,
     this.onScrollToTop,
+    this.tabMenuItemsBuilder,
+    this.onTabMenuAction,
     this.hidden = false,
     this.collapsed = false,
+    this.forceFlutterFallback = false,
+    this.scrollProgress,
   });
 
   static const double _dockRadius = 31;
@@ -1497,7 +1646,8 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
 
     return IosNativeRouteGate(
       builder: (context, nativeActive) {
-        final useNativeIos26 = nativeActive &&
+        final useNativeIos26 = !widget.forceFlutterFallback &&
+            nativeActive &&
             !widget.isLandscape &&
             widget.nativeItems != null &&
             widget.nativeItems!.isNotEmpty;
@@ -1510,6 +1660,7 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
               onSelect: widget.onSelect,
               onSearch: widget.onSearch,
               onScrollToTop: widget.onScrollToTop,
+              onTabMenuAction: widget.onTabMenuAction,
               showSearch: widget.onSearch != null,
               hidden: widget.hidden,
               collapsed: widget.collapsed,
@@ -1522,7 +1673,8 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
         // render a pixel-matched, zero-BackdropFilter placeholder identical in
         // geometry & visual style to MarcoDockContainerView so there is zero
         // size jump or legacy-style flash.
-        if (IosLiquidGlassBridge.isAvailable &&
+        if (!widget.forceFlutterFallback &&
+            IosLiquidGlassBridge.isAvailable &&
             !widget.isLandscape &&
             widget.nativeItems != null &&
             widget.nativeItems!.isNotEmpty) {
@@ -1561,14 +1713,27 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
               ? _buildVertical()
               : SizedBox(
                   height: portraitBarH,
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 260),
-                    switchInCurve: Curves.easeOutCubic,
-                    switchOutCurve: Curves.easeInCubic,
-                    child: widget.collapsed
-                        ? _buildCollapsedLogoButton(context, barH: portraitBarH)
-                        : _buildHorizontal(barH: portraitBarH),
-                  ),
+                  child: widget.scrollProgress != null
+                      ? ValueListenableBuilder<double>(
+                          valueListenable: widget.scrollProgress!,
+                          builder: (ctx, rawP, _) => _buildMorphingHorizontal(
+                            ctx,
+                            barH: portraitBarH,
+                            progress: rawP.clamp(0.0, 1.0),
+                          ),
+                        )
+                      : TweenAnimationBuilder<double>(
+                          tween: Tween<double>(
+                            end: widget.collapsed ? 1.0 : 0.0,
+                          ),
+                          duration: const Duration(milliseconds: 260),
+                          curve: Curves.linear,
+                          builder: (ctx, p, _) => _buildMorphingHorizontal(
+                            ctx,
+                            barH: portraitBarH,
+                            progress: p.clamp(0.0, 1.0),
+                          ),
+                        ),
                 ),
         );
         if (widget.hidden) {
@@ -1804,6 +1969,53 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
     );
   }
 
+  List<IosSlideMenuAction> _buildLogoMenuActions() {
+    final actions = <IosSlideMenuAction>[];
+    if (widget.onSearch != null) {
+      actions.add(
+        const IosSlideMenuAction(
+          id: 'search',
+          title: '搜索影片',
+          icon: CupertinoIcons.search,
+          section: 0,
+        ),
+      );
+    }
+    for (var i = 0; i < widget.items.length; i++) {
+      actions.add(
+        IosSlideMenuAction(
+          id: 'tab:$i',
+          title: widget.items[i].$3,
+          icon: i == _safeIndex ? widget.items[i].$2 : widget.items[i].$1,
+          selected: i == _safeIndex,
+          section: 1,
+        ),
+      );
+    }
+    if (widget.onScrollToTop != null) {
+      actions.add(
+        const IosSlideMenuAction(
+          id: 'top',
+          title: '回到顶部',
+          icon: CupertinoIcons.arrow_up_to_line,
+          section: 2,
+        ),
+      );
+    }
+    return actions;
+  }
+
+  void _handleLogoMenuSelection(String chosen) {
+    if (chosen == 'search') {
+      widget.onSearch?.call();
+    } else if (chosen == 'top') {
+      widget.onScrollToTop?.call();
+    } else if (chosen.startsWith('tab:')) {
+      final idx = int.tryParse(chosen.substring(4));
+      if (idx != null) widget.onSelect(idx);
+    }
+  }
+
   Widget _buildCollapsedLogoButton(BuildContext context, {double? barH}) {
     final size = barH ??
         (AppleLiquidGlassDock._itemH + AppleLiquidGlassDock._pad * 2);
@@ -1821,10 +2033,17 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
           child: Align(
             alignment: Alignment.centerRight,
             heightFactor: 1,
-            child: GestureDetector(
+            child: IosPressSlideMenuAnchor(
               key: const ValueKey('dock-collapsed-logo-button'),
-              behavior: HitTestBehavior.opaque,
-              onTap: () => _showFallbackCollapsedBubble(context),
+              menuKey: const ValueKey('dock-collapsed-bubble-menu'),
+              openOnTap: true,
+              menuWidth: 184,
+              minTouchWidth: math.max(44.0, size),
+              minTouchHeight: math.max(44.0, size),
+              preferredAnchor: Alignment.topRight,
+              accessibilityLabel: '快捷导航',
+              itemsBuilder: _buildLogoMenuActions,
+              onSelected: _handleLogoMenuSelection,
               child: RepaintBoundary(
                 child: LiquidGlass(
                   width: size,
@@ -1850,159 +2069,6 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
     );
   }
 
-  Future<void> _showFallbackCollapsedBubble(BuildContext context) async {
-    HapticFeedback.lightImpact();
-    final safeBottom = MediaQuery.paddingOf(context).bottom;
-    final dockBottom =
-        safeBottom > 0 ? math.max(safeBottom - 14.0, 10.0) : 12.0;
-    final bottomOffset = dockBottom + 62.0 + 12.0;
-    final chosen = await showGeneralDialog<String>(
-      context: context,
-      barrierDismissible: true,
-      barrierLabel: '关闭快捷导航',
-      barrierColor: const Color(0x28000000),
-      transitionDuration: const Duration(milliseconds: 220),
-      pageBuilder: (dialogCtx, _, __) {
-        return Stack(
-          children: [
-            Positioned(
-              right: 16,
-              bottom: bottomOffset,
-              child: Material(
-                type: MaterialType.transparency,
-                child: LiquidGlass(
-                  key: const ValueKey('dock-collapsed-bubble-menu'),
-                  width: 176,
-                  borderRadius: 24,
-                  tint: ApplePalette.isDarkOf(dialogCtx)
-                      ? const Color(0xA616161C)
-                      : const Color(0xF0FFFFFF),
-                  padding: const EdgeInsets.symmetric(vertical: 6),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      if (widget.onSearch != null) ...[
-                        _bubbleMenuRow(
-                          icon: CupertinoIcons.search,
-                          label: '搜索影片',
-                          selected: false,
-                          onTap: () => Navigator.of(dialogCtx).pop('search'),
-                        ),
-                        Divider(
-                          height: 1,
-                          thickness: 0.5,
-                          color: ApplePalette.of(dialogCtx).separator,
-                        ),
-                      ],
-                      for (var i = 0; i < widget.items.length; i++)
-                        _bubbleMenuRow(
-                          icon: i == _safeIndex
-                              ? widget.items[i].$2
-                              : widget.items[i].$1,
-                          label: widget.items[i].$3,
-                          selected: i == _safeIndex,
-                          onTap: () => Navigator.of(dialogCtx).pop('tab:$i'),
-                        ),
-                      if (widget.onScrollToTop != null) ...[
-                        Divider(
-                          height: 1,
-                          thickness: 0.5,
-                          color: ApplePalette.of(dialogCtx).separator,
-                        ),
-                        _bubbleMenuRow(
-                          icon: CupertinoIcons.arrow_up_to_line,
-                          label: '回到顶部',
-                          selected: false,
-                          onTap: () => Navigator.of(dialogCtx).pop('top'),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ],
-        );
-      },
-      transitionBuilder: (dialogContext, anim, __, child) {
-        if (Ios27ConcentricGeometry.isReduceMotion(dialogContext)) {
-          return FadeTransition(opacity: anim, child: child);
-        }
-        final curved = CurvedAnimation(
-          parent: anim,
-          curve: Ios27Spring.bouncy.curve,
-          reverseCurve: Ios27Spring.smooth.curve.flipped,
-        );
-        return FadeTransition(
-          opacity: CurvedAnimation(
-            parent: anim,
-            curve: Ios27Spring.smooth.curve,
-          ),
-          child: ScaleTransition(
-            scale: Tween<double>(begin: 0.86, end: 1.0).animate(curved),
-            alignment: Alignment.bottomRight,
-            child: child,
-          ),
-        );
-      },
-    );
-    if (chosen == null) return;
-    if (chosen == 'search') {
-      widget.onSearch?.call();
-    } else if (chosen == 'top') {
-      widget.onScrollToTop?.call();
-    } else if (chosen.startsWith('tab:')) {
-      final idx = int.tryParse(chosen.substring(4));
-      if (idx != null) widget.onSelect(idx);
-    }
-  }
-
-  Widget _bubbleMenuRow({
-    required IconData icon,
-    required String label,
-    required bool selected,
-    required VoidCallback onTap,
-  }) {
-    final palette = ApplePalette.of(context);
-    final fg = selected
-        ? (palette.isDark ? Colors.white : palette.systemBlue)
-        : palette.labelPrimary;
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        child: Row(
-          children: [
-            Icon(
-              icon,
-              size: 18,
-              color: fg,
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                label,
-                style: TextStyle(
-                  color: fg,
-                  fontSize: 14,
-                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                ),
-              ),
-            ),
-            if (selected)
-              Icon(
-                CupertinoIcons.checkmark_alt,
-                size: 15,
-                color: fg,
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _shell({required Widget child, double? radius}) {
     final isDark = ApplePalette.isDarkOf(context);
     return RepaintBoundary(
@@ -2013,6 +2079,258 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
         saturation: 1.8,
         child: child,
       ),
+    );
+  }
+
+  Widget _buildMorphingHorizontal(
+    BuildContext context, {
+    required double barH,
+    required double progress,
+  }) {
+    final p = progress.clamp(0.0, 1.0);
+    if (widget.onSearch == null) {
+      return p >= 0.5
+          ? _buildCollapsedLogoButton(context, barH: barH)
+          : _buildHorizontal(barH: barH);
+    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final n = math.max(widget.items.length, 1);
+        final available =
+            constraints.maxWidth.isFinite ? constraints.maxWidth : 360.0;
+        final effGap =
+            available < 330.0 ? 8.0 : AppleLiquidGlassDock._searchGap;
+        final maxCap = available >= 560.0 ? 456.0 : 420.0;
+        final maxRowWidth = math.min(available, maxCap);
+        final maxSearchPill = math.max(120.0, maxRowWidth - barH - effGap);
+        final pillWidth = math.min(
+          maxSearchPill,
+          available >= 560.0 ? 384.0 : 348.0,
+        );
+        final totalRowW = pillWidth + effGap + barH;
+        final itemW = (pillWidth - AppleLiquidGlassDock._pad * 2) / n;
+        final itemH = barH - AppleLiquidGlassDock._pad * 2;
+        final isSliding = _dragLensSlot != null;
+        final lensSlot = _dragLensSlot ?? _safeIndex.toDouble();
+
+        // Distance from capsule center to the stationary right Search/Logo center.
+        final capsuleCenterX = pillWidth * 0.5;
+        final rightCenterX = pillWidth + effGap + barH * 0.5;
+        final dx = rightCenterX - capsuleCenterX;
+        final tabTx = dx * p;
+        final tabScaleX = (1.0 - 0.90 * p).clamp(0.08, 1.0);
+        final tabScaleY = (1.0 - 0.62 * p).clamp(0.28, 1.0);
+        final tabOpacity = (1.0 - p * 1.15).clamp(0.0, 1.0);
+
+        final settledCollapsed = p >= 0.995;
+        final settledExpanded = p <= 0.005;
+        final spinScale = (settledCollapsed || settledExpanded)
+            ? 1.0
+            : (1.0 - 0.08 * math.sin(p * math.pi));
+        final searchAngle = settledExpanded ? 0.0 : p * math.pi;
+        final logoAngle = settledCollapsed ? 0.0 : (p - 1.0) * math.pi;
+        final searchOpacity =
+            settledCollapsed ? 0.0 : ((0.62 - p) / 0.28).clamp(0.0, 1.0);
+        final logoOpacity =
+            settledCollapsed ? 1.0 : ((p - 0.34) / 0.28).clamp(0.0, 1.0);
+        final effectiveTabOpacity = settledCollapsed ? 0.0 : tabOpacity;
+        final isLogoActive = p >= 0.5;
+        final isDark = ApplePalette.isDarkOf(context);
+
+        final pill = _shell(
+          radius: barH * 0.5,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {},
+            onVerticalDragStart: (_) {},
+            onVerticalDragUpdate: (_) {},
+            onHorizontalDragStart: (d) =>
+                _updateSlidePosition(d.localPosition.dx, itemW),
+            onHorizontalDragUpdate: (d) =>
+                _updateSlidePosition(d.localPosition.dx, itemW),
+            onHorizontalDragEnd: (_) => _endSlide(),
+            onHorizontalDragCancel: () => _endSlide(cancelled: true),
+            child: SizedBox(
+              width: pillWidth,
+              height: barH,
+              child: Stack(
+                children: [
+                  AnimatedPositioned(
+                    duration: isSliding
+                        ? const Duration(milliseconds: 32)
+                        : AppleLiquidGlassDock._motion,
+                    curve: isSliding
+                        ? Curves.linear
+                        : AppleLiquidGlassDock._curve,
+                    left: AppleLiquidGlassDock._pad + itemW * lensSlot,
+                    top: AppleLiquidGlassDock._pad,
+                    width: itemW,
+                    height: itemH,
+                    child: Opacity(
+                      opacity: (1.0 - p * 1.35).clamp(0.0, 1.0),
+                      child: AnimatedScale(
+                        scale: isSliding ? 1.05 : 1.0,
+                        duration: const Duration(milliseconds: 140),
+                        curve: Curves.easeOutCubic,
+                        child: const _DockSelectionLens(),
+                      ),
+                    ),
+                  ),
+                  Positioned.fill(
+                    child: Padding(
+                      padding:
+                          const EdgeInsets.all(AppleLiquidGlassDock._pad),
+                      child: Row(
+                        children: [
+                          for (int i = 0; i < widget.items.length; i++)
+                            Expanded(
+                              child: Builder(
+                                builder: (_) {
+                                  if (p <= 0.001) return _item(i);
+                                  final frac = i / math.max(n - 1, 1);
+                                  final slotP =
+                                      ((p - frac * 0.18) / 0.82).clamp(0.0, 1.0);
+                                  final pullX = (1.0 - frac * 0.45) *
+                                      pillWidth *
+                                      0.24 *
+                                      slotP;
+                                  final slotScale =
+                                      (1.0 - 0.62 * slotP).clamp(0.32, 1.0);
+                                  return Opacity(
+                                    opacity:
+                                        (1.0 - slotP * 1.15).clamp(0.0, 1.0),
+                                    child: Transform.translate(
+                                      offset: Offset(pullX, 0),
+                                      child: Transform.scale(
+                                        scale: slotScale,
+                                        child: _item(i),
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+
+        final morphCircleVisual = RepaintBoundary(
+          child: Transform.scale(
+            scale: spinScale,
+            child: LiquidGlass(
+              width: barH,
+              height: barH,
+              borderRadius: barH * 0.5,
+              tint: isDark
+                  ? const Color(0x56161414)
+                  : const Color(0xD8FFFFFF),
+              blur: 20,
+              saturation: 1.8,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  if (searchOpacity > 0.01)
+                    Opacity(
+                      opacity: searchOpacity,
+                      child: Transform.rotate(
+                        angle: searchAngle,
+                        child: Icon(
+                          CupertinoIcons.search,
+                          size: 22,
+                          color: isDark
+                              ? Colors.white
+                              : const Color(0xFF14161C),
+                        ),
+                      ),
+                    ),
+                  if (logoOpacity > 0.01)
+                    Opacity(
+                      opacity: logoOpacity,
+                      child: Transform.rotate(
+                        angle: logoAngle,
+                        child: const MarcoBrandLogo(
+                          iconSize: 32,
+                          showWordmark: false,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        );
+
+        final Widget morphCircle = isLogoActive
+            ? IosPressSlideMenuAnchor(
+                key: const ValueKey('dock-collapsed-logo-button'),
+                menuKey: const ValueKey('dock-collapsed-bubble-menu'),
+                openOnTap: true,
+                menuWidth: 184,
+                minTouchWidth: math.max(44.0, barH),
+                minTouchHeight: math.max(44.0, barH),
+                preferredAnchor: Alignment.topRight,
+                accessibilityLabel: '快捷导航',
+                itemsBuilder: _buildLogoMenuActions,
+                onSelected: _handleLogoMenuSelection,
+                child: morphCircleVisual,
+              )
+            : Semantics(
+                button: true,
+                label: '搜索',
+                child: GestureDetector(
+                  key: const ValueKey('home-search-button'),
+                  behavior: HitTestBehavior.opaque,
+                  onTap: widget.onSearch!,
+                  onHorizontalDragStart: (_) {},
+                  onVerticalDragStart: (_) {},
+                  child: morphCircleVisual,
+                ),
+              );
+
+        return SizedBox(
+          width: totalRowW,
+          height: barH,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              if (effectiveTabOpacity > 0.005)
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  width: pillWidth,
+                  height: barH,
+                  child: IgnorePointer(
+                    ignoring: p >= 0.35,
+                    child: Opacity(
+                      opacity: effectiveTabOpacity,
+                      child: Transform.translate(
+                        offset: Offset(tabTx, 0),
+                        child: Transform.scale(
+                          scaleX: tabScaleX,
+                          scaleY: tabScaleY,
+                          child: pill,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              Positioned(
+                right: 0,
+                top: 0,
+                width: barH,
+                height: barH,
+                child: morphCircle,
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -2207,7 +2525,11 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
             index < widget.nativeItems!.length
         ? widget.nativeItems![index].kind
         : null;
-    return _DockItem(
+    final hasLongPressMenu = !kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        widget.tabMenuItemsBuilder != null &&
+        widget.onTabMenuAction != null;
+    final dockItem = _DockItem(
       icon: item.$1,
       selectedIcon: item.$2,
       label: item.$3,
@@ -2217,7 +2539,33 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
         icon: item.$1,
       ),
       selected: index == activeIdx,
+      onTap: hasLongPressMenu ? null : () => widget.onSelect(index),
+    );
+    if (!hasLongPressMenu) {
+      return Semantics(
+        button: true,
+        selected: index == activeIdx,
+        label: item.$3,
+        child: dockItem,
+      );
+    }
+    return IosPressSlideMenuAnchor(
+      key: ValueKey('dock-tab-menu-anchor-$index'),
+      menuKey: ValueKey('dock-tab-menu-$index'),
+      openOnTap: false,
+      menuWidth: 214,
+      minTouchWidth: 44,
+      minTouchHeight: 44,
+      preferredAnchor: Alignment.topCenter,
+      // Long-pressing a Dock tab must not lift / float / scale the tab; only a
+      // subtle opacity highlight acknowledges the press before the menu opens.
+      pressedScale: 1.0,
+      pressedOpacity: 0.62,
+      accessibilityLabel: item.$3,
       onTap: () => widget.onSelect(index),
+      itemsBuilder: () => widget.tabMenuItemsBuilder!(index),
+      onSelected: (actionId) => widget.onTabMenuAction!(index, actionId),
+      child: dockItem,
     );
   }
 }
@@ -2235,29 +2583,33 @@ class _DockSearchCircleButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = ApplePalette.of(context);
-    return Ios27Pressable(
-      key: const ValueKey('home-search-button'),
-      pressedScale: Ios27Spring.pressSwellScale,
-      borderRadius: size * 0.5,
-      onTap: () {
-        HapticFeedback.lightImpact();
-        onTap();
-      },
-      child: RepaintBoundary(
-        child: LiquidGlass(
-          width: size,
-          height: size,
-          borderRadius: size * 0.5,
-          tint: palette.isDark
-              ? const Color(0x56161414)
-              : const Color(0xD8FFFFFF),
-          blur: 20,
-          saturation: 1.8,
-          child: Center(
-            child: Icon(
-              CupertinoIcons.search,
-              size: 22,
-              color: palette.labelPrimary,
+    return Semantics(
+      button: true,
+      label: '搜索',
+      child: Ios27Pressable(
+        key: const ValueKey('home-search-button'),
+        pressedScale: Ios27Spring.pressSwellScale,
+        borderRadius: size * 0.5,
+        onTap: () {
+          HapticFeedback.lightImpact();
+          onTap();
+        },
+        child: RepaintBoundary(
+          child: LiquidGlass(
+            width: size,
+            height: size,
+            borderRadius: size * 0.5,
+            tint: palette.isDark
+                ? const Color(0x56161414)
+                : const Color(0xD8FFFFFF),
+            blur: 20,
+            saturation: 1.8,
+            child: Center(
+              child: Icon(
+                CupertinoIcons.search,
+                size: 22,
+                color: palette.labelPrimary,
+              ),
             ),
           ),
         ),
@@ -2290,12 +2642,12 @@ class _DockSelectionLens extends StatelessWidget {
             end: Alignment.bottomCenter,
             colors: isDark
                 ? const [
-                    Color(0x423896FF),
-                    Color(0x2A2068CC),
+                    Color(0x28FFFFFF),
+                    Color(0x1CFFFFFF),
                   ]
                 : const [
-                    Color(0x26007AFF),
-                    Color(0x14007AFF),
+                    Color(0x14000000),
+                    Color(0x0E000000),
                   ],
           ),
         ),
@@ -2307,9 +2659,10 @@ class _DockSelectionLens extends StatelessWidget {
 /// Custom icon archetypes for the 4 bottom Dock tabs (`主页` / `直播` / `片库` / `设置`).
 enum MarcoDockIconKind { home, live, library, settings }
 
-/// Bespoke 24x24pt layered animated vector tab icon mirroring native iOS
-/// `MarcoAnimatedTabIconView` pixel-for-pixel on iOS 15–18, landscape, Split
-/// View, desktop, and iOS 26+ route-transition placeholders.
+/// Apple HIG SF-style monochrome tab icon mirroring native iOS
+/// `MarcoAnimatedTabIconView` (native SF Symbols `house`, `play.tv`,
+/// `rectangle.stack`, `gearshape`) on Flutter fallback surfaces, landscape,
+/// Split View, desktop, and iOS 26+ route-transition placeholders.
 class MarcoAnimatedDockIcon extends StatefulWidget {
   final MarcoDockIconKind? kind;
   final IconData fallbackIcon;
@@ -2342,15 +2695,21 @@ class MarcoAnimatedDockIcon extends StatefulWidget {
         return MarcoDockIconKind.settings;
     }
     if (label.contains('主页') ||
+        icon == CupertinoIcons.house ||
+        icon == CupertinoIcons.house_fill ||
         icon == CupertinoIcons.play_rectangle ||
         icon == CupertinoIcons.play_rectangle_fill) {
       return MarcoDockIconKind.home;
     }
     if (label.contains('直播') ||
+        icon == CupertinoIcons.tv ||
+        icon == CupertinoIcons.tv_fill ||
         icon == CupertinoIcons.dot_radiowaves_left_right) {
       return MarcoDockIconKind.live;
     }
     if (label.contains('片库') ||
+        icon == CupertinoIcons.rectangle_stack ||
+        icon == CupertinoIcons.rectangle_stack_fill ||
         icon == CupertinoIcons.square_stack_3d_up ||
         icon == CupertinoIcons.square_stack_3d_up_fill) {
       return MarcoDockIconKind.library;
@@ -2376,7 +2735,7 @@ class _MarcoAnimatedDockIconState extends State<MarcoAnimatedDockIcon>
     super.initState();
     _ctrl = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 620),
+      duration: const Duration(milliseconds: 420),
       value: 1.0,
     );
   }
@@ -2404,55 +2763,78 @@ class _MarcoAnimatedDockIconState extends State<MarcoAnimatedDockIcon>
     super.dispose();
   }
 
+  IconData _resolveGlyph(MarcoDockIconKind kind, bool selected) {
+    return switch (kind) {
+      MarcoDockIconKind.home =>
+        selected ? CupertinoIcons.house_fill : CupertinoIcons.house,
+      MarcoDockIconKind.live =>
+        selected ? CupertinoIcons.tv_fill : CupertinoIcons.tv,
+      MarcoDockIconKind.library => selected
+          ? CupertinoIcons.rectangle_stack_fill
+          : CupertinoIcons.rectangle_stack,
+      MarcoDockIconKind.settings =>
+        selected ? CupertinoIcons.gear_alt_fill : CupertinoIcons.gear_alt,
+    };
+  }
+
   @override
   Widget build(BuildContext context) {
     final isDark = ApplePalette.isDarkOf(context);
-    final activePrimary =
-        isDark ? const Color(0xFF40A6FF) : AppleColors.systemBlue;
-    final activeSecondary =
-        isDark ? const Color(0xFF76D6FF) : const Color(0xFF38B6FF);
-    final liveRed =
-        isDark ? const Color(0xFFFF453A) : const Color(0xFFFF3B30);
+    final activeColor =
+        isDark ? const Color(0xFF0A84FF) : AppleColors.systemBlue;
     final inactiveColor = isDark
-        ? Colors.white.withValues(alpha: 0.70)
-        : const Color(0xFF2C303A).withValues(alpha: 0.74);
+        ? Colors.white.withValues(alpha: 0.76)
+        : const Color(0xFF1A1A1A).withValues(alpha: 0.82);
 
-    if (widget.kind == null) {
-      return AnimatedBuilder(
-        animation: _ctrl,
-        builder: (context, child) {
-          final scale = widget.selected
-              ? _evalKeyframes(
-                  _ctrl.value,
-                  const [0.0, 0.44, 0.76, 1.0],
-                  const [0.84, 1.14, 0.97, 1.0],
-                )
-              : 1.0;
-          return Transform.scale(scale: scale, child: child);
-        },
-        child: Icon(
-          widget.fallbackIcon,
-          size: widget.size * 0.88,
-          color: widget.selected ? activePrimary : inactiveColor,
-        ),
-      );
-    }
+    final kind = widget.kind;
+    final glyph =
+        kind == null ? widget.fallbackIcon : _resolveGlyph(kind, widget.selected);
+    final iconSize = kind == MarcoDockIconKind.live
+        ? widget.size * 0.86
+        : widget.size * 0.90;
 
     return SizedBox(
       width: widget.size,
       height: widget.size,
       child: AnimatedBuilder(
         animation: _ctrl,
-        builder: (context, _) => CustomPaint(
-          key: ValueKey('marco-dock-icon-${widget.kind!.name}'),
-          painter: _MarcoDockIconPainter(
-            kind: widget.kind!,
-            selected: widget.selected,
-            progress: _ctrl.value,
-            activePrimary: activePrimary,
-            activeSecondary: activeSecondary,
-            liveRed: liveRed,
-            inactiveColor: inactiveColor,
+        builder: (context, child) {
+          if (!widget.selected || _ctrl.value >= 0.999) {
+            return child!;
+          }
+          final t = _ctrl.value;
+          final scale = _evalKeyframes(
+            t,
+            const [0.0, 0.42, 0.76, 1.0],
+            const [0.88, 1.12, 0.98, 1.0],
+          );
+          final liftY = _evalKeyframes(
+            t,
+            const [0.0, 0.40, 0.78, 1.0],
+            const [0.0, -1.5, 0.25, 0.0],
+          );
+          final rotation = kind == MarcoDockIconKind.settings
+              ? _evalKeyframes(
+                  t,
+                  const [0.0, 0.55, 1.0],
+                  const [-0.26, 0.06, 0.0],
+                )
+              : 0.0;
+          Widget transformed = Transform.translate(
+            offset: Offset(0, liftY),
+            child: Transform.scale(scale: scale, child: child),
+          );
+          if (rotation != 0.0) {
+            transformed = Transform.rotate(angle: rotation, child: transformed);
+          }
+          return transformed;
+        },
+        child: Center(
+          child: Icon(
+            glyph,
+            key: kind == null ? null : ValueKey('marco-dock-icon-${kind.name}'),
+            size: iconSize,
+            color: widget.selected ? activeColor : inactiveColor,
           ),
         ),
       ),
@@ -2475,640 +2857,20 @@ double _evalKeyframes(double t, List<double> times, List<double> values) {
   return values.last;
 }
 
-class _MarcoDockIconPainter extends CustomPainter {
-  final MarcoDockIconKind kind;
-  final bool selected;
-  final double progress;
-  final Color activePrimary;
-  final Color activeSecondary;
-  final Color liveRed;
-  final Color inactiveColor;
-
-  const _MarcoDockIconPainter({
-    required this.kind,
-    required this.selected,
-    required this.progress,
-    required this.activePrimary,
-    required this.activeSecondary,
-    required this.liveRed,
-    required this.inactiveColor,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final scale = math.min(size.width, size.height) / 24.0;
-    canvas.save();
-    canvas.translate(
-      (size.width - 24.0 * scale) * 0.5,
-      (size.height - 24.0 * scale) * 0.5,
-    );
-    canvas.scale(scale, scale);
-
-    switch (kind) {
-      case MarcoDockIconKind.home:
-        _paintHome(canvas);
-      case MarcoDockIconKind.live:
-        _paintLive(canvas);
-      case MarcoDockIconKind.library:
-        _paintLibrary(canvas);
-      case MarcoDockIconKind.settings:
-        _paintSettings(canvas);
-    }
-
-    canvas.restore();
-  }
-
-  void _withPivot(
-    Canvas canvas,
-    Offset pivot, {
-    double scaleX = 1.0,
-    double scaleY = 1.0,
-    double translateX = 0.0,
-    double translateY = 0.0,
-    double rotation = 0.0,
-    required VoidCallback draw,
-  }) {
-    canvas.save();
-    canvas.translate(pivot.dx + translateX, pivot.dy + translateY);
-    if (rotation != 0.0) canvas.rotate(rotation);
-    if (scaleX != 1.0 || scaleY != 1.0) canvas.scale(scaleX, scaleY);
-    canvas.translate(-pivot.dx, -pivot.dy);
-    draw();
-    canvas.restore();
-  }
-
-  void _paintHome(Canvas canvas) {
-    final t = selected ? progress : 1.0;
-    final screenScale = selected
-        ? _evalKeyframes(
-            t,
-            const [0.0, 0.42, 0.76, 1.0],
-            const [0.82, 1.12, 0.97, 1.0],
-          )
-        : 1.0;
-    final standScaleX = selected
-        ? _evalKeyframes(
-            t,
-            const [0.0, 0.48, 0.78, 1.0],
-            const [0.38, 1.14, 0.98, 1.0],
-          )
-        : 1.0;
-    final playTx = selected
-        ? _evalKeyframes(
-            t,
-            const [0.0, 0.46, 0.78, 1.0],
-            const [-2.4, 0.9, -0.2, 0.0],
-          )
-        : 0.0;
-    final playScale = selected
-        ? _evalKeyframes(
-            t,
-            const [0.0, 0.46, 0.78, 1.0],
-            const [0.55, 1.18, 0.96, 1.0],
-          )
-        : 1.0;
-
-    // Curved cinema stand arc
-    _withPivot(
-      canvas,
-      const Offset(12.0, 19.6),
-      scaleX: standScaleX,
-      draw: () {
-        final p = Path()
-          ..moveTo(8.1, 20.5)
-          ..quadraticBezierTo(12.0, 18.8, 15.9, 20.5);
-        canvas.drawPath(
-          p,
-          Paint()
-            ..style = PaintingStyle.stroke
-            ..strokeCap = StrokeCap.round
-            ..strokeWidth = selected ? 2.05 : 1.75
-            ..color = selected
-                ? activeSecondary
-                : inactiveColor.withValues(alpha: inactiveColor.a * 0.74),
-        );
-      },
-    );
-
-    // Sculpted rounded cinema screen
-    _withPivot(
-      canvas,
-      const Offset(12.0, 10.7),
-      scaleX: screenScale,
-      scaleY: screenScale,
-      draw: () {
-        final rrect = RRect.fromRectAndRadius(
-          const Rect.fromLTWH(2.3, 3.9, 19.4, 13.6),
-          const Radius.circular(4.3),
-        );
-        if (selected) {
-          canvas.drawRRect(rrect, Paint()..color = activePrimary);
-        } else {
-          canvas.drawRRect(
-            rrect,
-            Paint()
-              ..style = PaintingStyle.stroke
-              ..strokeWidth = 1.85
-              ..color = inactiveColor,
-          );
-        }
-      },
-    );
-
-    // Play triangle
-    _withPivot(
-      canvas,
-      const Offset(12.2, 10.7),
-      translateX: playTx,
-      scaleX: playScale,
-      scaleY: playScale,
-      draw: () {
-        final tri = Path()
-          ..moveTo(10.0, 8.3)
-          ..lineTo(15.3, 10.7)
-          ..lineTo(10.0, 13.1)
-          ..close();
-        if (selected) {
-          canvas.drawPath(tri, Paint()..color = Colors.white);
-          canvas.drawPath(
-            tri,
-            Paint()
-              ..style = PaintingStyle.stroke
-              ..strokeJoin = StrokeJoin.round
-              ..strokeWidth = 0.9
-              ..color = Colors.white,
-          );
-        } else {
-          canvas.drawPath(
-            tri,
-            Paint()
-              ..style = PaintingStyle.stroke
-              ..strokeJoin = StrokeJoin.round
-              ..strokeCap = StrokeCap.round
-              ..strokeWidth = 1.55
-              ..color = inactiveColor,
-          );
-        }
-      },
-    );
-
-    // Top-right 4-point cinema sparkle (selected only)
-    if (selected) {
-      final st = ((t - 0.10) / 0.90).clamp(0.0, 1.0);
-      final spScale = _evalKeyframes(
-        st,
-        const [0.0, 0.52, 0.80, 1.0],
-        const [0.01, 1.35, 0.92, 1.0],
-      );
-      final spRot = _evalKeyframes(
-        st,
-        const [0.0, 0.54, 0.82, 1.0],
-        const [-0.78, 0.24, -0.05, 0.0],
-      );
-      _withPivot(
-        canvas,
-        const Offset(20.6, 3.4),
-        scaleX: spScale,
-        scaleY: spScale,
-        rotation: spRot,
-        draw: () {
-          final star = Path();
-          const sr = 2.75;
-          const ir = 0.78;
-          for (var k = 0; k < 8; k++) {
-            final a = k * (math.pi / 4.0);
-            final rr = k.isEven ? sr : ir;
-            final pt = Offset(
-              20.6 + math.cos(a) * rr,
-              3.4 + math.sin(a) * rr,
-            );
-            if (k == 0) {
-              star.moveTo(pt.dx, pt.dy);
-            } else {
-              star.lineTo(pt.dx, pt.dy);
-            }
-          }
-          star.close();
-          canvas.drawPath(star, Paint()..color = activeSecondary);
-        },
-      );
-    }
-  }
-
-  void _paintLive(Canvas canvas) {
-    final t = selected ? progress : 1.0;
-    const bc = Offset(12.0, 10.6);
-
-    final innerT = ((t - 0.08) / 0.82).clamp(0.0, 1.0);
-    final outerT = ((t - 0.20) / 0.80).clamp(0.0, 1.0);
-
-    final outerScale = selected
-        ? _evalKeyframes(
-            outerT,
-            const [0.0, 0.50, 0.80, 1.0],
-            const [0.64, 1.20, 0.98, 1.0],
-          )
-        : 1.0;
-    final outerAlpha = selected
-        ? _evalKeyframes(outerT, const [0.0, 0.44, 1.0], const [0.12, 1.0, 1.0])
-        : 0.56;
-
-    final innerScale = selected
-        ? _evalKeyframes(
-            innerT,
-            const [0.0, 0.48, 0.78, 1.0],
-            const [0.68, 1.16, 0.98, 1.0],
-          )
-        : 1.0;
-    final innerAlpha = selected
-        ? _evalKeyframes(innerT, const [0.0, 0.42, 1.0], const [0.22, 1.0, 1.0])
-        : 1.0;
-
-    // Outer broadcast wave arcs
-    _withPivot(
-      canvas,
-      bc,
-      scaleX: outerScale,
-      scaleY: outerScale,
-      draw: () {
-        final paint = Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeCap = StrokeCap.round
-          ..strokeWidth = selected ? 1.9 : 1.8
-          ..color = (selected ? activeSecondary : inactiveColor).withValues(
-            alpha: (selected ? 1.0 : inactiveColor.a) * outerAlpha,
-          );
-        final rect = Rect.fromCircle(center: bc, radius: 8.5);
-        canvas.drawArc(
-          rect,
-          138.0 * math.pi / 180.0,
-          84.0 * math.pi / 180.0,
-          false,
-          paint,
-        );
-        canvas.drawArc(
-          rect,
-          -42.0 * math.pi / 180.0,
-          84.0 * math.pi / 180.0,
-          false,
-          paint,
-        );
-      },
-    );
-
-    // Inner broadcast wave arcs
-    _withPivot(
-      canvas,
-      bc,
-      scaleX: innerScale,
-      scaleY: innerScale,
-      draw: () {
-        final paint = Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeCap = StrokeCap.round
-          ..strokeWidth = selected ? 1.95 : 1.85
-          ..color = (selected ? activePrimary : inactiveColor).withValues(
-            alpha: (selected ? 1.0 : inactiveColor.a) * innerAlpha,
-          );
-        final rect = Rect.fromCircle(center: bc, radius: 5.25);
-        canvas.drawArc(
-          rect,
-          140.0 * math.pi / 180.0,
-          80.0 * math.pi / 180.0,
-          false,
-          paint,
-        );
-        canvas.drawArc(
-          rect,
-          -40.0 * math.pi / 180.0,
-          80.0 * math.pi / 180.0,
-          false,
-          paint,
-        );
-      },
-    );
-
-    // Broadcast dish stand
-    final standPath = Path()
-      ..moveTo(12.0, 14.0)
-      ..lineTo(12.0, 19.6)
-      ..moveTo(8.2, 20.6)
-      ..quadraticBezierTo(12.0, 18.8, 15.8, 20.6);
-    canvas.drawPath(
-      standPath,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeCap = StrokeCap.round
-        ..strokeWidth = selected ? 1.95 : 1.8
-        ..color = selected ? activePrimary : inactiveColor,
-    );
-
-    // Crimson Live Halo + Center Beacon
-    if (selected) {
-      final haloScale = _evalKeyframes(
-        t,
-        const [0.0, 0.45, 0.78, 1.0],
-        const [0.55, 1.72, 1.08, 1.0],
-      );
-      final haloAlpha = _evalKeyframes(
-        t,
-        const [0.0, 0.48, 0.78, 1.0],
-        const [0.42, 0.14, 0.28, 0.28],
-      );
-      _withPivot(
-        canvas,
-        bc,
-        scaleX: haloScale,
-        scaleY: haloScale,
-        draw: () {
-          canvas.drawCircle(
-            bc,
-            4.0,
-            Paint()..color = liveRed.withValues(alpha: haloAlpha),
-          );
-        },
-      );
-      final beaconScale = _evalKeyframes(
-        t,
-        const [0.0, 0.38, 0.72, 1.0],
-        const [0.58, 1.38, 0.94, 1.0],
-      );
-      _withPivot(
-        canvas,
-        bc,
-        scaleX: beaconScale,
-        scaleY: beaconScale,
-        draw: () {
-          canvas.drawCircle(bc, 2.35, Paint()..color = liveRed);
-        },
-      );
-    } else {
-      canvas.drawCircle(bc, 2.15, Paint()..color = inactiveColor);
-    }
-  }
-
-  void _paintLibrary(Canvas canvas) {
-    final t = selected ? progress : 1.0;
-    final midT = ((t - 0.04) / 0.90).clamp(0.0, 1.0);
-    final backT = ((t - 0.12) / 0.88).clamp(0.0, 1.0);
-
-    final backTy = selected
-        ? _evalKeyframes(
-            backT,
-            const [0.0, 0.48, 0.80, 1.0],
-            const [5.2, -2.3, 0.4, 0.0],
-          )
-        : 0.0;
-    final backSx = selected
-        ? _evalKeyframes(
-            backT,
-            const [0.0, 0.48, 0.80, 1.0],
-            const [0.74, 1.08, 0.98, 1.0],
-          )
-        : 1.0;
-
-    final midTy = selected
-        ? _evalKeyframes(
-            midT,
-            const [0.0, 0.46, 0.78, 1.0],
-            const [3.2, -1.5, 0.3, 0.0],
-          )
-        : 0.0;
-    final midSx = selected
-        ? _evalKeyframes(
-            midT,
-            const [0.0, 0.46, 0.78, 1.0],
-            const [0.84, 1.06, 0.99, 1.0],
-          )
-        : 1.0;
-
-    final frontScale = selected
-        ? _evalKeyframes(
-            t,
-            const [0.0, 0.42, 0.76, 1.0],
-            const [0.86, 1.09, 0.98, 1.0],
-          )
-        : 1.0;
-    final bmSy = selected
-        ? _evalKeyframes(
-            t,
-            const [0.0, 0.46, 0.78, 1.0],
-            const [0.42, 1.16, 0.96, 1.0],
-          )
-        : 1.0;
-
-    // Back card 3
-    _withPivot(
-      canvas,
-      const Offset(12.0, 4.1),
-      translateY: backTy,
-      scaleX: backSx,
-      draw: () {
-        canvas.drawRRect(
-          RRect.fromRectAndRadius(
-            const Rect.fromLTWH(6.6, 3.1, 10.8, 2.0),
-            const Radius.circular(1.0),
-          ),
-          Paint()
-            ..color = selected
-                ? activeSecondary.withValues(alpha: 0.52)
-                : inactiveColor.withValues(alpha: inactiveColor.a * 0.46),
-        );
-      },
-    );
-
-    // Mid card 2
-    _withPivot(
-      canvas,
-      const Offset(12.0, 7.2),
-      translateY: midTy,
-      scaleX: midSx,
-      draw: () {
-        canvas.drawRRect(
-          RRect.fromRectAndRadius(
-            const Rect.fromLTWH(4.5, 6.1, 15.0, 2.15),
-            const Radius.circular(1.08),
-          ),
-          Paint()
-            ..color = selected
-                ? activeSecondary.withValues(alpha: 0.84)
-                : inactiveColor.withValues(alpha: inactiveColor.a * 0.72),
-        );
-      },
-    );
-
-    // Front card 1
-    _withPivot(
-      canvas,
-      const Offset(12.0, 15.2),
-      scaleX: frontScale,
-      scaleY: frontScale,
-      draw: () {
-        final card = RRect.fromRectAndRadius(
-          const Rect.fromLTWH(2.5, 9.4, 19.0, 11.6),
-          const Radius.circular(3.7),
-        );
-        if (selected) {
-          canvas.drawRRect(card, Paint()..color = activePrimary);
-        } else {
-          canvas.drawRRect(
-            card,
-            Paint()
-              ..style = PaintingStyle.stroke
-              ..strokeWidth = 1.85
-              ..color = inactiveColor,
-          );
-        }
-      },
-    );
-
-    // Bookmark ribbon inside front card
-    _withPivot(
-      canvas,
-      const Offset(12.0, 9.4),
-      scaleY: bmSy,
-      draw: () {
-        final bm = Path()
-          ..moveTo(9.3, 9.4)
-          ..lineTo(14.7, 9.4)
-          ..lineTo(14.7, 16.5)
-          ..lineTo(12.0, 14.4)
-          ..lineTo(9.3, 16.5)
-          ..close();
-        if (selected) {
-          canvas.drawPath(bm, Paint()..color = Colors.white);
-        } else {
-          canvas.drawPath(
-            bm,
-            Paint()
-              ..style = PaintingStyle.stroke
-              ..strokeJoin = StrokeJoin.round
-              ..strokeCap = StrokeCap.round
-              ..strokeWidth = 1.55
-              ..color = inactiveColor,
-          );
-        }
-      },
-    );
-  }
-
-  void _paintSettings(Canvas canvas) {
-    final t = selected ? progress : 1.0;
-    const sixtyDeg = math.pi / 3.0;
-    final rot = selected
-        ? _evalKeyframes(
-            t,
-            const [0.0, 0.48, 0.78, 1.0],
-            const [0.0, sixtyDeg * 1.18, sixtyDeg * 0.95, sixtyDeg],
-          )
-        : 0.0;
-    final gearScale = selected
-        ? _evalKeyframes(
-            t,
-            const [0.0, 0.42, 0.76, 1.0],
-            const [0.86, 1.11, 0.98, 1.0],
-          )
-        : 1.0;
-
-    final gear = Path();
-    const samples = 96;
-    for (var i = 0; i < samples; i++) {
-      final th = (2.0 * math.pi * i) / samples - math.pi * 0.5;
-      final wave = math.cos(6.0 * th);
-      final shaped = (wave >= 0 ? 1.0 : -1.0) * math.pow(wave.abs(), 0.54);
-      final r = 8.0 + 1.55 * shaped;
-      final pt = Offset(12.0 + r * math.cos(th), 12.0 + r * math.sin(th));
-      if (i == 0) {
-        gear.moveTo(pt.dx, pt.dy);
-      } else {
-        gear.lineTo(pt.dx, pt.dy);
-      }
-    }
-    gear.close();
-
-    _withPivot(
-      canvas,
-      const Offset(12.0, 12.0),
-      scaleX: gearScale,
-      scaleY: gearScale,
-      rotation: rot,
-      draw: () {
-        if (selected) {
-          gear.addOval(
-            Rect.fromCircle(center: const Offset(12.0, 12.0), radius: 3.65),
-          );
-          gear.fillType = PathFillType.evenOdd;
-          canvas.drawPath(gear, Paint()..color = activePrimary);
-        } else {
-          canvas.drawPath(
-            gear,
-            Paint()
-              ..style = PaintingStyle.stroke
-              ..strokeJoin = StrokeJoin.round
-              ..strokeWidth = 1.85
-              ..color = inactiveColor,
-          );
-          canvas.drawCircle(
-            const Offset(12.0, 12.0),
-            3.25,
-            Paint()
-              ..style = PaintingStyle.stroke
-              ..strokeWidth = 1.75
-              ..color = inactiveColor,
-          );
-        }
-      },
-    );
-
-    if (selected) {
-      final jt = ((t - 0.10) / 0.90).clamp(0.0, 1.0);
-      final jScale = _evalKeyframes(
-        jt,
-        const [0.0, 0.48, 0.80, 1.0],
-        const [0.20, 1.34, 0.94, 1.0],
-      );
-      _withPivot(
-        canvas,
-        const Offset(12.0, 12.0),
-        scaleX: jScale,
-        scaleY: jScale,
-        draw: () {
-          canvas.drawCircle(
-            const Offset(12.0, 12.0),
-            1.75,
-            Paint()..color = activeSecondary,
-          );
-        },
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _MarcoDockIconPainter old) {
-    return old.kind != kind ||
-        old.selected != selected ||
-        old.progress != progress ||
-        old.activePrimary != activePrimary ||
-        old.activeSecondary != activeSecondary ||
-        old.liveRed != liveRed ||
-        old.inactiveColor != inactiveColor;
-  }
-}
-
 class _DockItem extends StatefulWidget {
   final IconData icon;
   final IconData selectedIcon;
   final String label;
   final MarcoDockIconKind? kind;
   final bool selected;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   const _DockItem({
     required this.icon,
     required this.selectedIcon,
     required this.label,
     required this.kind,
     required this.selected,
-    required this.onTap,
+    this.onTap,
   });
   @override
   State<_DockItem> createState() => _DockItemState();
@@ -3126,11 +2888,45 @@ class _DockItemState extends State<_DockItem> {
     final selected = widget.selected;
     final labelColor = palette.isDark
         ? (selected
-            ? const Color(0xFF5CB8FF)
-            : Colors.white.withValues(alpha: 0.70))
+            ? const Color(0xFF0A84FF)
+            : Colors.white.withValues(alpha: 0.76))
         : (selected
             ? AppleColors.systemBlue
-            : const Color(0xFF2C303A).withValues(alpha: 0.76));
+            : const Color(0xFF1A1A1A).withValues(alpha: 0.82));
+    final content = Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        MarcoAnimatedDockIcon(
+          kind: widget.kind,
+          fallbackIcon: selected ? widget.selectedIcon : widget.icon,
+          selected: selected,
+          size: 24,
+          pulseTick: _pulseTick,
+        ),
+        const SizedBox(height: 2.5),
+        AnimatedDefaultTextStyle(
+          duration: duration,
+          curve: Ios27Spring.snappy.curve,
+          style: DefaultTextStyle.of(context).style.merge(
+            TextStyle(
+              color: labelColor,
+              fontSize: 10.5,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+              letterSpacing: 0.1,
+            ),
+          ),
+          child: Text(
+            widget.label,
+            maxLines: 1,
+            overflow: TextOverflow.clip,
+            textScaler: TextScaler.noScaling,
+          ),
+        ),
+      ],
+    );
+    if (widget.onTap == null) {
+      return content;
+    }
     return Ios27Pressable(
       pressedScale: Ios27Spring.pressSwellScale,
       borderRadius: 24,
@@ -3139,39 +2935,9 @@ class _DockItemState extends State<_DockItem> {
         if (selected) {
           setState(() => _pulseTick++);
         }
-        widget.onTap();
+        widget.onTap!();
       },
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          MarcoAnimatedDockIcon(
-            kind: widget.kind,
-            fallbackIcon: selected ? widget.selectedIcon : widget.icon,
-            selected: selected,
-            size: 24,
-            pulseTick: _pulseTick,
-          ),
-          const SizedBox(height: 2.5),
-          AnimatedDefaultTextStyle(
-            duration: duration,
-            curve: Ios27Spring.snappy.curve,
-            style: DefaultTextStyle.of(context).style.merge(
-              TextStyle(
-                color: labelColor,
-                fontSize: 10.5,
-                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                letterSpacing: 0.1,
-              ),
-            ),
-            child: Text(
-              widget.label,
-              maxLines: 1,
-              overflow: TextOverflow.clip,
-              textScaler: TextScaler.noScaling,
-            ),
-          ),
-        ],
-      ),
+      child: content,
     );
   }
 }
@@ -4433,43 +4199,86 @@ class AppleAmbientBackground extends StatefulWidget {
     this.animate = true,
   });
 
+  /// Pure policy predicate deciding whether the ambient breathing ticker should
+  /// run. Disabled on iOS/iPadOS so 120Hz ProMotion displays (notably iPad Pro
+  /// 2020 on iPadOS 15.4) never repaint behind floating `BackdropFilter` layers
+  /// while idle, and always paused in Light mode, background, occluded routes,
+  /// or Reduce Motion.
+  @visibleForTesting
+  static bool shouldAnimateBreath({
+    required bool useAuroraShader,
+    required bool animate,
+    required bool showAmbientArtwork,
+    required bool isWindowsDesktop,
+    required bool isIosPlatform,
+    required bool isDark,
+    required bool lifecycleResumed,
+    required bool isCurrentRoute,
+    required bool reduceMotion,
+    bool isFlutterTest = false,
+  }) {
+    if (useAuroraShader) return false;
+    if (!animate || !showAmbientArtwork) return false;
+    if (isWindowsDesktop || isIosPlatform) return false;
+    if (!isDark || !lifecycleResumed || !isCurrentRoute || reduceMotion) {
+      return false;
+    }
+    if (isFlutterTest) return false;
+    return true;
+  }
+
+  /// Pure policy predicate for the `aurora` wallpaper preset's shader ticker.
+  /// Always static on iOS / iPadOS (one frame, zero idle frames).
+  @visibleForTesting
+  static bool shouldAnimateAurora({
+    required bool animate,
+    required bool showAmbientArtwork,
+    required bool isIosPlatform,
+  }) {
+    return animate && showAmbientArtwork && !isIosPlatform;
+  }
+
   @override
   State<AppleAmbientBackground> createState() => _AppleAmbientBackgroundState();
 }
 
 class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final AnimationController _breathController;
+  bool _lifecycleResumed = true;
+  bool _isDark = true;
+  bool _isCurrentRoute = true;
+  bool _reduceMotion = false;
 
   bool get _useAuroraShader =>
       widget.preset == 'aurora' && !OhosRuntime.isOhos && !_isWindowsDesktop;
 
-  bool get _shouldAnimate {
-    if (_useAuroraShader) return false;
-    if (!widget.animate || !widget.showAmbientArtwork) return false;
-    if (_isWindowsDesktop) return false;
-    if (!kIsWeb && Platform.environment.containsKey('FLUTTER_TEST')) {
-      return false;
-    }
-    return true;
-  }
+  /// The home ambient aurora wallpaper is a full-screen fragment shader that
+  /// sits underneath every glass surface. On iOS it renders a single static
+  /// frame instead of animating forever behind an idle UI (sustained heat on
+  /// 120Hz ProMotion iPhones/iPads, including the iOS 26/27 native glass path).
+  bool get _auroraAnimationAllowed =>
+      AppleAmbientBackground.shouldAnimateAurora(
+        animate: widget.animate,
+        showAmbientArtwork: widget.showAmbientArtwork,
+        isIosPlatform: _isIosPlatform(),
+      );
 
-  @override
-  void initState() {
-    super.initState();
-    _breathController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 7800),
-      value: 0.45,
-    );
-    if (_shouldAnimate) {
-      _breathController.repeat(reverse: true);
-    }
-  }
+  bool get _shouldAnimate => AppleAmbientBackground.shouldAnimateBreath(
+        useAuroraShader: _useAuroraShader,
+        animate: widget.animate,
+        showAmbientArtwork: widget.showAmbientArtwork,
+        isWindowsDesktop: _isWindowsDesktop,
+        isIosPlatform: _isIosPlatform(),
+        isDark: _isDark,
+        lifecycleResumed: _lifecycleResumed,
+        isCurrentRoute: _isCurrentRoute,
+        reduceMotion: _reduceMotion,
+        isFlutterTest:
+            !kIsWeb && Platform.environment.containsKey('FLUTTER_TEST'),
+      );
 
-  @override
-  void didUpdateWidget(covariant AppleAmbientBackground oldWidget) {
-    super.didUpdateWidget(oldWidget);
+  void _syncBreathAnimation() {
     if (_shouldAnimate && !_breathController.isAnimating) {
       _breathController.repeat(reverse: true);
     } else if (!_shouldAnimate && _breathController.isAnimating) {
@@ -4479,7 +4288,45 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
   }
 
   @override
+  void initState() {
+    super.initState();
+    final initialState = WidgetsBinding.instance.lifecycleState;
+    _lifecycleResumed =
+        initialState == null || initialState == AppLifecycleState.resumed;
+    WidgetsBinding.instance.addObserver(this);
+    _breathController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 7800),
+      value: 0.45,
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final resumed = state == AppLifecycleState.resumed;
+    if (_lifecycleResumed == resumed) return;
+    _lifecycleResumed = resumed;
+    _syncBreathAnimation();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _isDark = ApplePalette.isDarkOf(context);
+    _isCurrentRoute = ModalRoute.of(context)?.isCurrent ?? true;
+    _reduceMotion = MediaQuery.disableAnimationsOf(context);
+    _syncBreathAnimation();
+  }
+
+  @override
+  void didUpdateWidget(covariant AppleAmbientBackground oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncBreathAnimation();
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _breathController.dispose();
     super.dispose();
   }
@@ -4576,7 +4423,7 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
                     opacity: 0.04,
                     child: AuroraBackground(
                       key: const Key('apple-ambient-aurora'),
-                      active: widget.animate && widget.showAmbientArtwork,
+                      active: _auroraAnimationAllowed,
                       strength: widget.showAmbientArtwork
                           ? MotionTokens.auroraDefaultStrength
                           : 0.28,
@@ -4598,7 +4445,7 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
             Positioned.fill(
               child: AuroraBackground(
                 key: const Key('apple-ambient-aurora'),
-                active: widget.animate && widget.showAmbientArtwork,
+                active: _auroraAnimationAllowed,
                 strength: widget.showAmbientArtwork
                     ? MotionTokens.auroraDefaultStrength
                     : 0.28,
@@ -4618,31 +4465,39 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
         if (widget.customWallpaper != null)
           Positioned.fill(
             child: IgnorePointer(
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  ImageFiltered(
-                    imageFilter: ImageFilter.blur(
-                      sigmaX: (widget.blurSigma * 0.35).clamp(8.0, 36.0),
-                      sigmaY: (widget.blurSigma * 0.35).clamp(8.0, 36.0),
-                      tileMode: TileMode.decal,
+              child: RepaintBoundary(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    ImageFiltered(
+                      imageFilter: ImageFilter.blur(
+                        sigmaX: (widget.blurSigma * 0.35).clamp(
+                          8.0,
+                          _isIosPlatform() ? 22.0 : 36.0,
+                        ),
+                        sigmaY: (widget.blurSigma * 0.35).clamp(
+                          8.0,
+                          _isIosPlatform() ? 22.0 : 36.0,
+                        ),
+                        tileMode: TileMode.decal,
+                      ),
+                      child: widget.customWallpaper,
                     ),
-                    child: widget.customWallpaper,
-                  ),
-                  const DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          Color(0x7808090D),
-                          Color(0xA608090D),
-                          Color(0xCC050608),
-                        ],
+                    const DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [
+                            Color(0x7808090D),
+                            Color(0xA608090D),
+                            Color(0xCC050608),
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -4655,7 +4510,7 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
             child: IgnorePointer(
               child: RepaintBoundary(
                 child: ClipRect(
-                  child: _isWindowsDesktop
+                  child: (_isWindowsDesktop || _isIosPlatform())
                       ? Stack(
                           fit: StackFit.expand,
                           children: [

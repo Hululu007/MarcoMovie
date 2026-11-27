@@ -394,12 +394,26 @@ void main() {
       expect(ctrl.thermalState, IosThermalState.nominal);
 
       expect(await ctrl.startPip(), isTrue);
+      // Native has accepted startPip, but active stays false until didStart.
+      expect(ctrl.isPipActive, isFalse);
+      expect(ctrl.isPipStarting, isTrue);
+
+      ctrl.handleNativeEvent(const {
+        'type': 'pipStateChanged',
+        'active': true,
+        'supported': true,
+        'possible': true,
+        'phase': 'didStart',
+      });
+      await Future<void>.delayed(Duration.zero);
       expect(ctrl.isPipActive, isTrue);
+      expect(ctrl.isPipStarting, isFalse);
 
       ctrl.handleNativeEvent(const {
         'type': 'pipStateChanged',
         'active': false,
         'supported': true,
+        'phase': 'didStop',
       });
       ctrl.handleNativeEvent(const {'type': 'pipRestoreForeground'});
       ctrl.handleNativeEvent(const {
@@ -414,7 +428,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(ctrl.isPipActive, isFalse);
-      expect(pipStates, equals(const [false]));
+      expect(pipStates, equals(const [true, false]));
       expect(restoredCount, 1);
       expect(ctrl.isAirPlayActive, isTrue);
       expect(ctrl.airPlayDeviceName, '客厅 Apple TV');

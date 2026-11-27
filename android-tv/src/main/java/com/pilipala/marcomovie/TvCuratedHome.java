@@ -79,9 +79,25 @@ final class TvCuratedHome {
     }
 
     static Catalog peekOrSeed() {
+        return peekOrSeed(null);
+    }
+
+    static Catalog peekOrSeed(MainActivity a) {
         Catalog cached = memoryCatalog;
         if (cached != null && (!cached.hotDramas.isEmpty() || !cached.hotMovies.isEmpty())) {
             return cached;
+        }
+        if (a != null && !a.privateMode) {
+            try {
+                long now = System.currentTimeMillis();
+                Catalog disk = readDiskCache(new File(a.getCacheDir(), CACHE_FILE), now);
+                if (disk != null) {
+                    memoryCatalog = disk;
+                    memoryLoadedAtMs = now;
+                    return disk;
+                }
+            } catch (Throwable ignored) {
+            }
         }
         return buildCatalog(seedDramas(), seedMovies(), false);
     }

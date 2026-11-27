@@ -21,8 +21,9 @@ class _InstantDetailClient extends CmsClient {
   Future<(CmsSite, CmsVideo)> playableDetail(
     CmsSite source,
     CmsVideo item,
-    Iterable<CmsSite> candidates,
-  ) async =>
+    Iterable<CmsSite> candidates, {
+    bool forceRefresh = false,
+  }) async =>
       (source, item);
 
   @override
@@ -207,7 +208,12 @@ void main() {
         await tester.runAsync(() async {
           posterPng = await _encodeStripedPosterPng(width: 120, height: 180);
         });
-        PosterLoader.seedMemoryForTest(posterUrl, posterPng, asHd: true);
+        PosterLoader.seedMemoryForTest(
+          posterUrl,
+          posterPng,
+          asHd: true,
+          isPrivate: true,
+        );
 
         ui.Image? capturedBackdrop;
         PlayerTransitionMode? resolvedMode;
@@ -317,7 +323,12 @@ void main() {
         await tester.runAsync(() async {
           posterPng = await _encodeStripedPosterPng(width: 120, height: 180);
         });
-        PosterLoader.seedMemoryForTest(posterUrl, posterPng, asHd: true);
+        PosterLoader.seedMemoryForTest(
+          posterUrl,
+          posterPng,
+          asHd: true,
+          isPrivate: true,
+        );
 
         final capturedBackdrops = <ui.Image>[];
         PlayerTransitionMode? resolvedMode;

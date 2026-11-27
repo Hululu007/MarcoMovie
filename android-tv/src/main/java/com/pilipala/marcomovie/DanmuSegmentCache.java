@@ -108,6 +108,7 @@ public final class DanmuSegmentCache implements AutoCloseable {
     private boolean fastCurrCached = false;
     private boolean fastNextCached = false;
     private Listener listener;
+    private volatile Throwable lastError;
     private boolean closed = false;
 
     public DanmuSegmentCache(DanmuProvider provider) {
@@ -118,8 +119,37 @@ public final class DanmuSegmentCache implements AutoCloseable {
         if (provider == null) throw new IllegalArgumentException("provider required");
         this.provider = provider;
         this.seekDebounceMs = Math.max(0L, seekDebounceMs);
-        this.workerPool = Executors.newFixedThreadPool(3);
-        this.scheduler = Executors.newSingleThreadScheduledExecutor();
+        java.util.concurrent.ThreadPoolExecutor wp =
+                new java.util.concurrent.ThreadPoolExecutor(
+                        2,
+                        2,
+                        15L,
+                        TimeUnit.SECONDS,
+                        new java.util.concurrent.LinkedBlockingQueue<Runnable>(),
+                        new java.util.concurrent.ThreadFactory() {
+                            @Override
+                            public Thread newThread(Runnable r) {
+                                Thread t = new Thread(r, "danmu-seg-worker");
+                                t.setDaemon(true);
+                                return t;
+                            }
+                        });
+        wp.allowCoreThreadTimeOut(true);
+        this.workerPool = wp;
+        java.util.concurrent.ScheduledThreadPoolExecutor sp =
+                new java.util.concurrent.ScheduledThreadPoolExecutor(
+                        1,
+                        new java.util.concurrent.ThreadFactory() {
+                            @Override
+                            public Thread newThread(Runnable r) {
+                                Thread t = new Thread(r, "danmu-seg-sched");
+                                t.setDaemon(true);
+                                return t;
+                            }
+                        });
+        sp.setKeepAliveTime(15L, TimeUnit.SECONDS);
+        sp.allowCoreThreadTimeOut(true);
+        this.scheduler = sp;
     }
 
     public static long computeEffectiveMs(long rawPositionMs, long offsetMs) {
@@ -129,6 +159,19 @@ public final class DanmuSegmentCache implements AutoCloseable {
     public static int computeFetchWindowIndex(long effectiveMs) {
         if (effectiveMs < 0L) return 0;
         return (int) (effectiveMs / WINDOW_DURATION_MS);
+    }
+
+    public Throwable getLastError() {
+        return lastError;
+    }
+
+    public int getKnownTotalCommentCount() {
+        synchronized (lock) {
+            if (activeSession == null || activeSession.segmented) {
+                return -1;
+            }
+            return activeSession.preloadComments.size();
+        }
     }
 
     public void setListener(Listener listener) {
@@ -207,6 +250,7 @@ public final class DanmuSegmentCache implements AutoCloseable {
             gen = this.bindGeneration;
             this.boundEpisodeId = boundEpisodeId == null ? "" : boundEpisodeId.trim();
             this.activeSession = null;
+            this.lastError = null;
             this.sessionEpoch = 0;
             this.session410RefreshCount = 0;
             this.activeRefreshFlight = null;
@@ -260,6 +304,7 @@ public final class DanmuSegmentCache implements AutoCloseable {
                                 l = closed ? null : listener;
                             }
                             if (l != null && !token.isCancelled()) {
+                                lastError = e;
                                 l.onError(e.getMessage() == null ? "弹幕会话初始化失败" : e.getMessage());
                             }
                         } finally {
@@ -493,6 +538,7 @@ public final class DanmuSegmentCache implements AutoCloseable {
                                 l = (closed || token.isCancelled()) ? null : listener;
                             }
                             if (l != null) {
+                                lastError = e;
                                 l.onError(e.getMessage() == null ? "分片弹幕拉取失败" : e.getMessage());
                             }
                         } finally {

@@ -291,7 +291,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 80));
       expect(
         player.native.properties,
-        contains(('volume-max', '200')),
+        contains(('volume-max', '100')),
       );
       expect(
         player.native.properties,

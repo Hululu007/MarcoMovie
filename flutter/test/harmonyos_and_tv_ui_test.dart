@@ -21,6 +21,7 @@ import 'package:marco_movie/core/storage_service.dart';
 import 'package:marco_movie/core/video_kernel.dart';
 import 'package:marco_movie/ui/adaptive_shell.dart';
 import 'package:marco_movie/ui/cloud_sync_panel.dart';
+import 'package:marco_movie/ui/onboarding/onboarding_prefs.dart';
 import 'package:marco_movie/ui/player_screen.dart';
 import 'package:marco_movie/ui/tv/tv_detail_screen.dart';
 import 'package:marco_movie/ui/tv/tv_focus_widgets.dart';
@@ -3065,7 +3066,10 @@ http://127.0.0.1:18080/b1.m3u8
           required bool expectDownloadBtn,
           String? expectedBtnLabel,
         }) async {
-          SharedPreferences.setMockInitialValues({});
+          SharedPreferences.setMockInitialValues({
+            OnboardingPrefs.officialChannelNoticeVersionKey:
+                OnboardingPrefs.currentOfficialChannelNoticeVersion,
+          });
           final phoneStorage = await StorageService.init();
           OhosRuntime.debugIsOhosOverride = true;
           OhosRuntime.debugDeviceTypeOverride = 'phone';

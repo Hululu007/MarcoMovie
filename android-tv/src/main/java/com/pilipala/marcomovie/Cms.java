@@ -297,6 +297,7 @@ public final class Cms {
                 tag,
                 doubanScore = "",
                 doubanId = "";
+        public final List<String> aliases = new ArrayList<>();
         public final List<Line> lines = new ArrayList<>();
     }
 
@@ -839,8 +840,33 @@ public final class Cms {
         }
     }
 
+    /** Computes exact UTF-8 byte length without allocating a full byte[] copy for large payloads. */
+    public static int utf8ByteLength(String text) {
+        if (text == null) return 0;
+        int len = text.length();
+        int bytes = 0;
+        for (int i = 0; i < len; i++) {
+            char c = text.charAt(i);
+            if (c <= 0x7F) {
+                bytes += 1;
+            } else if (c <= 0x7FF) {
+                bytes += 2;
+            } else if (Character.isHighSurrogate(c)
+                    && i + 1 < len
+                    && Character.isLowSurrogate(text.charAt(i + 1))) {
+                bytes += 4;
+                i++;
+            } else {
+                bytes += 3;
+            }
+        }
+        return bytes;
+    }
+
     public static Config parseConfig(String text, String origin) throws Exception {
-        if (text == null || text.length() > MAX_JSON) throw new IOException("配置超过 16 MB 限制");
+        if (text == null || text.length() > MAX_JSON || utf8ByteLength(text) > MAX_JSON) {
+            throw new IOException("配置超过 16 MB 限制");
+        }
         String trimmed = text.trim().replaceFirst("^\\uFEFF", "");
         if (isHtml(trimmed)) {
             throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
@@ -1145,12 +1171,58 @@ public final class Cms {
         return true;
     }
 
+    private static boolean needsCommentOrTrailingCommaStrip(String source) {
+        int len = source.length();
+        boolean quoted = false, escaped = false;
+        for (int i = 0; i < len; i++) {
+            char ch = source.charAt(i);
+            if (quoted) {
+                if (escaped) {
+                    escaped = false;
+                } else if (ch == '\\') {
+                    escaped = true;
+                } else if (ch == '"') {
+                    quoted = false;
+                } else {
+                    int nq = source.indexOf('"', i + 1);
+                    int nb = source.indexOf('\\', i + 1);
+                    int next = nq < 0 ? nb : (nb < 0 ? nq : Math.min(nq, nb));
+                    if (next < 0) return false;
+                    i = next - 1;
+                }
+                continue;
+            }
+            if (ch == '"') {
+                quoted = true;
+                continue;
+            }
+            if (ch == '/' && i + 1 < len) {
+                char next = source.charAt(i + 1);
+                if (next == '/' || next == '*') return true;
+            }
+            if (ch == ',') {
+                int j = i + 1;
+                while (j < len && Character.isWhitespace(source.charAt(j))) j++;
+                if (j < len && (source.charAt(j) == '}' || source.charAt(j) == ']')) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     public static String withoutComments(String source) throws IOException {
         if (source == null) return "";
         if (source.startsWith("\uFEFF")) source = source.substring(1);
-        StringBuilder clean = new StringBuilder();
+        // Zero-allocation fast path for standard JSON (crucial for multi-megabyte subscriptions on
+        // low-RAM TV devices where allocating multiple 16 MiB StringBuilders risks GC stalls/OOM).
+        if (!needsCommentOrTrailingCommaStrip(source)) {
+            return source;
+        }
+        int len = source.length();
+        StringBuilder clean = new StringBuilder(len);
         boolean quoted = false, escaped = false;
-        for (int i = 0; i < source.length(); i++) {
+        for (int i = 0; i < len; i++) {
             char ch = source.charAt(i);
             if (quoted) {
                 clean.append(ch);
@@ -1164,31 +1236,31 @@ public final class Cms {
                 clean.append(ch);
                 continue;
             }
-            if (ch == '/' && i + 1 < source.length() && source.charAt(i + 1) == '/') {
-                while (i < source.length() && source.charAt(i) != '\n') i++;
+            if (ch == '/' && i + 1 < len && source.charAt(i + 1) == '/') {
+                while (i < len && source.charAt(i) != '\n') i++;
                 clean.append('\n');
                 continue;
             }
-            if (ch == '/' && i + 1 < source.length() && source.charAt(i + 1) == '*') {
+            if (ch == '/' && i + 1 < len && source.charAt(i + 1) == '*') {
                 i += 2;
-                while (i + 1 < source.length()
-                        && !(source.charAt(i) == '*' && source.charAt(i + 1) == '/')) i++;
-                if (i + 1 >= source.length()) throw new IOException("配置注释没有结束");
+                while (i + 1 < len && !(source.charAt(i) == '*' && source.charAt(i + 1) == '/'))
+                    i++;
+                if (i + 1 >= len) throw new IOException("配置注释没有结束");
                 i++;
                 clean.append(' ');
                 continue;
             }
             clean.append(ch);
         }
-        // Strip trailing commas before '}' or ']' outside string literals
-        String noComments = clean.toString();
-        StringBuilder out = new StringBuilder(noComments.length());
+        // Strip trailing commas before '}' or ']' outside string literals in-place in clean
+        int cLen = clean.length();
+        int write = 0;
         quoted = false;
         escaped = false;
-        for (int i = 0; i < noComments.length(); i++) {
-            char ch = noComments.charAt(i);
+        for (int i = 0; i < cLen; i++) {
+            char ch = clean.charAt(i);
             if (quoted) {
-                out.append(ch);
+                clean.setCharAt(write++, ch);
                 if (escaped) escaped = false;
                 else if (ch == '\\') escaped = true;
                 else if (ch == '"') quoted = false;
@@ -1196,20 +1268,20 @@ public final class Cms {
             }
             if (ch == '"') {
                 quoted = true;
-                out.append(ch);
+                clean.setCharAt(write++, ch);
                 continue;
             }
             if (ch == ',') {
                 int j = i + 1;
-                while (j < noComments.length() && Character.isWhitespace(noComments.charAt(j))) j++;
-                if (j < noComments.length()
-                        && (noComments.charAt(j) == '}' || noComments.charAt(j) == ']')) {
+                while (j < cLen && Character.isWhitespace(clean.charAt(j))) j++;
+                if (j < cLen && (clean.charAt(j) == '}' || clean.charAt(j) == ']')) {
                     continue;
                 }
             }
-            out.append(ch);
+            clean.setCharAt(write++, ch);
         }
-        return out.toString();
+        clean.setLength(write);
+        return clean.toString();
     }
 
     public static String read(InputStream in, int limit) throws IOException {
@@ -2618,6 +2690,7 @@ public final class Cms {
         v.id = optSafeString(j, "vod_id", "");
         String vTitle = optSafeString(j, "vod_name", "");
         v.title = vTitle.isEmpty() ? "未命名影片" : vTitle;
+        parseExplicitAliases(j, v.aliases);
         v.poster = optSafeString(j, "vod_pic", "");
         v.remarks = optSafeString(j, "vod_remarks", "");
         Object action = j.opt("action");
@@ -2703,6 +2776,44 @@ public final class Cms {
         parsePlayLines(v, from, urls);
         prioritizeDirectStreamLines(v);
         return v;
+    }
+
+    private static void parseExplicitAliases(JSONObject j, List<String> out) {
+        if (j == null || out == null) return;
+        String[] allKeys = {"explicit_aliases", "vod_aliases", "aliases", "vod_alias", "alias"};
+        for (String key : allKeys) {
+            if (j.isNull(key)) continue;
+            JSONArray arr = j.optJSONArray(key);
+            if (arr != null) {
+                for (int i = 0; i < arr.length(); i++) {
+                    Object item = arr.opt(i);
+                    if (item instanceof String) {
+                        String val = ((String) item).trim();
+                        if (!val.isEmpty() && !"null".equalsIgnoreCase(val) && !out.contains(val)) {
+                            out.add(val);
+                        }
+                    }
+                }
+                continue;
+            }
+            if ("vod_alias".equals(key) || "alias".equals(key)) {
+                // Preserve meaningful punctuation inside singular alias strings (e.g. "Face/Off",
+                // "C++", "Yes, Minister") — never split on '/', ',', or '|' unless the source uses
+                // an explicit multi-record protocol separator ("$$$" or newline).
+                String raw = optSafeString(j, key, "").trim();
+                if (raw.isEmpty()) continue;
+                String[] parts =
+                        (raw.contains("$$$") || raw.indexOf('\n') >= 0 || raw.indexOf('\r') >= 0)
+                                ? raw.split("(?:\\$\\$\\$|[\\r\\n]+)")
+                                : new String[] {raw};
+                for (String p : parts) {
+                    String val = p.trim();
+                    if (!val.isEmpty() && !"null".equalsIgnoreCase(val) && !out.contains(val)) {
+                        out.add(val);
+                    }
+                }
+            }
+        }
     }
 
     private static String joinStrings(String delimiter, List<String> parts) {
