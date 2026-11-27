@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -426,6 +427,28 @@ final class DownloadManager {
                 || keyLower.startsWith("x-qiniu-");
     }
 
+    private static boolean looksLikeUnixEpochTimestamp(String rawValue) {
+        if (rawValue == null) return false;
+        String v = rawValue.trim();
+        if (v.length() < 9 || v.length() > 13) return false;
+        for (int i = 0; i < v.length(); i++) {
+            char c = v.charAt(i);
+            if (c < '0' || c > '9') return false;
+        }
+        return true;
+    }
+
+    private static boolean looksLikeQiniuToken(String rawValue) {
+        if (rawValue == null) return false;
+        String v = rawValue.trim();
+        if (v.isEmpty()) return false;
+        int colon = v.indexOf(':');
+        if (colon > 0 && colon < v.length() - 1) return true;
+        String upper = v.toUpperCase(Locale.ROOT);
+        int encColon = upper.indexOf("%3A");
+        return encColon > 0 && encColon + 3 < v.length();
+    }
+
     private static String canonicalizeMediaSource(String rawSource) {
         if (rawSource == null) return "";
         String trimmed = rawSource.trim();
@@ -458,22 +481,53 @@ final class DownloadManager {
         if (canonicalBase.isEmpty()) return "";
         if (rawQuery.isEmpty()) return canonicalBase;
 
-        List<String> kept = new ArrayList<>();
         String[] pairs = rawQuery.split("&");
+        boolean hasQiniuToken = false;
+        boolean hasEpochE = false;
         for (String pair : pairs) {
             if (pair == null || pair.isEmpty()) continue;
             int eq = pair.indexOf('=');
-            String k = eq >= 0 ? pair.substring(0, eq).trim() : pair.trim();
-            if (isVolatileQueryParam(k.toLowerCase(Locale.ROOT))) continue;
-            kept.add(pair);
+            String kLower =
+                    (eq >= 0 ? pair.substring(0, eq) : pair).trim().toLowerCase(Locale.ROOT);
+            String val = eq >= 0 ? pair.substring(eq + 1).trim() : "";
+            if ("token".equals(kLower) && looksLikeQiniuToken(val)) {
+                hasQiniuToken = true;
+            } else if ("e".equals(kLower) && looksLikeUnixEpochTimestamp(val)) {
+                hasEpochE = true;
+            }
         }
-        if (kept.isEmpty()) return canonicalBase;
-        Collections.sort(kept);
+        boolean stripQiniuExpiryE = hasQiniuToken && hasEpochE;
+
+        // Sort distinct business keys canonically while strictly preserving original value order
+        // when the same key repeats (e.g. fid=A&fid=B vs fid=B&fid=A).
+        Map<String, List<String>> grouped = new TreeMap<>();
+        for (String pair : pairs) {
+            if (pair == null || pair.isEmpty()) continue;
+            int eq = pair.indexOf('=');
+            String kLower =
+                    (eq >= 0 ? pair.substring(0, eq) : pair).trim().toLowerCase(Locale.ROOT);
+            String val = eq >= 0 ? pair.substring(eq + 1).trim() : "";
+            if (isVolatileQueryParam(kLower)) continue;
+            if (stripQiniuExpiryE && "e".equals(kLower) && looksLikeUnixEpochTimestamp(val)) {
+                continue;
+            }
+            List<String> bucket = grouped.get(kLower);
+            if (bucket == null) {
+                bucket = new ArrayList<>();
+                grouped.put(kLower, bucket);
+            }
+            bucket.add(pair);
+        }
+        if (grouped.isEmpty()) return canonicalBase;
         StringBuilder sb = new StringBuilder(canonicalBase.length() + rawQuery.length() + 1);
         sb.append(canonicalBase).append('?');
-        for (int i = 0; i < kept.size(); i++) {
-            if (i > 0) sb.append('&');
-            sb.append(kept.get(i));
+        boolean first = true;
+        for (List<String> bucket : grouped.values()) {
+            for (String pair : bucket) {
+                if (!first) sb.append('&');
+                sb.append(pair);
+                first = false;
+            }
         }
         return sb.toString();
     }

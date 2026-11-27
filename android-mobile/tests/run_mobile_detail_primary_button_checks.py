@@ -2246,6 +2246,31 @@ public final class RealDownloadManagerQueueChecks {
                         out.write(payloadB);
                     }
                 });
+        server.createContext(
+                "/query.mp4",
+                ex -> {
+                    String q = ex.getRequestURI().getRawQuery();
+                    String body = "identical media payload";
+                    if (q != null) {
+                        boolean matchedFid = false;
+                        for (String pair : q.split("&")) {
+                            if (pair.startsWith("fid=")) {
+                                body = "media payload " + pair.substring(4);
+                                matchedFid = true;
+                                break;
+                            }
+                        }
+                        if (!matchedFid && !q.contains("token=") && q.startsWith("e=")) {
+                            body = "part " + q.substring(2);
+                        }
+                    }
+                    byte[] raw = body.getBytes(StandardCharsets.UTF_8);
+                    ex.getResponseHeaders().set("Content-Type", "video/mp4");
+                    ex.sendResponseHeaders(200, raw.length);
+                    try (OutputStream out = ex.getResponseBody()) {
+                        out.write(raw);
+                    }
+                });
         server.start();
 
         try {
@@ -2388,6 +2413,130 @@ public final class RealDownloadManagerQueueChecks {
             check(
                     dmUltra.enqueue(site, vid, line, Collections.singletonList(epA)) == 0,
                     "R16-3-legacy-sourceless: sourceless legacy 4-part task still prevents duplicate re-queue (added=0)");
+
+            // =================================================================
+            // Round-17 P2: Query parameter canonicalization regressions in REAL DownloadManager:
+            //   1. Repeated key value order preserved (fid=A&fid=B vs fid=B&fid=A -> 1, 1, 0; 2 DONE)
+            //   2. Qiniu Kodo private download e+token renewal -> 1, 0, 0; 1 DONE
+            //   3. Non-auth e=1 vs e=2 preserved as distinct episodes -> 1, 1, 0; 2 DONE
+            //   4. Distinct business keys still sort canonically (a=1&fid=B&z=9&fid=A == z=9&fid=B&a=1&fid=A)
+            // =================================================================
+            String queryBase = "http://127.0.0.1:" + port + "/query.mp4";
+
+            // R17-1: ordered-repeat (fid=A&fid=B, fid=B&fid=A, fid=A&fid=B)
+            File repDir = new File(rootDir, "r17-ordered-repeat");
+            repDir.mkdirs();
+            DownloadManager dmRep = createRealManager(repDir);
+            Cms.Episode epRep1 = new Cms.Episode();
+            epRep1.name = "正片";
+            epRep1.url = queryBase + "?fid=A&fid=B";
+            Cms.Episode epRep2 = new Cms.Episode();
+            epRep2.name = "正片";
+            epRep2.url = queryBase + "?fid=B&fid=A";
+            Cms.Episode epRep3 = new Cms.Episode();
+            epRep3.name = "正片";
+            epRep3.url = queryBase + "?fid=A&fid=B";
+            int r1 = dmRep.enqueue(site, vid, line, Collections.singletonList(epRep1));
+            int r2 = dmRep.enqueue(site, vid, line, Collections.singletonList(epRep2));
+            int r3 = dmRep.enqueue(site, vid, line, Collections.singletonList(epRep3));
+            waitAllTerminal(dmRep, 2);
+            dmRep.flushSaved();
+            List<DownloadManager.Task> repReloaded = createRealManager(repDir).snapshot();
+            Set<String> repBodies = new HashSet<>();
+            for (DownloadManager.Task t : repReloaded) {
+                if (t.state == DownloadManager.DONE) {
+                    repBodies.add(new String(java.nio.file.Files.readAllBytes(new File(t.path).toPath()), StandardCharsets.UTF_8));
+                }
+            }
+            check(
+                    r1 == 1 && r2 == 1 && r3 == 0
+                            && repReloaded.size() == 2
+                            && repBodies.contains("media payload A")
+                            && repBodies.contains("media payload B"),
+                    "R17-1-ordered-repeat: fid=A&fid=B / fid=B&fid=A / fid=A&fid=B adds 1,1,0 and reloads 2 DONE files (A & B)");
+
+            // R17-2: Qiniu Kodo private download renewal (e + token)
+            File kodoDir = new File(rootDir, "r17-kodo-renewal");
+            kodoDir.mkdirs();
+            DownloadManager dmKodo = createRealManager(kodoDir);
+            Cms.Episode epK1 = new Cms.Episode();
+            epK1.name = "正片";
+            epK1.url = queryBase + "?e=1800000000&token=sample:fixture-AA";
+            Cms.Episode epK2 = new Cms.Episode();
+            epK2.name = "正片";
+            epK2.url = queryBase + "?e=1800003600&token=sample:fixture-BB";
+            Cms.Episode epK3 = new Cms.Episode();
+            epK3.name = "正片";
+            epK3.url = queryBase + "?token=sample%3Afixture-CC&e=1800007200";
+            int k1 = dmKodo.enqueue(site, vid, line, Collections.singletonList(epK1));
+            int k2 = dmKodo.enqueue(site, vid, line, Collections.singletonList(epK2));
+            int k3 = dmKodo.enqueue(site, vid, line, Collections.singletonList(epK3));
+            waitAllTerminal(dmKodo, 1);
+            dmKodo.flushSaved();
+            List<DownloadManager.Task> kodoReloaded = createRealManager(kodoDir).snapshot();
+            String kodoBody =
+                    kodoReloaded.size() == 1 && kodoReloaded.get(0).state == DownloadManager.DONE
+                            ? new String(java.nio.file.Files.readAllBytes(new File(kodoReloaded.get(0).path).toPath()), StandardCharsets.UTF_8)
+                            : "";
+            check(
+                    k1 == 1 && k2 == 0 && k3 == 0
+                            && kodoReloaded.size() == 1
+                            && "identical media payload".equals(kodoBody),
+                    "R17-2-kodo-renewal: Qiniu e+token renewal adds 1,0,0 and reloads 1 DONE file");
+
+            // R17-3: Non-credential e=1, e=2, e=1 episode-key control
+            File epEDir = new File(rootDir, "r17-episode-e-control");
+            epEDir.mkdirs();
+            DownloadManager dmEpE = createRealManager(epEDir);
+            Cms.Episode epE1 = new Cms.Episode();
+            epE1.name = "正片";
+            epE1.url = queryBase + "?e=1";
+            Cms.Episode epE2 = new Cms.Episode();
+            epE2.name = "正片";
+            epE2.url = queryBase + "?e=2";
+            Cms.Episode epE3 = new Cms.Episode();
+            epE3.name = "正片";
+            epE3.url = queryBase + "?e=1";
+            int e1 = dmEpE.enqueue(site, vid, line, Collections.singletonList(epE1));
+            int e2 = dmEpE.enqueue(site, vid, line, Collections.singletonList(epE2));
+            int e3 = dmEpE.enqueue(site, vid, line, Collections.singletonList(epE3));
+            waitAllTerminal(dmEpE, 2);
+            dmEpE.flushSaved();
+            List<DownloadManager.Task> epEReloaded = createRealManager(epEDir).snapshot();
+            Set<String> epEBodies = new HashSet<>();
+            for (DownloadManager.Task t : epEReloaded) {
+                if (t.state == DownloadManager.DONE) {
+                    epEBodies.add(new String(java.nio.file.Files.readAllBytes(new File(t.path).toPath()), StandardCharsets.UTF_8));
+                }
+            }
+            check(
+                    e1 == 1 && e2 == 1 && e3 == 0
+                            && epEReloaded.size() == 2
+                            && epEBodies.contains("part 1")
+                            && epEBodies.contains("part 2"),
+                    "R17-3-episode-e-control: non-auth e=1 / e=2 / e=1 adds 1,1,0 and reloads 2 DONE files (part 1 & part 2)");
+
+            // R17-4: Cross-key sorting still deduplicates while preserving per-key value order
+            File sortDir = new File(rootDir, "r17-cross-key-sort");
+            sortDir.mkdirs();
+            DownloadManager dmSort = createRealManager(sortDir);
+            Cms.Episode epS1 = new Cms.Episode();
+            epS1.name = "正片";
+            epS1.url = queryBase + "?z=9&fid=B&a=1&fid=A&sign=old";
+            Cms.Episode epS2 = new Cms.Episode();
+            epS2.name = "正片";
+            epS2.url = queryBase + "?a=1&fid=B&sign=new&z=9&fid=A";
+            Cms.Episode epS3 = new Cms.Episode();
+            epS3.name = "正片";
+            epS3.url = queryBase + "?a=1&fid=A&z=9&fid=B";
+            int s1 = dmSort.enqueue(site, vid, line, Collections.singletonList(epS1));
+            int s2 = dmSort.enqueue(site, vid, line, Collections.singletonList(epS2));
+            int s3 = dmSort.enqueue(site, vid, line, Collections.singletonList(epS3));
+            waitAllTerminal(dmSort, 2);
+            dmSort.flushSaved();
+            check(
+                    s1 == 1 && s2 == 0 && s3 == 1 && createRealManager(sortDir).snapshot().size() == 2,
+                    "R17-4-cross-key-sort: different keys sort canonically (s2=0) while flipped fid order remains distinct (s3=1)");
 
             System.out.println("RealDownloadManagerQueueChecks OK (" + passed + " checks passed)");
         } finally {

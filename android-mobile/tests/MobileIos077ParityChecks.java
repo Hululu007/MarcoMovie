@@ -5522,8 +5522,40 @@ public final class MobileIos077ParityChecks {
                         && keyDupASigned1.equals(keyDupASigned2),
                 "R16 P2: duplicate-named 「正片」 A/B resolve cleanly in MobileDownloads.resolveInitialPickIndex and produce distinct stable keys in DownloadManager");
 
+        // 36. Round-17 P2: DownloadManager.mediaIdentity preserves value order for repeated query
+        //     keys (fid=A&fid=B != fid=B&fid=A), sorts distinct keys canonically, strips Qiniu
+        //     Kodo private-download e+token credentials while preserving non-auth e=1 vs e=2.
+        String idRepAB = DownloadManager.mediaIdentity("https://cdn.example/m.mp4?fid=A&fid=B");
+        String idRepBA = DownloadManager.mediaIdentity("https://cdn.example/m.mp4?fid=B&fid=A");
+        String idSort1 =
+                DownloadManager.mediaIdentity("https://cdn.example/m.mp4?z=9&fid=B&a=1&fid=A");
+        String idSort2 =
+                DownloadManager.mediaIdentity("https://cdn.example/m.mp4?a=1&fid=B&z=9&fid=A");
+        String idKodo1 =
+                DownloadManager.mediaIdentity(
+                        "https://cdn.example/m.mp4?e=1800000000&token=sample:fixture-AA");
+        String idKodo2 =
+                DownloadManager.mediaIdentity(
+                        "https://cdn.example/m.mp4?e=1800003600&token=sample:fixture-BB");
+        String idKodoEnc =
+                DownloadManager.mediaIdentity(
+                        "https://cdn.example/m.mp4?token=sample%3Afixture-CC&e=1800007200");
+        String idEpE1 = DownloadManager.mediaIdentity("https://cdn.example/m.mp4?e=1");
+        String idEpE2 = DownloadManager.mediaIdentity("https://cdn.example/m.mp4?e=2");
+        check(
+                !idRepAB.equals(idRepBA)
+                        && idSort1.equals(idSort2)
+                        && !idSort1.equals(
+                                DownloadManager.mediaIdentity(
+                                        "https://cdn.example/m.mp4?a=1&fid=A&z=9&fid=B"))
+                        && idKodo1.equals(idKodo2)
+                        && idKodo1.equals(idKodoEnc)
+                        && !idEpE1.equals(idEpE2)
+                        && !idEpE1.equals(idKodo1),
+                "R17 P2: DownloadManager.mediaIdentity preserves repeated-key order, strips Qiniu e+token auth, and keeps e=1 vs e=2 distinct");
+
         pass(
-                "DriveOrder + R4..R16 P1-1..P2: line-season failover, Dart-aligned episodeMediaId, same-site drive conflict, direct-card, line-management rebind, awaiting-reselection, 0-preselect & duplicate-name download identity verified");
+                "DriveOrder + R4..R17 P1-1..P2: line-season failover, Dart-aligned episodeMediaId, same-site drive conflict, direct-card, line-management rebind, awaiting-reselection, 0-preselect, duplicate-name & query-order/Qiniu download identity verified");
     }
 
     private static String computeWindowsV073MediaId(String canonicalUrl) throws Exception {
