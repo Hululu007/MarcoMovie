@@ -1676,6 +1676,22 @@ public final class AiBetaLabChecks {
                         && "AI净化".equals(MobileDetailScreen.episodeCleanPillLabel(2, true)),
                 "P2-1: locked DetailScreen masks stored AI clean mode 2 -> local clean without erasing preference for re-unlock");
 
+        check(
+                "字幕 / 弹幕".equals(MobileSettingsScreen.buildSubtitleDanmuSummary(false, true, true))
+                        && "字幕 / 关弹幕"
+                                .equals(
+                                        MobileSettingsScreen.buildSubtitleDanmuSummary(
+                                                false, false, false))
+                        && "双语 / 弹幕"
+                                .equals(
+                                        MobileSettingsScreen.buildSubtitleDanmuSummary(
+                                                true, true, true))
+                        && "单语 / 关弹幕"
+                                .equals(
+                                        MobileSettingsScreen.buildSubtitleDanmuSummary(
+                                                true, false, false)),
+                "P2-1: locked Settings root hides bilingual label (字幕 / 弹幕) and restores 双语/单语 once unlocked");
+
         // Static guards: zero hardcoded third-party CLI client IDs (P1-9), locked-state UI guards
         // (P1-5/P2-1), zero UI emoji in AI classes
         String authSrc =

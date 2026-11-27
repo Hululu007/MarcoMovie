@@ -365,9 +365,10 @@ final class MobileSettingsScreen {
         // Cluster 2 — 内容与观影
         String siteVal = a.config == null ? "未导入" : (a.config.sites.size() + " 个片源");
         String engineVal = shortEngineName(a.prefs.getInt(Prefs.PLAYER_ENGINE, 0));
+        boolean aiUnlocked = AiBetaGate.isUnlocked(a);
         boolean bilingualOn = a.mobilePrefs().getBoolean(Prefs.SUBTITLE_BILINGUAL, true);
         boolean danmuOn = a.prefs.getBoolean(Prefs.DANMAKU_DEFAULT, true);
-        String subDanmuVal = (bilingualOn ? "双语" : "单语") + " / " + (danmuOn ? "弹幕" : "关弹幕");
+        String subDanmuVal = buildSubtitleDanmuSummary(aiUnlocked, bilingualOn, danmuOn);
         String serviceVal = buildServiceSummary(a);
         addSection(
                 a,
@@ -4105,6 +4106,12 @@ final class MobileSettingsScreen {
             default:
                 return "Media3";
         }
+    }
+
+    static String buildSubtitleDanmuSummary(
+            boolean aiUnlocked, boolean bilingualOn, boolean danmuOn) {
+        String subPart = aiUnlocked ? (bilingualOn ? "双语" : "单语") : "字幕";
+        return subPart + " / " + (danmuOn ? "弹幕" : "关弹幕");
     }
 
     private static String buildServiceSummary(MainActivity a) {
