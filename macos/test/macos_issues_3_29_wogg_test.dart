@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -122,7 +121,7 @@ void main() {
         name: '玩偶测试',
         type: 3,
         api: 'csp_WoGG',
-        ext: 'https://wogg.example/',
+        ext: '{"siteUrl":"https://wogg.example/"}',
       );
 
       final requested = <String>[];
@@ -260,10 +259,10 @@ void main() {
       expect(CmsParser.extraTopLevelHomeCategories(catsWithout), isEmpty);
     });
 
-    testWidgets('Desktop Home: stale cache missing 44 refreshes -> shows 臻彩 pill -> click 44 -> opens DetailScreen', (tester) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
-
+    testWidgets(
+      'Desktop Home: stale cache missing 44 refreshes -> shows 臻彩 pill -> click 44 -> opens DetailScreen',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
       Future<void> pumpBounded([int steps = 10]) async {
         for (var i = 0; i < steps; i++) {
           await tester.pump(const Duration(milliseconds: 60));
@@ -277,7 +276,7 @@ void main() {
             'name': '玩偶4K',
             'type': 3,
             'api': 'csp_WoGG',
-            'ext': 'https://wogg.example/',
+            'ext': '{"siteUrl":"https://wogg.example/"}',
           },
         ],
       });
@@ -399,10 +398,10 @@ void main() {
       expect(find.textContaining('奥本海默 臻彩视界'), findsWidgets);
     });
 
-    testWidgets('Desktop Home does NOT fabricate 臻彩 pill when source omits category 44', (tester) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
-
+    testWidgets(
+      'Desktop Home does NOT fabricate 臻彩 pill when source omits category 44',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
       final storage = await initStorage();
       await storage.upsertSubscriptions([
         SubscriptionEntry(

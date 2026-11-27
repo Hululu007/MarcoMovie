@@ -354,8 +354,11 @@ class MacosDisplayRefreshBridge {
     return _changesController.stream;
   }
 
+  static bool get _isTestEnv => Platform.environment.containsKey('FLUTTER_TEST');
+
   static void ensureInstalled() {
     if (_handlerInstalled) return;
+    if (kIsWeb || !Platform.isMacOS || _isTestEnv) return;
     _handlerInstalled = true;
     _channel.setMethodCallHandler((call) async {
       if (call.method == 'onDisplayRefreshRateChanged' &&
@@ -383,12 +386,14 @@ class MacosDisplayRefreshBridge {
     if (override != null) {
       return override();
     }
-    if (kIsWeb || !Platform.isMacOS) {
+    if (kIsWeb || !Platform.isMacOS || _isTestEnv) {
       return MacosDisplayRefreshInfo.unavailable;
     }
     ensureInstalled();
     try {
-      final raw = await _channel.invokeMethod<dynamic>('getDisplayRefreshInfo');
+      final raw = await _channel
+          .invokeMethod<dynamic>('getDisplayRefreshInfo')
+          .timeout(const Duration(milliseconds: 500));
       if (raw is Map) {
         return MacosDisplayRefreshInfo.tryParseMap(raw) ??
             MacosDisplayRefreshInfo.unavailable;

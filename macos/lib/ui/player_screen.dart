@@ -1579,9 +1579,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         _startup.position(_position);
       }
       if (_loading) {
+        _playbackStatus.onPlaybackRecovered();
         setState(() {
           _loading = false;
         });
+        _syncLoadingUiRefreshTimer();
         if (_playing &&
             !_buffering &&
             _controlsVisible &&
@@ -1608,12 +1610,14 @@ class _PlayerScreenState extends State<PlayerScreen>
       final clearStaleBuffering =
           _buffering && _position.inMilliseconds >= 250;
       if (_loading || clearStaleBuffering) {
+        _playbackStatus.onPlaybackRecovered();
         setState(() {
           _loading = false;
           if (clearStaleBuffering) {
             _buffering = false;
           }
         });
+        _syncLoadingUiRefreshTimer();
         if (_playing &&
             !_buffering &&
             _controlsVisible &&
@@ -1783,7 +1787,9 @@ class _PlayerScreenState extends State<PlayerScreen>
             _startup.markLiveFrameReady();
           }
         } else if (_loading) {
+          _playbackStatus.onPlaybackRecovered();
           setState(() => _loading = false);
+          _syncLoadingUiRefreshTimer();
         }
         _startSpecController.onFirstFrameReady(
           enabled: _hudPrefs.effectiveStartSpecHud,
@@ -2046,6 +2052,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           _recoverFromNetdiskTrialOrFailure(_playSession, isTrial: true),
         );
       }
+      final clearedLoading = !_isLiveStream && dur > Duration.zero && _loading;
       setState(() {
         if (dur.inMilliseconds > 0) {
           if (dur.inMilliseconds > _lastKnownDurationMs) {
@@ -2060,11 +2067,16 @@ class _PlayerScreenState extends State<PlayerScreen>
         } else {
           _duration = dur;
         }
-        final clearedLoading = !_isLiveStream && dur > Duration.zero && _loading;
         if (clearedLoading) {
           _loading = false;
+          if (!_buffering) {
+            _playbackStatus.onPlaybackRecovered();
+          }
         }
       });
+      if (clearedLoading) {
+        _syncLoadingUiRefreshTimer();
+      }
       if (dur > Duration.zero &&
           _playing &&
           !_buffering &&
@@ -2125,15 +2137,22 @@ class _PlayerScreenState extends State<PlayerScreen>
           playing: playing,
           userPaused: effectivePaused,
         );
+        final clearedLoadingOnPlay = playing && _liveSessionReadyForDisplay;
         setState(() {
           _playing = playing;
-          if (playing && _liveSessionReadyForDisplay) {
+          if (clearedLoadingOnPlay) {
             _loading = false;
+            if (!_buffering) {
+              _playbackStatus.onPlaybackRecovered();
+            }
             if (!OhosRuntime.isOhos && !_isLiveStream && !widget.embedded) {
               _hasStartedVodPlayback = true;
             }
           }
         });
+        if (clearedLoadingOnPlay) {
+          _syncLoadingUiRefreshTimer();
+        }
         if (!OhosRuntime.isOhos && _danmuSettings.effectiveEnabled) {
           _danmuCache?.onPlaybackTick(
             _position.inMilliseconds,
@@ -2291,6 +2310,8 @@ class _PlayerScreenState extends State<PlayerScreen>
           _midPlaybackStallTimer?.cancel();
           _midPlaybackStallEpochsMs.clear();
           PlaybackWakelock.setEnabled(false);
+          _playbackStatus.reset();
+          _syncLoadingUiRefreshTimer();
           setState(() {
             _loading = false;
             _buffering = false;
@@ -2403,7 +2424,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
 
     if (nextReady || nextPlaying || nextPos > Duration.zero || nextDur > Duration.zero) {
-      if (_loading) _loading = false;
+      if (_loading) {
+        _loading = false;
+        if (!nextBuffering) {
+          _playbackStatus.onPlaybackRecovered();
+          _syncLoadingUiRefreshTimer();
+        }
+      }
       if (!OhosRuntime.isOhos &&
           !_hasStartedVodPlayback &&
           !_isLiveStream &&
@@ -3035,6 +3062,8 @@ class _PlayerScreenState extends State<PlayerScreen>
                 context:
                     'site=${widget.site.key} api=${widget.site.api} ep=${_currentEpisode.name}',
               );
+              _playbackStatus.reset();
+              _unbindLeaseThroughput();
               setState(() {
                 _allowEvents = false;
                 _allowHistory = false;
@@ -3049,6 +3078,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                 );
                 _playbackErrorCause = error;
               });
+              _syncLoadingUiRefreshTimer();
               _enginePause();
             }
           }),
@@ -3256,6 +3286,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       await adoptedNext?.dispose();
       _pendingResumeMs = 0;
       if (mounted) {
+        _playbackStatus.reset();
+        _unbindLeaseThroughput();
         setState(() {
           _loading = false;
           _playing = false;
@@ -3264,6 +3296,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           _playbackError = unavailableReason;
           _controlsVisible = true;
         });
+        _syncLoadingUiRefreshTimer();
       }
       return;
     }

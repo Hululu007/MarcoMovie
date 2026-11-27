@@ -31,7 +31,6 @@ import '../core/macos_window_bounds.dart';
 import '../core/mdk_platform_player.dart';
 import '../core/models.dart';
 import '../core/netdisk_service.dart';
-import '../core/next_episode_prebuffer.dart';
 import '../core/python_source_host.dart';
 import '../core/storage_service.dart';
 import '../core/subscription_refresh_service.dart';
@@ -2043,25 +2042,48 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       });
     }
   }
-  void _showUnsupportedSiteNotice(CmsSite site, {BuildContext? dialogContext}) {
+  void _showUnsupportedSiteNotice(
+    CmsSite site, {
+    BuildContext? dialogContext,
+    String dismissLabel = '好',
+  }) {
     final targetCtx = dialogContext ?? context;
+    final reason = site.unsupportedReason;
+    final fullHint = site.actionableUnsupportedHint;
+    final detail = fullHint.startsWith(reason)
+        ? fullHint.substring(reason.length).trim()
+        : (fullHint != reason ? fullHint : '');
     unawaited(
-      showAppleNativeAlert(
-        targetCtx,
-        title: site.name,
-        message: site.actionableUnsupportedHint,
-        actions: const [
-          AppleNativeAlertAction(
-            id: 'extensions',
-            title: '配置蜘蛛扩展与网关',
-            isDefault: true,
+      showCupertinoDialog<String>(
+        context: targetCtx,
+        barrierDismissible: true,
+        builder: (ctx) => CupertinoAlertDialog(
+          title: Text(site.name),
+          content: Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(reason),
+                if (detail.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(detail),
+                ],
+              ],
+            ),
           ),
-          AppleNativeAlertAction(
-            id: 'ok',
-            title: '我知道了',
-            isCancel: true,
-          ),
-        ],
+          actions: [
+            CupertinoDialogAction(
+              isDefaultAction: true,
+              onPressed: () => Navigator.of(ctx).pop('extensions'),
+              child: const Text('配置蜘蛛扩展与网关'),
+            ),
+            CupertinoDialogAction(
+              onPressed: () => Navigator.of(ctx).pop('ok'),
+              child: Text(dismissLabel),
+            ),
+          ],
+        ),
       ).then((actionId) {
         if (actionId == 'extensions' && mounted) {
           unawaited(_openSpiderExtensionsPage(iosBackLabel: '返回'));
@@ -7658,7 +7680,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             ),
                       onTap: () {
                         if (!s.supported) {
-                          _showUnsupportedSiteNotice(s, dialogContext: ctx);
+                          _showUnsupportedSiteNotice(
+                            s,
+                            dialogContext: ctx,
+                            dismissLabel: '我知道了',
+                          );
                           return;
                         }
                         Navigator.of(ctx).pop();
