@@ -7,6 +7,7 @@ import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.*;
 import android.widget.*;
+
 import com.pilipala.marcomovie.hud.EpisodeHoldSwitchOverlay;
 import com.pilipala.marcomovie.hud.FastForwardScrubCapsule;
 import com.pilipala.marcomovie.hud.PlayerHudPrefs;
@@ -30,6 +31,9 @@ final class PlayerChrome {
     final LinearLayout actionHost, badgeRow;
     final LinearLayout mobileSpecBadgeRow;
     final LinearLayout loadingPill;
+    final LinearLayout errorCard;
+    final TextView errorTitleView, errorDetailView, errorHintView;
+    final Button errorRetryBtn, errorSwitchLineBtn, errorDecoderBtn;
     final LinearLayout centerRow;
     final LinearLayout topActions;
     final LinearLayout tvTopRightHud;
@@ -64,9 +68,133 @@ final class PlayerChrome {
     final TextView resolution;
     final Cms.Video chromeVideo;
     final NetworkSpeedMonitor loadingSpeedMonitor;
+
+    /**
+     * Pure-JVM state holder separating initial loading, first-frame waiting, mid-playback
+     * buffering, and terminal stalled error so 1Hz UI clock refreshes never clobber active
+     * buffering percentages or overwrite a terminal black-screen failure back into waiting.
+     */
+    static final class OverlayState {
+        boolean loading = true;
+        boolean waitingForFirstFrame = false;
+        boolean buffering = false;
+        int bufferingPercent = -1;
+        boolean terminalError = false;
+        String loadingHeadline = "";
+        String statusText = "";
+        boolean controlsMustStayVisible = false;
+
+        void resetForEpisodeSwitch() {
+            loading = true;
+            waitingForFirstFrame = false;
+            buffering = false;
+            bufferingPercent = -1;
+            terminalError = false;
+            loadingHeadline = "正在切换剧集…";
+            statusText = "正在加载播放…";
+            controlsMustStayVisible = false;
+        }
+
+        void setLoading(boolean value) {
+            loading = value;
+            if (!value) {
+                waitingForFirstFrame = false;
+            }
+        }
+
+        void setTerminalError(String message) {
+            terminalError = true;
+            controlsMustStayVisible = true;
+            loading = false;
+            waitingForFirstFrame = false;
+            buffering = false;
+            bufferingPercent = -1;
+            if (message != null && !message.isEmpty()) {
+                statusText = message;
+            }
+        }
+
+        void setWaitingForFirstFrame(boolean waiting, boolean prepared) {
+            if (waiting && terminalError) return;
+            waitingForFirstFrame = waiting;
+            if (waiting) {
+                loading = true;
+                loadingHeadline = "解码就绪，等待首帧画面…";
+            } else if (prepared) {
+                loading = false;
+            }
+        }
+
+        void setBuffering(boolean active, int percent, boolean prepared) {
+            if (terminalError && active) return;
+            buffering = active;
+            bufferingPercent = active ? percent : -1;
+            if (active && prepared) {
+                loadingHeadline =
+                        (percent >= 0 && percent < 100) ? ("正在缓冲 " + percent + "%") : "正在缓冲…";
+            }
+        }
+
+        void applyOutputOverlayMode(
+                PlaybackOutputState.UiOverlayMode mode, String stalledMessage, boolean prepared) {
+            if (mode == null) return;
+            switch (mode) {
+                case INITIAL_LOADING:
+                    terminalError = false;
+                    controlsMustStayVisible = false;
+                    loading = true;
+                    waitingForFirstFrame = false;
+                    break;
+                case WAITING_FIRST_FRAME:
+                    if (!terminalError) {
+                        setWaitingForFirstFrame(true, prepared);
+                    }
+                    break;
+                case PLAYBACK_BUFFERING:
+                    terminalError = false;
+                    controlsMustStayVisible = false;
+                    waitingForFirstFrame = false;
+                    loading = false;
+                    // Deliberately preserve active buffering flag, percentage, and headline.
+                    break;
+                case READY_CLEAN:
+                    terminalError = false;
+                    controlsMustStayVisible = false;
+                    waitingForFirstFrame = false;
+                    loading = false;
+                    // Deliberately do NOT wipe buffering here; buffering is cleared only by
+                    // onBufferingChanged(false).
+                    break;
+                case RECOVERY_STALLED_ERROR:
+                    terminalError = true;
+                    controlsMustStayVisible = true;
+                    loading = false;
+                    waitingForFirstFrame = false;
+                    buffering = false;
+                    bufferingPercent = -1;
+                    if (stalledMessage != null && !stalledMessage.isEmpty()) {
+                        statusText = stalledMessage;
+                    }
+                    break;
+            }
+        }
+
+        boolean shouldShowSpinner(boolean prepared, boolean blockingLoad, boolean miniMode) {
+            if (terminalError || blockingLoad || miniMode) return false;
+            return (loading && (!prepared || waitingForFirstFrame)) || (buffering && prepared);
+        }
+
+        boolean shouldShowTvStatus(boolean prepared, boolean playing) {
+            return loading || buffering || terminalError || !prepared || !playing;
+        }
+    }
+
+    final OverlayState overlayState = new OverlayState();
     boolean loading = true;
+    boolean waitingForFirstFrame = false;
     boolean buffering = false;
     int bufferingPercent = -1;
+    boolean terminalError = false;
     boolean progressOnlyMode = false;
     boolean hdrSurfaceActive = false;
     final Rect windowInsets = new Rect();
@@ -746,57 +874,63 @@ final class PlayerChrome {
             unlockPill = null;
         }
 
-        loadingPill = a.row();
+        loadingPill = new LinearLayout(a);
+        loadingPill.setOrientation(LinearLayout.VERTICAL);
         loadingPill.setTag("player-loading");
-        loadingPill.setGravity(Gravity.CENTER_VERTICAL);
-        loadingPill.setPadding(a.dp(18), a.dp(13), a.dp(20), a.dp(13));
-        loadingPill.setBackground(chromeSurface(0xea141822, 18, 0x38ffffff));
+        loadingPill.setContentDescription("正在加载播放");
+        loadingPill.setGravity(Gravity.CENTER_HORIZONTAL);
+        loadingPill.setPadding(a.dp(24), a.dp(18), a.dp(24), a.dp(16));
+        loadingPill.setBackground(chromeSurface(0xdc141822, 18, 0x30ffffff));
         UiCompat.setElevation(loadingPill, a.dp(12));
+        int logoSize = a.dp(a.isTvDevice() ? 42 : 34);
         loadingIndicatorSlot = new FrameLayout(a);
         loadingIndicatorSlot.setTag("player-loading-indicator-slot");
         brandLoader = new BrandLogoLoaderView(a);
+        brandLoader.setTag("player-loading-logo");
         brandLoader.setReducedMotion(a.reduced);
         brandLoader.setActive(true);
         loadingIndicatorSlot.addView(
-                brandLoader, new FrameLayout.LayoutParams(a.dp(28), a.dp(28), Gravity.CENTER));
+                brandLoader, new FrameLayout.LayoutParams(logoSize, logoSize, Gravity.CENTER));
         loadingPill.addView(
-                loadingIndicatorSlot, new LinearLayout.LayoutParams(a.dp(28), a.dp(28)));
-        LinearLayout loadingCopy = new LinearLayout(a);
-        loadingCopy.setOrientation(LinearLayout.VERTICAL);
-        loadingCopy.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams copyLp = new LinearLayout.LayoutParams(-2, -2);
-        copyLp.leftMargin = a.dp(13);
+                loadingIndicatorSlot, new LinearLayout.LayoutParams(logoSize, logoSize));
+
+        // Diagnostic/accessibility backing views kept off-hierarchy so the center loading visual
+        // strictly displays only the BrandLogoLoaderView animation and one real-time speed line.
         loadingText = a.text(resolveInitialLoadingHeadline(episode), 14.5f, MainActivity.WHITE);
-        loadingText.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
-        loadingText.setIncludeFontPadding(false);
-        loadingText.setSingleLine(true);
-        loadingText.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        loadingCopy.addView(loadingText, new LinearLayout.LayoutParams(-2, -2));
+        loadingSubText =
+                a.text(
+                        formatLoadingSubtitle(
+                                video != null ? video.title : "",
+                                episode != null ? episode.name : ""),
+                        12f,
+                        0xffb4c0d0);
 
-        String loadingSub =
-                formatLoadingSubtitle(
-                        video != null ? video.title : "", episode != null ? episode.name : "");
-        loadingSubText = a.text(loadingSub, 12f, 0xffb4c0d0);
-        loadingSubText.setIncludeFontPadding(false);
-        loadingSubText.setSingleLine(true);
-        loadingSubText.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        loadingSubText.setVisibility(loadingSub.isEmpty() ? View.GONE : View.VISIBLE);
-        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(-2, -2);
-        subLp.topMargin = a.dp(3);
-        loadingCopy.addView(loadingSubText, subLp);
-
-        loadingSpeedText = a.text(NetworkSpeedMonitor.formatSpeedLabel(-1L), 11.5f, 0xff5ac8fa);
+        loadingSpeedText =
+                a.text(
+                        NetworkSpeedMonitor.formatSpeedLabel(0L),
+                        a.isTvDevice() ? 13f : 12f,
+                        0xffd7e5f5);
         loadingSpeedText.setTag("player-loading-speed");
         loadingSpeedText.setFontFeatureSettings("tnum");
         loadingSpeedText.setIncludeFontPadding(false);
         loadingSpeedText.setSingleLine(true);
+        loadingSpeedText.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        if (android.os.Build.VERSION.SDK_INT >= 19) {
+            loadingSpeedText.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_NONE);
+        }
         LinearLayout.LayoutParams spdLp = new LinearLayout.LayoutParams(-2, -2);
-        spdLp.topMargin = a.dp(3);
-        loadingCopy.addView(loadingSpeedText, spdLp);
+        spdLp.topMargin = a.dp(10);
+        loadingPill.addView(loadingSpeedText, spdLp);
 
         loadingSpeedMonitor =
                 new NetworkSpeedMonitor(
-                        () -> a.player != null ? a.player.networkSpeedBytesPerSec() : -1L,
+                        () -> {
+                            if (a.activeEpisode != null
+                                    && NetworkSpeedMonitor.isLocalMediaUrl(a.activeEpisode.url)) {
+                                return 0L;
+                            }
+                            return a.player != null ? a.player.networkSpeedBytesPerSec() : -1L;
+                        },
                         (bps, formatted) -> {
                             if (loadingSpeedText != null) {
                                 loadingSpeedText.setText(formatted);
@@ -805,17 +939,84 @@ final class PlayerChrome {
         loadingPill.addOnAttachStateChangeListener(
                 new View.OnAttachStateChangeListener() {
                     @Override
-                    public void onViewAttachedToWindow(View v) {}
+                    public void onViewAttachedToWindow(View v) {
+                        if (a.playerChrome == PlayerChrome.this) {
+                            update();
+                        }
+                    }
 
                     @Override
                     public void onViewDetachedFromWindow(View v) {
                         loadingSpeedMonitor.stop();
+                        if (brandLoader != null) brandLoader.setActive(false);
+                        cancelLightSeekCapsuleHide();
                     }
                 });
 
-        loadingPill.addView(loadingCopy, copyLp);
         applyLoadingCardBounds(a.windowWidth());
         a.playbackLayer.addView(loadingPill, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
+
+        errorCard = a.vertical();
+        errorCard.setTag("player-error-panel");
+        errorCard.setGravity(Gravity.CENTER_HORIZONTAL);
+        errorCard.setClipChildren(false);
+        errorCard.setClipToPadding(false);
+        errorCard.setPadding(a.dp(22), a.dp(18), a.dp(22), a.dp(16));
+        errorCard.setBackground(chromeSurface(0xf0161a24, 20, 0x40ffffff));
+        UiCompat.setElevation(errorCard, a.dp(14));
+
+        errorTitleView = a.text("播放失败", a.isTvDevice() ? 16.5f : 15.5f, MainActivity.WHITE);
+        errorTitleView.setTag("player-error-title");
+        errorTitleView.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        errorTitleView.setGravity(Gravity.CENTER);
+        errorCard.addView(errorTitleView, new LinearLayout.LayoutParams(-2, -2));
+
+        errorDetailView = a.text("", a.isTvDevice() ? 13f : 12.5f, 0xffd0d7e6);
+        errorDetailView.setTag("player-error-detail");
+        errorDetailView.setGravity(Gravity.CENTER);
+        errorDetailView.setMaxLines(3);
+        errorDetailView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        errorDetailView.setMaxWidth(a.dp(a.isTvDevice() ? 420 : 300));
+        LinearLayout.LayoutParams errDetailLp = new LinearLayout.LayoutParams(-2, -2);
+        errDetailLp.topMargin = a.dp(6);
+        errDetailLp.bottomMargin = a.dp(14);
+        errorCard.addView(errorDetailView, errDetailLp);
+
+        LinearLayout errorBtnRow = a.row();
+        errorBtnRow.setGravity(Gravity.CENTER);
+        errorBtnRow.setClipChildren(false);
+        errorBtnRow.setClipToPadding(false);
+
+        errorRetryBtn =
+                buildErrorPanelButton(
+                        "重试",
+                        "error-retry",
+                        () -> {
+                            if (a.playbackControls != null) {
+                                a.playbackControls.reload(false);
+                            }
+                        });
+        errorSwitchLineBtn =
+                buildErrorPanelButton("换线", "error-switch-line", this::onErrorSwitchLineClick);
+        errorDecoderBtn = buildErrorPanelButton("切换解码", "error-decoder", this::onErrorDecoderClick);
+        LinearLayout.LayoutParams eb1 = new LinearLayout.LayoutParams(-2, a.dp(38));
+        errorBtnRow.addView(errorRetryBtn, eb1);
+        LinearLayout.LayoutParams eb2 = new LinearLayout.LayoutParams(-2, a.dp(38));
+        eb2.leftMargin = a.dp(10);
+        errorBtnRow.addView(errorSwitchLineBtn, eb2);
+        LinearLayout.LayoutParams eb3 = new LinearLayout.LayoutParams(-2, a.dp(38));
+        eb3.leftMargin = a.dp(10);
+        errorBtnRow.addView(errorDecoderBtn, eb3);
+        errorCard.addView(errorBtnRow, new LinearLayout.LayoutParams(-2, -2));
+
+        errorHintView =
+                a.text(a.isTvDevice() ? "方向键选择操作 · 按返回键退出播放" : "点击下方操作重试或切换", 11.5f, 0x99d0d7e6);
+        errorHintView.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams errHintLp = new LinearLayout.LayoutParams(-2, -2);
+        errHintLp.topMargin = a.dp(10);
+        errorCard.addView(errorHintView, errHintLp);
+        errorCard.setVisibility(View.GONE);
+        overlay.addView(errorCard, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
 
         if (a.isTvDevice()) {
             tvMinimalPauseBadge = new MinimalPauseBadge();
@@ -1033,9 +1234,129 @@ final class PlayerChrome {
         scheduleLayout();
     }
 
+    private void onErrorSwitchLineClick() {
+        if (a.playbackControls != null) {
+            a.playbackControls.openLinePickerFromError(errorSwitchLineBtn);
+        }
+    }
+
+    private void onErrorDecoderClick() {
+        if (a.playbackControls != null) {
+            a.playbackControls.menuAnchor = errorDecoderBtn;
+            a.playbackControls.decoderMenu();
+        }
+    }
+
     private void cancelActiveTouchGesture() {
         if (a.touchPlayerGesture != null) {
             a.touchPlayerGesture.cancelActiveGesture();
+        }
+    }
+
+    private Button buildErrorPanelButton(String label, String tag, Runnable action) {
+        final Button btn = a.button(label, tag, action);
+        btn.setId(UiCompat.generateViewId());
+        btn.setSingleLine(true);
+        btn.setTextSize(a.isTvDevice() ? 13.5f : 13f);
+        btn.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        btn.setMinWidth(a.dp(a.isTvDevice() ? 88 : 76));
+        btn.setMinimumWidth(a.dp(a.isTvDevice() ? 88 : 76));
+        btn.setMinHeight(a.dp(38));
+        btn.setMinimumHeight(a.dp(38));
+        btn.setPadding(a.dp(16), 0, a.dp(16), 0);
+        btn.setGravity(Gravity.CENTER);
+        UiCompat.setDefaultFocusHighlightEnabled(btn, false);
+        btn.setBackground(a.bg(0x28ffffff, 19));
+        btn.setTextColor(MainActivity.WHITE);
+        btn.setOnFocusChangeListener(
+                (v, focused) -> {
+                    FocusMotion.style(
+                            a,
+                            btn,
+                            focused,
+                            0x28ffffff,
+                            MainActivity.WHITE,
+                            19,
+                            MainActivity.WHITE,
+                            0xff14161b,
+                            false,
+                            1.04f);
+                    btn.setPadding(a.dp(16), 0, a.dp(16), 0);
+                });
+        return btn;
+    }
+
+    void syncErrorPanel() {
+        if (errorCard == null) return;
+        boolean showError = terminalError && !a.miniMode;
+        if (!showError) {
+            if (errorCard.getVisibility() != View.GONE) {
+                errorCard.setVisibility(View.GONE);
+            }
+            return;
+        }
+        String detail =
+                overlayState.statusText != null && !overlayState.statusText.trim().isEmpty()
+                        ? overlayState.statusText.trim()
+                        : (a.playStatus != null && a.playStatus.getText() != null
+                                ? a.playStatus.getText().toString().trim()
+                                : "播放异常，请重试或切换线路");
+        errorTitleView.setText(detail.contains("未正常出画") ? "画面未就绪" : "播放失败");
+        errorDetailView.setText(detail);
+        boolean hasAltLines =
+                a.playbackControls != null && a.playbackControls.hasAlternativeLines();
+        errorRetryBtn.setVisibility(View.VISIBLE);
+        errorSwitchLineBtn.setVisibility(hasAltLines ? View.VISIBLE : View.GONE);
+        errorDecoderBtn.setVisibility(View.VISIBLE);
+
+        java.util.List<Button> vis = new java.util.ArrayList<>(3);
+        vis.add(errorRetryBtn);
+        if (hasAltLines) vis.add(errorSwitchLineBtn);
+        vis.add(errorDecoderBtn);
+        int downTargetId = View.NO_ID;
+        if (a.playbackControls != null
+                && a.playbackControls.lastFocusedModernButton != null
+                && a.playbackControls.lastFocusedModernButton.getVisibility() == View.VISIBLE) {
+            downTargetId = a.playbackControls.lastFocusedModernButton.getId();
+        }
+        for (int i = 0; i < vis.size(); i++) {
+            Button cur = vis.get(i);
+            Button prev = vis.get((i - 1 + vis.size()) % vis.size());
+            Button next = vis.get((i + 1) % vis.size());
+            cur.setNextFocusLeftId(prev.getId());
+            cur.setNextFocusRightId(next.getId());
+            cur.setNextFocusUpId(cur.getId());
+            cur.setNextFocusDownId(downTargetId != View.NO_ID ? downTargetId : cur.getId());
+        }
+        if (errorCard.getVisibility() != View.VISIBLE) {
+            errorCard.setVisibility(View.VISIBLE);
+        }
+    }
+
+    boolean isErrorCardFocused(View v) {
+        if (!terminalError
+                || errorCard == null
+                || errorCard.getVisibility() != View.VISIBLE
+                || v == null) {
+            return false;
+        }
+        return v == errorRetryBtn || v == errorSwitchLineBtn || v == errorDecoderBtn;
+    }
+
+    void focusPrimaryErrorAction() {
+        if (!a.isTvDevice() || errorCard == null || !terminalError || a.miniMode) return;
+        syncErrorPanel();
+        if (errorRetryBtn != null && errorRetryBtn.getVisibility() == View.VISIBLE) {
+            errorRetryBtn.requestFocus();
+            errorRetryBtn.post(
+                    () -> {
+                        if (terminalError
+                                && errorCard.getVisibility() == View.VISIBLE
+                                && (a.playbackControls == null || !a.playbackControls.dialogOpen)
+                                && !errorCard.hasFocus()) {
+                            errorRetryBtn.requestFocus();
+                        }
+                    });
         }
     }
 
@@ -1259,7 +1580,13 @@ final class PlayerChrome {
             }
             dock.setPadding(vp(a, 12), vp(a, 7), vp(a, 12), vp(a, 7));
             int dockBottom = vp(a, 18);
-            place(dock, -2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL, 0, 0, 0, dockBottom);
+            int maxDockW = Math.max(vp(a, 240), width - vp(a, 48));
+            dock.measure(
+                    View.MeasureSpec.makeMeasureSpec(maxDockW, View.MeasureSpec.AT_MOST),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+            int dockW =
+                    dock.getMeasuredWidth() > 0 ? Math.min(maxDockW, dock.getMeasuredWidth()) : -2;
+            place(dock, dockW, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL, 0, 0, 0, dockBottom);
             int side = Math.max(vp(a, 28), Math.round(width * 0.068f));
             int trackWidth = Math.max(vp(a, 260), Math.min(vp(a, 824), width - side * 2));
             int left = Math.max(0, (width - trackWidth) / 2);
@@ -1452,11 +1779,65 @@ final class PlayerChrome {
     void setLoadingStatus(String headline, String subtitle) {
         if (loadingText != null && headline != null && !headline.trim().isEmpty()) {
             loadingText.setText(clampLoadingText(headline, 22));
+            if (loadingPill != null) {
+                loadingPill.setContentDescription(clampLoadingText(headline, 22));
+            }
         }
         if (loadingSubText != null && subtitle != null) {
             String sub = clampLoadingText(subtitle, 34);
             loadingSubText.setText(sub);
             loadingSubText.setVisibility(sub.isEmpty() ? View.GONE : View.VISIBLE);
+        }
+    }
+
+    void resetLoadingSpeedSession() {
+        if (loadingSpeedText != null) {
+            loadingSpeedText.setText(NetworkSpeedMonitor.formatSpeedLabel(0L));
+        }
+        if (loadingSpeedMonitor != null) {
+            loadingSpeedMonitor.resetSession();
+        }
+    }
+
+    private Runnable pendingLightSeekHide;
+    private boolean lightSeekCapsuleActive;
+
+    void cancelLightSeekCapsuleHide() {
+        if (pendingLightSeekHide != null && a != null && a.ui != null) {
+            a.ui.removeCallbacks(pendingLightSeekHide);
+        }
+        pendingLightSeekHide = null;
+    }
+
+    void showLightSeekCapsule(int direction, int targetMs, int seekSerial, int generation) {
+        if (tvScrubCapsule == null || a.generation != generation) return;
+        cancelLightSeekCapsuleHide();
+        lightSeekCapsuleActive = true;
+        tvScrubCapsule.showLightCue(direction, targetMs);
+    }
+
+    void scheduleLightSeekCapsuleHide(final int seekSerial, final int generation, long delayMs) {
+        if (tvScrubCapsule == null || a == null || a.ui == null) return;
+        cancelLightSeekCapsuleHide();
+        pendingLightSeekHide =
+                () -> {
+                    pendingLightSeekHide = null;
+                    if (a.generation != generation
+                            || a.seekGestureSerial != seekSerial
+                            || a.seekGesture.active) {
+                        return;
+                    }
+                    lightSeekCapsuleActive = false;
+                    if (tvScrubCapsule != null) tvScrubCapsule.hide();
+                };
+        a.ui.postDelayed(pendingLightSeekHide, Math.max(200L, delayMs));
+    }
+
+    void hideLightSeekCapsuleNow() {
+        cancelLightSeekCapsuleHide();
+        lightSeekCapsuleActive = false;
+        if (tvScrubCapsule != null) {
+            tvScrubCapsule.hide();
         }
     }
 
@@ -1505,6 +1886,10 @@ final class PlayerChrome {
     void syncTvScrubCapsule() {
         if (tvScrubCapsule == null) return;
         if (a.seekGesture.active && a.seekGesture.duration > 0) {
+            if (a.seekLightCapsuleMode) {
+                tvScrubCapsule.showLightCue(a.seekGesture.direction, a.seekGesture.target);
+                return;
+            }
             long now = SystemClock.uptimeMillis();
             int curPos =
                     a.player != null && a.prepared
@@ -1517,7 +1902,7 @@ final class PlayerChrome {
                     a.seekGesture.direction,
                     a.seekGesture.speed(now),
                     a.seekGesture.accelerated(now));
-        } else {
+        } else if (!lightSeekCapsuleActive) {
             tvScrubCapsule.hide();
         }
     }
@@ -1581,23 +1966,68 @@ final class PlayerChrome {
         }
     }
 
+    private void mirrorOverlayFields() {
+        loading = overlayState.loading;
+        waitingForFirstFrame = overlayState.waitingForFirstFrame;
+        buffering = overlayState.buffering;
+        bufferingPercent = overlayState.bufferingPercent;
+        terminalError = overlayState.terminalError;
+    }
+
     void setLoading(boolean value) {
-        loading = value;
-        if (!value) {
-            buffering = false;
-            bufferingPercent = -1;
+        overlayState.setLoading(value);
+        mirrorOverlayFields();
+        update();
+    }
+
+    void setTerminalError(String message) {
+        overlayState.setTerminalError(message);
+        mirrorOverlayFields();
+        if (a.playStatus != null && !overlayState.statusText.isEmpty()) {
+            a.playStatus.setText(overlayState.statusText);
+        }
+        update();
+        focusPrimaryErrorAction();
+    }
+
+    void setWaitingForFirstFrame(boolean waiting) {
+        if (waiting && overlayState.terminalError) return;
+        if (overlayState.waitingForFirstFrame == waiting && (!waiting || overlayState.loading))
+            return;
+        overlayState.setWaitingForFirstFrame(waiting, a.prepared);
+        mirrorOverlayFields();
+        if (waiting) {
+            setLoadingStatus(overlayState.loadingHeadline, null);
         }
         update();
     }
 
     void setBuffering(boolean active, int percent) {
-        buffering = active;
-        bufferingPercent = percent;
-        if (active && a.prepared) {
-            String head = (percent >= 0 && percent < 100) ? ("正在缓冲 " + percent + "%") : "正在缓冲…";
-            setLoadingStatus(head, null);
+        overlayState.setBuffering(active, percent, a.prepared);
+        mirrorOverlayFields();
+        if (active && a.prepared && !overlayState.terminalError) {
+            setLoadingStatus(overlayState.loadingHeadline, null);
         }
         update();
+    }
+
+    void applyOutputOverlayMode(PlaybackOutputState.UiOverlayMode mode, String stalledMessage) {
+        boolean wasWaiting = overlayState.waitingForFirstFrame;
+        overlayState.applyOutputOverlayMode(mode, stalledMessage, a.prepared);
+        mirrorOverlayFields();
+        if (mode == PlaybackOutputState.UiOverlayMode.WAITING_FIRST_FRAME
+                && (!wasWaiting || loadingText == null || loadingText.getText().length() == 0)) {
+            setLoadingStatus(overlayState.loadingHeadline, null);
+        } else if (mode == PlaybackOutputState.UiOverlayMode.RECOVERY_STALLED_ERROR
+                && a.playStatus != null
+                && !overlayState.statusText.isEmpty()
+                && !overlayState.statusText.contentEquals(a.playStatus.getText())) {
+            a.playStatus.setText(overlayState.statusText);
+        }
+        update();
+        if (mode == PlaybackOutputState.UiOverlayMode.RECOVERY_STALLED_ERROR) {
+            focusPrimaryErrorAction();
+        }
     }
 
     void setHdrSurfaceActive(boolean active) {
@@ -1613,10 +2043,10 @@ final class PlayerChrome {
     }
 
     /**
-     * Suppresses background 1Hz RGBA HUD redraws on Android TV HDR SurfaceView playback while
-     * main controls are hidden so Amlogic/MediaTek HWC2 compositors remain locked in hardware HDR
-     * VPP overlay instead of periodically dropping into GPU mixed composition (which flashes HDR
-     * video toward SDR for ~200–300ms per HUD tick).
+     * Suppresses background 1Hz RGBA HUD redraws on Android TV HDR SurfaceView playback while main
+     * controls are hidden so Amlogic/MediaTek HWC2 compositors remain locked in hardware HDR VPP
+     * overlay instead of periodically dropping into GPU mixed composition (which flashes HDR video
+     * toward SDR for ~200–300ms per HUD tick).
      */
     static boolean shouldSuppressLiveHudRedraws(
             boolean tvDevice, boolean hdrSurfaceActive, boolean controlsVisible) {
@@ -1625,6 +2055,9 @@ final class PlayerChrome {
 
     void switchEpisode(Cms.Episode episode, Cms.Line line) {
         cancelEpisodeHoldSwitch();
+        a.seekGestureSerial++;
+        hideLightSeekCapsuleNow();
+        resetLoadingSpeedSession();
         hdrSurfaceActive = false;
         PlaybackControls.markSleepTimerInPlaceSwitch();
         if (startSpecBanner != null) startSpecBanner.resetEpisode();
@@ -1649,9 +2082,8 @@ final class PlayerChrome {
                 formatLoadingSubtitle(chromeVideo != null ? chromeVideo.title : "", epName);
         if (a.playStatus != null) a.playStatus.setText("正在加载播放…");
         setLoadingStatus("正在切换剧集…", loadingSub);
-        buffering = false;
-        bufferingPercent = -1;
-        loading = true;
+        overlayState.resetForEpisodeSwitch();
+        mirrorOverlayFields();
         update();
     }
 
@@ -1688,7 +2120,7 @@ final class PlayerChrome {
         topShade.setVisibility(otherVis);
         heading.setVisibility(otherVis);
         if (modernTv) {
-            dock.setVisibility(View.VISIBLE);
+            dock.setVisibility(resolved ? View.GONE : View.VISIBLE);
             if (actionHost != null) actionHost.setVisibility(otherVis);
         } else {
             dock.setVisibility(otherVis);
@@ -1804,7 +2236,10 @@ final class PlayerChrome {
     }
 
     void update() {
-        if (a.prepared) loading = false;
+        if (a.prepared && !overlayState.waitingForFirstFrame) {
+            overlayState.loading = false;
+        }
+        mirrorOverlayFields();
         syncClockViews();
         if (a.playbackControls != null) {
             a.playbackControls.syncSkipCountdownLifecycle();
@@ -1817,9 +2252,7 @@ final class PlayerChrome {
         syncSlimProgressVisibility(dur, isLiveStream);
         syncTvScrubCapsule();
         boolean showSpinner =
-                ((loading && !a.prepared) || (buffering && a.prepared))
-                        && a.playbackLoading == null
-                        && !a.miniMode;
+                overlayState.shouldShowSpinner(a.prepared, a.playbackLoading != null, a.miniMode);
         if (loadingPill.getVisibility() != (showSpinner ? View.VISIBLE : View.GONE)) {
             loadingPill.setVisibility(showSpinner ? View.VISIBLE : View.GONE);
         }
@@ -1838,11 +2271,12 @@ final class PlayerChrome {
                             && !a.playing
                             && !a.controlsVisible
                             && !showSpinner
+                            && !terminalError
                             && !a.miniMode
                             && a.playbackLoading == null;
             tvMinimalPauseBadge.setVisibility(showMinimalPause ? View.VISIBLE : View.GONE);
         }
-        if (!a.controlsVisible && !loading && !buffering && a.prepared) {
+        if (!a.controlsVisible && !loading && !buffering && !terminalError && a.prepared) {
             return;
         }
         if (a.player != null && a.prepared) {
@@ -1858,13 +2292,15 @@ final class PlayerChrome {
         if (a.playStatus != null) {
             if (a.isTvDevice()) {
                 a.playStatus.setVisibility(
-                        loading || buffering || !a.prepared || !a.playing
+                        overlayState.shouldShowTvStatus(a.prepared, a.playing)
                                 ? View.VISIBLE
                                 : View.GONE);
             } else {
                 boolean compact = !a.isPortrait() || a.windowHeight() < a.dp(440);
                 a.playStatus.setVisibility(
-                        (!a.prepared && !loading) || !compact ? View.VISIBLE : View.GONE);
+                        terminalError || (!a.prepared && !loading) || !compact
+                                ? View.VISIBLE
+                                : View.GONE);
             }
         }
         if (modernTv && cardTitleView != null && a.activeEpisode != null) {
@@ -1876,8 +2312,9 @@ final class PlayerChrome {
         if (a.playbackControls != null) {
             a.playbackControls.refreshPlayPauseGlyph();
         }
+        syncErrorPanel();
         int stateVis =
-                showSpinner
+                (showSpinner || terminalError)
                         ? View.GONE
                         : (progressOnlyMode
                                 ? View.INVISIBLE

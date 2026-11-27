@@ -402,7 +402,9 @@ final class CloudSyncDialog {
             if (a.config != null
                     && a.config.raw != null
                     && !a.config.raw.isEmpty()
-                    && !ConfigLibrary.isLocalFileOrigin(a.configOrigin)) {
+                    && !ConfigLibrary.isLocalFileOrigin(a.configOrigin)
+                    && !TvMultiSourceStore.isEffectiveRuntimeConfig(a.config, a.configOrigin)
+                    && !SubscriptionManager.isMergedOrigin(a.configOrigin)) {
                 try {
                     library.rememberIfAbsent(
                             a.config.raw,
@@ -723,20 +725,23 @@ final class CloudSyncDialog {
                     String favoritesJson,
                     String tombstonesJson,
                     CloudSync.MergeResult result) {
-                boolean isHistCorrupt =
-                        WatchHistory.isCorrupted()
-                                || prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
-                SharedPreferences.Editor ed = prefs.edit();
-                if (!isHistCorrupt) {
-                    WatchHistory.overwrite(
-                            historyJson,
-                            (json, corrupted) ->
-                                    ed.putString(Prefs.WATCH_HISTORY, json)
-                                            .putBoolean(WatchHistory.CORRUPTED_PREF, corrupted));
+                synchronized (WatchHistory.PERSISTENCE_LOCK) {
+                    boolean isHistCorrupt =
+                            WatchHistory.isCorrupted()
+                                    || prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
+                    SharedPreferences.Editor ed = prefs.edit();
+                    if (!isHistCorrupt) {
+                        WatchHistory.overwrite(
+                                historyJson,
+                                (json, corrupted) ->
+                                        ed.putString(Prefs.WATCH_HISTORY, json)
+                                                .putBoolean(
+                                                        WatchHistory.CORRUPTED_PREF, corrupted));
+                    }
+                    ed.putString(Prefs.FAVORITES, favoritesJson)
+                            .putString(Prefs.SYNC_TOMBSTONES, tombstonesJson)
+                            .apply();
                 }
-                ed.putString(Prefs.FAVORITES, favoritesJson)
-                        .putString(Prefs.SYNC_TOMBSTONES, tombstonesJson)
-                        .apply();
             }
         };
     }
@@ -783,18 +788,33 @@ final class CloudSyncDialog {
                 });
         final boolean syncSubs = syncFlags[0];
         final boolean syncHist = syncFlags[1];
-        final List<CloudSync.SubscriptionItem> localSubs =
-                syncSubs ? collectPublicSubscriptions(a) : null;
         final SharedPreferences prefs = a.prefs;
-        CloudSync.MergeResult res =
-                CloudSync.mergeSerial(
-                        WatchHistory.STORAGE_EXECUTOR,
-                        buildPrefsStore(prefs),
-                        localSubs,
-                        syncSubs,
-                        syncHist,
-                        remoteJson,
-                        now);
+        CloudSync.MergeResult res = null;
+        final int maxSubEpochRetries = syncSubs ? 3 : 0;
+        for (int attempt = 0; attempt <= maxSubEpochRetries; attempt++) {
+            long epochBeforeCollect = WatchHistory.restoreEpoch();
+            final List<CloudSync.SubscriptionItem> localSubs =
+                    syncSubs ? collectPublicSubscriptions(a) : null;
+            CloudSync.MergeResult candidate =
+                    CloudSync.mergeSerial(
+                            WatchHistory.STORAGE_EXECUTOR,
+                            buildPrefsStore(prefs),
+                            localSubs,
+                            syncSubs,
+                            syncHist,
+                            remoteJson,
+                            now);
+            if (!syncSubs || WatchHistory.restoreEpoch() == epochBeforeCollect) {
+                res = candidate;
+                break;
+            }
+            if (attempt == maxSubEpochRetries) {
+                throw new java.io.IOException("本地配置刚被备份还原更新，已取消过期云同步合并");
+            }
+        }
+        if (res == null) {
+            throw new java.io.IOException("云同步合并结果为空");
+        }
 
         if (syncSubs && res.subscriptions != null && !a.isDestroyed() && !a.isFinishing()) {
             applyMergedSubscriptions(a, res.subscriptions, res.tombstonesJson);

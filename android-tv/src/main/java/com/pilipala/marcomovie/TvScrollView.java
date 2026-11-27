@@ -2,20 +2,131 @@ package com.pilipala.marcomovie;
 
 import android.graphics.Rect;
 import android.view.*;
+import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import java.util.ArrayList;
 
 /** A single focus reveal policy; retargeting retains position and velocity. */
 final class TvScrollView extends ScrollView {
+    /**
+     * Vertical LinearLayout that skips drawing off-viewport children inside a {@link TvScrollView}
+     * (with generous overscan for focus scale/halo) so full-tree DisplayList rebuilds only record
+     * visible rows instead of hundreds of below-the-fold poster cards.
+     */
+    static final class ViewportLinearLayout extends LinearLayout {
+        private final TvScrollView viewport;
+        private final int overscanPx;
+        private int lastFirst = Integer.MIN_VALUE;
+        private int lastLast = Integer.MIN_VALUE;
+
+        ViewportLinearLayout(MainActivity host, TvScrollView viewport) {
+            super(host);
+            setOrientation(VERTICAL);
+            this.viewport = viewport;
+            this.overscanPx = host != null ? host.dp(48) : 96;
+            if (viewport != null) {
+                viewport.registerCullingGroup(this);
+            }
+        }
+
+        private int computeOffsetYInViewport() {
+            int offsetY = 0;
+            View p = this;
+            while (p != null && p != viewport) {
+                offsetY += p.getTop();
+                ViewParent parent = p.getParent();
+                p = parent instanceof View ? (View) parent : null;
+            }
+            return p == viewport ? offsetY : Integer.MIN_VALUE;
+        }
+
+        void syncViewportRange() {
+            if (viewport == null || viewport.getHeight() <= 0 || getOrientation() != VERTICAL) {
+                return;
+            }
+            int offsetY = computeOffsetYInViewport();
+            if (offsetY == Integer.MIN_VALUE) return;
+            int visTop = viewport.getScrollY() - offsetY - overscanPx;
+            int visBottom = viewport.getScrollY() + viewport.getHeight() - offsetY + overscanPx;
+            int first = -1;
+            int last = -1;
+            for (int i = 0, count = getChildCount(); i < count; i++) {
+                View child = getChildAt(i);
+                if (child.getVisibility() == GONE) continue;
+                if (child.getBottom() < visTop || child.getTop() > visBottom) continue;
+                if (first < 0) first = i;
+                last = i;
+            }
+            if (first != lastFirst || last != lastLast) {
+                lastFirst = first;
+                lastLast = last;
+                invalidate();
+            }
+        }
+
+        @Override
+        protected void onLayout(boolean changed, int l, int t, int r, int b) {
+            super.onLayout(changed, l, t, r, b);
+            lastFirst = Integer.MIN_VALUE;
+            lastLast = Integer.MIN_VALUE;
+        }
+
+        @Override
+        protected void dispatchDraw(android.graphics.Canvas canvas) {
+            if (viewport == null || viewport.getHeight() <= 0 || getOrientation() != VERTICAL) {
+                super.dispatchDraw(canvas);
+                return;
+            }
+            int offsetY = computeOffsetYInViewport();
+            if (offsetY == Integer.MIN_VALUE) {
+                super.dispatchDraw(canvas);
+                return;
+            }
+            int visTop = viewport.getScrollY() - offsetY - overscanPx;
+            int visBottom = viewport.getScrollY() + viewport.getHeight() - offsetY + overscanPx;
+            long drawTime = getDrawingTime();
+            int first = -1;
+            int last = -1;
+            for (int i = 0, count = getChildCount(); i < count; i++) {
+                View child = getChildAt(i);
+                if (child.getVisibility() == GONE) continue;
+                if (child.getBottom() < visTop || child.getTop() > visBottom) continue;
+                if (first < 0) first = i;
+                last = i;
+                drawChild(canvas, child, drawTime);
+            }
+            lastFirst = first;
+            lastLast = last;
+        }
+    }
+
     final MainActivity a;
     final MotionSpring spring = new MotionSpring(0, 28, .4f);
     final Rect tempRect = new Rect();
     final TvFocusFrame focusFrame;
+    private final ArrayList<ViewportLinearLayout> cullingGroups = new ArrayList<>();
     MotionLoop.Step motion;
     boolean focusing, layingOut;
     boolean readingMode;
     boolean suppressNextReveal;
     long lastReadingStep;
     int goal;
+
+    void registerCullingGroup(ViewportLinearLayout group) {
+        if (group != null && !cullingGroups.contains(group)) {
+            cullingGroups.add(group);
+        }
+    }
+
+    @Override
+    protected void onScrollChanged(int l, int t, int oldl, int oldt) {
+        super.onScrollChanged(l, t, oldl, oldt);
+        if (t != oldt && !cullingGroups.isEmpty()) {
+            for (int i = 0, n = cullingGroups.size(); i < n; i++) {
+                cullingGroups.get(i).syncViewportRange();
+            }
+        }
+    }
 
     TvScrollView(MainActivity host) {
         super(host);

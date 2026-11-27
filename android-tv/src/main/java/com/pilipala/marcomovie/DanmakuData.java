@@ -151,25 +151,36 @@ final class DanmakuData {
                         c.text = a.optString(3);
                     } else if (item instanceof JSONObject) {
                         JSONObject o = (JSONObject) item;
-                        c.time = (long) (o.optDouble("time", o.optDouble("t", 0)) * 1000);
+                        if (o.has("timeMs") && !o.isNull("timeMs")) {
+                            double msVal = o.optDouble("timeMs", Double.NaN);
+                            c.time = Double.isNaN(msVal) ? -1L : Math.round(msVal);
+                        } else {
+                            c.time =
+                                    Math.round(o.optDouble("time", o.optDouble("t", 0.0)) * 1000.0);
+                        }
                         c.mode = o.optInt("mode", 1);
-                        c.color = o.optInt("color", 0xffffff);
+                        c.color = o.optInt("color", o.optInt("rgbColor", 0xffffff)) & 0xffffff;
                         c.text = o.optString("text", o.optString("m", o.optString("content")));
                         if (o.has("p")) {
-                            String[] p = o.getString("p").split(",");
-                            c.time = (long) (Double.parseDouble(p[0]) * 1000);
-                            if (p.length > 2) {
-                                int v1 = Integer.parseInt(p[1].trim());
-                                int v2 = Integer.parseInt(p[2].trim());
-                                if (v1 <= 8 && v2 > 8) {
-                                    c.mode = v1;
-                                    c.color = v2;
-                                } else {
-                                    c.color = v1;
-                                    c.mode = v2;
+                            String pRaw = o.optString("p", "").trim();
+                            if (!pRaw.isEmpty()) {
+                                String[] p = pRaw.split(",");
+                                if (p.length >= 1 && !p[0].trim().isEmpty()) {
+                                    c.time = Math.round(Double.parseDouble(p[0].trim()) * 1000.0);
                                 }
-                            } else if (p.length > 1) {
-                                c.color = Integer.parseInt(p[1].trim());
+                                if (p.length > 2) {
+                                    int v1 = Integer.parseInt(p[1].trim());
+                                    int v2 = Integer.parseInt(p[2].trim());
+                                    if (v1 <= 8 && v2 > 8) {
+                                        c.mode = v1;
+                                        c.color = v2 & 0xffffff;
+                                    } else {
+                                        c.color = v1 & 0xffffff;
+                                        c.mode = v2;
+                                    }
+                                } else if (p.length > 1) {
+                                    c.color = Integer.parseInt(p[1].trim()) & 0xffffff;
+                                }
                             }
                         }
                     } else continue;

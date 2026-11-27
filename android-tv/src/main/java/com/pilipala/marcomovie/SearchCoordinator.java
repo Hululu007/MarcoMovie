@@ -165,6 +165,18 @@ public final class SearchCoordinator implements AutoCloseable {
         return count != null && count.get() > 0;
     }
 
+    private static synchronized boolean isPluginPoolExhausted() {
+        return wedgedWorkers >= computePoolCapacity(baseThreads, wedgedWorkers, maxPoolThreads);
+    }
+
+    private static boolean usesHttpPool(Cms.Site site) {
+        return site.supported()
+                || HttpT4Engine.eligible(site)
+                || (site.api != null
+                        && (site.api.startsWith("emby://account/")
+                                || site.api.startsWith("alist://mount/")));
+    }
+
     public synchronized void start(List<Cms.Site> sites, String query) {
         if (closed || !jobs.isEmpty()) throw new IllegalStateException("Search already started");
         for (Cms.Site site : sites) jobs.add(new Job(site, query));
@@ -199,21 +211,24 @@ public final class SearchCoordinator implements AutoCloseable {
                 job.finish(Collections.emptyList(), Outcome.BUSY);
                 continue;
             }
+            boolean httpJob = usesHttpPool(job.site);
+            if (!httpJob && isPluginPoolExhausted()) {
+                job.finish(Collections.emptyList(), Outcome.BUSY);
+                continue;
+            }
             job.allocated = true;
             inFlight++;
             try {
-                job.future =
-                        RequestScope.submit(
-                                job.site.supported()
-                                                || HttpT4Engine.eligible(job.site)
-                                                || (job.site.api != null
-                                                        && (job.site.api.startsWith(
-                                                                        "emby://account/")
-                                                                || job.site.api.startsWith(
-                                                                        "alist://mount/")))
-                                        ? HTTP_NETWORK
-                                        : NETWORK,
-                                job);
+                job.queueTimeout =
+                        TIMER.schedule(
+                                () -> {
+                                    if (!job.started) {
+                                        job.finish(Collections.emptyList(), Outcome.BUSY);
+                                    }
+                                },
+                                requestMs,
+                                TimeUnit.MILLISECONDS);
+                job.future = RequestScope.submit(httpJob ? HTTP_NETWORK : NETWORK, job);
             } catch (RejectedExecutionException busy) {
                 job.finish(Collections.emptyList(), Outcome.BUSY);
             }
@@ -230,6 +245,7 @@ public final class SearchCoordinator implements AutoCloseable {
         volatile Thread runningThread;
         boolean allocated;
         volatile Future<?> future;
+        volatile ScheduledFuture<?> queueTimeout;
         volatile ScheduledFuture<?> timeout;
 
         Job(Cms.Site site, String query) {
@@ -249,6 +265,8 @@ public final class SearchCoordinator implements AutoCloseable {
             }
             runningThread = Thread.currentThread();
             started = true;
+            ScheduledFuture<?> qt = queueTimeout;
+            if (qt != null) qt.cancel(false);
             timeout =
                     TIMER.schedule(
                             () -> finish(Collections.emptyList(), Outcome.TIMEOUT),
@@ -307,6 +325,7 @@ public final class SearchCoordinator implements AutoCloseable {
 
         void finish(List<Cms.Video> videos, Outcome outcome) {
             if (!done.compareAndSet(false, true)) return;
+            if (queueTimeout != null) queueTimeout.cancel(false);
             if (timeout != null) timeout.cancel(false);
             if (outcome == Outcome.TIMEOUT || outcome == Outcome.BUSY) {
                 if (future != null) future.cancel(true);
@@ -335,9 +354,25 @@ public final class SearchCoordinator implements AutoCloseable {
 
         void cancel() {
             done.set(true);
+            if (queueTimeout != null) queueTimeout.cancel(false);
             if (timeout != null) timeout.cancel(false);
             if (future != null) future.cancel(true);
-            markWedgedIfRunning();
+            // Do not synchronously flag a site as wedged on user-initiated close(): an
+            // interruptible
+            // HTTP or plugin worker needs a brief moment to unwind after future.cancel(true),
+            // otherwise an immediate second search on the same page falsely marks healthy sites
+            // BUSY.
+            if (started && !exited.get() && !usesHttpPool(site)) {
+                try {
+                    TIMER.schedule(
+                            () -> {
+                                if (!exited.get()) markWedgedIfRunning();
+                            },
+                            250,
+                            TimeUnit.MILLISECONDS);
+                } catch (RejectedExecutionException ignored) {
+                }
+            }
         }
     }
 

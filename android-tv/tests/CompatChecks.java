@@ -542,7 +542,17 @@ public final class CompatChecks {
                                         + "    public PlaybackControlsStub playbackControls;\n"
                                         + "    public static class PlaybackControlsStub {\n"
                                         + "        public void applyExternalDanmaku(String url) {}\n"
+                                        + "        public void applyExternalDanmaku(\n"
+                                        + "                String url, DanmuOwnership.RequestContext owner) {}\n"
                                         + "    }\n"
+                                        + "}\n")
+                                .getBytes(StandardCharsets.UTF_8));
+                Path stubAccountPanel = stubPkg.resolve("AccountPanel.java");
+                Files.write(
+                        stubAccountPanel,
+                        ("package com.pilipala.marcomovie;\n"
+                                        + "final class AccountPanel {\n"
+                                        + "    static void onPluginConfigRefreshed() {}\n"
                                         + "}\n")
                                 .getBytes(StandardCharsets.UTF_8));
                 Path stubSourceController = stubPkg.resolve("SourceController.java");
@@ -614,6 +624,7 @@ public final class CompatChecks {
                                 root.resolve("shared/java/com/pilipala/catpaw/NodeRuntime.java")
                                         .toString(),
                                 stubMain.toString(),
+                                stubAccountPanel.toString(),
                                 stubSourceController.toString(),
                                 pkg.resolve("TvLayoutPolicy.java").toString(),
                                 pkg.resolve("Prefs.java").toString(),
@@ -636,6 +647,8 @@ public final class CompatChecks {
                                                 "android-tv/src/main/java/com/github/catvod/crawler/SpiderApi.java")
                                         .toString(),
                                 pkg.resolve("Cms.java").toString(),
+                                pkg.resolve("DanmuProvider.java").toString(),
+                                pkg.resolve("DanmuOwnership.java").toString(),
                                 pkg.resolve("JsEngine.java").toString(),
                                 pkg.resolve("CspEngine.java").toString());
                 JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();

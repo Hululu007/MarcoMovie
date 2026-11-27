@@ -19,16 +19,49 @@ import java.util.concurrent.*;
 /** Independent first native build. No original APK code or artwork is embedded. */
 public final class MainActivity extends Activity {
     static final int WHITE = 0xfff5f5f7, MUTED = 0xffa1a1aa, DARK = 0xff101013;
+    private static ThreadPoolExecutor boundedTvPool(int maxThreads, final String threadName) {
+        ThreadPoolExecutor pool =
+                new ThreadPoolExecutor(
+                        maxThreads,
+                        maxThreads,
+                        25L,
+                        TimeUnit.SECONDS,
+                        new LinkedBlockingQueue<Runnable>(),
+                        new ThreadFactory() {
+                            @Override
+                            public Thread newThread(final Runnable r) {
+                                Thread t =
+                                        new Thread(
+                                                () -> {
+                                                    try {
+                                                        android.os.Process.setThreadPriority(
+                                                                android.os.Process
+                                                                        .THREAD_PRIORITY_BACKGROUND);
+                                                    } catch (Throwable ignored) {
+                                                    }
+                                                    r.run();
+                                                },
+                                                threadName);
+                                t.setDaemon(true);
+                                return t;
+                            }
+                        });
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
+    }
+
     final Handler ui = new Handler(Looper.getMainLooper());
-    final ExecutorService worker = Executors.newFixedThreadPool(4);
-    final ExecutorService details = Executors.newFixedThreadPool(4);
+    final ExecutorService worker = boundedTvPool(4, "tv-worker");
+    final ExecutorService details = boundedTvPool(4, "tv-details");
     final DetailCache detailCache = new DetailCache();
     final SingleFlight<String> detailFlights = new SingleFlight<>();
     Future<?> detailPrefetch;
     final List<Future<?>> pageRequests = new ArrayList<>();
-    final ExecutorService artwork = Executors.newFixedThreadPool(8);
+    final ExecutorService artwork = boundedTvPool(3, "tv-artwork");
     final List<Future<?>> artworkRequests = new ArrayList<>();
-    final ExecutorService phoneticWork = Executors.newSingleThreadExecutor();
+    final ExecutorService phoneticWork = boundedTvPool(1, "tv-phonetic");
+    final java.util.concurrent.atomic.AtomicBoolean phoneticInitScheduled =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     final LinkedHashSet<String> pendingTitles = new LinkedHashSet<>();
     final Runnable learnPendingTitles = this::learnPendingTitles;
 
@@ -41,6 +74,13 @@ public final class MainActivity extends Activity {
             new Runnable() {
                 public void run() {
                     if (!foreground) return;
+                    if (isOwnModalDialogShowing()
+                            || (lastUserInteractionUptimeMs > 0L
+                                    && SystemClock.uptimeMillis() - lastUserInteractionUptimeMs
+                                            < 3500L)) {
+                        ui.postDelayed(this, 4000);
+                        return;
+                    }
                     if (current != null && current.home && appDialog == null) {
                         UpdateManager updates = UpdateManager.get(MainActivity.this);
                         updates.automatic();
@@ -52,14 +92,19 @@ public final class MainActivity extends Activity {
     PlaybackLoading playbackLoading;
     View playbackLoadingFocus;
     int playbackResolveSerial;
+    DanmuOwnership.RequestContext activeDanmuContext;
     GlobalSearchScreen searchScreen;
     Dialog sourceDialog, accountDialog;
+    SourcePicker.Origin activePickerOrigin;
+    final HomeSourceSwitchAnchor.LoadingGuardTracker loadingGuard =
+            new HomeSourceSwitchAnchor.LoadingGuardTracker();
     MagnetStream magnetStream;
     // Assets only. Never publish an Activity's learned/private index into this template.
     private static volatile PhoneticSearchIndex sharedPhoneticDictionary;
     volatile PhoneticSearchIndex phonetic;
     final CountDownLatch phoneticReady = new CountDownLatch(1);
     ConfigStore configStore;
+    TvMultiSourceStore multiSourceStore;
     PhoneConfigDialog phoneConfig;
     CastService castService;
     CastScreen activeCastScreen;
@@ -76,7 +121,8 @@ public final class MainActivity extends Activity {
     WatchHistory.Entry playingBookmark;
     WatchHistory.Entry historyFallbackBookmark;
     boolean historyFallbackInFlight;
-    String migratingHistoryOldKey;
+    WatchHistory.PendingMigration pendingHistoryMigration;
+    boolean deferPlayingBookmarkUntilMigrationCommit;
     long lastBookmarkSave;
     final ArrayDeque<Screen> back = new ArrayDeque<>();
     final LruCache<String, Bitmap> images =
@@ -552,6 +598,9 @@ public final class MainActivity extends Activity {
 
     boolean reduced, prepared, playing, foreground;
     int generation;
+    int playbackSessionId;
+    int blackScreenRecoveryCount;
+    PlaybackOutputState playbackOutputState;
     static final int MAX_HOME_SNAPSHOTS = 8;
     final LinkedHashMap<String, SourceEngine> engines = new LinkedHashMap<>(16, 0.75f, true);
     final SingleFlight<SourceEngine> engineInitializations = new SingleFlight<>();
@@ -582,6 +631,10 @@ public final class MainActivity extends Activity {
     TextView playStatus, playClock;
     final SeekGesture seekGesture = new SeekGesture();
     String seekStatus = "";
+    boolean seekLightCapsuleMode;
+    int seekGestureSerial;
+    boolean suppressBackUpAfterSeekCancel;
+    int activeSeekKeyCode;
     final Runnable seekPulse =
             new Runnable() {
                 public void run() {
@@ -597,7 +650,9 @@ public final class MainActivity extends Activity {
                     }
                     seekGesture.advance(SystemClock.uptimeMillis());
                     previewSeek();
-                    scheduleHide();
+                    if (!seekLightCapsuleMode) {
+                        scheduleHide();
+                    }
                     ui.postDelayed(this, 100);
                 }
             };
@@ -613,6 +668,7 @@ public final class MainActivity extends Activity {
         boolean player, home;
         HomeScreen.State homeState;
         HomeScreen retainedHome;
+        GlobalSearchScreen retainedSearch;
 
         /** True while a listing redirect (folder / action / cross-search) has not drawn a page. */
         boolean redirect;
@@ -1020,12 +1076,23 @@ public final class MainActivity extends Activity {
                         ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
                         : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER);
         configStore = new ConfigStore(getFilesDir());
+        multiSourceStore = new TvMultiSourceStore(getFilesDir());
         if (isTvDevice()) {
             getWindow().getDecorView().setSystemUiVisibility(5894);
         } else {
             applyMobileSystemBars(false);
         }
         prefs = getSharedPreferences(privateMode ? "movie-private" : Prefs.FILE, MODE_PRIVATE);
+        if (!privateMode) {
+            ConfigLibrary.recoverInterruptedRestoreIfNeeded(
+                    getFilesDir(),
+                    newPrefs -> SettingsScreen.applyRestorablePrefsSnapshot(prefs, newPrefs, true),
+                    txId ->
+                            txId != null
+                                    && txId.equals(
+                                            prefs.getString(
+                                                    ConfigLibrary.RESTORE_TX_APPLIED_ID_PREF, "")));
+        }
         final int priorBootCrashes = recordStartupBootGuard(getCacheDir());
         final boolean priorLoadingCrash = !prefs.getString(Prefs.LOADING_SITE, "").isEmpty();
         if (priorBootCrashes >= 1 || priorLoadingCrash) {
@@ -1044,6 +1111,8 @@ public final class MainActivity extends Activity {
         WatchHistory.historyCorrupted = prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
         if (WatchHistory.historyCorrupted) {
             ui.post(() -> toast("检测到观看历史数据损坏，已自动备份至本地。为保护数据，已暂停历史更新与云端覆盖。"));
+        } else if (!privateMode && isTvDevice()) {
+            worker.execute(this::prewarmWatchHistoryCacheAsync);
         }
         reduced = prefs.getBoolean(Prefs.REDUCED, false);
         configOrigin = prefs.getString("origin", "");
@@ -1053,30 +1122,130 @@ public final class MainActivity extends Activity {
                 int memClass = am.getMemoryClass();
                 images.resize(ImageDecodePolicy.cacheBytes(memClass));
                 ImmersivePoster.applyMemoryBudget(memClass);
+                if (isTvDevice() && artwork instanceof ThreadPoolExecutor) {
+                    boolean lowRam =
+                            GlobalSearchScreen.isLowRamMemoryClass(
+                                    am.isLowRamDevice(),
+                                    memClass,
+                                    Runtime.getRuntime().maxMemory());
+                    int cap = lowRam ? 3 : 4;
+                    ThreadPoolExecutor artPool = (ThreadPoolExecutor) artwork;
+                    artPool.setCorePoolSize(cap);
+                    artPool.setMaximumPoolSize(cap);
+                }
             }
         } catch (Exception ignored) {
         }
         try {
+            ConfigLibrary.recoverInterruptedRestoreIfNeeded(
+                    getFilesDir(),
+                    privateMode
+                            ? null
+                            : newPrefs ->
+                                    SettingsScreen.applyRestorablePrefsSnapshot(
+                                            prefs, newPrefs, true),
+                    privateMode
+                            ? null
+                            : txId ->
+                                    txId != null
+                                            && txId.equals(
+                                                    prefs.getString(
+                                                            ConfigLibrary
+                                                                    .RESTORE_TX_APPLIED_ID_PREF,
+                                                            "")));
             File f = new File(getFilesDir(), "config.json");
-            if (f.exists())
+            String storedRaw = "";
+            if (f.exists()) {
                 try (InputStream i = new FileInputStream(f)) {
-                    config = Cms.parseConfig(Cms.read(i, Cms.MAX_JSON), configOrigin);
+                    storedRaw = Cms.read(i, Cms.MAX_JSON);
+                }
+            }
+            if (isTvDevice() && !privateMode && multiSourceStore != null) {
+                ConfigLibrary lib = new ConfigLibrary(configStore.directory);
+                TvMultiSourceStore.State msState = multiSourceStore.readState();
+                if (msState.initialized) {
+                    TvMultiSourceStore.EffectiveBuild built =
+                            multiSourceStore.buildEffectiveConfig(
+                                    lib,
+                                    prefs.getString(Prefs.PREFERRED_SITE, ""),
+                                    (cfg, site) -> SourceController.available(this, cfg, site));
+                    if (built.totalSubscriptionCount == 0) {
+                        config = null;
+                        configOrigin = "";
+                        prefs.edit().putString(Prefs.SELECTED_SITE, "").apply();
+                    } else if (built.enabledSubscriptionCount == 0) {
+                        config = built.config;
+                        configOrigin = "";
+                        prefs.edit().putString(Prefs.SELECTED_SITE, "").apply();
+                    } else if (built.config != null && !built.config.sites.isEmpty()) {
+                        config = built.config;
+                        configOrigin = built.effectiveOrigin;
+                        SourcePicker.applyEdits(this, config, configOrigin);
+                        if (!built.resolvedCurrentSiteKey.isEmpty()
+                                && priorBootCrashes == 0
+                                && !priorLoadingCrash) {
+                            prefs.edit()
+                                    .putString(Prefs.SELECTED_SITE, built.resolvedCurrentSiteKey)
+                                    .apply();
+                        }
+                    } else {
+                        // Enabled subscription(s) exist but zero VOD sites remain enabled (e.g.
+                        // last VOD line disabled or pure-live subscription). Keep runtime config
+                        // (including valid lives) and NEVER fall back to stale config.json.
+                        config = built.config;
+                        configOrigin = built.effectiveOrigin;
+                        prefs.edit().putString(Prefs.SELECTED_SITE, "").apply();
+                    }
+                } else if (!storedRaw.isEmpty()) {
+                    config = Cms.parseConfig(storedRaw, configOrigin);
                     SourcePicker.applyEdits(this, config, configOrigin);
                     if (priorBootCrashes == 0 && !priorLoadingCrash) {
                         SourcePreferences.restoreDefault(this);
                     }
                 }
+            } else if (!storedRaw.isEmpty()) {
+                config = Cms.parseConfig(storedRaw, configOrigin);
+                SourcePicker.applyEdits(this, config, configOrigin);
+                if (priorBootCrashes == 0 && !priorLoadingCrash) {
+                    SourcePreferences.restoreDefault(this);
+                }
+            }
         } catch (Exception e) {
             AppLog.w("MainActivity", "load saved config failed", e);
             config = null;
         }
         // Phone / tablet only: restore the offline download queue (never started on TV).
         if (!isTvDevice()) DownloadManager.get(this);
-        initializePhonetic();
+        if (isTvDevice()) {
+            // Defer heavy cold-start pinyin/YAML parsing past initial TV navigation and any open
+            // modal picker so worker & GC never starve the UI/RenderThread during cold opens.
+            final Runnable deferredPhonetic =
+                    new Runnable() {
+                        private int deferCount;
+
+                        @Override
+                        public void run() {
+                            if (isFinishing()
+                                    || (Build.VERSION.SDK_INT >= 17 && isDestroyed())) {
+                                return;
+                            }
+                            if (isOwnModalDialogShowing()
+                                    || (isRecentlyInteracting(3500L) && deferCount < 6)) {
+                                deferCount++;
+                                ui.postDelayed(this, 2500L);
+                                return;
+                            }
+                            ensurePhoneticInitialized();
+                        }
+                    };
+            ui.postDelayed(deferredPhonetic, 5500L);
+        } else {
+            ensurePhoneticInitialized();
+        }
         layoutIntro = b == null || b.getBoolean("layout_initial_launch", false);
         root = newGlassBackdropRoot();
         root.setBackgroundColor(DARK);
-        setContentView(root);
+        presentRoot(root, false);
         root.addOnLayoutChangeListener(
                 new View.OnLayoutChangeListener() {
                     public void onLayoutChange(
@@ -1124,6 +1293,9 @@ public final class MainActivity extends Activity {
                                             () ->
                                                     MagnetStream.cleanStaleSessions(
                                                             MainActivity.this));
+                                    if (isTvDevice() && !privateMode) {
+                                        CatalogScreen.prewarmTvHistoryThemeAsync(MainActivity.this);
+                                    }
                                     if (!reduced
                                             && !recoveredFromCrash
                                             && priorBootCrashes == 0
@@ -1174,6 +1346,11 @@ public final class MainActivity extends Activity {
                                     } else if (!privateMode
                                             && OnboardingScreen.shouldShow(MainActivity.this)) {
                                         showOnboarding(false);
+                                    } else if (!privateMode
+                                            && isTvDevice()
+                                            && TvOfficialNotice.shouldShowOnLaunch(
+                                                    MainActivity.this)) {
+                                        TvOfficialNotice.showFirstLaunchDialog(MainActivity.this);
                                     } else if (layoutIntro && isTvDevice()) {
                                         StartupIntro.show(MainActivity.this);
                                     }
@@ -1376,6 +1553,10 @@ public final class MainActivity extends Activity {
     }
 
     void chooseOrImport() {
+        if (hasZeroEnabledSubscriptions() || hasNoEnabledVodSitesWithEnabledSubscriptions()) {
+            SourcePicker.showManageSubscriptions(this);
+            return;
+        }
         if (config == null) importDialog();
         else chooseSources();
     }
@@ -1423,8 +1604,359 @@ public final class MainActivity extends Activity {
         return best;
     }
 
+    /**
+     * Persistent TV stage host that switches between retained fullscreen roots (Home / Search /
+     * History) without toggling {@code View.INVISIBLE} <-> {@code View.VISIBLE}: on Android 9,
+     * toggling visibility dispatches {@code Drawable.setVisible} across ~450 Home views and
+     * invalidates every hardware RenderNode (~52 ms DrawStart->SyncQueued stall on every BACK).
+     * Instead, retained siblings stay {@code VISIBLE} with preserved hardware DisplayLists while
+     * {@link #dispatchDraw}, {@link #onMeasure}, {@link #onLayout}, {@link #addFocusables}, {@link
+     * #addChildrenForAccessibility}, and {@link #dispatchTouchEvent} route strictly to {@link
+     * #activeRoot}.
+     */
+    static final class TvStageLayout extends FrameLayout {
+        View activeRoot;
+
+        TvStageLayout(Context context) {
+            super(context);
+        }
+
+        void setActiveRoot(View nextActive) {
+            if (activeRoot == nextActive) return;
+            activeRoot = nextActive;
+            invalidate();
+        }
+
+        @Override
+        public void onViewRemoved(View child) {
+            super.onViewRemoved(child);
+            if (activeRoot == child) {
+                activeRoot = null;
+            }
+        }
+
+        @Override
+        protected void dispatchDraw(android.graphics.Canvas canvas) {
+            View active = activeRoot;
+            if (active != null && active.getParent() == this && active.getVisibility() == VISIBLE) {
+                drawChild(canvas, active, getDrawingTime());
+                return;
+            }
+            super.dispatchDraw(canvas);
+        }
+
+        @Override
+        public boolean dispatchTouchEvent(android.view.MotionEvent ev) {
+            View active = activeRoot;
+            if (active != null && active.getParent() == this && active.getVisibility() == VISIBLE) {
+                return active.dispatchTouchEvent(ev);
+            }
+            return super.dispatchTouchEvent(ev);
+        }
+
+        @Override
+        public void addFocusables(ArrayList<View> views, int direction, int focusableMode) {
+            View active = activeRoot;
+            if (active != null && active.getParent() == this && active.getVisibility() == VISIBLE) {
+                active.addFocusables(views, direction, focusableMode);
+                return;
+            }
+            super.addFocusables(views, direction, focusableMode);
+        }
+
+        @Override
+        public void addChildrenForAccessibility(ArrayList<View> outChildren) {
+            View active = activeRoot;
+            if (active != null && active.getParent() == this && active.getVisibility() == VISIBLE) {
+                outChildren.add(active);
+                return;
+            }
+            super.addChildrenForAccessibility(outChildren);
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            int w = MeasureSpec.getSize(widthMeasureSpec);
+            int h = MeasureSpec.getSize(heightMeasureSpec);
+            int wMode = MeasureSpec.getMode(widthMeasureSpec);
+            int hMode = MeasureSpec.getMode(heightMeasureSpec);
+            if (wMode == MeasureSpec.EXACTLY && hMode == MeasureSpec.EXACTLY && w > 0 && h > 0) {
+                setMeasuredDimension(w, h);
+                int childWSpec = MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY);
+                int childHSpec = MeasureSpec.makeMeasureSpec(h, MeasureSpec.EXACTLY);
+                for (int i = 0, count = getChildCount(); i < count; i++) {
+                    View child = getChildAt(i);
+                    int vis = child.getVisibility();
+                    if (vis == GONE) continue;
+                    if (child != activeRoot
+                            && child.getMeasuredWidth() == w
+                            && child.getMeasuredHeight() == h) {
+                        continue;
+                    }
+                    child.measure(childWSpec, childHSpec);
+                }
+                return;
+            }
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+        }
+
+        @Override
+        protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+            int w = right - left;
+            int h = bottom - top;
+            for (int i = 0, count = getChildCount(); i < count; i++) {
+                View child = getChildAt(i);
+                int vis = child.getVisibility();
+                if (vis == GONE) continue;
+                if (child != activeRoot
+                        && !changed
+                        && child.getLeft() == 0
+                        && child.getTop() == 0
+                        && child.getRight() == w
+                        && child.getBottom() == h) {
+                    continue;
+                }
+                child.layout(0, 0, w, h);
+            }
+        }
+    }
+
+    TvStageLayout tvStage;
+    Object tvHistoryHostCache;
+    FrameLayout retainedHistoryRoot;
+
+    void attachPrewarmedHistoryRoot(FrameLayout historyRoot) {
+        if (!isTvDevice() || privateMode || historyRoot == null || tvStage == null) return;
+        if (retainedHistoryRoot != null && retainedHistoryRoot != historyRoot) {
+            if (retainedHistoryRoot.getParent() == tvStage && retainedHistoryRoot != root) {
+                tvStage.removeView(retainedHistoryRoot);
+            }
+        }
+        retainedHistoryRoot = historyRoot;
+        if (historyRoot.getParent() == null) {
+            historyRoot.setVisibility(View.VISIBLE);
+            historyRoot.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+            historyRoot.setImportantForAccessibility(
+                    View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+            tvStage.addView(historyRoot, 0, new FrameLayout.LayoutParams(-1, -1));
+        }
+    }
+
+    /**
+     * Measures and lays out an occluded pre-warmed TV history root in place without disturbing
+     * {@link TvStageLayout#activeRoot} or invalidating Home's hardware RenderNodes.
+     */
+    void layoutPrewarmedHistoryRoot(FrameLayout historyRoot) {
+        if (!isTvDevice() || privateMode || historyRoot == null || tvStage == null) return;
+        if (historyRoot.getParent() != tvStage || tvStage.activeRoot == historyRoot) return;
+        int w = tvStage.getWidth();
+        int h = tvStage.getHeight();
+        if (w <= 0 || h <= 0) return;
+        int wSpec = View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY);
+        int hSpec = View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY);
+        historyRoot.measure(wSpec, hSpec);
+        historyRoot.layout(0, 0, w, h);
+    }
+
+    void detachRetainedHistoryRoot() {
+        FrameLayout old = retainedHistoryRoot;
+        retainedHistoryRoot = null;
+        tvHistoryHostCache = null;
+        if (old != null && old != root && old.getParent() instanceof ViewGroup) {
+            ((ViewGroup) old.getParent()).removeView(old);
+        }
+    }
+
+    private boolean hasRetainedHomeInBackStack() {
+        for (Screen s : back) {
+            if (s != null
+                    && s.home
+                    && s.retainedHome != null
+                    && s.retainedHome.retainedRoot != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private FrameLayout retainedHomeRootInBackStack() {
+        for (Screen s : back) {
+            if (s != null
+                    && s.home
+                    && s.retainedHome != null
+                    && s.retainedHome.retainedRoot != null) {
+                return s.retainedHome.retainedRoot;
+            }
+        }
+        return null;
+    }
+
+    private FrameLayout retainedSearchRootInBackStack() {
+        for (Screen s : back) {
+            if (s != null && s.retainedSearch != null && s.retainedSearch.retainedRoot != null) {
+                return s.retainedSearch.retainedRoot;
+            }
+        }
+        return null;
+    }
+
+    private boolean isSearchRetainedInBackStack(GlobalSearchScreen screen) {
+        if (screen == null) return false;
+        for (Screen s : back) {
+            if (s != null && s.retainedSearch == screen && screen.retainedRoot != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Presents {@code nextRoot} inside a persistent TV stage container so navigating from Home to
+     * secondary pages (History / Settings / Search / Detail) keeps {@code HomeScreen.retainedRoot}
+     * (and any {@code GlobalSearchScreen.retainedRoot} under Detail) attached underneath
+     * (INVISIBLE + FOCUS_BLOCK_DESCENDANTS), eliminating full-tree rebuilds on BACK.
+     */
+    void presentRoot(FrameLayout nextRoot, boolean preserveRetainedHome) {
+        if (nextRoot == null) return;
+        if (!isTvDevice()) {
+            if (nextRoot.getParent() instanceof ViewGroup) {
+                ((ViewGroup) nextRoot.getParent()).removeView(nextRoot);
+            }
+            setContentView(nextRoot);
+            return;
+        }
+        if (tvStage == null) {
+            tvStage = new TvStageLayout(this);
+            tvStage.setBackgroundColor(0xff0d0f14);
+            tvStage.setClipChildren(false);
+            tvStage.setClipToPadding(false);
+            setContentView(tvStage);
+        }
+        FrameLayout keepHome = preserveRetainedHome ? retainedHomeRootInBackStack() : null;
+        FrameLayout keepSearch = preserveRetainedHome ? retainedSearchRootInBackStack() : null;
+        boolean keepHistoryAllowed =
+                !privateMode && retainedHistoryRoot != null && (current == null || !current.player);
+        FrameLayout keepHistory = keepHistoryAllowed ? retainedHistoryRoot : null;
+        if (nextRoot.getParent() == tvStage) {
+            // Fast resume path: occlude preserved siblings in place without toggling
+            // View.INVISIBLE (so Android 9 hardware RenderNodes stay valid) and remove transient
+            // screens.
+            for (int i = tvStage.getChildCount() - 1; i >= 0; i--) {
+                View child = tvStage.getChildAt(i);
+                if (child == nextRoot) continue;
+                if ((keepHome != null && child == keepHome)
+                        || (keepSearch != null && child == keepSearch)
+                        || (keepHistory != null && child == keepHistory)) {
+                    if (child instanceof ViewGroup) {
+                        ViewGroup vg = (ViewGroup) child;
+                        if (vg.getDescendantFocusability() != ViewGroup.FOCUS_BLOCK_DESCENDANTS) {
+                            vg.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+                        }
+                    }
+                    if (child.getImportantForAccessibility()
+                            != View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS) {
+                        child.setImportantForAccessibility(
+                                View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+                    }
+                } else {
+                    tvStage.removeViewAt(i);
+                }
+            }
+            if (nextRoot.getVisibility() != View.VISIBLE) {
+                nextRoot.setVisibility(View.VISIBLE);
+            }
+            if (nextRoot.getDescendantFocusability() != ViewGroup.FOCUS_AFTER_DESCENDANTS) {
+                nextRoot.setDescendantFocusability(ViewGroup.FOCUS_AFTER_DESCENDANTS);
+            }
+            if (nextRoot.getImportantForAccessibility() != View.IMPORTANT_FOR_ACCESSIBILITY_AUTO) {
+                nextRoot.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
+            }
+            tvStage.setActiveRoot(nextRoot);
+            return;
+        }
+        for (int i = tvStage.getChildCount() - 1; i >= 0; i--) {
+            View child = tvStage.getChildAt(i);
+            if ((keepHome != null && child == keepHome)
+                    || (keepSearch != null && child == keepSearch)
+                    || (keepHistory != null && child == keepHistory)) {
+                if (child instanceof ViewGroup) {
+                    ViewGroup vg = (ViewGroup) child;
+                    if (vg.getDescendantFocusability() != ViewGroup.FOCUS_BLOCK_DESCENDANTS) {
+                        vg.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+                    }
+                }
+                if (child.getImportantForAccessibility()
+                        != View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS) {
+                    child.setImportantForAccessibility(
+                            View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+                }
+            } else {
+                tvStage.removeViewAt(i);
+            }
+        }
+        if (nextRoot.getParent() instanceof ViewGroup) {
+            ((ViewGroup) nextRoot.getParent()).removeView(nextRoot);
+        }
+        if (nextRoot.getVisibility() != View.VISIBLE) {
+            nextRoot.setVisibility(View.VISIBLE);
+        }
+        if (nextRoot.getDescendantFocusability() != ViewGroup.FOCUS_AFTER_DESCENDANTS) {
+            nextRoot.setDescendantFocusability(ViewGroup.FOCUS_AFTER_DESCENDANTS);
+        }
+        if (nextRoot.getImportantForAccessibility() != View.IMPORTANT_FOR_ACCESSIBILITY_AUTO) {
+            nextRoot.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
+        }
+        tvStage.setActiveRoot(nextRoot);
+        tvStage.addView(nextRoot, new FrameLayout.LayoutParams(-1, -1));
+    }
+
+    /**
+     * Fast TV page host for split-pane screens (e.g. GlobalSearchScreen) that manage their own
+     * internal scrolling: skips creating a redundant outer TvScrollView and full-screen HomeAmbient
+     * to avoid nested ScrollView double-measure stalls on Mali-450 TVs.
+     */
+    void renderDirectTvPage() {
+        preparePage(false);
+        root = newGlassBackdropRoot();
+        root.setClipChildren(false);
+        root.setClipToPadding(false);
+        root.setBackgroundColor(0xff0d0f14);
+        homeAmbient = null;
+        scroll = null;
+        homeDock = null;
+        body = vertical();
+        body.setClipChildren(false);
+        body.setClipToPadding(false);
+        root.addView(body, new FrameLayout.LayoutParams(-1, -1));
+        presentRoot(root, isTvDevice() && hasRetainedHomeInBackStack());
+        watchRootLayout(root);
+    }
+
+    /**
+     * Reuses a pre-built or retained direct TV page root (such as {@link CatalogScreen}'s history
+     * host) without allocating a fresh backdrop root or duplicate layout-change listeners.
+     */
+    void presentDirectTvRoot(
+            FrameLayout existingRoot, LinearLayout existingBody, boolean attachLayoutWatcher) {
+        preparePage(false);
+        root = existingRoot;
+        homeAmbient = null;
+        scroll = null;
+        homeDock = null;
+        body = existingBody;
+        presentRoot(root, isTvDevice() && hasRetainedHomeInBackStack());
+        if (attachLayoutWatcher) {
+            watchRootLayout(root);
+        }
+    }
+
     void renderPage(String title, String eyebrow) {
         renderPage(title, eyebrow, false);
+    }
+
+    private void pauseOccludedHomeAnimations() {
+        if (homeAmbient != null) homeAmbient.setStagePaused(true);
+        if (scroll instanceof TvScrollView) ((TvScrollView) scroll).cancelMotion();
     }
 
     void preparePage(boolean navigation) {
@@ -1437,12 +1969,18 @@ public final class MainActivity extends Activity {
         tvInitialFocus = null;
         activeCastScreen = null;
         if (searchScreen != null) {
-            searchScreen.close();
+            if (isTvDevice() && !navigation && isSearchRetainedInBackStack(searchScreen)) {
+                searchScreen.pauseForChildPage();
+            } else {
+                searchScreen.close();
+            }
             searchScreen = null;
         }
         stopWeb();
         stopMagnet();
         releasePlayer();
+        if (navigation) pendingHistoryMigration = null;
+        else pauseOccludedHomeAnimations();
         if (!isTvDevice()) {
             applyMobileSystemBars(false);
         }
@@ -1462,7 +2000,9 @@ public final class MainActivity extends Activity {
         homeAmbient = null;
         boolean wantAmbient =
                 isTvDevice()
-                        ? (tvBgMode == Prefs.BG_MODE_ADAPTIVE || tvBgMode == Prefs.BG_MODE_GRADIENT)
+                        ? (navigation
+                                && (tvBgMode == Prefs.BG_MODE_ADAPTIVE
+                                        || tvBgMode == Prefs.BG_MODE_GRADIENT))
                         : (navigation
                                 && prefs.getBoolean(Prefs.HOME_AMBIENT, true)
                                 && !prefs.getBoolean(Prefs.WALLPAPER_ENABLED, false));
@@ -1476,7 +2016,10 @@ public final class MainActivity extends Activity {
         scroll.setClipChildren(false);
         scroll.setClipToPadding(false);
         scroll.setFillViewport(true);
-        body = vertical();
+        body =
+                (isTvDevice() && navigation)
+                        ? new TvScrollView.ViewportLinearLayout(this, (TvScrollView) scroll)
+                        : vertical();
         body.setClipChildren(false);
         body.setClipToPadding(false);
         if (!isTvDevice()) {
@@ -1487,7 +2030,7 @@ public final class MainActivity extends Activity {
         }
         scroll.addView(body, new ScrollView.LayoutParams(-1, -2));
         root.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
-        setContentView(root);
+        presentRoot(root, isTvDevice() && !navigation && hasRetainedHomeInBackStack());
         watchRootLayout(root);
         homeDock = null;
         if (navigation) {
@@ -1638,6 +2181,7 @@ public final class MainActivity extends Activity {
     }
 
     void cancelActiveTransition() {
+        if (startupIntro != null) startupIntro.cancel();
         transitionSerial++;
         pendingPlayerTransition = false;
         PlayerTransitionHelper.TransitionHandle handle = activeTransition;
@@ -1769,6 +2313,9 @@ public final class MainActivity extends Activity {
     }
 
     void openScreenNow(Screen s, boolean history) {
+        if (layoutReady && history && current != null && current.home) {
+            clearStartupBootGuard(getCacheDir());
+        }
         capture();
         if (history && current != null) back.push(current);
         current = s;
@@ -2005,6 +2552,17 @@ public final class MainActivity extends Activity {
                                             if (current != null) {
                                                 restore(current);
                                             }
+                                            if (!isReplay
+                                                    && !privateMode
+                                                    && isTvDevice()
+                                                    && TvOfficialNotice.shouldShowOnLaunch(
+                                                            MainActivity.this)) {
+                                                ui.post(
+                                                        () ->
+                                                                TvOfficialNotice
+                                                                        .showFirstLaunchDialog(
+                                                                                MainActivity.this));
+                                            }
                                         });
                             }
                         });
@@ -2076,14 +2634,23 @@ public final class MainActivity extends Activity {
         ui.post(
                 () -> {
                     if (current != s) return;
-                    if (scroll != null) scroll.scrollTo(0, s.scroll);
+                    if (scroll != null && scroll.getScrollY() != s.scroll) {
+                        scroll.scrollTo(0, s.scroll);
+                        if (homeDock != null && s.home) {
+                            homeDock.syncScrollYImmediate(s.scroll);
+                        }
+                    }
                     if (!isTvDevice()) return;
                     View target = s.focus == null ? null : root.findViewWithTag(s.focus);
                     if (target != null
-                            && (!target.isShown() || !target.isFocusable() || !target.isEnabled()))
-                        target = null;
+                            && (!target.isShown()
+                                    || !target.isFocusable()
+                                    || !target.isEnabled()
+                                    || isInsideBlockedDescendant(target))) {
+                        target = findVisibleFocusableByTag(root, s.focus);
+                    }
                     if (target != null) {
-                        target.requestFocus();
+                        if (!target.hasFocus()) target.requestFocus();
                         autoFocus = target;
                     } else {
                         View first = tvInitialFocus;
@@ -2114,6 +2681,38 @@ public final class MainActivity extends Activity {
                 });
     }
 
+    private static boolean isInsideBlockedDescendant(View view) {
+        android.view.ViewParent p = view == null ? null : view.getParent();
+        while (p instanceof ViewGroup) {
+            ViewGroup vg = (ViewGroup) p;
+            if (vg.getDescendantFocusability() == ViewGroup.FOCUS_BLOCK_DESCENDANTS) {
+                return true;
+            }
+            p = vg.getParent();
+        }
+        return false;
+    }
+
+    /** Finds a visible, enabled, focusable descendant matching {@code tag}, skipping hidden/blocked subtrees. */
+    static View findVisibleFocusableByTag(View node, Object tag) {
+        if (node == null || tag == null) return null;
+        if (node.getVisibility() != View.VISIBLE || !node.isShown()) return null;
+        if (tag.equals(node.getTag()) && node.isFocusable() && node.isEnabled()) {
+            return node;
+        }
+        if (node instanceof ViewGroup) {
+            ViewGroup vg = (ViewGroup) node;
+            if (vg.getDescendantFocusability() == ViewGroup.FOCUS_BLOCK_DESCENDANTS) {
+                return null;
+            }
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                View found = findVisibleFocusableByTag(vg.getChildAt(i), tag);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
     void refresh() {
         capture();
         Screen s = current;
@@ -2133,6 +2732,9 @@ public final class MainActivity extends Activity {
             activeOnboarding.handleBackPressed();
             return;
         }
+        if (searchScreen != null && searchScreen.handleBackPressed()) {
+            return;
+        }
         if (pendingPlayerTransition) {
             cancelActiveTransition();
             return;
@@ -2148,6 +2750,7 @@ public final class MainActivity extends Activity {
         }
         if (playbackLoading != null) {
             changingMiniEpisode = false;
+            pendingHistoryMigration = null;
             clearPlaybackLoading();
             cancelPageRequests();
             stopWeb();
@@ -2160,6 +2763,14 @@ public final class MainActivity extends Activity {
         }
         if (current != null && current.player) {
             if (!miniMode && playbackControls != null) {
+                if (!prepared && playerChrome != null && playerChrome.terminalError) {
+                    leavePlayback();
+                    return;
+                }
+                if (playerChrome != null && playerChrome.terminalError) {
+                    leavePlayback();
+                    return;
+                }
                 if (controlsVisible) showControls(false);
                 else if (isLive() || isCast() || !isTvDevice()) leavePlayback();
                 else minimizePlayback();
@@ -2167,6 +2778,7 @@ public final class MainActivity extends Activity {
             }
             if (miniMode) {
                 releasePlayer();
+                pendingHistoryMigration = null;
                 if (!back.isEmpty()) back.pop();
                 if (!back.isEmpty()) {
                     current = back.pop();
@@ -2479,11 +3091,24 @@ public final class MainActivity extends Activity {
         SourceController.learnTitles(this, videos);
     }
 
+    void ensurePhoneticInitialized() {
+        if (phoneticInitScheduled.compareAndSet(false, true)) {
+            initializePhonetic();
+        }
+    }
+
     void initializePhonetic() {
         final boolean publicSpace = !privateMode;
         final SharedPreferences target = prefs;
         worker.execute(
                 () -> {
+                    try {
+                        if (!PinyinKeyboardModel.hasWarmSharedDictionary()) {
+                            PinyinKeyboardModel.warmSharedDictionary(
+                                    getAssets().open("search/pinyin-characters.tsv"));
+                        }
+                    } catch (Exception ignored) {
+                    }
                     try {
                         PhoneticSearchIndex dictionary;
                         synchronized (MainActivity.class) {
@@ -2571,6 +3196,91 @@ public final class MainActivity extends Activity {
 
     void chooseSources() {
         SourcePicker.show(this);
+    }
+
+    long multiSourceRevision() {
+        return multiSourceStore != null ? multiSourceStore.currentRevision() : 0L;
+    }
+
+    boolean hasZeroEnabledSubscriptions() {
+        if (!isTvDevice() || privateMode || multiSourceStore == null) return false;
+        TvMultiSourceStore.State st = multiSourceStore.readState();
+        return st.initialized && !st.subscriptions.isEmpty() && st.enabledCount() == 0;
+    }
+
+    boolean hasNoEnabledVodSitesWithEnabledSubscriptions() {
+        if (!isTvDevice() || privateMode || multiSourceStore == null) return false;
+        TvMultiSourceStore.State st = multiSourceStore.readState();
+        if (!st.initialized || st.enabledCount() <= 0) return false;
+        return config == null || config.sites == null || config.sites.isEmpty();
+    }
+
+    boolean isSiteEnabledInMultiSource(String siteKey) {
+        if (multiSourceStore == null || privateMode) return true;
+        return multiSourceStore.isSiteCurrentlyEnabled(siteKey);
+    }
+
+    /**
+     * Applies a newly built multi-source effective configuration on the UI thread, preserving
+     * active playback sessions while updating browsing, search, and home catalog anchor cleanly.
+     */
+    void applyMultiSourceEffectiveBuild(
+            TvMultiSourceStore.EffectiveBuild built,
+            boolean keepCatalogAnchor,
+            int anchorRelTopPx,
+            int fallbackScrollY,
+            String statusToast) {
+        if (built == null || isFinishing()) return;
+        if (multiSourceStore != null
+                && (built.stale || built.revision != multiSourceStore.currentRevision())) {
+            return;
+        }
+        String prevSelected = prefs != null ? prefs.getString(Prefs.SELECTED_SITE, "") : "";
+        boolean playingNow = player != null || (current != null && current.player);
+        closeEngines();
+        GlobalSearchScreen.invalidateContext(this);
+        config = built.config;
+        configOrigin = built.effectiveOrigin;
+        if (config != null) {
+            SourcePicker.applyEdits(this, config, configOrigin);
+        }
+        String nextSiteKey = built.resolvedCurrentSiteKey;
+        if (prefs != null) {
+            prefs.edit()
+                    .putString(Prefs.SELECTED_SITE, nextSiteKey)
+                    .putString(Prefs.ORIGIN, configOrigin)
+                    .apply();
+        }
+        if (statusToast != null && !statusToast.isEmpty()) {
+            toast(statusToast);
+        }
+        if (playingNow) {
+            // Active playback session is allowed to finish uninterrupted.
+            return;
+        }
+        if (current != null && current.home) {
+            if (built.enabledSubscriptionCount == 0 || nextSiteKey.isEmpty()) {
+                open(new Screen(this::home), false);
+                return;
+            }
+            Cms.Site nextSite = null;
+            if (config != null) {
+                for (Cms.Site s : config.sites) {
+                    if (s != null && nextSiteKey.equals(s.key) && available(s)) {
+                        nextSite = s;
+                        break;
+                    }
+                }
+            }
+            if (nextSite != null
+                    && keepCatalogAnchor
+                    && current.retainedHome != null
+                    && !nextSiteKey.equals(prevSelected)) {
+                current.retainedHome.switchSiteInPlace(nextSite, anchorRelTopPx, fallbackScrollY);
+            } else if (nextSite != null && current.retainedHome == null) {
+                open(new Screen(this::home), false);
+            }
+        }
     }
 
     void importDialog() {
@@ -2670,6 +3380,7 @@ public final class MainActivity extends Activity {
     }
 
     void castScreen() {
+        syncCastService();
         CastScreen screen = new CastScreen(this);
         activeCastScreen = screen;
         screen.show();
@@ -2833,6 +3544,7 @@ public final class MainActivity extends Activity {
     }
 
     boolean liveKey(KeyEvent event) {
+        if (liveSession == null || miniMode || current == null || !current.player) return false;
         return LiveController.liveKey(this, event);
     }
 
@@ -2841,6 +3553,8 @@ public final class MainActivity extends Activity {
     }
 
     void openSearch(String initial) {
+        markUserInteraction();
+        ensurePhoneticInitialized();
         if (config == null) {
             importDialog();
             return;
@@ -2850,13 +3564,14 @@ public final class MainActivity extends Activity {
             return;
         }
         GlobalSearchScreen screen = new GlobalSearchScreen(this, initial);
-        open(
+        Screen s =
                 new Screen(
                         () -> {
-                            screen.show();
+                            screen.resumeOrShow();
                             searchScreen = screen;
-                        }),
-                true);
+                        });
+        s.retainedSearch = screen;
+        open(s, true);
     }
 
     void crossSearch(String keyword) {
@@ -2869,10 +3584,12 @@ public final class MainActivity extends Activity {
     }
 
     void stopMagnet() {
+        if (magnetStream == null) return;
         PlaybackController.stopMagnet(this);
     }
 
     void stopWeb() {
+        if (webResolver == null) return;
         PlaybackController.stopWeb(this);
     }
 
@@ -2881,6 +3598,7 @@ public final class MainActivity extends Activity {
     }
 
     void clearPlaybackLoading() {
+        if (playbackLoading == null && playbackLoadingFocus == null) return;
         PlaybackController.clearPlaybackLoading(this);
     }
 
@@ -3049,21 +3767,74 @@ public final class MainActivity extends Activity {
         };
     }
 
+    private static final Object WATCH_HISTORY_CACHE_LOCK = new Object();
+    private String cachedWatchHistoryRaw;
+    private java.util.List<WatchHistory.Entry> cachedWatchHistoryEntries;
+
+    void invalidateWatchHistoryCache() {
+        synchronized (WATCH_HISTORY_CACHE_LOCK) {
+            cachedWatchHistoryRaw = null;
+            cachedWatchHistoryEntries = null;
+        }
+    }
+
+    private void prewarmWatchHistoryCacheAsync() {
+        if (privateMode || prefs == null) return;
+        try {
+            if (prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false)) return;
+            String raw = prefs.getString(Prefs.WATCH_HISTORY, "[]");
+            if (raw == null) raw = "[]";
+            synchronized (WATCH_HISTORY_CACHE_LOCK) {
+                if (cachedWatchHistoryEntries != null && raw.equals(cachedWatchHistoryRaw)) {
+                    return;
+                }
+            }
+            if (WatchHistory.isMalformed(raw)) return;
+            java.util.List<WatchHistory.Entry> parsed = WatchHistory.read(raw, null);
+            synchronized (WATCH_HISTORY_CACHE_LOCK) {
+                if (!WatchHistory.isCorrupted()) {
+                    cachedWatchHistoryRaw = raw;
+                    cachedWatchHistoryEntries = parsed;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     java.util.List<WatchHistory.Entry> watchHistory() {
         if (privateMode) return java.util.Collections.emptyList();
         if (prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false)) {
             WatchHistory.setCorrupted(true);
         }
-        return WatchHistory.read(
-                prefs.getString(Prefs.WATCH_HISTORY, "[]"),
-                (key, raw) -> {
-                    if (!prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false)) {
-                        prefs.edit()
-                                .putString(key, raw)
-                                .putBoolean(WatchHistory.CORRUPTED_PREF, true)
-                                .apply();
-                    }
-                });
+        String raw = prefs.getString(Prefs.WATCH_HISTORY, "[]");
+        if (raw == null) raw = "[]";
+        synchronized (WATCH_HISTORY_CACHE_LOCK) {
+            if (cachedWatchHistoryEntries != null
+                    && !WatchHistory.isCorrupted()
+                    && raw.equals(cachedWatchHistoryRaw)) {
+                return cachedWatchHistoryEntries;
+            }
+        }
+        java.util.List<WatchHistory.Entry> parsed =
+                WatchHistory.read(
+                        raw,
+                        (key, corruptedRaw) -> {
+                            if (!prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false)) {
+                                prefs.edit()
+                                        .putString(key, corruptedRaw)
+                                        .putBoolean(WatchHistory.CORRUPTED_PREF, true)
+                                        .apply();
+                            }
+                        });
+        if (WatchHistory.isCorrupted()) {
+            invalidateWatchHistoryCache();
+        } else {
+            synchronized (WATCH_HISTORY_CACHE_LOCK) {
+                cachedWatchHistoryRaw = raw;
+                cachedWatchHistoryEntries = parsed;
+            }
+        }
+        return parsed;
     }
 
     void clearWatchHistory() {
@@ -3071,6 +3842,7 @@ public final class MainActivity extends Activity {
     }
 
     void clearWatchHistory(final Runnable onUiComplete) {
+        invalidateWatchHistoryCache();
         WatchHistory.setCorrupted(false);
         WatchHistory.enqueueClear(
                 historyPersistence(),
@@ -3086,6 +3858,7 @@ public final class MainActivity extends Activity {
     }
 
     void removeWatchHistory(final String key, final Runnable onUiComplete) {
+        invalidateWatchHistoryCache();
         WatchHistory.enqueueRemove(
                 historyPersistence(),
                 key,
@@ -3103,6 +3876,7 @@ public final class MainActivity extends Activity {
     boolean overwriteWatchHistory(String validJson) {
         String validated = WatchHistory.validateBackupJson(validJson);
         if (validated == null) return false;
+        invalidateWatchHistoryCache();
         WatchHistory.enqueueBackupRestore(historyPersistence(), validated, null);
         return true;
     }
@@ -3128,6 +3902,14 @@ public final class MainActivity extends Activity {
     }
 
     void releasePlayer() {
+        if (player == null
+                && playbackControls == null
+                && playerChrome == null
+                && playbackSessionId == 0
+                && !prepared
+                && !playing) {
+            return;
+        }
         PlaybackController.releasePlayer(this);
     }
 
@@ -3160,8 +3942,28 @@ public final class MainActivity extends Activity {
         return !canceled || mitvSynthetic;
     }
 
+    void markUserInteraction() {
+        lastUserInteractionUptimeMs = SystemClock.uptimeMillis();
+    }
+
+    boolean isRecentlyInteracting(long windowMs) {
+        long last = lastUserInteractionUptimeMs;
+        if (last <= 0L) return false;
+        long delta = SystemClock.uptimeMillis() - last;
+        return delta >= 0L && delta < windowMs;
+    }
+
+    @Override
+    public void onUserInteraction() {
+        super.onUserInteraction();
+        markUserInteraction();
+    }
+
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event != null && event.getAction() == KeyEvent.ACTION_DOWN) {
+            markUserInteraction();
+        }
         if (introSkipKey && event.getAction() == KeyEvent.ACTION_UP) {
             introSkipKey = false;
             return true;
@@ -3173,7 +3975,7 @@ public final class MainActivity extends Activity {
                             || key == KeyEvent.KEYCODE_ENTER
                             || key == KeyEvent.KEYCODE_BACK)) {
                 introSkipKey = true;
-                startupIntro.finish(true);
+                startupIntro.cancel();
             }
             return true;
         }
@@ -3221,8 +4023,17 @@ public final class MainActivity extends Activity {
         if (feedbackFocus != null) FocusMotion.key(this, feedbackFocus, event.getKeyCode(), event);
         if (current != null && current.home && homeDock != null && homeDock.key(event)) return true;
         if (current != null && current.home && HomeScreen.navigationKey(this, event)) return true;
-        if (PlaybackController.dispatchPlaybackKey(this, event)) return true;
+        if (current != null
+                && current.player
+                && !miniMode
+                && PlaybackController.dispatchPlaybackKey(this, event)) return true;
         return super.dispatchKeyEvent(event);
+    }
+
+    boolean isOwnModalDialogShowing() {
+        return (sourceDialog != null && sourceDialog.isShowing())
+                || (appDialog != null && appDialog.isShowing())
+                || (accountDialog != null && accountDialog.isShowing());
     }
 
     @Override
@@ -3232,7 +4043,9 @@ public final class MainActivity extends Activity {
             if (markerHost != null) markerHost.abort();
             if (playerChrome != null) playerChrome.cancelEpisodeHoldSwitch();
             finishSeek(false);
-            PluginDialogStyler.watch(this);
+            if (!isOwnModalDialogShowing()) {
+                PluginDialogStyler.watch(this);
+            }
         }
         SourceController.onActivityFocusChanged(this, focus);
     }
@@ -3241,24 +4054,67 @@ public final class MainActivity extends Activity {
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
         ImageLoader.trimMemory(this, level);
+        if (level >= TRIM_MEMORY_RUNNING_LOW) {
+            ImageLoader.clearWallpaperCache();
+        }
         ImmersivePoster.trimMemory(level);
+        GlobalSearchScreen.trimMemory(level);
     }
 
     @Override
     public void onLowMemory() {
         super.onLowMemory();
         images.evictAll();
+        detachRetainedHistoryRoot();
+        ImageLoader.clearWallpaperCache();
         ImmersivePoster.trimMemory(TRIM_MEMORY_COMPLETE);
+        GlobalSearchScreen.trimMemory(TRIM_MEMORY_COMPLETE);
     }
+
+    volatile long lastUserInteractionUptimeMs;
+    private int tvBackgroundServiceDeferCount;
+
+    private final Runnable deferredTvBackgroundServices =
+            new Runnable() {
+                @Override
+                public void run() {
+                    if (isFinishing() || (Build.VERSION.SDK_INT >= 17 && isDestroyed())) return;
+                    if (isOwnModalDialogShowing()) {
+                        ui.postDelayed(this, 1500L);
+                        return;
+                    }
+                    long sinceKeyMs = SystemClock.uptimeMillis() - lastUserInteractionUptimeMs;
+                    if (lastUserInteractionUptimeMs > 0L
+                            && sinceKeyMs >= 0L
+                            && sinceKeyMs < 3500L
+                            && tvBackgroundServiceDeferCount < 6) {
+                        tvBackgroundServiceDeferCount++;
+                        ui.postDelayed(this, 3000L);
+                        return;
+                    }
+                    tvBackgroundServiceDeferCount = 0;
+                    syncCastService();
+                    syncSpiderGateway();
+                }
+            };
 
     @Override
     protected void onStart() {
         super.onStart();
         activeActivity = this;
         foreground = true;
+        if (playbackOutputState != null) {
+            playbackOutputState.onForegroundChanged(true, SystemClock.elapsedRealtime());
+        }
         CspEngine.syncAllPluginActivities(this);
-        syncCastService();
-        syncSpiderGateway();
+        if (isTvDevice() && !layoutReady) {
+            tvBackgroundServiceDeferCount = 0;
+            ui.removeCallbacks(deferredTvBackgroundServices);
+            ui.postDelayed(deferredTvBackgroundServices, 5000L);
+        } else {
+            syncCastService();
+            syncSpiderGateway();
+        }
         UpdateManager.get(this)
                 .listen(
                         () -> {
@@ -3279,9 +4135,18 @@ public final class MainActivity extends Activity {
         super.onResume();
         activeActivity = this;
         foreground = true;
+        if (playbackOutputState != null) {
+            playbackOutputState.onForegroundChanged(true, SystemClock.elapsedRealtime());
+        }
         CspEngine.syncAllPluginActivities(this);
-        syncCastService();
-        syncSpiderGateway();
+        if (isTvDevice() && !layoutReady) {
+            tvBackgroundServiceDeferCount = 0;
+            ui.removeCallbacks(deferredTvBackgroundServices);
+            ui.postDelayed(deferredTvBackgroundServices, 5000L);
+        } else {
+            syncCastService();
+            syncSpiderGateway();
+        }
         if (layoutReady && !privateMode) {
             SourceController.runDailyAutoUpdateIfNeeded(this, false);
         }
@@ -3305,6 +4170,7 @@ public final class MainActivity extends Activity {
         if (playerChrome != null) playerChrome.cancelEpisodeHoldSwitch();
         finishSeek(false);
         if (playbackLoading != null) {
+            pendingHistoryMigration = null;
             clearPlaybackLoading();
             cancelPageRequests();
             stopWeb();
@@ -3333,6 +4199,11 @@ public final class MainActivity extends Activity {
             CloudSyncDialog.pushOnExit(this);
         }
         foreground = false;
+        if (playbackOutputState != null) {
+            long nowMs = SystemClock.elapsedRealtime();
+            playbackOutputState.onForegroundChanged(false, nowMs);
+            playbackOutputState.onPlayStateChanged(false, false, nowMs);
+        }
         super.onStop();
         if (player != null)
             try {
@@ -3361,6 +4232,8 @@ public final class MainActivity extends Activity {
         dismissOnboarding();
         clearPlaybackLoading();
         TvQrInputHelper.dismissActive();
+        SourcePicker.clearCachedShell(this);
+        detachRetainedHistoryRoot();
         if (phoneConfig != null) phoneConfig.close();
         stopCastService();
         stopSpiderGateway();
@@ -3370,6 +4243,7 @@ public final class MainActivity extends Activity {
         stopMagnet();
         generation++;
         releasePlayer();
+        pendingHistoryMigration = null;
         if (!privateMode && !switchingPrivacy && (isFinishing() || activeActivity == null)) {
             CloudSyncDialog.pushOnExit(this);
         }

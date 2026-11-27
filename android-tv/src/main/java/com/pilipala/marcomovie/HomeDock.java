@@ -16,16 +16,23 @@ final class HomeDock {
     static final int ICON_SETTINGS = 6;
     static final int ICON_HISTORY = 8;
 
-    private static android.view.animation.DecelerateInterpolator topDecelCache;
+    static final int TOP_COLLAPSE_THRESHOLD_DP = 72;
+    static final int TOP_EXPAND_THRESHOLD_DP = 36;
+    static final long TOP_TRANSITION_DURATION_MS = 180L;
+    static final float TOP_COMPACT_SCALE_RATIO = 0.88f;
+    static final float TOP_COMPACT_SCALE_DELTA = 1f - TOP_COMPACT_SCALE_RATIO;
 
-    private static android.view.animation.DecelerateInterpolator topDecel() {
-        if (topDecelCache == null) {
-            topDecelCache = new android.view.animation.DecelerateInterpolator();
+    private static android.view.animation.LinearInterpolator topLinearCache;
+
+    private static android.view.animation.LinearInterpolator topLinear() {
+        if (topLinearCache == null) {
+            topLinearCache = new android.view.animation.LinearInterpolator();
         }
-        return topDecelCache;
+        return topLinearCache;
     }
 
     final MainActivity a;
+    final FrameLayout ownerRoot;
     final LinearLayout rail;
     TextView brandText;
     View edgeShade;
@@ -42,8 +49,12 @@ final class HomeDock {
     final boolean bottomMode, topMode, horizontal, tvLeft, tvTopLabeled;
     final TvV17Navigation navigation = new TvV17Navigation();
     boolean expanded;
-    private float lastScrollProgress = -1f;
+    private int lastScrollY;
     private boolean topFocused;
+    private boolean topCompactTarget;
+    private float displayedTopProgress;
+    private float animatingTopTarget = -1f;
+    private android.animation.ValueAnimator topTransitionAnimator;
     private java.lang.ref.WeakReference<View> menuReturnRef;
     final float navScale, fitScale;
     final int crossDp, mainDp, cellDp;
@@ -160,8 +171,39 @@ final class HomeDock {
 
     static float computeTopScrimAlpha(float progress) {
         float p = Math.max(0f, Math.min(1f, progress));
-        float smooth = p * p * (3f - 2f * p);
-        return 0.18f + 0.76f * smooth;
+        return 0.18f + 0.76f * p;
+    }
+
+    /**
+     * Hysteresis state machine for the two-target top navigation bar (expanded vs compact).
+     * Never rests at intermediate scales and avoids jitter near the transition band.
+     */
+    static boolean resolveTopCompactTarget(
+            boolean currentlyCompact,
+            int scrollY,
+            int collapseThresholdPx,
+            int expandThresholdPx,
+            boolean topFocused) {
+        if (topFocused) return false;
+        int collapsePx = Math.max(1, collapseThresholdPx);
+        int expandPx = Math.max(0, Math.min(collapsePx - 1, expandThresholdPx));
+        if (currentlyCompact) {
+            return scrollY > expandPx;
+        }
+        return scrollY >= collapsePx;
+    }
+
+    static float computeTopScale(float progress, float overflowScale) {
+        float p = Math.max(0f, Math.min(1f, progress));
+        return Math.max(0.5f, overflowScale) * (1f - TOP_COMPACT_SCALE_DELTA * p);
+    }
+
+    static long computeLinearTransitionDurationMs(
+            float fromProgress, float toProgress, long fullDurationMs, boolean reduced) {
+        if (reduced || fullDurationMs <= 0L) return 0L;
+        float dist = Math.abs(toProgress - fromProgress);
+        if (dist < 0.001f) return 0L;
+        return Math.max(16L, Math.round(fullDurationMs * dist));
     }
 
     /** Wraps horizontal navigation index continuously with no left/right dead-ends. */
@@ -173,6 +215,7 @@ final class HomeDock {
 
     HomeDock(MainActivity host) {
         a = host;
+        ownerRoot = host.root;
         tvLeft = a.useLeftDock();
         bottomMode = !tvLeft && a.useBottomDock();
         topMode = !tvLeft && a.useTopDock();
@@ -305,7 +348,13 @@ final class HomeDock {
                 a.dp(Math.round((tvTopLabeled ? 7 : (horizontal ? 10 : 6)) * fitScale)),
                 a.dp(Math.round((tvTopLabeled ? 4 : (horizontal ? 6 : 8)) * fitScale)));
         if (tvTopLabeled) {
-            topScrim = new View(a);
+            topScrim =
+                    new View(a) {
+                        @Override
+                        public boolean hasOverlappingRendering() {
+                            return false;
+                        }
+                    };
             topScrim.setTag("home-top-scrim");
             topScrim.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             GradientDrawable scrimBg =
@@ -589,6 +638,11 @@ final class HomeDock {
         a.root.getViewTreeObserver()
                 .addOnGlobalFocusChangeListener(
                         (oldFocus, newFocus) -> {
+                            // Ignore focus moves while Home is occluded behind a retained TV stage
+                            // page (e.g. History / Search / Settings) so the dock lens stays parked
+                            // on its active nav item and never glides 16 frames on BACK.
+                            if (a.homeDock != HomeDock.this) return;
+                            if (newFocus != null && !isDescendantOfOwnerRoot(newFocus)) return;
                             boolean inDock = contains(newFocus);
                             if (inDock
                                     && oldFocus != null
@@ -605,10 +659,21 @@ final class HomeDock {
                             if (newFocus != null
                                     && !inDock
                                     && contains(oldFocus)
-                                    && newFocus.getRootView() == a.root.getRootView())
+                                    && isDescendantOfOwnerRoot(newFocus))
                                 selection.select(items[homeIndex]);
                         });
         selection.select(items[homeIndex]);
+    }
+
+    private boolean isDescendantOfOwnerRoot(View view) {
+        if (view == null || ownerRoot == null) return false;
+        ViewParent p = view == ownerRoot ? ownerRoot : view.getParent();
+        if (view == ownerRoot) return true;
+        while (p != null) {
+            if (p == ownerRoot) return true;
+            p = p.getParent();
+        }
+        return false;
     }
 
     private LinearLayout buildTopBrandPill() {
@@ -658,7 +723,7 @@ final class HomeDock {
         nextOverflow = Math.max(0.65f, Math.min(1f, nextOverflow));
         if (Math.abs(nextOverflow - runtimeOverflowScale) > 0.01f) {
             runtimeOverflowScale = nextOverflow;
-            applyTopShrink(lastScrollProgress < 0f ? 0f : lastScrollProgress, false);
+            applyTopGeometry(displayedTopProgress);
         }
     }
 
@@ -666,78 +731,174 @@ final class HomeDock {
         if (!tvTopLabeled || topFocused == focused) return;
         topFocused = focused;
         rail.invalidate();
-        applyTopShrink(lastScrollProgress < 0f ? 0f : lastScrollProgress, !a.reduced);
+        updateTopTargetState(lastScrollY, true);
     }
 
     void onScrollY(int scrollY) {
         if (!tvTopLabeled) return;
-        float progress = computeTopShrinkProgress(scrollY, a.dp(260));
-        if (Math.abs(progress - lastScrollProgress) < 0.008f) return;
-        lastScrollProgress = progress;
-        applyTopShrink(progress, false);
+        lastScrollY = Math.max(0, scrollY);
+        updateTopTargetState(lastScrollY, true);
     }
 
-    private void applyTopShrink(float progress, boolean animate) {
-        float smooth = progress * progress * (3f - 2f * progress);
-        float effective = topFocused ? 0f : smooth;
-        float scrimAlpha =
-                topFocused
-                        ? Math.max(0.58f, computeTopScrimAlpha(progress))
-                        : computeTopScrimAlpha(progress);
-        float targetScale = (1f - 0.08f * effective) * runtimeOverflowScale;
-        float targetTy = -a.dp(4) * effective;
-        float brandAlpha = 1f - 0.08f * effective;
-        float railAlpha = topFocused ? 1f : (1f - 0.06f * effective);
+    void syncScrollYImmediate(int scrollY) {
+        syncScrollYImmediate(scrollY, true);
+    }
 
-        if (animate) {
-            android.view.animation.DecelerateInterpolator decel = topDecel();
-            if (topScrim != null) {
-                topScrim.animate().cancel();
-                topScrim.animate()
-                        .alpha(scrimAlpha)
-                        .setDuration(140)
-                        .setInterpolator(decel)
-                        .start();
-            }
-            if (topBrandPill != null) {
-                topBrandPill.animate().cancel();
-                topBrandPill
-                        .animate()
-                        .scaleX(targetScale)
-                        .scaleY(targetScale)
-                        .translationY(targetTy)
-                        .alpha(brandAlpha)
-                        .setDuration(140)
-                        .setInterpolator(decel)
-                        .start();
-            }
-            rail.animate().cancel();
-            rail.animate()
-                    .scaleX(targetScale)
-                    .scaleY(targetScale)
-                    .translationY(targetTy)
-                    .alpha(railAlpha)
-                    .setDuration(140)
-                    .setInterpolator(decel)
-                    .start();
+    void resetScrollYImmediate(int scrollY) {
+        syncScrollYImmediate(scrollY, false);
+    }
+
+    void syncScrollYImmediate(int scrollY, boolean preservePreviousTarget) {
+        if (!tvTopLabeled) return;
+        lastScrollY = Math.max(0, scrollY);
+        topCompactTarget =
+                resolveTopCompactTarget(
+                        preservePreviousTarget && topCompactTarget,
+                        lastScrollY,
+                        a.dp(TOP_COLLAPSE_THRESHOLD_DP),
+                        a.dp(TOP_EXPAND_THRESHOLD_DP),
+                        topFocused);
+        cancelTopTransition();
+        displayedTopProgress = topCompactTarget ? 1f : 0f;
+        applyTopGeometry(displayedTopProgress);
+    }
+
+    float currentTopProgress() {
+        return displayedTopProgress;
+    }
+
+    boolean isTopCompactTarget() {
+        return topCompactTarget;
+    }
+
+    int topAnimatorStartCount() {
+        return topTransitionStartCount;
+    }
+
+    private int topTransitionStartCount;
+
+    private void cancelTopTransition() {
+        android.animation.ValueAnimator old = topTransitionAnimator;
+        // Detach write permission BEFORE cancel() so synchronous onAnimationEnd() from the old
+        // animator can never snap displayedTopProgress to the superseded endpoint.
+        topTransitionAnimator = null;
+        animatingTopTarget = -1f;
+        if (old != null) {
+            old.cancel();
+        }
+    }
+
+    private boolean isSystemAnimationDisabled() {
+        if (a.reduced) return true;
+        try {
+            float scale =
+                    android.provider.Settings.Global.getFloat(
+                            a.getContentResolver(),
+                            android.provider.Settings.Global.ANIMATOR_DURATION_SCALE,
+                            1f);
+            return scale <= 0f;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private void updateTopTargetState(int scrollY, boolean allowAnimate) {
+        boolean nextCompact =
+                resolveTopCompactTarget(
+                        topCompactTarget,
+                        scrollY,
+                        a.dp(TOP_COLLAPSE_THRESHOLD_DP),
+                        a.dp(TOP_EXPAND_THRESHOLD_DP),
+                        topFocused);
+        topCompactTarget = nextCompact;
+        final float target = nextCompact ? 1f : 0f;
+        if (Math.abs(displayedTopProgress - target) < 0.001f) {
+            cancelTopTransition();
+            displayedTopProgress = target;
+            applyTopGeometry(displayedTopProgress);
             return;
         }
-        if (topScrim != null) {
-            topScrim.animate().cancel();
+        if (topTransitionAnimator != null
+                && topTransitionAnimator.isRunning()
+                && Math.abs(animatingTopTarget - target) < 0.001f) {
+            return;
+        }
+        cancelTopTransition();
+        boolean instant = !allowAnimate || isSystemAnimationDisabled();
+        long durationMs =
+                computeLinearTransitionDurationMs(
+                        displayedTopProgress, target, TOP_TRANSITION_DURATION_MS, instant);
+        if (durationMs <= 0L) {
+            displayedTopProgress = target;
+            applyTopGeometry(displayedTopProgress);
+            return;
+        }
+        animatingTopTarget = target;
+        final android.animation.ValueAnimator anim =
+                android.animation.ValueAnimator.ofFloat(displayedTopProgress, target);
+        anim.setDuration(durationMs);
+        anim.setInterpolator(topLinear());
+        anim.addUpdateListener(
+                animation -> {
+                    if (topTransitionAnimator != anim) return;
+                    displayedTopProgress = (Float) animation.getAnimatedValue();
+                    applyTopGeometry(displayedTopProgress);
+                });
+        anim.addListener(
+                new android.animation.AnimatorListenerAdapter() {
+                    @Override
+                    public void onAnimationEnd(android.animation.Animator animation) {
+                        if (topTransitionAnimator == anim) {
+                            topTransitionAnimator = null;
+                            animatingTopTarget = -1f;
+                            displayedTopProgress = target;
+                            applyTopGeometry(displayedTopProgress);
+                        }
+                    }
+                });
+        topTransitionAnimator = anim;
+        topTransitionStartCount++;
+        anim.start();
+    }
+
+    private void applyTopGeometry(float progress) {
+        float p = Math.max(0f, Math.min(1f, progress));
+        float targetScale = computeTopScale(p, runtimeOverflowScale);
+        float targetTy = -a.dp(4) * p;
+        float brandAlpha = 1f - 0.08f * p;
+        float railAlpha = topFocused ? 1f : (1f - 0.06f * p);
+        float scrimAlpha =
+                topFocused ? Math.max(0.58f, computeTopScrimAlpha(p)) : computeTopScrimAlpha(p);
+
+        if (topScrim != null && Math.abs(topScrim.getAlpha() - scrimAlpha) > 0.001f) {
             topScrim.setAlpha(scrimAlpha);
         }
         if (topBrandPill != null) {
-            topBrandPill.animate().cancel();
-            topBrandPill.setScaleX(targetScale);
-            topBrandPill.setScaleY(targetScale);
-            topBrandPill.setTranslationY(targetTy);
-            topBrandPill.setAlpha(brandAlpha);
+            if (Math.abs(topBrandPill.getScaleX() - targetScale) > 0.001f) {
+                topBrandPill.setScaleX(targetScale);
+            }
+            if (Math.abs(topBrandPill.getScaleY() - targetScale) > 0.001f) {
+                topBrandPill.setScaleY(targetScale);
+            }
+            if (Math.abs(topBrandPill.getTranslationY() - targetTy) > 0.01f) {
+                topBrandPill.setTranslationY(targetTy);
+            }
+            if (Math.abs(topBrandPill.getAlpha() - brandAlpha) > 0.001f) {
+                topBrandPill.setAlpha(brandAlpha);
+            }
         }
-        rail.animate().cancel();
-        rail.setScaleX(targetScale);
-        rail.setScaleY(targetScale);
-        rail.setTranslationY(targetTy);
-        rail.setAlpha(railAlpha);
+        if (Math.abs(rail.getScaleX() - targetScale) > 0.001f) {
+            rail.setScaleX(targetScale);
+        }
+        if (Math.abs(rail.getScaleY() - targetScale) > 0.001f) {
+            rail.setScaleY(targetScale);
+        }
+        if (Math.abs(rail.getTranslationY() - targetTy) > 0.01f) {
+            rail.setTranslationY(targetTy);
+        }
+        if (Math.abs(rail.getAlpha() - railAlpha) > 0.001f) {
+            rail.setAlpha(railAlpha);
+        }
     }
 
     void focusFromMenuKey() {

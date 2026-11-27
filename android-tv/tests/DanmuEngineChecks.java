@@ -90,6 +90,9 @@ public final class DanmuEngineChecks {
         testSeekStormDebounceAndCancellation();
         testRateLimitingAnd429RetryAfter();
         testTvPerFrameZeroRepeatFilterAndZeroAllocPast64Min();
+        testStrictEpisodeAndSeasonMatching();
+        testDanmuOwnershipAndStaleRejection();
+        testMatch404405FallbackErrorsAndTimeMs();
         System.out.println("ALL DANMU ENGINE CHECKS PASSED (" + passed + " assertions)");
     }
 
@@ -1718,6 +1721,575 @@ public final class DanmuEngineChecks {
         check(
                 admittedPreviouslyBlocked,
                 "M-01 LayoutEngine.onBlockFilterChanged clears droppedIds when rules relax");
+    }
+
+    private static void testStrictEpisodeAndSeasonMatching() throws Exception {
+        final String origin = "http://127.0.0.1:19999";
+        // 1. Reverse-ordered bound episode list: [E03, E02, E01] -> must pick E02, never index 1/0
+        List<Candidate> reversed =
+                Arrays.asList(
+                        new Candidate(
+                                origin,
+                                "710",
+                                "Test Show",
+                                DandanplayProvider.encodeBoundEpisodeId(origin, "103"),
+                                "第3集",
+                                1.0),
+                        new Candidate(
+                                origin,
+                                "710",
+                                "Test Show",
+                                DandanplayProvider.encodeBoundEpisodeId(origin, "102"),
+                                "第2集",
+                                1.0),
+                        new Candidate(
+                                origin,
+                                "710",
+                                "Test Show",
+                                DandanplayProvider.encodeBoundEpisodeId(origin, "101"),
+                                "第1集",
+                                1.0));
+        Candidate pickedRev =
+                DandanplayProvider.pickBoundAnimeEpisode(
+                        reversed,
+                        new MatchQuery("Test Show", "第2集", 2, 0, 1, false, "710", origin));
+        check(
+                pickedRev != null && "第2集".equals(pickedRev.episodeTitle),
+                "Reverse-ordered bound list selects exact E02");
+
+        // 2. Gap list [E01, E03] missing E02 -> must return null, never fall back to E01 or E03
+        List<Candidate> gapList =
+                Arrays.asList(
+                        new Candidate(
+                                origin,
+                                "710",
+                                "Test Show",
+                                DandanplayProvider.encodeBoundEpisodeId(origin, "101"),
+                                "第1集",
+                                1.0),
+                        new Candidate(
+                                origin,
+                                "710",
+                                "Test Show",
+                                DandanplayProvider.encodeBoundEpisodeId(origin, "103"),
+                                "第3集",
+                                1.0));
+        Candidate pickedGap =
+                DandanplayProvider.pickBoundAnimeEpisode(
+                        gapList, new MatchQuery("Test Show", "E02", 2, 0, 1, false, "710", origin));
+        check(pickedGap == null, "Bound list missing E02 returns null instead of E01/E03 fallback");
+
+        // 3. Specials mixed into main episodes: [SP1, 第0集, 特别篇, 第1集, 第二集] -> E02 picks 第二集
+        List<Candidate> withSpecials =
+                Arrays.asList(
+                        new Candidate(
+                                origin,
+                                "710",
+                                "Test Show",
+                                DandanplayProvider.encodeBoundEpisodeId(origin, "900"),
+                                "SP02 特别篇",
+                                1.0),
+                        new Candidate(
+                                origin,
+                                "710",
+                                "Test Show",
+                                DandanplayProvider.encodeBoundEpisodeId(origin, "901"),
+                                "第0集 先导",
+                                1.0),
+                        new Candidate(
+                                origin,
+                                "710",
+                                "Test Show",
+                                DandanplayProvider.encodeBoundEpisodeId(origin, "101"),
+                                "第1集",
+                                1.0),
+                        new Candidate(
+                                origin,
+                                "710",
+                                "Test Show",
+                                DandanplayProvider.encodeBoundEpisodeId(origin, "102"),
+                                "第二集",
+                                1.0));
+        Candidate pickedSp =
+                DandanplayProvider.pickBoundAnimeEpisode(
+                        withSpecials,
+                        new MatchQuery("Test Show", "E02", 2, 0, 1, false, "710", origin));
+        check(
+                pickedSp != null && "第二集".equals(pickedSp.episodeTitle),
+                "Specials mixed into bound list never hijack E02 (picks 第二集)");
+
+        // 4. Single-episode movie positive control
+        List<Candidate> movieEps =
+                Collections.singletonList(
+                        new Candidate(
+                                origin,
+                                "800",
+                                "Demo Movie",
+                                DandanplayProvider.encodeBoundEpisodeId(origin, "8001"),
+                                "正片",
+                                1.0));
+        Candidate pickedMovie =
+                DandanplayProvider.pickBoundAnimeEpisode(
+                        movieEps,
+                        new MatchQuery("Demo Movie", "正片", 0, 5400, -1, true, "800", origin));
+        check(pickedMovie != null, "Single-episode movie positive control preserved");
+
+        // 5. Loopback HTTP checks: missing server episodeTitle, bound anime preservation,
+        //    multi-season duplicate E02, and user episode offset
+        final AtomicReference<String> scenario = new AtomicReference<>("missing_ep_title");
+        HttpServer srv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        srv.setExecutor(daemonPool(4));
+        final String srvOrigin = "http://127.0.0.1:" + srv.getAddress().getPort();
+        srv.createContext(
+                "/api/v2/bangumi/",
+                new HttpHandler() {
+                    @Override
+                    public void handle(HttpExchange ex) throws IOException {
+                        String body =
+                                "{\"bangumi\":{\"animeTitle\":\"Bound Show\",\"episodes\":[{\"episodeId\":101,\"episodeTitle\":\"第1集\"}]}}";
+                        sendResponse(ex, 200, "application/json", body);
+                    }
+                });
+        srv.createContext(
+                "/api/v2/match",
+                new HttpHandler() {
+                    @Override
+                    public void handle(HttpExchange ex) throws IOException {
+                        String sc = scenario.get();
+                        if ("missing_ep_title".equals(sc)) {
+                            // Server omits episodeTitle entirely; must NOT fabricate from query!
+                            String body =
+                                    "{\"isMatched\":true,\"matches\":[{\"animeId\":500,\"animeTitle\":\"NoEp Show\",\"episodeId\":5001}]}";
+                            sendResponse(ex, 200, "application/json", body);
+                            return;
+                        }
+                        sendResponse(
+                                ex,
+                                200,
+                                "application/json",
+                                "{\"isMatched\":false,\"matches\":[]}");
+                    }
+                });
+        srv.createContext(
+                "/api/v2/search/episodes",
+                new HttpHandler() {
+                    @Override
+                    public void handle(HttpExchange ex) throws IOException {
+                        String sc = scenario.get();
+                        if ("missing_ep_title".equals(sc)) {
+                            sendResponse(ex, 200, "application/json", "{\"animes\":[]}");
+                            return;
+                        }
+                        if ("bound_preserve".equals(sc)) {
+                            String body =
+                                    "{\"animes\":["
+                                            + "{\"animeId\":999,\"animeTitle\":\"Bound Show\",\"episodes\":[{\"episodeId\":9992,\"episodeTitle\":\"第2集\"}]},"
+                                            + "{\"animeId\":710,\"animeTitle\":\"Bound Show\",\"episodes\":[{\"episodeId\":7102,\"episodeTitle\":\"第2集\"}]}"
+                                            + "]}";
+                            sendResponse(ex, 200, "application/json", body);
+                            return;
+                        }
+                        if ("multi_season".equals(sc)) {
+                            String body =
+                                    "{\"animes\":["
+                                            + "{\"animeId\":10,\"animeTitle\":\"星际剧\",\"episodes\":[{\"episodeId\":1002,\"episodeTitle\":\"第2集\"}]},"
+                                            + "{\"animeId\":20,\"animeTitle\":\"星际剧 第2季\",\"episodes\":[{\"episodeId\":2002,\"episodeTitle\":\"第2集\"}]}"
+                                            + "]}";
+                            sendResponse(ex, 200, "application/json", body);
+                            return;
+                        }
+                        if ("offset_e5".equals(sc)) {
+                            String body =
+                                    "{\"animes\":[{\"animeId\":30,\"animeTitle\":\"偏移测试剧\",\"episodes\":["
+                                            + "{\"episodeId\":3002,\"episodeTitle\":\"第2集\"},"
+                                            + "{\"episodeId\":3005,\"episodeTitle\":\"第5集\"}"
+                                            + "]}]}";
+                            sendResponse(ex, 200, "application/json", body);
+                            return;
+                        }
+                        sendResponse(ex, 200, "application/json", "{\"animes\":[]}");
+                    }
+                });
+        srv.start();
+        try {
+            DandanplayProvider p = new DandanplayProvider(srvOrigin, "", "", 1, 0L);
+
+            scenario.set("missing_ep_title");
+            List<Candidate> noEp =
+                    p.matchOrSearch(
+                            new MatchQuery("NoEp Show", "E02", 2, 0, 1, false, "", ""), null);
+            check(
+                    noEp.isEmpty(),
+                    "Missing server episodeTitle stays unknown and is not substituted from query");
+
+            scenario.set("bound_preserve");
+            List<Candidate> boundKeep =
+                    p.matchOrSearch(
+                            new MatchQuery("Bound Show", "E02", 2, 0, 1, false, "710", srvOrigin),
+                            null);
+            check(
+                    boundKeep.size() == 1 && "710".equals(boundKeep.get(0).animeId),
+                    "Bound anime fallback preserves bound animeId=710 over unrelated animeId=999");
+
+            scenario.set("multi_season");
+            List<Candidate> s2 =
+                    p.matchOrSearch(new MatchQuery("星际剧 第2季", "第2集", 2, 0, 2, false, "", ""), null);
+            check(
+                    s2.size() == 1
+                            && "20".equals(s2.get(0).animeId)
+                            && DandanplayProvider.decodeBoundEpisodeId(
+                                            s2.get(0).boundEpisodeId, p.getConfiguredOrigins())
+                                    .rawEpisodeId
+                                    .equals("2002"),
+                    "Multi-season S2 E02 selects Season 2 (2002) and excludes implicit S1 E02");
+
+            List<Candidate> s1 =
+                    p.matchOrSearch(new MatchQuery("星际剧", "第2集", 2, 0, 1, false, "", ""), null);
+            check(
+                    s1.size() == 1
+                            && "10".equals(s1.get(0).animeId)
+                            && DandanplayProvider.decodeBoundEpisodeId(
+                                            s1.get(0).boundEpisodeId, p.getConfiguredOrigins())
+                                    .rawEpisodeId
+                                    .equals("1002"),
+                    "Multi-season S1 E02 selects Season 1 (1002) and excludes Season 2 E02");
+
+            scenario.set("offset_e5");
+            List<Candidate> off =
+                    p.matchOrSearch(new MatchQuery("偏移测试剧", "第2集", 5, 0, 1, false, "", ""), null);
+            check(
+                    off.size() == 1
+                            && DandanplayProvider.decodeBoundEpisodeId(
+                                            off.get(0).boundEpisodeId, p.getConfiguredOrigins())
+                                    .rawEpisodeId
+                                    .equals("3005"),
+                    "User episode offset (adjusted episodeIndex=5 on raw 第2集) selects E05");
+        } finally {
+            srv.stop(0);
+        }
+    }
+
+    private static void testDanmuOwnershipAndStaleRejection() throws Exception {
+        DanmuOwnership.Coordinator coord = new DanmuOwnership.Coordinator();
+        coord.resetForTest();
+
+        // 1. Clean first play E01: unbound push allowed before any switch
+        DanmuOwnership.RequestContext e01 =
+                coord.beginResolve(
+                        "siteA", "vid1", "线路一", "第1集", "http://line1.example/e01.mp4", 0, false);
+        DanmuOwnership.PushResolution firstPush =
+                coord.onPluginPush("http://line1.example/e01.xml");
+        check(
+                firstPush.accepted && e01.matches(firstPush.owner),
+                "Initial unswitched episode accepts plugin push and binds owner");
+        check(
+                "http://line1.example/e01.xml".equals(coord.consumePending(e01, 25000L)),
+                "Pending plugin danmaku consumable by its bound owner");
+
+        // 2. E01 -> E02: hold E01 callback until E02 mounts E02_ONLY, then release E01 callback
+        coord.invalidateForSwitch();
+        DanmuOwnership.RequestContext e02 =
+                coord.beginResolve(
+                        "siteA", "vid1", "线路一", "第2集", "http://line1.example/e02.mp4", 1, true);
+        DanmuOwnership.RequestContext prevScope = coord.bindThreadScope(e02);
+        DanmuOwnership.PushResolution e02Push;
+        try {
+            e02Push = coord.onPluginPush("http://line1.example/e02.xml");
+        } finally {
+            coord.restoreThreadScope(prevScope);
+        }
+        check(
+                e02Push.accepted && e02.matches(e02Push.owner),
+                "E02 bound-thread push accepted after switch");
+        coord.markConfirmedDanmuMounted(e02);
+
+        DanmuOwnership.PushResolution lateBoundE01 =
+                coord.onPluginPush("http://line1.example/e01_only.xml", e01);
+        check(
+                !lateBoundE01.accepted && "stale_bound_owner".equals(lateBoundE01.rejectReason),
+                "Late E01 bound callback rejected after E02 displays first comment");
+        DanmuOwnership.PushResolution lateUnboundE01 =
+                coord.onPluginPush("http://line1.example/e01_only.xml");
+        check(!lateUnboundE01.accepted, "Late E01 unbound ambiguous callback never overwrites E02");
+
+        // 3. E01 -> E02 -> E01: old E01#1 rejected on E01#3 while E01#3 accepted
+        coord.invalidateForSwitch();
+        DanmuOwnership.RequestContext e01Return =
+                coord.beginResolve(
+                        "siteA", "vid1", "线路一", "第1集", "http://line1.example/e01.mp4", 0, true);
+        check(
+                !coord.onPluginPush("http://line1.example/e01_old.xml", e01).accepted,
+                "E01->E02->E01 rejects stale E01#1 callback on new E01#3 scope");
+        check(
+                coord.onPluginPush("http://line1.example/e01_new.xml", e01Return).accepted,
+                "E01->E02->E01 accepts fresh E01#3 callback");
+
+        // 4. Same-episode line switch: Line 1 -> Line 2
+        coord.invalidateForSwitch();
+        DanmuOwnership.RequestContext e01Line2 =
+                coord.beginResolve(
+                        "siteA", "vid1", "线路二", "第1集", "http://line2.example/e01.mp4", 0, true);
+        check(
+                !coord.onPluginPush("http://line1.example/line1.xml", e01Return).accepted,
+                "Same-episode line switch rejects Line 1 stale callback");
+        check(
+                coord.onPluginPush("http://line2.example/line2.xml", e01Line2).accepted,
+                "Same-episode line switch accepts Line 2 callback");
+
+        // 5. Exit & re-enter: exit clears active scope and pending; re-enter rejects pre-exit push
+        coord.clearActiveScope();
+        check(
+                !coord.onPluginPush("http://line2.example/late_after_exit.xml", e01Line2).accepted
+                        && !coord.onPluginPush("http://line2.example/late_unbound.xml").accepted,
+                "Exiting playback rejects both bound and unbound late callbacks");
+        DanmuOwnership.RequestContext e01Reenter =
+                coord.beginResolve(
+                        "siteA", "vid1", "线路一", "第1集", "http://line1.example/e01.mp4", 0, false);
+        check(
+                !coord.onPluginPush("http://line2.example/pre_exit.xml", e01Line2).accepted
+                        && !coord.onPluginPush("http://line2.example/ambiguous_after_reenter.xml")
+                                .accepted,
+                "Re-entering playback rejects pre-exit bound and post-exit ambiguous pushes");
+        check(
+                coord.onPluginPush("http://line1.example/reenter_ok.xml", e01Reenter).accepted,
+                "Re-entered playback accepts its own bound callback");
+
+        // 6. EpisodeStatus headline, count omission when unknown, focus recommendation, dedup
+        DanmuOwnership.EpisodeStatus st = new DanmuOwnership.EpisodeStatus();
+        st.reset("第 2 集");
+        st.markLoaded(DanmuOwnership.SourceKind.SOURCE_BUNDLED, 128, "", "");
+        check(
+                "第 2 集 · 片源自带 · 已加载 128 条".equals(st.statusHeadline())
+                        && "toggle".equals(st.recommendedInitialFocusAction()),
+                "EpisodeStatus shows known count and defaults focus to toggle when loaded");
+
+        st.markLoaded(DanmuOwnership.SourceKind.CUSTOM_SERVICE, -1, "Show · 第2集", "102");
+        check(
+                "第 2 集 · 自定义服务 · 已加载".equals(st.statusHeadline())
+                        && !st.statusHeadline().contains("-1"),
+                "EpisodeStatus omits count when unknown (segmented stream)");
+
+        st.markNoMatch();
+        check(
+                "第 2 集 · 尚未匹配".equals(st.statusHeadline())
+                        && "correct".equals(st.recommendedInitialFocusAction()),
+                "EpisodeStatus recommends correct/rematch when unmatched");
+
+        st.markFailure(
+                DanmuOwnership.SourceKind.CUSTOM_SERVICE,
+                DanmuProvider.FailureInfo.classify(new HttpStatusException(429, "rate", 12000L)));
+        check(
+                st.isFailure()
+                        && "retry".equals(st.recommendedInitialFocusAction())
+                        && st.statusHeadline().contains("429")
+                        && st.statusHeadline().contains("12"),
+                "EpisodeStatus recommends retry and explains HTTP 429 Retry-After");
+        check(
+                st.shouldEmitAutoToast("match:RATE_LIMIT:429")
+                        && !st.shouldEmitAutoToast("match:RATE_LIMIT:429"),
+                "Auto error toast is deduplicated per episode and error key");
+
+        String diag = DanmuProvider.FailureInfo.sanitizedDiagnostic("match", 401, e02.anonId(), 0);
+        check(
+                diag.contains("stage=match")
+                        && diag.contains("http=401")
+                        && !diag.contains("http://"),
+                "Sanitized diagnostic logs stage, status, anonymized req ID and count only");
+    }
+
+    private static void testMatch404405FallbackErrorsAndTimeMs() throws Exception {
+        // 1. 404 & 405 on /api/v2/match fall back to same-origin /api/v2/search/episodes
+        for (final int status : new int[] {404, 405}) {
+            final AtomicInteger searchCalls = new AtomicInteger(0);
+            HttpServer srv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            srv.setExecutor(daemonPool(2));
+            String origin = "http://127.0.0.1:" + srv.getAddress().getPort();
+            srv.createContext(
+                    "/api/v2/match",
+                    new HttpHandler() {
+                        @Override
+                        public void handle(HttpExchange ex) throws IOException {
+                            sendResponse(
+                                    ex, status, "application/json", "{\"error\":\"no match\"}");
+                        }
+                    });
+            srv.createContext(
+                    "/api/v2/search/episodes",
+                    new HttpHandler() {
+                        @Override
+                        public void handle(HttpExchange ex) throws IOException {
+                            searchCalls.incrementAndGet();
+                            sendResponse(
+                                    ex,
+                                    200,
+                                    "application/json",
+                                    "{\"animes\":[{\"animeId\":120,\"animeTitle\":\"Sample Show\",\"episodes\":[{\"episodeId\":12002,\"episodeTitle\":\"Episode 2\"}]}]}");
+                        }
+                    });
+            srv.start();
+            try {
+                DandanplayProvider p = new DandanplayProvider(origin, "", "", 1, 0L);
+                List<Candidate> cs =
+                        p.matchOrSearch(new MatchQuery("Sample Show", "Episode 2", 2, 0), null);
+                check(
+                        cs.size() == 1 && searchCalls.get() == 1,
+                        "HTTP "
+                                + status
+                                + " on /api/v2/match falls back to /api/v2/search/episodes");
+            } finally {
+                srv.stop(0);
+            }
+        }
+
+        // 2. 401 / 403 / 429 (with Retry-After) / 503 surface distinct FailureKind without calling
+        // search
+        for (final int status : new int[] {401, 403, 429, 503}) {
+            final AtomicInteger searchCalls = new AtomicInteger(0);
+            HttpServer srv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            srv.setExecutor(daemonPool(2));
+            String origin = "http://127.0.0.1:" + srv.getAddress().getPort();
+            srv.createContext(
+                    "/api/v2/match",
+                    new HttpHandler() {
+                        @Override
+                        public void handle(HttpExchange ex) throws IOException {
+                            if (status == 429) {
+                                ex.getResponseHeaders().set("Retry-After", "12");
+                            }
+                            sendResponse(ex, status, "application/json", "{\"error\":\"fixture\"}");
+                        }
+                    });
+            srv.createContext(
+                    "/api/v2/search/episodes",
+                    new HttpHandler() {
+                        @Override
+                        public void handle(HttpExchange ex) throws IOException {
+                            searchCalls.incrementAndGet();
+                            sendResponse(ex, 200, "application/json", "{\"animes\":[]}");
+                        }
+                    });
+            srv.start();
+            try {
+                DandanplayProvider p = new DandanplayProvider(origin, "", "", 1, 0L);
+                HttpStatusException caught = null;
+                try {
+                    p.matchOrSearch(new MatchQuery("Sample Show", "Episode 2", 2, 0), null);
+                } catch (HttpStatusException ex) {
+                    caught = ex;
+                }
+                DanmuProvider.FailureInfo fi = DanmuProvider.FailureInfo.classify(caught);
+                DanmuProvider.FailureKind expectedKind =
+                        (status == 401 || status == 403)
+                                ? DanmuProvider.FailureKind.AUTH
+                                : (status == 429
+                                        ? DanmuProvider.FailureKind.RATE_LIMIT
+                                        : DanmuProvider.FailureKind.SERVICE_ERROR);
+                check(
+                        caught != null
+                                && caught.statusCode == status
+                                && searchCalls.get() == 0
+                                && fi.kind == expectedKind
+                                && (status != 429 || caught.retryAfterMs == 12000L),
+                        "HTTP "
+                                + status
+                                + " surfaces "
+                                + expectedKind
+                                + " cleanly without silent empty fallback");
+            } finally {
+                srv.stop(0);
+            }
+        }
+
+        // 3. Direct/local DanmakuData.parse timeMs parity + 0s, 10min, mid-video resume & legacy
+        // seconds
+        String timeMsJson =
+                "{\"comments\":["
+                        + "{\"timeMs\":0,\"text\":\"at-zero\"},"
+                        + "{\"timeMs\":600000,\"text\":\"at-10min\"},"
+                        + "{\"time\":12.5,\"text\":\"sec-time\"},"
+                        + "{\"t\":3.2,\"text\":\"sec-t\"},"
+                        + "{\"p\":\"45.5,1,16777215\",\"m\":\"p-sec\"}"
+                        + "]}";
+        List<DanmakuData.Comment> direct = DanmakuData.parse(timeMsJson);
+        List<DanmuItem> svc = DandanplayProvider.parseDanmuPayload(timeMsJson, 100);
+        check(
+                direct.size() == 5 && svc.size() == 5,
+                "Both DanmakuData and DandanplayProvider parse all 5 timestamp formats");
+        check(
+                direct.get(0).time == 0L && "at-zero".equals(direct.get(0).text),
+                "timeMs=0 parses to 0ms");
+        check(
+                direct.get(1).time == 3200L && "sec-t".equals(direct.get(1).text),
+                "Second-based field t=3.2 preserves 3200ms semantics");
+        check(
+                direct.get(2).time == 12500L && "sec-time".equals(direct.get(2).text),
+                "Second-based field time=12.5 preserves 12500ms semantics");
+        check(
+                direct.get(3).time == 45500L && "p-sec".equals(direct.get(3).text),
+                "JSON p='45.5,...' preserves 45500ms semantics");
+        check(
+                direct.get(4).time == 600000L
+                        && svc.get(4).timeMs == 600000L
+                        && "at-10min".equals(direct.get(4).text),
+                "timeMs=600000 parses identically to 600000ms (10min) in both direct and service paths");
+
+        List<DanmakuData.Comment> xml =
+                DanmakuData.parse(
+                        "<?xml version=\"1.0\"?><i><d p=\"60.5,1,25,16777215\">xml-hi</d></i>");
+        check(
+                xml.size() == 1 && xml.get(0).time == 60500L,
+                "XML p='60.5,...' preserves second-based 60500ms semantics");
+
+        // Mid-video resume presentation check at 601500ms (10m 1.5s) vs 1500ms
+        List<DanmuItem> convertedDirect = new ArrayList<>();
+        for (int i = 0; i < direct.size(); i++) {
+            DanmakuData.Comment c = direct.get(i);
+            convertedDirect.add(new DanmuItem("d" + i, c.time, c.mode, c.color, c.text));
+        }
+        LayoutEngine resumeEngine = new LayoutEngine();
+        TextWidthMeasurer m =
+                new TextWidthMeasurer() {
+                    @Override
+                    public float measureWidth(String text) {
+                        return 120f;
+                    }
+                };
+        // At 1500ms: at-zero should appear, at-10min must NOT appear
+        List<DanmuItem> atEarly = new ArrayList<>();
+        for (DanmuItem it : convertedDirect) {
+            if (it.timeMs <= 1500L
+                    && it.timeMs >= 1500L - DanmuSegmentCache.MAX_COMMENT_LIFETIME_MS)
+                atEarly.add(it);
+        }
+        resumeEngine.step(
+                1500L, atEarly, 1920, 1080, 24f, 0f, 44f, 0.5f, 6, 48, 8200L, true, true, true, m);
+        boolean sawZeroEarly = false, saw10mEarly = false;
+        for (ActiveSlot s : resumeEngine.getSlots()) {
+            if (s.active && "at-zero".equals(s.text)) sawZeroEarly = true;
+            if (s.active && "at-10min".equals(s.text)) saw10mEarly = true;
+        }
+        check(
+                sawZeroEarly && !saw10mEarly,
+                "At 1.5s playback, timeMs=0 shows and timeMs=600000 does NOT prematurely render");
+
+        // Mid-video resume at 601500ms: at-10min MUST render right on cue
+        resumeEngine.reset();
+        List<DanmuItem> atResume = new ArrayList<>();
+        for (DanmuItem it : convertedDirect) {
+            if (it.timeMs <= 601500L
+                    && it.timeMs >= 601500L - DanmuSegmentCache.MAX_COMMENT_LIFETIME_MS)
+                atResume.add(it);
+        }
+        resumeEngine.step(
+                601500L, atResume, 1920, 1080, 24f, 0f, 44f, 0.5f, 6, 48, 8200L, true, true, true,
+                m);
+        boolean saw10mResume = false;
+        for (ActiveSlot s : resumeEngine.getSlots()) {
+            if (s.active && "at-10min".equals(s.text)) saw10mResume = true;
+        }
+        check(
+                saw10mResume,
+                "Mid-video resume at 10m01.5s renders timeMs=600000 comment right on cue");
     }
 
     private static String repeatChar(char c, int count) {

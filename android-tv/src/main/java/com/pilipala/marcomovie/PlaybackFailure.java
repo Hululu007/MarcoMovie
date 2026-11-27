@@ -12,7 +12,31 @@ final class PlaybackFailure {
                 || code == 5002;
     }
 
+    static boolean isTlsError(Throwable error) {
+        int depth = 0;
+        for (Throwable cur = error; cur != null && depth < 16; cur = cur.getCause(), depth++) {
+            if (cur instanceof javax.net.ssl.SSLException
+                    || cur instanceof java.security.cert.CertificateException
+                    || cur instanceof java.security.cert.CertPathValidatorException) {
+                return true;
+            }
+            String cls = cur.getClass().getName();
+            if (cls != null
+                    && (cls.contains("SSLHandshake")
+                            || cls.contains("CertPathValidator")
+                            || cls.contains("TrustAnchor"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     static String message(int code, int http) {
+        return message(code, http, false);
+    }
+
+    static String message(int code, int http, boolean tlsError) {
+        if (tlsError) return "HTTPS 安全证书或 TLS 握手失败（旧系统证书链可能不支持此源），请切换其他线路或检查电视系统时间。";
         if (http == 401 || http == 403) return "服务拒绝访问。可能是登录、权限或临时链接失效，请刷新线路或检查账号。";
         if (http == 404 || http == 410) return "播放链接已失效或内容不存在，请刷新线路。";
         if (code >= 2000 && code < 3000) return "媒体连接失败。请检查网络或刷新线路重试。";

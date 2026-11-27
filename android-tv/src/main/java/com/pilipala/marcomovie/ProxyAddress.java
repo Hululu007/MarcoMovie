@@ -28,6 +28,46 @@ final class ProxyAddress {
         return isListenerAddress(rewrite(address));
     }
 
+    /**
+     * Recognizes ONLY this app's active in-process local media/HLS proxy endpoints (matching the
+     * actual bound loopback listener port and exact parsed route path), never external URLs that
+     * merely contain "/kcache/" or "/hls?sid=" in their path or query parameters.
+     */
+    static boolean isInProcessMediaProxy(String address) {
+        return isInProcessMediaProxy(address, port);
+    }
+
+    static boolean isInProcessMediaProxy(String address, int activePort) {
+        if (address == null || address.trim().isEmpty() || activePort <= 0) return false;
+        try {
+            URI uri = new URI(address.trim());
+            if (!"http".equalsIgnoreCase(uri.getScheme())) return false;
+            if (!isLoopbackHost(uri.getHost())) return false;
+            if (uri.getPort() != activePort) return false;
+            String path = uri.getPath();
+            if (path == null || path.isEmpty()) return false;
+            if (path.startsWith("/kcache/") && path.length() > "/kcache/".length()) {
+                return true;
+            }
+            if ("/hls".equals(path)) {
+                String rawQuery = uri.getRawQuery();
+                if (rawQuery != null && !rawQuery.isEmpty()) {
+                    for (String pair : rawQuery.split("&")) {
+                        int eq = pair.indexOf('=');
+                        if (eq > 0
+                                && "sid".equals(pair.substring(0, eq))
+                                && eq + 1 < pair.length()) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
     private static boolean isListenerAddress(String address) {
         try {
             URI uri = new URI(address);

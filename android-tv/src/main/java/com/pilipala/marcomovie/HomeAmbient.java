@@ -68,6 +68,7 @@ final class HomeAmbient extends View {
     private boolean shadersDirty = true;
     private int lastBaseW = -1, lastBaseH = -1;
     boolean loopRunning;
+    private boolean stagePaused;
     private float scrollReveal = 1f;
 
     static float computeScrollReveal(int scrollY, int heroHeightPx) {
@@ -563,7 +564,8 @@ final class HomeAmbient extends View {
     }
 
     private boolean shouldAnimate() {
-        if (!isAttachedToWindow()
+        if (stagePaused
+                || !isAttachedToWindow()
                 || getVisibility() != View.VISIBLE
                 || getWindowVisibility() != View.VISIBLE
                 || a.reduced
@@ -578,6 +580,29 @@ final class HomeAmbient extends View {
         return true;
     }
 
+    /**
+     * Pauses/resumes ambient animation when Home is occluded behind a retained fullscreen TV stage
+     * sibling without toggling {@code View.INVISIBLE} (avoiding full-tree Drawable invalidation).
+     */
+    void setStagePaused(boolean paused) {
+        if (stagePaused == paused) return;
+        stagePaused = paused;
+        if (paused) {
+            if (pending != null) {
+                removeCallbacks(pending);
+                pending = null;
+            }
+            if (morphProgress < 1f) {
+                morphProgress = 1f;
+                curLeft = left;
+                curRight = right;
+                curMid = targetMid;
+                cachedPrevBitmap = null;
+            }
+        }
+        syncMotionLoop();
+    }
+
     private void syncMotionLoop() {
         if (shouldAnimate()) {
             if (!loopRunning) {
@@ -589,6 +614,14 @@ final class HomeAmbient extends View {
             loopRunning = false;
             MotionLoop.remove(driftStep);
         }
+    }
+
+    @Override
+    public boolean hasOverlappingRendering() {
+        if (a != null && a.isTvDevice()) {
+            return morphProgress < 1f && cachedPrevBitmap != null && !cachedPrevBitmap.isRecycled();
+        }
+        return super.hasOverlappingRendering();
     }
 
     @Override

@@ -86,6 +86,7 @@ final class Prefs {
     static final String FAVORITES = "favorites";
     static final String WATCH_HISTORY = "watch_history";
     static final String GLOBAL_SEARCH_HISTORY = "global_search_history";
+    static final String SEARCH_MATCH_MODE = "search_match_mode";
     static final String PHONETIC_TITLES = "phonetic_titles";
     // Leave the unversioned derived cache untouched for rollback; never import it into V2.
     static final String PHONETIC_PUBLIC_TITLES_V2 = "phonetic_public_titles_v2";
@@ -113,6 +114,7 @@ final class Prefs {
     static final String PLAYER_ALWAYS_SHOW_CLOCK = "player_always_show_clock";
     static final String TV_PLAYER_TOP_RIGHT_HUD = "tv_player_top_right_hud";
     static final String TV_PLAYER_TOOLBAR_ORDER = "tv_player_toolbar_order";
+    static final String TV_SETTINGS_LAST_CATEGORY = "tv_settings_last_category";
     static final String CAST_ENABLED = "cast_enabled";
     static final String CAST_DEVICE_UUID = "cast_device_uuid";
     static final String CAST_DEVICE_NAME = "cast_device_name";
@@ -477,7 +479,10 @@ final class Prefs {
                                     "subtitles",
                                     "audio-tracks",
                                     "lines",
+                                    "danmaku",
                                     "speed",
+                                    "tracks",
+                                    "epg",
                                     "decoder",
                                     "skip-intro-tool",
                                     "skip-outro-tool",

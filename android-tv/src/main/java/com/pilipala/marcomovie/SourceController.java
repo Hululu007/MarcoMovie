@@ -88,6 +88,20 @@ final class SourceController {
                                         && cfg != null)));
     }
 
+    static String siteSupportSummary(MainActivity a, Cms.Config cfg, Cms.Site s) {
+        if (s == null) return "该线路当前不可用";
+        if (!a.prefs.getBoolean(Prefs.EXPERIMENTAL_CSP, true)
+                && (CspEngine.eligible(s) || JsEngine.eligible(s) || DrpyEngine.eligible(s))) {
+            return "该线路依赖扩展插件支持，请先在设置中开启“启用来源扩展”。";
+        }
+        if (CspEngine.eligible(s)
+                && (s.jar == null || s.jar.isEmpty())
+                && (cfg == null || cfg.spider == null || cfg.spider.isEmpty())) {
+            return "该线路缺少独立 JAR 或配置级 spider，暂时无法加载。";
+        }
+        return "该线路类型暂不支持或缺少运行依赖，可点击“编辑线路”检查配置。";
+    }
+
     static SourceEngine engine(MainActivity a, Cms.Site s) throws Exception {
         return engine(a, s, null);
     }
@@ -437,6 +451,21 @@ final class SourceController {
             }
         } catch (Throwable ignored) {
         }
+    }
+
+    static void invalidateDetailDiskCache(MainActivity a, Cms.Site site, String id) {
+        java.io.File f = detailDiskFile(a, site, id);
+        if (f != null && f.isFile()) {
+            try {
+                f.delete();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    static void updateDetailDiskCache(MainActivity a, Cms.Site site, String id, String raw) {
+        if (a == null || a.privateMode) return;
+        writeDetailDiskCache(a, site, id, raw);
     }
 
     static void prefetchDetail(MainActivity a, Cms.Site site, Cms.Video video) {
@@ -1275,7 +1304,12 @@ final class SourceController {
         LinearLayout container = a.vertical();
         container.addView(input, new LinearLayout.LayoutParams(-1, -2));
         final android.widget.CheckBox appendCheck = new android.widget.CheckBox(a);
-        boolean hasExisting = a.config != null && !a.config.sites.isEmpty();
+        boolean hasExisting =
+                (a.config != null && !a.config.sites.isEmpty())
+                        || (a.isTvDevice()
+                                && !a.privateMode
+                                && a.multiSourceStore != null
+                                && !a.multiSourceStore.readState().subscriptions.isEmpty());
         if (hasExisting) {
             appendCheck.setText("追加到现有片源并按源自动分组（多源线路同时显示；取消勾选则替换）");
             appendCheck.setTextColor(MainActivity.WHITE);
@@ -1312,8 +1346,15 @@ final class SourceController {
                                                                 : "请输入 HTTP(S) 配置地址");
                                                 return;
                                             }
+                                            boolean useTvMultiSource =
+                                                    a.isTvDevice()
+                                                            && !a.privateMode
+                                                            && a.multiSourceStore != null
+                                                            && a.multiSourceStore.readState()
+                                                                    .initialized;
                                             boolean refreshingSameSingle =
-                                                    specs.size() == 1
+                                                    !useTvMultiSource
+                                                            && specs.size() == 1
                                                             && !existingOriginFinal.isEmpty()
                                                             && existingOriginFinal.equals(
                                                                     specs.get(0).url.trim());
@@ -1322,7 +1363,9 @@ final class SourceController {
                                                             && appendCheck.isChecked()
                                                             && !refreshingSameSingle;
                                             d.dismiss();
-                                            if (specs.size() == 1 && !appendMerge) {
+                                            if (specs.size() == 1
+                                                    && !appendMerge
+                                                    && !useTvMultiSource) {
                                                 final String onlyUrl = specs.get(0).url;
                                                 a.open(
                                                         new MainActivity.Screen(
@@ -1352,16 +1395,23 @@ final class SourceController {
                                                         true);
                                                 return;
                                             }
+                                            final String pageTitle =
+                                                    appendMerge ? "多源分组导入" : "导入并替换片源";
+                                            final String pageSub =
+                                                    appendMerge
+                                                            ? "MULTI-SOURCE IMPORT"
+                                                            : "IMPORT CONFIGURATION";
                                             a.open(
                                                     new MainActivity.Screen(
                                                             () -> {
-                                                                a.renderPage(
-                                                                        "多源分组导入",
-                                                                        "MULTI-SOURCE IMPORT");
+                                                                a.renderPage(pageTitle, pageSub);
                                                                 a.load(
-                                                                        "正在读取 "
-                                                                                + specs.size()
-                                                                                + " 个订阅源并自动分组…",
+                                                                        specs.size() == 1
+                                                                                ? "连接配置并读取来源…"
+                                                                                : ("正在读取 "
+                                                                                        + specs
+                                                                                                .size()
+                                                                                        + " 个订阅源并自动分组…"),
                                                                         () ->
                                                                                 fetchAndMergeImportSpecs(
                                                                                         a,
@@ -1372,14 +1422,21 @@ final class SourceController {
                                                                                     merged.config,
                                                                                     merged.origin);
                                                                             a.toast(
-                                                                                    "已导入 "
-                                                                                            + merged.sourceCount
-                                                                                            + " 个源并自动分组（共 "
-                                                                                            + merged
-                                                                                                    .config
-                                                                                                    .sites
-                                                                                                    .size()
-                                                                                            + " 条线路）");
+                                                                                    appendMerge
+                                                                                            ? ("已导入 "
+                                                                                                    + merged.sourceCount
+                                                                                                    + " 个源并自动分组（共 "
+                                                                                                    + merged
+                                                                                                            .config
+                                                                                                            .sites
+                                                                                                            .size()
+                                                                                                    + " 条线路）")
+                                                                                            : ("已切换为新片源（共 "
+                                                                                                    + merged
+                                                                                                            .config
+                                                                                                            .sites
+                                                                                                            .size()
+                                                                                                    + " 条线路，旧源已保留在管理订阅源）"));
                                                                         });
                                                             }),
                                                     true);
@@ -1435,6 +1492,59 @@ final class SourceController {
         }
         ConfigLibrary library = new ConfigLibrary(a.configStore.directory);
         long now = System.currentTimeMillis();
+        boolean useTvMultiSource =
+                a.isTvDevice()
+                        && !a.privateMode
+                        && a.multiSourceStore != null
+                        && a.multiSourceStore.readState().initialized;
+        if (useTvMultiSource) {
+            int succeeded = 0;
+            Exception lastError = null;
+            java.util.Set<String> importedSubIds = new java.util.LinkedHashSet<>();
+            for (SubscriptionManager.ImportSpec spec : specs) {
+                try {
+                    String origin = importOrigin(spec.url);
+                    String fetched = fetchImport(a, spec.url);
+                    Cms.Config parsed = Cms.parseConfig(fetched, origin);
+                    String effectiveOrigin =
+                            !parsed.warehouse.isEmpty()
+                                    ? parsed.warehouse
+                                    : (!parsed.origin.isEmpty() ? parsed.origin : origin);
+                    String savedName = !spec.name.isEmpty() ? spec.name : configName(parsed);
+                    TvMultiSourceStore.SubscriptionRecord rec =
+                            a.multiSourceStore.registerSubscription(
+                                    library, parsed.raw, effectiveOrigin, savedName, true, now);
+                    if (rec != null && !rec.id.isEmpty()) importedSubIds.add(rec.id);
+                    succeeded++;
+                } catch (Exception err) {
+                    lastError = err;
+                    AppLog.w("SourceController", "Batch import source failed: " + spec.url, err);
+                }
+            }
+            if (succeeded == 0) {
+                if (lastError != null) throw lastError;
+                throw new IOException("未能成功读取任何订阅源，请检查地址与网络");
+            }
+            if (!appendToExisting && !importedSubIds.isEmpty()) {
+                a.multiSourceStore.enableOnlySubscriptions(importedSubIds);
+            }
+            TvMultiSourceStore.EffectiveBuild built =
+                    a.multiSourceStore.buildEffectiveConfig(
+                            library,
+                            a.prefs.getString(Prefs.PREFERRED_SITE, ""),
+                            (cfg, st) -> available(a, cfg, st));
+            List<String> enabledNames = new ArrayList<String>();
+            for (TvMultiSourceStore.SubscriptionRecord r :
+                    a.multiSourceStore.readState().subscriptions) {
+                if (r.enabled && r.name != null && !r.name.isEmpty()) enabledNames.add(r.name);
+            }
+            return new SubscriptionManager.MergedResult(
+                    built.config,
+                    built.config != null && built.config.raw != null ? built.config.raw : "",
+                    built.effectiveOrigin,
+                    enabledNames,
+                    Math.max(1, built.enabledSubscriptionCount));
+        }
         java.util.LinkedHashMap<String, SubscriptionManager.SourceBundle> ordered =
                 new java.util.LinkedHashMap<String, SubscriptionManager.SourceBundle>();
 
@@ -1507,6 +1617,21 @@ final class SourceController {
                     try {
                         library.remember(parsed.raw, effectiveOrigin, savedName, "", now);
                     } catch (Exception ignored) {
+                    }
+                }
+                if (a.isTvDevice()
+                        && !a.privateMode
+                        && a.multiSourceStore != null
+                        && a.multiSourceStore.readState().initialized) {
+                    try {
+                        a.multiSourceStore.registerSubscription(
+                                library,
+                                parsed.raw,
+                                effectiveOrigin,
+                                spec.name.isEmpty() ? savedName : spec.name,
+                                true,
+                                now);
+                    } catch (Throwable ignored) {
                     }
                 }
                 String mapKey =
@@ -1640,6 +1765,98 @@ final class SourceController {
         a.worker.execute(
                 () -> {
                     try {
+                        if (a.isTvDevice()
+                                && a.multiSourceStore != null
+                                && a.multiSourceStore.readState().initialized) {
+                            TvMultiSourceStore.State msSnap = a.multiSourceStore.readState();
+                            int checked = 0;
+                            int updated = 0;
+                            int failed = 0;
+                            for (TvMultiSourceStore.SubscriptionRecord sub : msSnap.subscriptions) {
+                                if (!sub.enabled || sub.origin == null || !Cms.isHttp(sub.origin)) {
+                                    continue;
+                                }
+                                if (!force
+                                        && !SubscriptionManager.isDueForDailyUpdate(
+                                                sub.lastUpdated, now)) {
+                                    continue;
+                                }
+                                checked++;
+                                try {
+                                    boolean changed =
+                                            a.multiSourceStore.refreshSingleSubscription(
+                                                    library,
+                                                    sub.id,
+                                                    url -> fetchImport(a, url),
+                                                    now);
+                                    if (changed) updated++;
+                                    else {
+                                        TvMultiSourceStore.SubscriptionRecord latest =
+                                                a.multiSourceStore.readState().findById(sub.id);
+                                        if (latest != null && !latest.lastError.isEmpty()) failed++;
+                                    }
+                                } catch (Throwable err) {
+                                    failed++;
+                                }
+                            }
+                            String stamp = formatShortTimestamp(now);
+                            String statusText =
+                                    checked == 0
+                                            ? stamp + " · 暂无需要更新的已启用订阅"
+                                            : (updated > 0
+                                                    ? stamp + " · 已更新 " + updated + "/" + checked
+                                                            + " 个已启用订阅"
+                                                    : (failed == checked
+                                                            ? stamp + " · 检查失败（保留上次可用配置）"
+                                                            : stamp
+                                                                    + " · 已检查 "
+                                                                    + checked
+                                                                    + " 个已启用订阅，均为最新"));
+                            if (checked == 0 || failed < checked) {
+                                a.prefs
+                                        .edit()
+                                        .putLong(Prefs.SUBSCRIPTION_LAST_AUTO_UPDATE, now)
+                                        .putString(Prefs.SUBSCRIPTION_LAST_AUTO_STATUS, statusText)
+                                        .apply();
+                            } else {
+                                a.prefs
+                                        .edit()
+                                        .putString(Prefs.SUBSCRIPTION_LAST_AUTO_STATUS, statusText)
+                                        .apply();
+                            }
+                            if (updated > 0) {
+                                final long postRev = a.multiSourceStore.currentRevision();
+                                final TvMultiSourceStore.EffectiveBuild freshBuild =
+                                        a.multiSourceStore.buildEffectiveConfig(
+                                                library,
+                                                a.prefs.getString(Prefs.PREFERRED_SITE, ""),
+                                                (cfg, site) -> available(a, cfg, site));
+                                final int updCount = updated;
+                                a.ui.post(
+                                        () -> {
+                                            if (a.isFinishing()
+                                                    || a.isDestroyed()
+                                                    || freshBuild.stale
+                                                    || a.multiSourceStore.currentRevision()
+                                                            != postRev) {
+                                                return;
+                                            }
+                                            a.applyMultiSourceEffectiveBuild(
+                                                    freshBuild,
+                                                    false,
+                                                    0,
+                                                    0,
+                                                    "已自动更新 " + updCount + " 个已启用订阅");
+                                        });
+                            } else if (force) {
+                                final String finalStatus = statusText;
+                                a.ui.post(
+                                        () -> {
+                                            if (!a.isFinishing()) a.toast(finalStatus);
+                                        });
+                            }
+                            return;
+                        }
                         final SubscriptionManager.RefreshSummary summary =
                                 SubscriptionManager.refreshDueSubscriptions(
                                         library,
@@ -2390,15 +2607,46 @@ final class SourceController {
 
     static void mergeOrSaveConfig(MainActivity a, Cms.Config incoming, String origin, boolean merge)
             throws Exception {
+        String resolvedOrigin = origin != null ? origin.trim() : "";
+        if (resolvedOrigin.isEmpty() && incoming != null && incoming.origin != null) {
+            resolvedOrigin = incoming.origin.trim();
+        }
+        if (resolvedOrigin.isEmpty()
+                && incoming != null
+                && !incoming.sites.isEmpty()
+                && incoming.sites.get(0) != null
+                && incoming.sites.get(0).api != null) {
+            resolvedOrigin = incoming.sites.get(0).api.trim();
+        }
+        if (a.isTvDevice()
+                && !a.privateMode
+                && a.multiSourceStore != null
+                && a.configStore != null) {
+            ConfigLibrary library = new ConfigLibrary(a.configStore.directory);
+            if (!a.multiSourceStore.readState().initialized
+                    && a.config != null
+                    && a.config.raw != null
+                    && !a.config.raw.trim().isEmpty()) {
+                a.multiSourceStore.ensureMigrated(
+                        library,
+                        a.config.raw,
+                        a.configOrigin,
+                        a.prefs != null ? a.prefs.getString(Prefs.SELECTED_SITE, "") : "");
+            }
+            if (a.multiSourceStore.readState().initialized) {
+                saveConfig(a, incoming, resolvedOrigin, merge);
+                return;
+            }
+        }
         if (!merge || a.config == null || a.config.sites.isEmpty()) {
-            saveConfig(a, incoming, origin);
+            saveConfig(a, incoming, resolvedOrigin, merge);
             return;
         }
         org.json.JSONObject baseJson;
         try {
             baseJson = new org.json.JSONObject(Cms.withoutComments(a.config.raw));
         } catch (Exception ignored) {
-            saveConfig(a, incoming, origin);
+            saveConfig(a, incoming, resolvedOrigin, merge);
             return;
         }
         org.json.JSONArray sitesArr = baseJson.optJSONArray("sites");
@@ -2431,7 +2679,7 @@ final class SourceController {
         if (!incoming.sites.isEmpty()) {
             a.prefs.edit().putString(Prefs.SELECTED_SITE, incoming.sites.get(0).key).apply();
         }
-        saveConfig(a, merged, a.configOrigin);
+        saveConfig(a, merged, a.configOrigin, false);
     }
 
     static void importLocalUri(MainActivity a, Uri uri, boolean preferLive) {
@@ -2541,7 +2789,7 @@ final class SourceController {
                             a.ui.post(
                                     () -> {
                                         try {
-                                            mergeOrSaveConfig(a, singleCfg, "", true);
+                                            mergeOrSaveConfig(a, singleCfg, fileOrigin, true);
                                             a.toast("已导入扩展片源：" + singleCfg.sites.get(0).name);
                                         } catch (Exception ex) {
                                             a.toast("保存扩展片源失败：" + a.message(ex));
@@ -2653,27 +2901,79 @@ final class SourceController {
     }
 
     static void saveConfig(MainActivity a, Cms.Config c, String origin) throws Exception {
+        saveConfig(a, c, origin, false);
+    }
+
+    static void saveConfig(MainActivity a, Cms.Config c, String origin, boolean appendToExisting)
+            throws Exception {
         if (!c.warehouse.isEmpty()) origin = c.warehouse;
         else if (!c.origin.isEmpty()) origin = c.origin;
         if (origin == null) origin = "";
         ConfigLibrary library = new ConfigLibrary(a.configStore.directory);
         String selected = a.prefs.getString(Prefs.SELECTED_SITE, "");
         boolean isLocalFile = ConfigLibrary.isLocalFileOrigin(origin);
+        boolean incomingIsEffectiveRuntime =
+                TvMultiSourceStore.isEffectiveRuntimeConfig(c, origin)
+                        || SubscriptionManager.isMergedOrigin(origin);
         if (a.isTvDevice() || !isLocalFile) {
             try {
+                if (a.isTvDevice()
+                        && !a.privateMode
+                        && a.multiSourceStore != null
+                        && !incomingIsEffectiveRuntime
+                        && !a.multiSourceStore.readState().initialized) {
+                    String prevRaw = a.config != null && a.config.raw != null ? a.config.raw : "";
+                    String prevOrigin = a.configOrigin == null ? "" : a.configOrigin;
+                    a.multiSourceStore.ensureMigrated(library, prevRaw, prevOrigin, selected);
+                }
                 rememberConfig(a, library);
-                String id = ConfigLibrary.identity(origin, c.raw);
-                String previousId =
-                        a.config == null
-                                ? ""
-                                : ConfigLibrary.identity(a.configOrigin, a.config.raw);
-                if (!id.equals(previousId)) {
-                    selected = "";
-                    for (ConfigLibrary.Entry entry : library.entries()) {
-                        if (id.equals(entry.id)) selected = entry.selected;
+                if (!incomingIsEffectiveRuntime) {
+                    if (c.raw == null
+                            || Cms.utf8ByteLength(c.raw) > ConfigLibrary.MAX_SUBSCRIPTION_BYTES) {
+                        throw new IOException("订阅正文超过 16 MB 限制，原片库已保留");
+                    }
+                    String id = ConfigLibrary.identity(origin, c.raw);
+                    String previousId =
+                            a.config == null
+                                    ? ""
+                                    : ConfigLibrary.identity(a.configOrigin, a.config.raw);
+                    if (!id.equals(previousId)) {
+                        selected = "";
+                        for (ConfigLibrary.Entry entry : library.entries()) {
+                            if (id.equals(entry.id)) selected = entry.selected;
+                        }
+                    }
+                    if (a.isTvDevice()
+                            && !a.privateMode
+                            && a.multiSourceStore != null
+                            && a.multiSourceStore.readState().initialized) {
+                        // Validate byte limit, stage candidate content, read back & verify BEFORE
+                        // committing index or disabling previous subscriptions on replace.
+                        a.multiSourceStore.importSubscriptionAtomic(
+                                library,
+                                c.raw,
+                                origin,
+                                configName(c),
+                                appendToExisting,
+                                !appendToExisting || isLocalFile,
+                                System.currentTimeMillis());
+                        TvMultiSourceStore.EffectiveBuild rebuilt =
+                                a.multiSourceStore.buildEffectiveConfig(
+                                        library,
+                                        a.prefs.getString(Prefs.PREFERRED_SITE, ""),
+                                        (cfg, st) -> available(a, cfg, st));
+                        if (rebuilt != null && !rebuilt.stale && rebuilt.config != null) {
+                            c = rebuilt.config;
+                            origin = rebuilt.effectiveOrigin;
+                            if (!rebuilt.resolvedCurrentSiteKey.isEmpty()) {
+                                selected = rebuilt.resolvedCurrentSiteKey;
+                            }
+                            incomingIsEffectiveRuntime = true;
+                        }
+                    } else {
+                        library.remember(c.raw, origin, configName(c), selected);
                     }
                 }
-                library.remember(c.raw, origin, configName(c), selected);
             } catch (Exception e) {
                 if (a.isTvDevice()) throw e;
             }
@@ -2733,7 +3033,7 @@ final class SourceController {
         a.closeEngines();
         a.config = c;
         a.configOrigin = targetOrigin;
-        if (!isLocalFile) {
+        if (!isLocalFile && !incomingIsEffectiveRuntime) {
             CloudSyncDialog.onSubscriptionSaved(a, targetOrigin, c.raw);
         }
         a.back.clear();
@@ -2762,11 +3062,23 @@ final class SourceController {
     }
 
     static void rememberConfig(MainActivity a, ConfigLibrary library) throws Exception {
-        if (a.config != null && a.config.raw != null && !a.config.raw.isEmpty())
-            library.remember(
-                    a.config.raw,
-                    a.configOrigin,
-                    configName(a.config),
-                    a.prefs.getString(Prefs.SELECTED_SITE, ""));
+        if (a == null
+                || a.config == null
+                || a.config.raw == null
+                || a.config.raw.isEmpty()
+                || library == null) {
+            return;
+        }
+        // Never write a filtered/merged TV runtime effective config back into ConfigLibrary:
+        // raw subscription content is owned per subscription and only updated on import/refresh.
+        if (TvMultiSourceStore.isEffectiveRuntimeConfig(a.config, a.configOrigin)
+                || SubscriptionManager.isMergedOrigin(a.configOrigin)) {
+            return;
+        }
+        library.remember(
+                a.config.raw,
+                a.configOrigin,
+                configName(a.config),
+                a.prefs != null ? a.prefs.getString(Prefs.SELECTED_SITE, "") : "");
     }
 }

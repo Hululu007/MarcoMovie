@@ -811,7 +811,19 @@ final class LiveController {
         if (a.liveSession == null || a.liveSession.index < 0) return;
         LiveCatalog.Channel c = a.liveSession.channels.get(a.liveSession.index);
         String[] labels = streamLabelsFor(a, c);
-        a.playbackControls.choose("直播线路", labels, -1, i -> tuneLive(a, a.liveSession.index, i));
+        int selected = 0;
+        if (a.playbackControls != null
+                && a.playbackControls.resolved != null
+                && a.playbackControls.resolved.media != null) {
+            selected =
+                    Math.max(
+                            0,
+                            Math.min(
+                                    labels.length - 1,
+                                    a.playbackControls.resolved.media.optInt("_qualityIdx", 0)));
+        }
+        a.playbackControls.choose(
+                "直播线路", labels, selected, i -> tuneLive(a, a.liveSession.index, i));
     }
 
     static void showEpgAndCatchupDialog(MainActivity a) {

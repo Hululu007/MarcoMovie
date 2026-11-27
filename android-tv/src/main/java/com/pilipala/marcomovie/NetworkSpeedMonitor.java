@@ -59,10 +59,24 @@ final class NetworkSpeedMonitor {
         lastUidRxBytes = readUidRxBytesSafe();
         smoothedRate = -1L;
         if (listener != null) {
-            listener.onSpeedUpdated(-1L, formatSpeedLabel(-1L));
+            listener.onSpeedUpdated(0L, formatSpeedLabel(0L));
         }
         handler.removeCallbacks(ticker);
         handler.postDelayed(ticker, SAMPLE_INTERVAL_MS);
+    }
+
+    /** Clears previous playback session rate immediately without stopping active sampling. */
+    void resetSession() {
+        lastSampleTimeMs = SystemClock.elapsedRealtime();
+        lastUidRxBytes = readUidRxBytesSafe();
+        smoothedRate = -1L;
+        if (listener != null) {
+            listener.onSpeedUpdated(0L, formatSpeedLabel(0L));
+        }
+        if (running) {
+            handler.removeCallbacks(ticker);
+            handler.postDelayed(ticker, SAMPLE_INTERVAL_MS);
+        }
     }
 
     void stop() {
@@ -77,7 +91,7 @@ final class NetworkSpeedMonitor {
         return running;
     }
 
-    private void sampleAndDispatch() {
+    void sampleAndDispatch() {
         long now = SystemClock.elapsedRealtime();
         long rawRate = -1L;
 
@@ -99,17 +113,36 @@ final class NetworkSpeedMonitor {
             }
         }
         lastSampleTimeMs = now;
-        if (curUidBytes >= 0L) {
-            lastUidRxBytes = curUidBytes;
-        }
+        lastUidRxBytes = curUidBytes >= 0L ? curUidBytes : -1L;
 
+        long displayRate;
         if (rawRate >= 0L) {
             smoothedRate = smoothRate(smoothedRate, rawRate);
+            displayRate = Math.max(0L, smoothedRate);
+        } else {
+            // Sample missing/unavailable or counter reset: reset smoothing and report 0 KB/s
+            // immediately instead of freezing stale speed from earlier samples or sessions.
+            smoothedRate = -1L;
+            displayRate = 0L;
         }
         if (listener != null) {
-            long report = smoothedRate >= 0L ? smoothedRate : rawRate;
-            listener.onSpeedUpdated(report, formatSpeedLabel(report));
+            listener.onSpeedUpdated(displayRate, formatSpeedLabel(displayRate));
         }
+    }
+
+    /** Returns true for clearly local media paths/URIs that perform no network transfer. */
+    static boolean isLocalMediaUrl(String url) {
+        if (url == null) return false;
+        String trimmed = url.trim();
+        if (trimmed.isEmpty()) return false;
+        String lower = trimmed.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("file:")
+                || lower.startsWith("content:")
+                || lower.startsWith("android.resource:")
+                || trimmed.startsWith("/")) {
+            return true;
+        }
+        return false;
     }
 
     private static long readUidRxBytesSafe() {
@@ -129,16 +162,15 @@ final class NetworkSpeedMonitor {
 
     /** Exponential smoothing favoring quick ramp-up while avoiding noisy jumps. */
     static long smoothRate(long previous, long current) {
-        if (current < 0L) return previous;
+        if (current < 0L) return -1L;
         if (previous < 0L) return current;
         if (current == 0L) return previous < 2048L ? 0L : Math.round(previous * 0.35);
         return Math.round(previous * 0.35 + current * 0.65);
     }
 
-    /** Formats a raw bytes/sec value into crisp fixed-unit human text. */
+    /** Formats a raw bytes/sec value into crisp fixed-unit human text; unknown/zero renders 0 KB/s. */
     static String formatSpeed(long bytesPerSec) {
-        if (bytesPerSec < 0L) return "测速中…";
-        if (bytesPerSec == 0L) return "0 KB/s";
+        if (bytesPerSec <= 0L) return "0 KB/s";
         if (bytesPerSec < 1024L) return bytesPerSec + " B/s";
         double kb = bytesPerSec / 1024.0;
         if (kb < 1024.0) return String.format(Locale.US, "%.0f KB/s", kb);

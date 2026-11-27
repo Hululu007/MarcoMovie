@@ -135,17 +135,35 @@ final class TvDetailHost {
         return line.episodes.get(0);
     }
 
+    static WatchHistory.Entry resolveHistoryFallbackBookmark(
+            WatchHistory.Entry matchedBookmark,
+            WatchHistory.Entry pendingFallback,
+            Cms.Site site,
+            Cms.Video video) {
+        if (PlaybackController.matchesHistoryFallbackBookmark(matchedBookmark, site, video)) {
+            return matchedBookmark;
+        }
+        if (PlaybackController.matchesHistoryFallbackBookmark(pendingFallback, site, video)) {
+            return pendingFallback;
+        }
+        return null;
+    }
+
     private static WatchHistory.Entry findBookmark(MainActivity a, Cms.Site site, Cms.Video video) {
         if (a == null || site == null || site.key == null || video == null || video.id == null)
             return null;
+        WatchHistory.Entry aliasMatch = null;
         for (WatchHistory.Entry entry : a.watchHistory()) {
-            if (entry != null
-                    && Objects.equals(site.key, entry.site)
-                    && Objects.equals(video.id, entry.id)) {
+            if (entry == null || !Objects.equals(video.id, entry.id)) continue;
+            if (Objects.equals(site.key, entry.site)) {
                 return entry;
             }
+            if (aliasMatch == null
+                    && TvMultiSourceStore.siteMatchesHistoryKey(a, site, entry.site)) {
+                aliasMatch = entry;
+            }
         }
-        return null;
+        return aliasMatch;
     }
 
     private static void mergeListingFallback(Cms.Video target, Cms.Video fallback) {
@@ -309,6 +327,7 @@ final class TvDetailHost {
 
         final Cms.Video initialVideo = ready != null ? ready : listing;
         mergeListingFallback(initialVideo, listing);
+        PlaybackController.clearMismatchedHistoryMigration(a, site, initialVideo);
         SeriesScrapeStore.OverrideRecord savedOv =
                 SeriesScrapeStore.load(
                         a, site != null ? site.key : "", initialVideo.id, initialVideo.title);
@@ -316,7 +335,13 @@ final class TvDetailHost {
             TvSeriesScrapeDialog.applyOverrideToVideo(initialVideo, savedOv);
         }
         final Cms.Video[] activeVideo = {initialVideo};
-        final WatchHistory.Entry[] activeBookmark = {findBookmark(a, site, initialVideo)};
+        WatchHistory.Entry initBm =
+                resolveHistoryFallbackBookmark(
+                        findBookmark(a, site, initialVideo),
+                        a.historyFallbackBookmark,
+                        site,
+                        initialVideo);
+        final WatchHistory.Entry[] activeBookmark = {initBm};
         final boolean initiallyPlayable = hasPlayableLines(initialVideo);
 
         int[] initSel =
@@ -491,7 +516,12 @@ final class TvDetailHost {
                                     a, site != null ? site.key : "", resolved.id, resolved.title);
                     if (ov != null) TvSeriesScrapeDialog.applyOverrideToVideo(resolved, ov);
                     activeVideo[0] = resolved;
-                    WatchHistory.Entry bm = findBookmark(a, site, resolved);
+                    WatchHistory.Entry bm =
+                            resolveHistoryFallbackBookmark(
+                                    findBookmark(a, site, resolved),
+                                    a.historyFallbackBookmark,
+                                    site,
+                                    resolved);
                     activeBookmark[0] = bm;
                     boolean playable = hasPlayableLines(resolved);
                     int[] sel =
@@ -521,12 +551,19 @@ final class TvDetailHost {
                             fileCap,
                             histCap);
                     if (!playable) {
-                        WatchHistory.Entry fallbackBm = bm != null ? bm : a.historyFallbackBookmark;
+                        WatchHistory.Entry pendingFallback = a.historyFallbackBookmark;
+                        if (pendingFallback != null
+                                && !PlaybackController.matchesHistoryFallbackBookmark(
+                                        pendingFallback, site, resolved)) {
+                            a.historyFallbackBookmark = null;
+                            pendingFallback = null;
+                        }
+                        WatchHistory.Entry fallbackBm =
+                                resolveHistoryFallbackBookmark(bm, pendingFallback, site, resolved);
                         if (fallbackBm != null
                                 && !a.historyFallbackInFlight
-                                && fallbackBm.title != null
-                                && !fallbackBm.title.trim().isEmpty()
                                 && CatalogScreen.hasAlternativeHistorySources(a, site.key)) {
+                            a.historyFallbackBookmark = null;
                             CatalogScreen.resumeHistoryFromAlternativeSources(
                                     a, fallbackBm, site.key, "原片源暂无可播放线路", true);
                             return;
@@ -554,15 +591,20 @@ final class TvDetailHost {
         MainActivity.Done<Throwable> onDetailError =
                 error -> {
                     if (!valid.get()) return;
+                    WatchHistory.Entry pendingFallback = a.historyFallbackBookmark;
+                    if (pendingFallback != null
+                            && !PlaybackController.matchesHistoryFallbackBookmark(
+                                    pendingFallback, site, initialVideo)) {
+                        a.historyFallbackBookmark = null;
+                        pendingFallback = null;
+                    }
                     WatchHistory.Entry fallbackBm =
-                            activeBookmark[0] != null
-                                    ? activeBookmark[0]
-                                    : a.historyFallbackBookmark;
+                            resolveHistoryFallbackBookmark(
+                                    activeBookmark[0], pendingFallback, site, initialVideo);
                     if (fallbackBm != null
                             && !a.historyFallbackInFlight
-                            && fallbackBm.title != null
-                            && !fallbackBm.title.trim().isEmpty()
                             && CatalogScreen.hasAlternativeHistorySources(a, site.key)) {
+                        a.historyFallbackBookmark = null;
                         CatalogScreen.resumeHistoryFromAlternativeSources(
                                 a, fallbackBm, site.key, "原片源加载失败", true);
                         return;

@@ -1847,7 +1847,7 @@ final class AccountPanel {
                         new int[] {0xff121217, 0xff050507, 0xff000000});
         pageRoot.setBackground(pageBg);
         a.root = pageRoot;
-        a.setContentView(pageRoot);
+        a.presentRoot(pageRoot, false);
 
         activePageRefresh =
                 () -> {

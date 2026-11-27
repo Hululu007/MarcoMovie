@@ -103,9 +103,64 @@ final class AppDialog extends Dialog {
         return 0;
     }
 
+    /**
+     * Computes the maximum body height that fits strictly inside the visible window budget without
+     * ever exceeding {@code winH - outerMarginY - chromeH}.
+     */
     static int computeMaxContentHeight(int winH, int chromeH, int outerMarginY, int minH) {
-        int available = Math.max(0, winH - Math.max(0, outerMarginY) - Math.max(0, chromeH));
-        return Math.max(minH, available);
+        int budget = Math.max(0, winH - Math.max(0, outerMarginY));
+        return Math.max(0, budget - Math.max(0, chromeH));
+    }
+
+    static final class DialogWindowBounds {
+        final int width;
+        final int maxHeight;
+        final int innerWidth;
+        final int padH;
+        final int outerMarginY;
+
+        DialogWindowBounds(int width, int maxHeight, int innerWidth, int padH, int outerMarginY) {
+            this.width = width;
+            this.maxHeight = maxHeight;
+            this.innerWidth = innerWidth;
+            this.padH = padH;
+            this.outerMarginY = outerMarginY;
+        }
+    }
+
+    /**
+     * Strictly caps dialog dimensions to the real visible viewport so constrained windows (e.g.
+     * 320x200px @ 2x) never request a larger window than available space.
+     */
+    static DialogWindowBounds computeDialogWindowBounds(
+            int visibleW,
+            int visibleH,
+            int preferredMaxW,
+            int defaultMarginH,
+            int defaultOuterMarginY,
+            int defaultPadH) {
+        int safeVisW = Math.max(1, visibleW);
+        int safeVisH = Math.max(1, visibleH);
+        int marginH = Math.min(Math.max(0, defaultMarginH), Math.max(0, safeVisW / 12));
+        int availW = Math.max(1, safeVisW - marginH);
+        int width = Math.max(1, Math.min(Math.max(1, preferredMaxW), availW));
+        int padH = Math.min(Math.max(0, defaultPadH), Math.max(0, width / 10));
+        int innerW = Math.max(1, width - padH * 2);
+        int outerMarginY = Math.min(Math.max(0, defaultOuterMarginY), Math.max(0, safeVisH / 10));
+        int maxH = Math.max(1, safeVisH - outerMarginY);
+        return new DialogWindowBounds(width, maxH, innerW, padH, outerMarginY);
+    }
+
+    /** Computes how many action buttons fit cleanly on one footer row without truncating labels. */
+    static int computeFooterColumns(
+            int innerWidthPx, int maxButtonNeededPx, int gapPx, int buttonCount) {
+        int count = Math.max(1, buttonCount);
+        int need = Math.max(1, maxButtonNeededPx);
+        int gap = Math.max(0, gapPx);
+        if (count <= 1) return 1;
+        if (count * need + (count - 1) * gap <= innerWidthPx) return count;
+        if (count >= 2 && (2 * need + gap) <= innerWidthPx) return 2;
+        return 1;
     }
 
     @Override
@@ -117,7 +172,12 @@ final class AppDialog extends Dialog {
         int padTop = a.dp(a.isTvDevice() ? 20 : 20);
         int padBottom = a.dp(16);
         panel.setPadding(padH, padTop, padH, padBottom);
-        a.glass(panel, 28);
+        if (a.isTvDevice()) {
+            panel.setBackground(
+                    TvV17Surface.rounded(0xf0161e2a, a.dp(24), 0x38ffffff, Math.max(1, a.dp(1))));
+        } else {
+            a.glass(panel, 28);
+        }
         TextView titleView = null;
         if (spec.title != null) {
             titleView = a.text(spec.title, a.isTvDevice() ? 22 : 20, MainActivity.WHITE);
@@ -168,29 +228,43 @@ final class AppDialog extends Dialog {
                 content.addView(item, lp);
                 if (checked || selected == null) selected = item;
             }
-        int marginH = a.isTvDevice() ? a.dp(72) : a.dp(32);
-        int width =
-                Math.min(
-                        a.dp(spec.wide ? 840 : (spec.view == null ? 520 : 660)),
-                        a.windowWidth() - marginH);
-        int innerWidth = Math.max(a.dp(200), width - padH * 2);
-
-        LinearLayout footer = a.row();
-        footer.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        int totalActionChars = 0;
-        for (String lbl : spec.buttons.values()) {
-            if (lbl != null) totalActionChars += lbl.length();
+        android.graphics.Rect visibleRect = new android.graphics.Rect();
+        if (a.getWindow() != null && a.getWindow().getDecorView() != null) {
+            a.getWindow().getDecorView().getWindowVisibleDisplayFrame(visibleRect);
         }
-        boolean compactFooter =
-                spec.buttons.size() >= 3
-                        || !a.isTvDevice()
-                        || (spec.buttons.size() == 2 && totalActionChars > 10);
+        int visibleW =
+                visibleRect.width() > 0
+                        ? Math.min(a.windowWidth(), visibleRect.width())
+                        : a.windowWidth();
+        int visibleH =
+                visibleRect.height() > 0
+                        ? Math.min(a.windowHeight(), visibleRect.height())
+                        : a.windowHeight();
+        int marginH = a.isTvDevice() ? a.dp(Math.min(72, Math.max(24, visibleW / 14))) : a.dp(32);
+        int defaultOuterMarginY = a.dp(a.isTvDevice() ? 48 : 80);
+        DialogWindowBounds bounds =
+                computeDialogWindowBounds(
+                        visibleW,
+                        visibleH,
+                        a.dp(spec.wide ? 840 : (spec.view == null ? 520 : 660)),
+                        marginH,
+                        defaultOuterMarginY,
+                        padH);
+        int width = bounds.width;
+        int innerWidth = bounds.innerWidth;
+        if (bounds.padH != padH) {
+            padH = bounds.padH;
+            panel.setPadding(padH, padTop, padH, padBottom);
+        }
+
         List<Button> orderedActions = new ArrayList<>();
+        int maxActionNeedPx = 0;
         for (int code : new int[] {-3, -2, -1})
             if (spec.buttons.containsKey(code)) {
+                String lblText = spec.buttons.get(code);
                 Button button =
                         a.button(
-                                spec.buttons.get(code),
+                                lblText,
                                 "dialog-action:" + code,
                                 () -> {
                                     dismiss();
@@ -199,26 +273,62 @@ final class AppDialog extends Dialog {
                                     if (action != null) action.onClick(this, code);
                                 });
                 if (button.getId() == View.NO_ID) button.setId(View.generateViewId());
-                button.setSingleLine(true);
-                button.setEllipsize(android.text.TextUtils.TruncateAt.END);
                 button.setMinWidth(0);
                 button.setMinimumWidth(0);
-                button.setMaxWidth(
-                        Math.max(
-                                a.dp(96), innerWidth / Math.max(1, spec.buttons.size()) - a.dp(8)));
-                if (compactFooter) {
-                    button.setTextSize(spec.buttons.size() >= 3 ? 13f : 14f);
-                    button.setPadding(a.dp(10), a.dp(6), a.dp(10), a.dp(6));
-                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, a.dp(42), 1);
-                    lp.setMargins(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
-                    footer.addView(button, lp);
-                } else {
-                    button.setTextSize(14);
-                    a.addButton(footer, button);
-                }
+                button.setTextSize(spec.buttons.size() >= 3 ? 13.5f : 14f);
+                button.setPadding(a.dp(12), a.dp(6), a.dp(12), a.dp(6));
+                int measuredNeed =
+                        Math.round(button.getPaint().measureText(lblText == null ? "" : lblText))
+                                + a.dp(28);
+                if (measuredNeed > maxActionNeedPx) maxActionNeedPx = measuredNeed;
                 actions.put(code, button);
                 orderedActions.add(button);
             }
+        final int footerCols =
+                orderedActions.isEmpty()
+                        ? 1
+                        : computeFooterColumns(
+                                innerWidth, maxActionNeedPx, a.dp(8), orderedActions.size());
+        LinearLayout footer = a.vertical();
+        footer.setClipChildren(false);
+        footer.setClipToPadding(false);
+        boolean wrapFooterLabels = footerCols == 1 && maxActionNeedPx > innerWidth;
+        if (!orderedActions.isEmpty()) {
+            LinearLayout fRow = null;
+            for (int i = 0; i < orderedActions.size(); i++) {
+                Button button = orderedActions.get(i);
+                button.setSingleLine(!wrapFooterLabels);
+                button.setMaxLines(wrapFooterLabels ? 2 : 1);
+                button.setEllipsize(
+                        wrapFooterLabels ? android.text.TextUtils.TruncateAt.END : null);
+                if (i % footerCols == 0) {
+                    fRow = a.row();
+                    fRow.setGravity(
+                            footerCols >= orderedActions.size() && orderedActions.size() <= 2
+                                    ? (Gravity.RIGHT | Gravity.CENTER_VERTICAL)
+                                    : Gravity.CENTER_VERTICAL);
+                    fRow.setClipChildren(false);
+                    fRow.setClipToPadding(false);
+                    footer.addView(fRow, new LinearLayout.LayoutParams(-1, -2));
+                }
+                if (footerCols >= orderedActions.size()
+                        && orderedActions.size() <= 2
+                        && a.isTvDevice()
+                        && maxActionNeedPx * orderedActions.size() + a.dp(16) <= innerWidth) {
+                    LinearLayout.LayoutParams lp =
+                            new LinearLayout.LayoutParams(
+                                    Math.max(a.dp(92), maxActionNeedPx),
+                                    wrapFooterLabels ? -2 : a.dp(42));
+                    lp.setMargins(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
+                    fRow.addView(button, lp);
+                } else {
+                    LinearLayout.LayoutParams lp =
+                            new LinearLayout.LayoutParams(0, wrapFooterLabels ? -2 : a.dp(42), 1f);
+                    lp.setMargins(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
+                    fRow.addView(button, lp);
+                }
+            }
+        }
 
         int chromeHeight = padTop + padBottom;
         if (titleView != null) {
@@ -233,14 +343,21 @@ final class AppDialog extends Dialog {
                     View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
             chromeHeight += footer.getMeasuredHeight() + a.dp(14);
         }
-        int outerMarginY = a.dp(a.isTvDevice() ? 56 : 96);
+        int outerMarginY = bounds.outerMarginY;
+        int dialogMaxH = bounds.maxHeight;
         final int maxHeight =
-                computeMaxContentHeight(a.windowHeight(), chromeHeight, outerMarginY, a.dp(110));
+                computeMaxContentHeight(
+                        visibleH, chromeHeight, outerMarginY, Math.min(a.dp(96), dialogMaxH / 2));
+        boolean needOuterScroll = maxHeight < Math.min(a.dp(80), Math.max(1, dialogMaxH / 2));
+        final int bodyCapH =
+                needOuterScroll
+                        ? Math.max(1, Math.min(dialogMaxH, Math.max(a.dp(48), dialogMaxH / 2)))
+                        : maxHeight;
 
         content.measure(
                 View.MeasureSpec.makeMeasureSpec(innerWidth, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-        boolean contentScrollable = content.getMeasuredHeight() > maxHeight;
+        boolean contentScrollable = content.getMeasuredHeight() > bodyCapH;
         if (messageView != null && (contentScrollable || orderedActions.isEmpty())) {
             messageView.setFocusable(true);
             messageView.setFocusableInTouchMode(a.isTvDevice());
@@ -267,10 +384,10 @@ final class AppDialog extends Dialog {
         panel.addView(
                 clip,
                 new LinearLayout.LayoutParams(
-                        -1, Math.min(maxHeight, Math.max(a.dp(24), content.getMeasuredHeight()))));
+                        -1, Math.min(bodyCapH, Math.max(a.dp(24), content.getMeasuredHeight()))));
         content.addOnLayoutChangeListener(
                 (v, l, t, r, b, ol, ot, orr, ob) -> {
-                    int desired = Math.min(maxHeight, Math.max(a.dp(24), b - t));
+                    int desired = Math.min(bodyCapH, Math.max(a.dp(24), b - t));
                     ViewGroup.LayoutParams clp = clip.getLayoutParams();
                     if (clp != null && clp.height != desired) {
                         clp.height = desired;
@@ -284,14 +401,21 @@ final class AppDialog extends Dialog {
         for (int i = 0; i < content.getChildCount(); i++)
             if (content.getChildAt(i) instanceof Button) style((Button) content.getChildAt(i));
         for (Button button : actions.values()) style(button);
-        setContentView(panel);
+        if (needOuterScroll) {
+            ScrollView outer = new TvScrollView(a);
+            outer.setVerticalScrollBarEnabled(false);
+            outer.addView(panel, new ScrollView.LayoutParams(width, -2));
+            setContentView(outer, new ViewGroup.LayoutParams(width, dialogMaxH));
+        } else {
+            setContentView(panel);
+        }
         setOnCancelListener(spec.cancel);
         super.show();
         a.appDialog = this;
         Window w = getWindow();
         w.setBackgroundDrawableResource(android.R.color.transparent);
         w.getDecorView().setMinimumWidth(0);
-        w.setLayout(width, -2);
+        w.setLayout(width, needOuterScroll ? dialogMaxH : -2);
         w.setGravity(Gravity.CENTER);
         w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
         WindowManager.LayoutParams attrs = w.getAttributes();
@@ -306,12 +430,22 @@ final class AppDialog extends Dialog {
             if (!orderedActions.isEmpty()) {
                 for (int i = 0; i < orderedActions.size(); i++) {
                     Button cur = orderedActions.get(i);
-                    Button left = i > 0 ? orderedActions.get(i - 1) : cur;
-                    Button right = i + 1 < orderedActions.size() ? orderedActions.get(i + 1) : cur;
+                    int col = i % footerCols;
+                    Button left = col > 0 ? orderedActions.get(i - 1) : cur;
+                    Button right =
+                            (col + 1 < footerCols && i + 1 < orderedActions.size())
+                                    ? orderedActions.get(i + 1)
+                                    : cur;
                     cur.setNextFocusLeftId(left.getId());
                     cur.setNextFocusRightId(right.getId());
-                    cur.setNextFocusDownId(cur.getId());
-                    if (!hasFocusableContent) {
+                    if (i + footerCols < orderedActions.size()) {
+                        cur.setNextFocusDownId(orderedActions.get(i + footerCols).getId());
+                    } else {
+                        cur.setNextFocusDownId(cur.getId());
+                    }
+                    if (i >= footerCols) {
+                        cur.setNextFocusUpId(orderedActions.get(i - footerCols).getId());
+                    } else if (!hasFocusableContent) {
                         cur.setNextFocusUpId(cur.getId());
                     }
                 }
@@ -340,7 +474,7 @@ final class AppDialog extends Dialog {
                     WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
                             | WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN);
         }
-        if (!a.reduced) {
+        if (!a.reduced && !a.isTvDevice()) {
             panel.setAlpha(0.02f);
             panel.setScaleX(.96f);
             panel.setScaleY(.96f);
@@ -351,7 +485,7 @@ final class AppDialog extends Dialog {
                     .setDuration(160)
                     .withEndAction(() -> com.pilipala.glass.GlassworkSurface.forceRecapture(panel))
                     .start();
-        } else {
+        } else if (!a.isTvDevice()) {
             panel.post(() -> com.pilipala.glass.GlassworkSurface.forceRecapture(panel));
         }
     }

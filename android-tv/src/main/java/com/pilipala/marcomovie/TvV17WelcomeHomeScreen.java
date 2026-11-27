@@ -70,11 +70,30 @@ final class TvV17WelcomeHomeScreen {
         UiCompat.setElevation(heroCard, a.dp(12));
 
         // Status badge pill
+        boolean zeroEnabled = a.hasZeroEnabledSubscriptions();
+        boolean noVodLinesEnabled =
+                !zeroEnabled && a.hasNoEnabledVodSitesWithEnabledSubscriptions();
+        int totalSavedSubs =
+                ((zeroEnabled || noVodLinesEnabled) && a.multiSourceStore != null)
+                        ? a.multiSourceStore.readState().subscriptions.size()
+                        : 0;
+        int enabledSubsCount =
+                (noVodLinesEnabled && a.multiSourceStore != null)
+                        ? a.multiSourceStore.readState().enabledCount()
+                        : 0;
         String badgeText;
         int badgeColor;
         int badgeBg;
         if (a.privateMode) {
             badgeText = "● 隐私空间 · 独立数据隔离";
+            badgeColor = 0xfffbbf24;
+            badgeBg = 0x24fbbf24;
+        } else if (zeroEnabled) {
+            badgeText = "● 暂无已启用片源 · 已保留 " + totalSavedSubs + " 个订阅";
+            badgeColor = 0xfffbbf24;
+            badgeBg = 0x24fbbf24;
+        } else if (noVodLinesEnabled) {
+            badgeText = "● 暂无可用点播线路 · 已启用 " + enabledSubsCount + " 个订阅";
             badgeColor = 0xfffbbf24;
             badgeBg = 0x24fbbf24;
         } else if (siteCount > 0) {
@@ -94,7 +113,8 @@ final class TvV17WelcomeHomeScreen {
         a.gap(heroCard, 18);
 
         // Headline
-        TextView title = a.text("把今晚，留给好故事。", 32f, TvV17Theme.TEXT);
+        String headline = zeroEnabled ? "暂无已启用片源" : (noVodLinesEnabled ? "暂无可用点播线路" : "把今晚，留给好故事。");
+        TextView title = a.text(headline, 32f, TvV17Theme.TEXT);
         title.setTypeface(null, Typeface.BOLD);
         title.setLineSpacing(a.dp(4), 1f);
         heroCard.addView(title);
@@ -102,9 +122,13 @@ final class TvV17WelcomeHomeScreen {
 
         // Lead copy
         String lead =
-                siteCount > 0
-                        ? "已导入影视配置，选择一个可用片源即可进入大屏片库；也可以随时扫码追加新源或直接观看电视直播。"
-                        : "专为客厅大屏打造的原生影音播放器。手机扫码导入影视或直播源，畅享 4K 杜比视界、全景声与丝滑遥控体验。";
+                zeroEnabled
+                        ? "所有已添加订阅当前均已停用。打开「管理订阅源」可重新开启任意订阅，原有配置、分组、收藏与观看历史均已完整保留。"
+                        : (noVodLinesEnabled
+                                ? "已启用订阅下当前没有开启的点播线路（直播频道、配置与观看历史均已保留）。打开「管理订阅源 → 管理线路」可随时恢复。"
+                                : (siteCount > 0
+                                        ? "已导入影视配置，选择一个可用片源即可进入大屏片库；也可以随时扫码追加新源或直接观看电视直播。"
+                                        : "专为客厅大屏打造的原生影音播放器。手机扫码导入影视或直播源，畅享 4K 杜比视界、全景声与丝滑遥控体验。"));
         TextView subtitle = a.text(lead, 14f, 0xb8ebebf5);
         subtitle.setLineSpacing(a.dp(5), 1f);
         heroCard.addView(subtitle);
@@ -117,7 +141,19 @@ final class TvV17WelcomeHomeScreen {
         primaryRow.setClipToPadding(false);
 
         final View firstPrimary;
-        if (a.config == null) {
+        if (zeroEnabled || noVodLinesEnabled) {
+            firstPrimary =
+                    buildActionPill(
+                            "管理订阅源",
+                            "welcome-manage-subscriptions",
+                            true,
+                            () -> SourcePicker.showManageSubscriptions(a));
+            addPill(primaryRow, firstPrimary, false);
+            addPill(
+                    primaryRow,
+                    buildActionPill("＋ 添加新源", "welcome-add-source", false, a::importDialog),
+                    true);
+        } else if (a.config == null) {
             firstPrimary = buildActionPill("＋ 导入我的配置", "primary", true, () -> a.importDialog());
             addPill(primaryRow, firstPrimary, false);
         } else {

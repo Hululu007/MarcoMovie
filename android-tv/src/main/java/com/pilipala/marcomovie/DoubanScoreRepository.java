@@ -5,6 +5,10 @@ package com.pilipala.marcomovie;
 import android.content.Context;
 import android.view.View;
 import android.widget.TextView;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -24,10 +28,9 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import org.json.JSONArray;
-import org.json.JSONObject;
 
 /**
  * Lightweight, throttled, persistent Douban rating cache & resolver dedicated to poster card grids
@@ -41,6 +44,9 @@ final class DoubanScoreRepository {
     private static final long MISS_TTL_MS = 48L * 3600 * 1000L;
     private static final int MAX_PENDING_TASKS = 48;
     private static final int TAG_LOOKUP_KEY = 0x5f444253; // "DBS"
+    private static final int TAG_BIND_TOKEN = 0x5f444254; // "DBT"
+    private static final int TAG_SCOPE_TOKEN = 0x5f444255; // "DBU"
+    private static final AtomicInteger NEXT_BIND_TOKEN = new AtomicInteger(1);
 
     private static final Pattern YEAR_PATTERN = Pattern.compile("(19[4-9]\\d|20[0-3]\\d)");
     private static final Pattern NUMERIC_ID_PATTERN = Pattern.compile("^\\d{5,12}$");
@@ -73,8 +79,25 @@ final class DoubanScoreRepository {
     private static final AtomicBoolean DISK_LOAD_STARTED = new AtomicBoolean(false);
     private static volatile long lastDiskSaveMs;
     private static final AtomicBoolean DISK_SAVE_SCHEDULED = new AtomicBoolean(false);
-    private static final ConcurrentHashMap<String, CopyOnWriteArrayList<WeakReference<TextView>>>
-            INFLIGHT = new ConcurrentHashMap<>();
+
+    private static final class BadgeWaiter {
+        final WeakReference<MainActivity> hostRef;
+        final WeakReference<TextView> badgeRef;
+        final int bindToken;
+        final int scopeToken;
+        final int activityGeneration;
+
+        BadgeWaiter(MainActivity host, TextView badge, int bindToken, int scopeToken) {
+            this.hostRef = new WeakReference<>(host);
+            this.badgeRef = new WeakReference<>(badge);
+            this.bindToken = bindToken;
+            this.scopeToken = scopeToken;
+            this.activityGeneration = host.generation;
+        }
+    }
+
+    private static final ConcurrentHashMap<String, CopyOnWriteArrayList<BadgeWaiter>> INFLIGHT =
+            new ConcurrentHashMap<>();
 
     private static final class FetchTask implements Runnable {
         final String key;
@@ -99,7 +122,18 @@ final class DoubanScoreRepository {
                     TimeUnit.SECONDS,
                     new LinkedBlockingQueue<Runnable>(8),
                     r -> {
-                        Thread t = new Thread(r, "douban-card-disk");
+                        Thread t =
+                                new Thread(
+                                        () -> {
+                                            try {
+                                                android.os.Process.setThreadPriority(
+                                                        android.os.Process
+                                                                .THREAD_PRIORITY_BACKGROUND);
+                                            } catch (Throwable ignored) {
+                                            }
+                                            r.run();
+                                        },
+                                        "douban-card-disk");
                         t.setDaemon(true);
                         return t;
                     },
@@ -113,7 +147,18 @@ final class DoubanScoreRepository {
                     TimeUnit.SECONDS,
                     new LinkedBlockingQueue<Runnable>(MAX_PENDING_TASKS),
                     r -> {
-                        Thread t = new Thread(r, "douban-card-score");
+                        Thread t =
+                                new Thread(
+                                        () -> {
+                                            try {
+                                                android.os.Process.setThreadPriority(
+                                                        android.os.Process
+                                                                .THREAD_PRIORITY_BACKGROUND);
+                                            } catch (Throwable ignored) {
+                                            }
+                                            r.run();
+                                        },
+                                        "douban-card-score");
                         t.setDaemon(true);
                         return t;
                     },
@@ -130,6 +175,14 @@ final class DoubanScoreRepository {
                             INFLIGHT.remove(((FetchTask) r).key);
                         }
                     });
+
+    static {
+        try {
+            ((ThreadPoolExecutor) DISK_IO_POOL).allowCoreThreadTimeOut(true);
+            ((ThreadPoolExecutor) FETCH_POOL).allowCoreThreadTimeOut(true);
+        } catch (Throwable ignored) {
+        }
+    }
 
     private DoubanScoreRepository() {}
 
@@ -202,26 +255,94 @@ final class DoubanScoreRepository {
     }
 
     /**
+     * Unbinds a badge {@link TextView} from any pending or previous Douban score lookup. Leaves
+     * {@code badge.getTag()} ({@code "card-douban-score"}) intact for view discovery.
+     */
+    static void unbindBadge(TextView badge) {
+        if (badge == null) return;
+        Object oldKey = badge.getTag(TAG_LOOKUP_KEY);
+        badge.setTag(TAG_LOOKUP_KEY, null);
+        badge.setTag(TAG_BIND_TOKEN, null);
+        badge.setTag(TAG_SCOPE_TOKEN, null);
+        try {
+            badge.animate().cancel();
+        } catch (Throwable ignored) {
+        }
+        badge.setAlpha(1f);
+        badge.setText("");
+        badge.setVisibility(View.GONE);
+        if (oldKey instanceof String) {
+            CopyOnWriteArrayList<BadgeWaiter> waiters = INFLIGHT.get(oldKey);
+            if (waiters != null) {
+                for (BadgeWaiter waiter : waiters) {
+                    TextView tv = waiter.badgeRef.get();
+                    if (tv == null || tv == badge) {
+                        waiters.remove(waiter);
+                    }
+                }
+            }
+        }
+    }
+
+    static boolean shouldAllowRemoteLookup(boolean privateMode) {
+        return !privateMode;
+    }
+
+    /**
+     * Validates an individual single-flight waiter against its own page generation, artwork scope,
+     * attachment state, lookup key, and bind token so a stale page leaving never blocks a newer
+     * page's card for the same title from receiving the completed Douban score.
+     */
+    static boolean shouldDeliverToWaiter(
+            boolean activityFinishing,
+            boolean privateMode,
+            int currentActivityGeneration,
+            int waiterActivityGeneration,
+            int waiterBindToken,
+            int waiterScopeToken,
+            boolean scopeCancelled,
+            boolean viewAttached,
+            Object viewLookupKey,
+            String expectedKey,
+            Object viewBindToken) {
+        if (activityFinishing || privateMode) return false;
+        if (currentActivityGeneration != waiterActivityGeneration) return false;
+        if (scopeCancelled) return false;
+        if (!viewAttached) return false;
+        if (expectedKey == null || !expectedKey.equals(viewLookupKey)) return false;
+        return viewBindToken instanceof Integer
+                && ((Integer) viewBindToken).intValue() == waiterBindToken;
+    }
+
+    /**
      * Binds a poster card's Douban badge {@link TextView} to a {@link Cms.Video}. Displays known or
      * cached scores synchronously in 0ms; otherwise queues a throttled background Douban lookup and
      * populates the badge safely if the card is still attached and bound to the same video.
      */
     static void bindBadge(final MainActivity a, final TextView badge, final Cms.Video video) {
+        bindBadge(a, badge, video, 0);
+    }
+
+    static void bindBadge(
+            final MainActivity a, final TextView badge, final Cms.Video video, int scopeToken) {
         if (a == null || badge == null || video == null) return;
         if (video.title == null || video.title.trim().isEmpty()) {
-            badge.setVisibility(View.GONE);
+            unbindBadge(badge);
             return;
         }
         final String key = normalizeLookupKey(video.title, video.year);
         if (key.isEmpty()) {
-            badge.setVisibility(View.GONE);
+            unbindBadge(badge);
             return;
         }
+        final int bindToken = NEXT_BIND_TOKEN.incrementAndGet();
         badge.setTag(TAG_LOOKUP_KEY, key);
+        badge.setTag(TAG_BIND_TOKEN, Integer.valueOf(bindToken));
+        badge.setTag(TAG_SCOPE_TOKEN, Integer.valueOf(scopeToken));
 
         // 1. Immediate score from CMS payload / remarks / ImmersivePoster memory cache
         double immediate = extractImmediateScore(video);
-        if (immediate < 2.0) {
+        if (immediate < 2.0 && !a.privateMode) {
             ImmersivePoster.Ratings ir = ImmersivePoster.extractImmediateRatings(video);
             if (ir != null && ir.douban >= 2.0) immediate = ir.douban;
         }
@@ -232,7 +353,15 @@ final class DoubanScoreRepository {
             if (video.doubanScore == null || video.doubanScore.isEmpty()) {
                 video.doubanScore = String.format(Locale.US, "%.1f", immediate);
             }
-            seedScore(a, video.title, video.year, immediate);
+            if (!a.privateMode) {
+                seedScore(a, video.title, video.year, immediate);
+            }
+            return;
+        }
+
+        // Private space cards never touch public rating caches or emit remote Douban lookups.
+        if (!shouldAllowRemoteLookup(a.privateMode)) {
+            badge.setVisibility(View.GONE);
             return;
         }
 
@@ -251,25 +380,29 @@ final class DoubanScoreRepository {
 
         // 3. Throttled single-flight async lookup
         badge.setVisibility(View.GONE);
+        if (ImageLoader.isScopeCancelled(scopeToken)) return;
         final Context appCtx = a.getApplicationContext();
         final String cleanTitle = TvSeriesScraper.cleanWorkTitle(video.title);
         final String year = extractYear(video.year);
         final String doubanId = video.doubanId == null ? "" : video.doubanId.trim();
 
-        CopyOnWriteArrayList<WeakReference<TextView>> waiters = INFLIGHT.get(key);
+        BadgeWaiter waiter = new BadgeWaiter(a, badge, bindToken, scopeToken);
+        CopyOnWriteArrayList<BadgeWaiter> waiters = INFLIGHT.get(key);
         if (waiters != null) {
-            waiters.add(new WeakReference<>(badge));
+            waiters.add(waiter);
             return;
         }
-        final CopyOnWriteArrayList<WeakReference<TextView>> created = new CopyOnWriteArrayList<>();
-        created.add(new WeakReference<>(badge));
-        CopyOnWriteArrayList<WeakReference<TextView>> existing = INFLIGHT.putIfAbsent(key, created);
+        final CopyOnWriteArrayList<BadgeWaiter> created = new CopyOnWriteArrayList<>();
+        created.add(waiter);
+        CopyOnWriteArrayList<BadgeWaiter> existing = INFLIGHT.putIfAbsent(key, created);
         if (existing != null) {
-            existing.add(new WeakReference<>(badge));
+            existing.add(waiter);
             return;
         }
 
-        FETCH_POOL.execute(
+        final android.os.Handler mainHandler =
+                new android.os.Handler(android.os.Looper.getMainLooper());
+        final FetchTask task =
                 new FetchTask(
                         key,
                         () -> {
@@ -292,7 +425,7 @@ final class DoubanScoreRepository {
                                 }
                                 scheduleDiskSave(appCtx);
                                 final double finalScore = resolved;
-                                final CopyOnWriteArrayList<WeakReference<TextView>> targets =
+                                final CopyOnWriteArrayList<BadgeWaiter> targets =
                                         INFLIGHT.remove(key);
                                 if (finalScore >= 2.0) {
                                     video.doubanScore =
@@ -300,15 +433,29 @@ final class DoubanScoreRepository {
                                 }
                                 if (finalScore >= 2.0 && targets != null && !targets.isEmpty()) {
                                     final String label = formatBadgeText(finalScore);
-                                    a.ui.post(
+                                    mainHandler.post(
                                             () -> {
-                                                if (a.isFinishing()) return;
-                                                for (WeakReference<TextView> ref : targets) {
-                                                    TextView tv = ref.get();
-                                                    if (tv == null || !tv.isAttachedToWindow())
+                                                for (BadgeWaiter target : targets) {
+                                                    MainActivity host = target.hostRef.get();
+                                                    TextView tv = target.badgeRef.get();
+                                                    if (host == null || tv == null) continue;
+                                                    boolean scopeCancelled =
+                                                            ImageLoader.isScopeCancelled(
+                                                                    target.scopeToken);
+                                                    if (!shouldDeliverToWaiter(
+                                                            host.isFinishing(),
+                                                            host.privateMode,
+                                                            host.generation,
+                                                            target.activityGeneration,
+                                                            target.bindToken,
+                                                            target.scopeToken,
+                                                            scopeCancelled,
+                                                            tv.isAttachedToWindow(),
+                                                            tv.getTag(TAG_LOOKUP_KEY),
+                                                            key,
+                                                            tv.getTag(TAG_BIND_TOKEN))) {
                                                         continue;
-                                                    if (!key.equals(tv.getTag(TAG_LOOKUP_KEY)))
-                                                        continue;
+                                                    }
                                                     tv.setText(label);
                                                     if (tv.getVisibility() != View.VISIBLE) {
                                                         tv.setAlpha(0f);
@@ -322,7 +469,25 @@ final class DoubanScoreRepository {
                                             });
                                 }
                             }
-                        }));
+                        });
+        if (a.isTvDevice() && a.current != null && a.current.home && a.ui != null) {
+            final int homeGen = a.generation;
+            a.ui.postDelayed(
+                    () -> {
+                        if (a.isFinishing()
+                                || a.generation != homeGen
+                                || a.current == null
+                                || !a.current.home
+                                || ImageLoader.isScopeCancelled(scopeToken)) {
+                            INFLIGHT.remove(key, created);
+                            return;
+                        }
+                        FETCH_POOL.execute(task);
+                    },
+                    2800L);
+        } else {
+            FETCH_POOL.execute(task);
+        }
     }
 
     private static double fetchRemoteDoubanScore(String cleanTitle, String year, String doubanId) {
