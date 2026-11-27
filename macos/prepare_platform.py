@@ -895,7 +895,8 @@ extension MainFlutterWindow {
     let canCreateDisplayLink = (CVDisplayLinkCreateWithCGDisplay(displayID, &probeLink) == kCVReturnSuccess && probeLink != nil)
     if refreshHz <= 0, let link = probeLink {
       let period = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(link)
-      if (period.flags & Int32(CVTimeFlags.isIndefinite.rawValue)) == 0 && period.timeValue > 0 {
+      // kCVTimeIsIndefinite == 1 << 0 (fixed CoreVideo ABI bit in CVTime.flags)
+      if (period.flags & Int32(1)) == 0 && period.timeValue > 0 {
         let hz = Double(period.timeScale) / Double(period.timeValue)
         if hz >= 23.0 && hz <= 480.0 {
           refreshHz = hz
