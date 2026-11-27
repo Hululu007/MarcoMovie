@@ -56,6 +56,7 @@ final class MobileDetailScreen {
             new HashMap<>();
     private static final Map<String, String> activeAiEpisodeTitles = new HashMap<>();
     private static String selectedEpisodeLine = "";
+    private static String selectedEpisodeLineId = "";
     private static int selectedEpisodeLineIndex = -1;
     private static int selectedEpisodeIndex = -1;
     private static boolean userSelectedDetailTarget = false;
@@ -65,6 +66,7 @@ final class MobileDetailScreen {
 
     static void resetDetailSelectionState() {
         selectedEpisodeLine = "";
+        selectedEpisodeLineId = "";
         selectedEpisodeLineIndex = -1;
         selectedEpisodeIndex = -1;
         userSelectedDetailTarget = false;
@@ -74,10 +76,175 @@ final class MobileDetailScreen {
 
     private static boolean matchesSelectedEpisodeLine(int lineIndex, Cms.Line line) {
         if (line == null) return false;
+        String candId = line.lineId();
+        if (!selectedEpisodeLineId.isEmpty() && !candId.isEmpty()) {
+            return selectedEpisodeLineId.equals(candId);
+        }
         if (selectedEpisodeLineIndex >= 0) {
             return selectedEpisodeLineIndex == lineIndex;
         }
         return Objects.equals(line.name, selectedEpisodeLine);
+    }
+
+    static int findLineIndexByStableIdentity(
+            List<Cms.Line> lines,
+            Cms.Line prevActiveLine,
+            String prevActiveLineId,
+            String prevActiveRawName,
+            Cms.Episode prevSelectedEp) {
+        if (lines == null || lines.isEmpty()) return -1;
+        if (prevActiveLineId != null && !prevActiveLineId.isEmpty()) {
+            for (int i = 0; i < lines.size(); i++) {
+                Cms.Line cand = lines.get(i);
+                if (cand != null && prevActiveLineId.equals(cand.lineId())) {
+                    return i;
+                }
+            }
+            // Stable lineId was explicitly known and is no longer present (e.g. line was hidden).
+            return -1;
+        }
+        if (prevActiveLine != null) {
+            int refIdx = lines.indexOf(prevActiveLine);
+            if (refIdx >= 0) return refIdx;
+        }
+        if (prevSelectedEp != null) {
+            for (int i = 0; i < lines.size(); i++) {
+                Cms.Line cand = lines.get(i);
+                if (cand != null
+                        && cand.episodes != null
+                        && cand.episodes.contains(prevSelectedEp)) {
+                    return i;
+                }
+            }
+        }
+        if (prevActiveRawName != null && !prevActiveRawName.isEmpty()) {
+            for (int i = 0; i < lines.size(); i++) {
+                Cms.Line cand = lines.get(i);
+                if (cand != null && prevActiveRawName.equals(cand.rawName())) {
+                    return i;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private static void openLineManagementSheet(
+            MainActivity a,
+            Cms.Site site,
+            Cms.Video video,
+            Cms.Line targetLineToManage,
+            int fallbackLineIndex,
+            LinearLayout panel,
+            WatchHistory.Entry remembered,
+            Map<Integer, Cms.Video> discoveredSeasons,
+            Map<Integer, String> discoveredLabels) {
+        final int prevLineIdx = resolveCurrentDetailLineIndex(a, video, fallbackLineIndex);
+        final Cms.Line prevActiveLine =
+                (video != null
+                                && video.lines != null
+                                && prevLineIdx >= 0
+                                && prevLineIdx < video.lines.size())
+                        ? video.lines.get(prevLineIdx)
+                        : null;
+        final String prevActiveLineId = prevActiveLine != null ? prevActiveLine.lineId() : "";
+        final String prevActiveRawName = prevActiveLine != null ? prevActiveLine.rawName() : "";
+        final int prevPage = resolveCurrentDetailPageIndex(a, video, prevLineIdx, activeDetailPage);
+        final Cms.Episode prevSelectedEp =
+                (prevActiveLine != null
+                                && prevActiveLine.episodes != null
+                                && selectedEpisodeIndex >= 0
+                                && selectedEpisodeIndex < prevActiveLine.episodes.size()
+                                && matchesSelectedEpisodeLine(prevLineIdx, prevActiveLine))
+                        ? prevActiveLine.episodes.get(selectedEpisodeIndex)
+                        : null;
+        PlaybackLineRules.showManageLineSheet(
+                a,
+                site,
+                video,
+                targetLineToManage,
+                () ->
+                        rebindDetailAfterLineManagement(
+                                a,
+                                site,
+                                video,
+                                panel,
+                                remembered,
+                                discoveredSeasons,
+                                discoveredLabels,
+                                prevActiveLine,
+                                prevActiveLineId,
+                                prevActiveRawName,
+                                prevLineIdx,
+                                prevPage,
+                                prevSelectedEp));
+    }
+
+    static void rebindDetailAfterLineManagement(
+            MainActivity a,
+            Cms.Site site,
+            Cms.Video video,
+            LinearLayout panel,
+            WatchHistory.Entry remembered,
+            Map<Integer, Cms.Video> discoveredSeasons,
+            Map<Integer, String> discoveredLabels,
+            Cms.Line prevActiveLine,
+            String prevActiveLineId,
+            String prevActiveRawName,
+            int prevFallbackLineIdx,
+            int prevPage,
+            Cms.Episode prevSelectedEp) {
+        if (video == null || video.lines == null || video.lines.isEmpty()) return;
+        int reboundIdx =
+                findLineIndexByStableIdentity(
+                        video.lines,
+                        prevActiveLine,
+                        prevActiveLineId,
+                        prevActiveRawName,
+                        prevSelectedEp);
+        int targetLineIdx;
+        int targetPage;
+        if (reboundIdx >= 0) {
+            targetLineIdx = reboundIdx;
+            Cms.Line reboundLine = video.lines.get(reboundIdx);
+            if (userSelectedDetailTarget) {
+                selectedEpisodeLine = reboundLine.name == null ? "" : reboundLine.name;
+                selectedEpisodeLineId = reboundLine.lineId();
+                selectedEpisodeLineIndex = reboundIdx;
+                if (prevSelectedEp != null && reboundLine.episodes != null) {
+                    int epPos = reboundLine.episodes.indexOf(prevSelectedEp);
+                    if (epPos >= 0) {
+                        selectedEpisodeIndex = epPos;
+                    }
+                }
+            }
+            targetPage =
+                    EpisodeSelection.boundPage(
+                            prevPage,
+                            reboundLine.episodes != null ? reboundLine.episodes.size() : 0);
+        } else {
+            // The previously active line itself was hidden/removed: never transfer its manual
+            // episode selection onto a different remaining line.
+            resetDetailSelectionState();
+            targetLineIdx = Math.max(0, Math.min(prevFallbackLineIdx, video.lines.size() - 1));
+            Cms.Line fallbackLine = video.lines.get(targetLineIdx);
+            targetPage =
+                    EpisodeSelection.boundPage(
+                            0,
+                            fallbackLine != null && fallbackLine.episodes != null
+                                    ? fallbackLine.episodes.size()
+                                    : 0);
+        }
+        panel.removeAllViews();
+        renderMobileEpisodes(
+                a,
+                site,
+                video,
+                targetLineIdx,
+                targetPage,
+                panel,
+                remembered,
+                discoveredSeasons,
+                discoveredLabels);
     }
 
     static int resolveCurrentDetailLineIndex(MainActivity a, Cms.Video video, int fallbackLineIdx) {
@@ -432,6 +599,7 @@ final class MobileDetailScreen {
         if (!forcePlay && tapMode == 2) {
             userSelectedDetailTarget = true;
             selectedEpisodeLine = line.name == null ? "" : line.name;
+            selectedEpisodeLineId = line.lineId();
             selectedEpisodeLineIndex =
                     video != null && video.lines != null ? video.lines.indexOf(line) : -1;
             selectedEpisodeIndex = Math.max(0, epNumber - 1);
@@ -2024,6 +2192,7 @@ final class MobileDetailScreen {
                                     candLine.name + " · " + candLine.episodes.size(),
                                     12.5f,
                                     activeLine ? p.accent : p.textSecondary);
+                    lPill.setTag("detail-line-pill:" + candLine.lineId());
                     lPill.setTypeface(null, activeLine ? Typeface.BOLD : Typeface.NORMAL);
                     lPill.setPadding(a.dp(13), a.dp(6), a.dp(13), a.dp(6));
                     lPill.setBackground(MobileTheme.pillBg(a, activeLine, 999));
@@ -2032,6 +2201,7 @@ final class MobileDetailScreen {
                             v -> {
                                 userSelectedDetailTarget = true;
                                 selectedEpisodeLine = candLine.name == null ? "" : candLine.name;
+                                selectedEpisodeLineId = candLine.lineId();
                                 selectedEpisodeLineIndex = targetLineIdx;
                                 selectedEpisodeIndex = -1;
                                 a.prefs
@@ -2051,30 +2221,16 @@ final class MobileDetailScreen {
                             });
                     lPill.setOnLongClickListener(
                             v -> {
-                                PlaybackLineRules.showManageLineSheet(
+                                openLineManagementSheet(
                                         a,
                                         site,
                                         video,
                                         candLine,
-                                        () -> {
-                                            int safeIdx =
-                                                    Math.max(
-                                                            0,
-                                                            Math.min(
-                                                                    targetLineIdx,
-                                                                    video.lines.size() - 1));
-                                            panel.removeAllViews();
-                                            renderMobileEpisodes(
-                                                    a,
-                                                    site,
-                                                    video,
-                                                    safeIdx,
-                                                    0,
-                                                    panel,
-                                                    remembered,
-                                                    discoveredSeasons,
-                                                    discoveredLabels);
-                                        });
+                                        safeLineIdx,
+                                        panel,
+                                        remembered,
+                                        discoveredSeasons,
+                                        discoveredLabels);
                                 return true;
                             });
                     LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
@@ -2363,6 +2519,7 @@ final class MobileDetailScreen {
                         v -> {
                             userSelectedDetailTarget = true;
                             selectedEpisodeLine = line.name == null ? "" : line.name;
+                            selectedEpisodeLineId = line.lineId();
                             selectedEpisodeLineIndex = safeLineIdx;
                             selectedEpisodeIndex = posIdx;
                             activeDetailLineIndex = safeLineIdx;
@@ -2420,6 +2577,7 @@ final class MobileDetailScreen {
                     v -> {
                         userSelectedDetailTarget = true;
                         selectedEpisodeLine = line.name == null ? "" : line.name;
+                        selectedEpisodeLineId = line.lineId();
                         selectedEpisodeLineIndex = safeLineIdx;
                         selectedEpisodeIndex = posIdx;
                         activeDetailLineIndex = safeLineIdx;
@@ -2672,36 +2830,23 @@ final class MobileDetailScreen {
             }
 
             TextView manageLineBtn = a.text("管理", 12f, p.textSecondary);
+            manageLineBtn.setTag("line-picker-manage:" + cand.lineId());
             manageLineBtn.setPadding(a.dp(10), a.dp(5), a.dp(10), a.dp(5));
             manageLineBtn.setBackground(MobileTheme.subtleBg(a, 999));
             MobileMotion.bindPress(manageLineBtn, 0.92f);
             Runnable openLineManage =
                     () -> {
                         if (handleRef[0] != null) handleRef[0].dismiss();
-                        PlaybackLineRules.showManageLineSheet(
+                        openLineManagementSheet(
                                 a,
                                 site,
                                 video,
                                 cand,
-                                () -> {
-                                    int safeIdx =
-                                            Math.max(
-                                                    0,
-                                                    Math.min(
-                                                            currentLineIndex,
-                                                            video.lines.size() - 1));
-                                    panel.removeAllViews();
-                                    renderMobileEpisodes(
-                                            a,
-                                            site,
-                                            video,
-                                            safeIdx,
-                                            0,
-                                            panel,
-                                            remembered,
-                                            discoveredSeasons,
-                                            discoveredLabels);
-                                });
+                                currentLineIndex,
+                                panel,
+                                remembered,
+                                discoveredSeasons,
+                                discoveredLabels);
                     };
             manageLineBtn.setOnClickListener(v -> openLineManage.run());
             LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(-2, -2);
@@ -2713,6 +2858,7 @@ final class MobileDetailScreen {
                         if (handleRef[0] != null) handleRef[0].dismiss();
                         userSelectedDetailTarget = true;
                         selectedEpisodeLine = cand.name == null ? "" : cand.name;
+                        selectedEpisodeLineId = cand.lineId();
                         selectedEpisodeLineIndex = idx;
                         selectedEpisodeIndex = -1;
                         a.prefs.edit().putString(Prefs.PREFERRED_LINE, cand.rawName()).apply();
@@ -2873,6 +3019,7 @@ final class MobileDetailScreen {
                         if (dlgRef[0] != null) dlgRef[0].dismiss();
                         userSelectedDetailTarget = true;
                         selectedEpisodeLine = line.name == null ? "" : line.name;
+                        selectedEpisodeLineId = line.lineId();
                         selectedEpisodeLineIndex = lineIndex;
                         selectedEpisodeIndex = posIdx;
                         int targetPage = visualIdx / 50;

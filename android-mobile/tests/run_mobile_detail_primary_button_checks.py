@@ -70,6 +70,9 @@ STUBS["android/view/View.java"] = STUBS["android/view/View.java"].replace(
     public void setContentDescription(CharSequence d) { this.contentDescription = d; }
     public CharSequence getContentDescription() { return contentDescription; }
     public void setOnLongClickListener(OnLongClickListener l) { this.longClickListener = l; }
+    public boolean performLongClick() {
+        return longClickListener != null && longClickListener.onLongClick(this);
+    }
     public void setOnTouchListener(OnTouchListener l) {}
     public void addOnLayoutChangeListener(OnLayoutChangeListener l) {}
     public void setStateListAnimator(Object a) {}
@@ -773,6 +776,111 @@ public final class AiBetaGate {
 }
 """
 
+MOBILE_BOTTOM_SHEET_OVERRIDE = r"""package com.pilipala.marcomovie;
+
+import android.app.Dialog;
+import android.view.View;
+import android.widget.TextView;
+
+/** Capturing MobileBottomSheet override for real-bytecode line picker & PlaybackLineRules manage sheet tests. */
+final class MobileBottomSheet {
+    static final class SheetHandle {
+        final Dialog dialog = new Dialog();
+        void dismiss() { dialog.dismiss(); }
+        void updateSubtitle(String s) {}
+    }
+
+    static View lastContent;
+    static String[] lastPickerOptions;
+    static PlayerBubble.IntAction lastPickerCallback;
+    static Runnable lastConfirmCallback;
+
+    static void resetForTest() {
+        lastContent = null;
+        lastPickerOptions = null;
+        lastPickerCallback = null;
+        lastConfirmCallback = null;
+    }
+
+    static void pickOptionContaining(String needle) {
+        if (lastPickerOptions == null || lastPickerCallback == null) {
+            throw new AssertionError("No active MobileBottomSheet picker for: " + needle);
+        }
+        for (int i = 0; i < lastPickerOptions.length; i++) {
+            if (lastPickerOptions[i] != null && lastPickerOptions[i].contains(needle)) {
+                PlayerBubble.IntAction cb = lastPickerCallback;
+                cb.accept(i);
+                return;
+            }
+        }
+        throw new AssertionError("Picker option not found: " + needle + " in " + java.util.Arrays.toString(lastPickerOptions));
+    }
+
+    static void confirmPending() {
+        if (lastConfirmCallback == null) {
+            throw new AssertionError("No pending MobileBottomSheet confirm dialog");
+        }
+        Runnable cb = lastConfirmCallback;
+        lastConfirmCallback = null;
+        cb.run();
+    }
+
+    static Dialog show(MainActivity a, String title, View content) {
+        return showHandle(a, title, null, null, null, content, true).dialog;
+    }
+
+    static Dialog show(
+            MainActivity a,
+            String title,
+            String subtitle,
+            String actionLabel,
+            Runnable onAction,
+            View content,
+            boolean allowScroll) {
+        return showHandle(a, title, subtitle, actionLabel, onAction, content, allowScroll).dialog;
+    }
+
+    static SheetHandle showCustom(MainActivity a, String title, View content, Runnable onDismiss) {
+        return showHandle(a, title, null, null, null, content, true);
+    }
+
+    static SheetHandle showHandle(
+            MainActivity a,
+            String title,
+            String subtitle,
+            String actionLabel,
+            Runnable onAction,
+            View content,
+            boolean allowScroll) {
+        lastContent = content;
+        return new SheetHandle();
+    }
+
+    static Dialog showPicker(
+            MainActivity a,
+            String title,
+            String subtitle,
+            String[] options,
+            int selectedIndex,
+            PlayerBubble.IntAction onSelect) {
+        lastPickerOptions = options;
+        lastPickerCallback = onSelect;
+        return new Dialog();
+    }
+
+    static Dialog showConfirm(
+            MainActivity a,
+            String title,
+            String message,
+            String confirmLabel,
+            boolean destructive,
+            Runnable onConfirm) {
+        lastConfirmCallback = onConfirm;
+        return new Dialog();
+    }
+}
+"""
+
 TEST_DRIVER_JAVA = r"""package com.pilipala.marcomovie;
 
 import android.view.View;
@@ -1162,6 +1270,252 @@ public final class MobileDetailPrimaryButtonChecks {
                 aSwitch.playCalls.isEmpty() && aSwitch.resumeAt == 0,
                 "C4c-videoB-click: Video B prompts re-selection with 0 play calls (stale callback ignored)");
 
+        // =====================================================================
+        // Round-13 P2: Line management (pin/move/hide) via BOTH long-press quick line pill AND
+        //   top source picker 「管理」 button rebinds active line, episode, page, top bar & primary
+        //   button by stable lineId, with 0 play calls during management and strictly 1 play on click!
+        // =====================================================================
+        WatchHistory.Entry bmQuarkEp1 = bookmark(
+                "site_main", "vod_r13", "青岚", "夸克", NetdiskStore.DRIVE_QUARK,
+                "第1集", "https://pan.quark.cn/s/ql_qk_e1", 0, 42_000);
+
+        // R13-1a: History=夸克 第1集 42s; hand-select 夸克 第2集 -> LONG-PRESS 百度 pill -> Pin 百度 to top
+        {
+            MobileBottomSheet.resetForTest();
+            Cms.Line qk = numberedLine("夸克", "https://pan.quark.cn/s/ql_qk_e", 60);
+            Cms.Line bd = numberedLine("百度", "https://pan.baidu.com/s/ql_bd_e", 60);
+            Cms.Video v = video("vod_r13", "青岚", qk, bd);
+            MainActivity act = new MainActivity();
+            act.setupForTest(site, Collections.singletonList(bmQuarkEp1), v, 0);
+            CatalogScreen.resumeHistory(act, bmQuarkEp1);
+            Button btn = (Button) act.root.findViewWithTag("detail-play");
+            act.root.findViewWithTag("episode:夸克:1").performClick();
+            check(
+                    btn.getText().toString().contains("播放 · 第 2 集") && act.playCalls.isEmpty(),
+                    "R13-1a-pre: selected 夸克 第2集 before pinning 百度 (calls=0)");
+            View bdPill = act.root.findViewWithTag("detail-line-pill:百度");
+            check(bdPill != null && bdPill.performLongClick(), "R13-1a: long-press 百度 line pill opens manage sheet");
+            MobileBottomSheet.pickOptionContaining("置顶此线路");
+            TextView topSrc = (TextView) act.root.findViewWithTag("detail-source-picker");
+            check(
+                    act.playCalls.isEmpty()
+                            && "百度".equals(v.lines.get(0).lineId())
+                            && "夸克".equals(v.lines.get(1).lineId())
+                            && topSrc != null && "夸克".equals(topSrc.getText().toString())
+                            && btn.getText().toString().contains("播放 · 第 2 集"),
+                    "R13-1a-reorder: long-press pin 百度 -> 0 plays, lines=[百度,夸克], topSrc='夸克', btn='播放 · 第 2 集'");
+            btn.performClick();
+            check(
+                    act.playCalls.size() == 1
+                            && "夸克".equals(act.playCalls.get(0).line.name)
+                            && "第2集".equals(act.playCalls.get(0).ep.name)
+                            && act.playCalls.get(0).epNum == 2
+                            && act.playCalls.get(0).resumeAt == 0,
+                    "R13-1a-play: main button plays 夸克 / 第2集 / 0 ms (calls=1)");
+        }
+
+        // R13-1b: History=夸克 第1集 42s; hand-select 夸克 第2集 -> TOP PICKER 「管理」 on 百度 -> Pin 百度 to top
+        {
+            MobileBottomSheet.resetForTest();
+            Cms.Line qk = numberedLine("夸克", "https://pan.quark.cn/s/ql_qk_e", 60);
+            Cms.Line bd = numberedLine("百度", "https://pan.baidu.com/s/ql_bd_e", 60);
+            Cms.Video v = video("vod_r13", "青岚", qk, bd);
+            MainActivity act = new MainActivity();
+            act.setupForTest(site, Collections.singletonList(bmQuarkEp1), v, 0);
+            CatalogScreen.resumeHistory(act, bmQuarkEp1);
+            Button btn = (Button) act.root.findViewWithTag("detail-play");
+            act.root.findViewWithTag("episode:夸克:1").performClick();
+            act.root.findViewWithTag("detail-source-pill").performClick();
+            View manageBd = MobileBottomSheet.lastContent.findViewWithTag("line-picker-manage:百度");
+            check(manageBd != null, "R13-1b: top picker 百度「管理」button exists");
+            manageBd.performClick();
+            MobileBottomSheet.pickOptionContaining("置顶此线路");
+            TextView topSrc = (TextView) act.root.findViewWithTag("detail-source-picker");
+            check(
+                    act.playCalls.isEmpty()
+                            && "百度".equals(v.lines.get(0).lineId())
+                            && "夸克".equals(v.lines.get(1).lineId())
+                            && topSrc != null && "夸克".equals(topSrc.getText().toString())
+                            && btn.getText().toString().contains("播放 · 第 2 集"),
+                    "R13-1b-reorder: top picker「管理」pin 百度 -> 0 plays, lines=[百度,夸克], topSrc='夸克', btn='播放 · 第 2 集'");
+            btn.performClick();
+            check(
+                    act.playCalls.size() == 1
+                            && "夸克".equals(act.playCalls.get(0).line.name)
+                            && "第2集".equals(act.playCalls.get(0).ep.name)
+                            && act.playCalls.get(0).epNum == 2
+                            && act.playCalls.get(0).resumeAt == 0,
+                    "R13-1b-play: main button plays 夸克 / 第2集 / 0 ms (calls=1)");
+        }
+
+        // R13-1c: Pagination preservation across line reorder (page 1: 51·60, 夸克 第52集 -> pin 百度)
+        {
+            MobileBottomSheet.resetForTest();
+            Cms.Line qk = numberedLine("夸克", "https://pan.quark.cn/s/ql_qk_e", 60);
+            Cms.Line bd = numberedLine("百度", "https://pan.baidu.com/s/ql_bd_e", 60);
+            Cms.Video v = video("vod_r13", "青岚", qk, bd);
+            MainActivity act = new MainActivity();
+            act.setupForTest(site, Collections.singletonList(bmQuarkEp1), v, 0);
+            CatalogScreen.resumeHistory(act, bmQuarkEp1);
+            Button btn = (Button) act.root.findViewWithTag("detail-play");
+            findTextViewContaining(act.root, "51 · 60").performClick();
+            act.root.findViewWithTag("episode:夸克:51").performClick();
+            act.root.findViewWithTag("detail-source-pill").performClick();
+            MobileBottomSheet.lastContent.findViewWithTag("line-picker-manage:百度").performClick();
+            MobileBottomSheet.pickOptionContaining("置顶此线路");
+            TextView topSrc = (TextView) act.root.findViewWithTag("detail-source-picker");
+            check(
+                    act.playCalls.isEmpty()
+                            && topSrc != null && "夸克".equals(topSrc.getText().toString())
+                            && act.root.findViewWithTag("episode:夸克:51") != null
+                            && btn.getText().toString().contains("播放 · 第 52 集"),
+                    "R13-1c-page: pin 百度 preserves page 1 (51·60), topSrc='夸克', Ep 52 & 0 plays");
+            btn.performClick();
+            check(
+                    act.playCalls.size() == 1
+                            && "夸克".equals(act.playCalls.get(0).line.name)
+                            && "第52集".equals(act.playCalls.get(0).ep.name)
+                            && act.playCalls.get(0).epNum == 52
+                            && act.playCalls.get(0).resumeAt == 0,
+                    "R13-1c-play: main button plays 夸克 / 第52集 / 0 ms (calls=1)");
+        }
+
+        // R13-2a: Hand-select 百度 第2集 -> Pin 百度 to top (BOTH long-press pill & top picker「管理」)
+        for (int entryMode = 0; entryMode < 2; entryMode++) {
+            String tag = entryMode == 0 ? "R13-2a-longpress" : "R13-2a-toppicker";
+            MobileBottomSheet.resetForTest();
+            Cms.Line qk = numberedLine("夸克", "https://pan.quark.cn/s/ql_qk_e", 10);
+            Cms.Line bd = numberedLine("百度", "https://pan.baidu.com/s/ql_bd_e", 10);
+            Cms.Video v = video("vod_r13", "青岚", qk, bd);
+            MainActivity act = new MainActivity();
+            act.setupForTest(site, Collections.singletonList(bmQuarkEp1), v, 0);
+            CatalogScreen.resumeHistory(act, bmQuarkEp1);
+            Button btn = (Button) act.root.findViewWithTag("detail-play");
+            act.root.findViewWithTag("detail-line-pill:百度").performClick();
+            act.root.findViewWithTag("episode:百度:1").performClick();
+            if (entryMode == 0) {
+                act.root.findViewWithTag("detail-line-pill:百度").performLongClick();
+            } else {
+                act.root.findViewWithTag("detail-source-pill").performClick();
+                MobileBottomSheet.lastContent.findViewWithTag("line-picker-manage:百度").performClick();
+            }
+            MobileBottomSheet.pickOptionContaining("置顶此线路");
+            TextView topSrc = (TextView) act.root.findViewWithTag("detail-source-picker");
+            check(
+                    act.playCalls.isEmpty()
+                            && "百度".equals(v.lines.get(0).lineId())
+                            && topSrc != null && "百度".equals(topSrc.getText().toString())
+                            && btn.getText().toString().contains("播放 · 第 2 集"),
+                    tag + "-reorder: pin 百度 -> 0 plays, topSrc='百度', btn='播放 · 第 2 集'");
+            btn.performClick();
+            check(
+                    act.playCalls.size() == 1
+                            && "百度".equals(act.playCalls.get(0).line.name)
+                            && "第2集".equals(act.playCalls.get(0).ep.name)
+                            && act.playCalls.get(0).epNum == 2
+                            && act.playCalls.get(0).resumeAt == 0,
+                    tag + "-play: main button plays 百度 / 第2集 / 0 ms (calls=1)");
+        }
+
+        // R13-2b: Hand-select 百度 第2集 -> Hide the OTHER line 夸克 (BOTH long-press reused pill & top picker「管理」)
+        for (int entryMode = 0; entryMode < 2; entryMode++) {
+            String tag = entryMode == 0 ? "R13-2b-longpress" : "R13-2b-toppicker";
+            MobileBottomSheet.resetForTest();
+            Cms.Line qk = numberedLine("夸克", "https://pan.quark.cn/s/ql_qk_e", 10);
+            Cms.Line bd = numberedLine("百度", "https://pan.baidu.com/s/ql_bd_e", 10);
+            Cms.Video v = video("vod_r13", "青岚", qk, bd);
+            MainActivity act = new MainActivity();
+            act.setupForTest(site, Collections.singletonList(bmQuarkEp1), v, 0);
+            CatalogScreen.resumeHistory(act, bmQuarkEp1);
+            Button btn = (Button) act.root.findViewWithTag("detail-play");
+            act.root.findViewWithTag("detail-line-pill:百度").performClick();
+            act.root.findViewWithTag("episode:百度:1").performClick();
+            if (entryMode == 0) {
+                act.root.findViewWithTag("detail-line-pill:夸克").performLongClick();
+            } else {
+                act.root.findViewWithTag("detail-source-pill").performClick();
+                MobileBottomSheet.lastContent.findViewWithTag("line-picker-manage:夸克").performClick();
+            }
+            MobileBottomSheet.pickOptionContaining("删除（隐藏）此线路");
+            MobileBottomSheet.confirmPending();
+            TextView topSrc = (TextView) act.root.findViewWithTag("detail-source-picker");
+            check(
+                    act.playCalls.isEmpty()
+                            && v.lines.size() == 1
+                            && "百度".equals(v.lines.get(0).lineId())
+                            && topSrc != null && "换源".equals(topSrc.getText().toString())
+                            && act.root.findViewWithTag("episode:百度:1") != null
+                            && btn.getText().toString().contains("播放 · 第 2 集"),
+                    tag + "-hide: hiding other line 夸克 -> 0 plays, lines=[百度], topSrc='换源', btn='播放 · 第 2 集'");
+            btn.performClick();
+            check(
+                    act.playCalls.size() == 1
+                            && "百度".equals(act.playCalls.get(0).line.name)
+                            && "第2集".equals(act.playCalls.get(0).ep.name)
+                            && act.playCalls.get(0).epNum == 2
+                            && act.playCalls.get(0).resumeAt == 0,
+                    tag + "-play: main button plays 百度 / 第2集 / 0 ms (calls=1)");
+        }
+
+        // R13-2c: Move another line up in 3-line [夸克, 百度, 阿里] while 百度 第2集 is selected + Hide active line resets safely
+        {
+            MobileBottomSheet.resetForTest();
+            Cms.Line qk = numberedLine("夸克", "https://pan.quark.cn/s/ql_qk_e", 10);
+            Cms.Line bd = numberedLine("百度", "https://pan.baidu.com/s/ql_bd_e", 10);
+            Cms.Line ali = numberedLine("阿里", "https://www.alipan.com/s/ql_ali_e", 10);
+            Cms.Video v = video("vod_r13", "青岚", qk, bd, ali);
+            MainActivity act = new MainActivity();
+            act.setupForTest(site, Collections.singletonList(bmQuarkEp1), v, 0);
+            CatalogScreen.resumeHistory(act, bmQuarkEp1);
+            Button btn = (Button) act.root.findViewWithTag("detail-play");
+            act.root.findViewWithTag("detail-line-pill:百度").performClick();
+            act.root.findViewWithTag("episode:百度:1").performClick();
+            act.root.findViewWithTag("detail-line-pill:阿里").performLongClick();
+            MobileBottomSheet.pickOptionContaining("上移一位");
+            TextView topSrc = (TextView) act.root.findViewWithTag("detail-source-picker");
+            check(
+                    act.playCalls.isEmpty()
+                            && "阿里".equals(v.lines.get(1).lineId())
+                            && "百度".equals(v.lines.get(2).lineId())
+                            && topSrc != null && "百度".equals(topSrc.getText().toString())
+                            && btn.getText().toString().contains("播放 · 第 2 集"),
+                    "R13-2c-move: moving 阿里 up shifts 百度 to idx 2 -> 0 plays, topSrc='百度', btn='播放 · 第 2 集'");
+            btn.performClick();
+            check(
+                    act.playCalls.size() == 1
+                            && "百度".equals(act.playCalls.get(0).line.name)
+                            && "第2集".equals(act.playCalls.get(0).ep.name)
+                            && act.playCalls.get(0).resumeAt == 0,
+                    "R13-2c-play: main button plays 百度 / 第2集 / 0 ms (calls=1)");
+        }
+
+        // R13-2d: Hiding the CURRENTLY active line (夸克) clears stale manual selection & prompts re-select on remaining 百度
+        {
+            MobileBottomSheet.resetForTest();
+            Cms.Line qk = numberedLine("夸克", "https://pan.quark.cn/s/ql_qk_e", 10);
+            Cms.Line bd = numberedLine("百度", "https://pan.baidu.com/s/ql_bd_e", 10);
+            Cms.Video v = video("vod_r13", "青岚", qk, bd);
+            MainActivity act = new MainActivity();
+            act.setupForTest(site, Collections.singletonList(bmQuarkEp1), v, 0);
+            CatalogScreen.resumeHistory(act, bmQuarkEp1);
+            Button btn = (Button) act.root.findViewWithTag("detail-play");
+            act.root.findViewWithTag("episode:夸克:1").performClick();
+            act.root.findViewWithTag("detail-line-pill:夸克").performLongClick();
+            MobileBottomSheet.pickOptionContaining("删除（隐藏）此线路");
+            MobileBottomSheet.confirmPending();
+            check(
+                    act.playCalls.isEmpty()
+                            && v.lines.size() == 1
+                            && "百度".equals(v.lines.get(0).lineId())
+                            && btn.getText().toString().contains("原线路已变更")
+                            && btn.getText().toString().contains("重选"),
+                    "R13-2d-hide-active: hiding active 夸克 clears stale selection & prompts re-selection on remaining 百度 (0 plays)");
+            btn.performClick();
+            check(
+                    act.playCalls.isEmpty() && act.resumeAt == 0,
+                    "R13-2d-click: clicking prompt after hiding active 夸克 triggers 0 plays");
+        }
+
         System.out.println("MobileDetailPrimaryButtonChecks OK (" + passed + " checks passed)");
     }
 }
@@ -1216,6 +1570,7 @@ def main() -> int:
             "com/pilipala/marcomovie/SourceController.java": SOURCE_CONTROLLER_OVERRIDE,
             "com/pilipala/marcomovie/ImmersivePoster.java": IMMERSIVE_POSTER_OVERRIDE,
             "com/pilipala/marcomovie/AiBetaGate.java": AI_BETA_GATE_OVERRIDE,
+            "com/pilipala/marcomovie/MobileBottomSheet.java": MOBILE_BOTTOM_SHEET_OVERRIDE,
             "com/pilipala/marcomovie/MobileDetailPrimaryButtonChecks.java": TEST_DRIVER_JAVA,
         }
         test_files = []

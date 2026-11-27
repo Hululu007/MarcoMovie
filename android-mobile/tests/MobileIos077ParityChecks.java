@@ -5400,8 +5400,45 @@ public final class MobileIos077ParityChecks {
                                 == 1,
                 "R12 P2: direct card tap on Quark Ep1/Baidu Ep1 syncs primary button to Ep1 @ 0ms, Ali S02E02 resolves @ 0ms, and live line/page fallback clamps safely");
 
+        // 32. Round-13 P2: Stable line identity rebinding across pin/reorder/rename/hide
+        Cms.Line r13QkCopy = new Cms.Line();
+        r13QkCopy.lineId = "夸克·第二季";
+        r13QkCopy.rawName = "夸克·第二季";
+        r13QkCopy.name = "夸克·第二季";
+        r13QkCopy.episodes.addAll(r11QuarkS2.episodes);
+        Cms.Line r13BdCopy = new Cms.Line();
+        r13BdCopy.lineId = "百度·第二季";
+        r13BdCopy.rawName = "百度·第二季";
+        r13BdCopy.name = "百度·第二季（重命名）";
+        r13BdCopy.episodes.addAll(r11BaiduS2.episodes);
+        List<Cms.Line> reorderedBdFirst = Arrays.asList(r13BdCopy, r13QkCopy);
+        List<Cms.Line> onlyBdLeft = Collections.singletonList(r13BdCopy);
+        check(
+                MobileDetailScreen.findLineIndexByStableIdentity(
+                                        reorderedBdFirst,
+                                        r11QuarkS2,
+                                        r11QuarkS2.lineId(),
+                                        r11QuarkS2.rawName(),
+                                        r11QkE2)
+                                == 1
+                        && MobileDetailScreen.findLineIndexByStableIdentity(
+                                        reorderedBdFirst,
+                                        r11BaiduS2,
+                                        r11BaiduS2.lineId(),
+                                        r11BaiduS2.rawName(),
+                                        r11BdE2)
+                                == 0
+                        && MobileDetailScreen.findLineIndexByStableIdentity(
+                                        onlyBdLeft,
+                                        r11QuarkS2,
+                                        r11QuarkS2.lineId(),
+                                        r11QuarkS2.rawName(),
+                                        r11QkE2)
+                                == -1,
+                "R13 P2: findLineIndexByStableIdentity rebinds reordered/renamed lines by stable lineId and returns -1 when active line was hidden");
+
         pass(
-                "DriveOrder + R4..R12 P1-1..P2: line-season failover, Dart-aligned episodeMediaId, same-site drive conflict, direct-card primary button sync, related-seasons state preservation, and O(N) perf verified");
+                "DriveOrder + R4..R13 P1-1..P2: line-season failover, Dart-aligned episodeMediaId, same-site drive conflict, direct-card & line-management stable rebind, and O(N) perf verified");
     }
 
     private static String computeWindowsV073MediaId(String canonicalUrl) throws Exception {
