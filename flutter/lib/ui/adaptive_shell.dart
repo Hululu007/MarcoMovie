@@ -13874,8 +13874,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               : const [
                   'AI 观影实验室',
                   'AI 实验室',
+                  'AI 助手',
                   '内测',
                   '口令',
+                  '自然语言找片',
+                  'AI 找片',
                 ],
           onOpen: () => _trackSecondaryRoute<void>(
             () async {

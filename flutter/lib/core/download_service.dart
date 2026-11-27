@@ -1006,14 +1006,50 @@ class DownloadService extends ChangeNotifier {
     }
   }
 
+  static Future<T> _withWallClockTimeout<T>(
+    Future<T> future,
+    Duration timeout,
+  ) {
+    final completer = Completer<T>();
+    final timer = Zone.root.createTimer(timeout, () {
+      if (!completer.isCompleted) {
+        completer.completeError(TimeoutException('Timed out', timeout));
+      }
+    });
+    future.then(
+      (value) {
+        timer.cancel();
+        if (!completer.isCompleted) completer.complete(value);
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        timer.cancel();
+        if (!completer.isCompleted) {
+          completer.completeError(error, stackTrace);
+        }
+      },
+    );
+    return completer.future;
+  }
+
   Future<Directory> _resolveRoot() async {
     Directory? base;
-    if (!kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
+    final isDesktopTarget = defaultTargetPlatform == TargetPlatform.windows ||
+        defaultTargetPlatform == TargetPlatform.macOS ||
+        defaultTargetPlatform == TargetPlatform.linux;
+    if (!kIsWeb &&
+        isDesktopTarget &&
+        (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
       try {
-        base = await getDownloadsDirectory().timeout(rootResolveTimeout);
+        base = await _withWallClockTimeout(
+          getDownloadsDirectory(),
+          rootResolveTimeout,
+        );
         if (base != null) {
           final probe = Directory(_join(base.path, 'Marco Movie'));
-          await probe.create(recursive: true).timeout(rootResolveTimeout);
+          await _withWallClockTimeout(
+            probe.create(recursive: true),
+            rootResolveTimeout,
+          );
           return probe;
         }
       } catch (_) {

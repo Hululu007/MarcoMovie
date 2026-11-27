@@ -79,7 +79,9 @@ void _applyWinningBootstrapSideEffects(MarcoAppBootstrapResult result) {
           .catchError((_) {}),
     );
   }
-  if (!kIsWeb && Platform.isMacOS) {
+  if (!kIsWeb &&
+      Platform.isMacOS &&
+      defaultTargetPlatform == TargetPlatform.macOS) {
     final macBounds = MacosWindowBoundsController.installShared(storage);
     unawaited(macBounds.syncOnStartup(initialThemeMode: AppleTheme.mode.value));
     AppleTheme.mode.addListener(() {

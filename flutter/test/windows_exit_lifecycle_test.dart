@@ -66,6 +66,10 @@ void main() {
   test(
     'WindowsTrayService.destroyWindow invokes native destroyWindow and runs registered pre-exit hooks',
     () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      addTearDown(() {
+        debugDefaultTargetPlatformOverride = null;
+      });
       final nativeCalls = <String>[];
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(trayChannel, (call) async {

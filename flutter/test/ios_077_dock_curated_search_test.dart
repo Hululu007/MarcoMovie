@@ -393,15 +393,21 @@ void main() {
         final configArgs = Map<String, dynamic>.from(configCall.arguments as Map);
         expect(configArgs['epoch'], isA<int>());
         final items = (configArgs['items'] as List).cast<Map>();
-        expect((items[0]['menuItems'] as List).first['title'], '回到顶部');
-        expect((items[1]['menuItems'] as List).first['title'], '管理直播源');
+        expect(
+          (items[0]['menuItems'] as List).map((e) => e['title']).toList(),
+          containsAll(<String>['搜索影片', '回到顶部']),
+        );
+        expect(
+          (items[1]['menuItems'] as List).map((e) => e['title']).toList(),
+          contains('管理直播源'),
+        );
         expect(
           (items[2]['menuItems'] as List).map((e) => e['title']).toList(),
-          ['收藏', '观看历史'],
+          containsAll(<String>['收藏', '观看历史', '离线下载']),
         );
         expect(
           (items[3]['menuItems'] as List).map((e) => e['title']).toList(),
-          ['添加资源库', '网盘账号'],
+          containsAll(<String>['添加资源库', '管理订阅', '网盘账号']),
         );
 
         // Entering Curated must send minimized=true with strictly higher epoch
