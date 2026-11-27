@@ -3842,7 +3842,371 @@ public final class MobileIos077ParityChecks {
                         && "115".equals(r6DriveOrder.get(3).name),
                 "R6 P2-1: Baidu pinned orders Baidu -> Quark -> bare 115 while CDN .m3u8 with pan.quark.cn in path strictly stays in slot 1");
 
+        // 17. Round-7 P1-1: Subscribe-only CloudSync MUST NOT drop legacy siteKey/vodId entries,
+        //     strip Windows 0.7.3 episodeMediaId, or truncate 64 remote entries to 60 — while still
+        //     scrubbing all legacy episodeUrl/signatures/leases and NOT uploading local history!
+        org.json.JSONArray remote3Hist = new org.json.JSONArray();
+        remote3Hist.put(
+                new JSONObject()
+                        .put("site", "demo")
+                        .put("id", "std_1")
+                        .put("line", "夸克")
+                        .put("episode", "第1集")
+                        .put("episodeUrl", "https://dl-pc.example/ep1.mkv?sign=SEC1")
+                        .put("position", 12_000));
+        remote3Hist.put(
+                new JSONObject()
+                        .put("siteKey", "legacy_site")
+                        .put("vodId", "vod_99")
+                        .put("line", "旧线")
+                        .put("episode", "第3集")
+                        .put("episodeUrl", "http://127.0.0.1:45678/lease/OLD_L1/stream.mkv")
+                        .put("position", 31_000));
+        remote3Hist.put(
+                new JSONObject()
+                        .put("site", "win_site")
+                        .put("id", "win_77")
+                        .put("line", "百度原画")
+                        .put("episode", "第2集")
+                        .put("episodeMediaId", "win073_media_stable_id_42")
+                        .put("episodeUrl", "https://dl-pc.example/win.mkv?token=WIN_SEC")
+                        .put("position", 42_000));
+        String remote3Payload =
+                new JSONObject()
+                        .put("schema", CloudSync.SCHEMA)
+                        .put("version", CloudSync.VERSION)
+                        .put("updated", 1_768_003_000_000L)
+                        .put("updatedAt", 1_768_003_000_000L)
+                        .put("watch_history", remote3Hist)
+                        .put("favorites", new org.json.JSONArray())
+                        .put("tombstones", new JSONObject())
+                        .put("subscriptions", new org.json.JSONArray())
+                        .toString();
+        CloudSync.MergeResult r7SubOnly3 =
+                CloudSync.merge(
+                        localUntouchedHistory,
+                        "[]",
+                        "{}",
+                        Collections.singletonList(localSub),
+                        true,
+                        false,
+                        remote3Payload,
+                        1_768_003_100_000L);
+        org.json.JSONArray out3Hist =
+                new JSONObject(r7SubOnly3.payloadJson).getJSONArray("watch_history");
+        check(
+                out3Hist.length() == 3
+                        && "std_1".equals(out3Hist.getJSONObject(0).optString("id"))
+                        && "legacy_site".equals(out3Hist.getJSONObject(1).optString("siteKey"))
+                        && "vod_99".equals(out3Hist.getJSONObject(1).optString("vodId"))
+                        && out3Hist.getJSONObject(1).optInt("position") == 31_000
+                        && "win073_media_stable_id_42"
+                                .equals(out3Hist.getJSONObject(2).optString("episodeMediaId"))
+                        && out3Hist.getJSONObject(2).optInt("position") == 42_000
+                        && !r7SubOnly3.payloadJson.contains("episodeUrl")
+                        && !r7SubOnly3.payloadJson.contains("SEC1")
+                        && !r7SubOnly3.payloadJson.contains("OLD_L1")
+                        && !r7SubOnly3.payloadJson.contains("WIN_SEC")
+                        && !r7SubOnly3.payloadJson.contains("keep_me")
+                        && localUntouchedHistory.equals(r7SubOnly3.historyJson),
+                "R7 P1-1A: subscribe-only sync preserves 3->3 entries, order, siteKey/vodId, Windows episodeMediaId & progress while stripping legacy URLs and excluding local history");
+
+        org.json.JSONArray remote64Hist = new org.json.JSONArray();
+        for (int i = 0; i < 64; i++) {
+            remote64Hist.put(
+                    new JSONObject()
+                            .put("site", "s64")
+                            .put("id", "v_" + i)
+                            .put("line", "L")
+                            .put("episode", "第" + (i + 1) + "集")
+                            .put("episodeUrl", "https://dl-pc.example/f" + i + ".mkv?sign=S" + i)
+                            .put("position", (i + 1) * 1000));
+        }
+        String remote64Payload =
+                new JSONObject()
+                        .put("schema", CloudSync.SCHEMA)
+                        .put("version", CloudSync.VERSION)
+                        .put("updated", 1_768_003_200_000L)
+                        .put("updatedAt", 1_768_003_200_000L)
+                        .put("watch_history", remote64Hist)
+                        .put("favorites", new org.json.JSONArray())
+                        .put("tombstones", new JSONObject())
+                        .put("subscriptions", new org.json.JSONArray())
+                        .toString();
+        CloudSync.MergeResult r7SubOnly64 =
+                CloudSync.merge(
+                        localUntouchedHistory,
+                        "[]",
+                        "{}",
+                        Collections.singletonList(localSub),
+                        true,
+                        false,
+                        remote64Payload,
+                        1_768_003_300_000L);
+        org.json.JSONArray out64Hist =
+                new JSONObject(r7SubOnly64.payloadJson).getJSONArray("watch_history");
+        check(
+                out64Hist.length() == 64
+                        && "v_0".equals(out64Hist.getJSONObject(0).optString("id"))
+                        && "v_63".equals(out64Hist.getJSONObject(63).optString("id"))
+                        && out64Hist.getJSONObject(63).optInt("position") == 64_000
+                        && !r7SubOnly64.payloadJson.contains("episodeUrl")
+                        && !r7SubOnly64.payloadJson.contains("dl-pc.example"),
+                "R7 P1-1B: subscribe-only sync preserves 64->64 remote history entries without truncating at 60");
+
+        // 18. Round-7 P1-2: Ambiguous identity (empty fingerprint + duplicate "播放", ?e=1 vs ?e=2
+        //     titled "开端"/"返航", forced fingerprint collision) MUST NEVER give 42s to wrong item!
+        Cms.Line proxyDupLine = new Cms.Line();
+        proxyDupLine.lineId = "本地代理";
+        proxyDupLine.name = "本地代理";
+        proxyDupLine.rawName = "本地代理";
+        Cms.Episode pDup0 = new Cms.Episode();
+        pDup0.name = "播放";
+        pDup0.url = "http://127.0.0.1:9978/proxy?do=cms&item=1";
+        Cms.Episode pDup1 = new Cms.Episode();
+        pDup1.name = "播放";
+        pDup1.url = "http://127.0.0.1:9978/proxy?do=cms&item=2";
+        proxyDupLine.episodes.add(pDup0);
+        proxyDupLine.episodes.add(pDup1);
+        Cms.Video proxyDupVideo = new Cms.Video();
+        proxyDupVideo.id = "v_pdup";
+        proxyDupVideo.lines.add(proxyDupLine);
+        WatchHistory.Entry bmProxyDup2 = new WatchHistory.Entry();
+        bmProxyDup2.site = "demo";
+        bmProxyDup2.id = "v_pdup";
+        bmProxyDup2.line = "本地代理";
+        bmProxyDup2.lineId = "本地代理";
+        bmProxyDup2.episode = "播放";
+        bmProxyDup2.episodeKey = WatchHistory.stableEpisodeKey(pDup1.url);
+        bmProxyDup2.index = 1;
+        bmProxyDup2.position = 42_000;
+        bmProxyDup2.duration = 240_000;
+        check(
+                bmProxyDup2.episodeKey.isEmpty()
+                        && HistoryResumeMatcher.matchEpisode(proxyDupVideo, bmProxyDup2) == null
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        proxyDupLine, pDup0, 0, bmProxyDup2)
+                                == 0
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        proxyDupLine, pDup1, 1, bmProxyDup2)
+                                == 0,
+                "R7 P1-2A: two local-proxy '播放' items with empty fingerprints never carry 42s to item 0 or ambiguous item");
+
+        // ?e=1 ("开端") vs ?e=2 ("返航") + unix timestamp e=1799999999 still stripped!
+        String keyE1 = WatchHistory.stableEpisodeKey("https://site.example/play?e=1&sign=A");
+        String keyE2 = WatchHistory.stableEpisodeKey("https://site.example/play?e=2&sign=B");
+        String keyE2Ref =
+                WatchHistory.stableEpisodeKey("https://site.example/play?e=2&sign=C&t=1799999999");
+        String keyExpStrip1 =
+                WatchHistory.stableEpisodeKey("https://site.example/play?id=9&e=1799999111");
+        String keyExpStrip2 =
+                WatchHistory.stableEpisodeKey("https://site.example/play?id=9&e=1799999999");
+        check(
+                !keyE1.isEmpty()
+                        && !keyE2.isEmpty()
+                        && !keyE1.equals(keyE2)
+                        && keyE2.equals(keyE2Ref)
+                        && keyExpStrip1.equals(keyExpStrip2),
+                "R7 P1-2B: stableEpisodeKey distinguishes e=1 vs e=2 while still stripping Unix epoch e=1799999999");
+
+        Cms.Line titledELine = new Cms.Line();
+        titledELine.lineId = "剧场线";
+        titledELine.name = "剧场线";
+        titledELine.rawName = "剧场线";
+        Cms.Episode epStart = new Cms.Episode();
+        epStart.name = "开端";
+        epStart.url = "https://site.example/play?e=1&sign=NEW1";
+        Cms.Episode epReturn = new Cms.Episode();
+        epReturn.name = "返航";
+        epReturn.url = "https://site.example/play?e=2&sign=NEW2";
+        titledELine.episodes.add(epStart);
+        titledELine.episodes.add(epReturn);
+        WatchHistory.Entry bmReturn = new WatchHistory.Entry();
+        bmReturn.site = "demo";
+        bmReturn.id = "v_titled";
+        bmReturn.line = "剧场线";
+        bmReturn.lineId = "剧场线";
+        bmReturn.episode = "返航";
+        bmReturn.episodeKey = keyE2;
+        bmReturn.index = 1;
+        bmReturn.position = 42_000;
+        bmReturn.duration = 240_000;
+        // Also test forced fingerprint collision where both episodes share the EXACT SAME URL!
+        Cms.Line collidedLine = new Cms.Line();
+        collidedLine.lineId = "剧场线";
+        collidedLine.name = "剧场线";
+        collidedLine.rawName = "剧场线";
+        Cms.Episode colStart = new Cms.Episode();
+        colStart.name = "开端";
+        colStart.url = "https://site.example/same_route";
+        Cms.Episode colReturn = new Cms.Episode();
+        colReturn.name = "返航";
+        colReturn.url = "https://site.example/same_route";
+        collidedLine.episodes.add(colStart);
+        collidedLine.episodes.add(colReturn);
+        WatchHistory.Entry bmCollidedReturn = new WatchHistory.Entry();
+        bmCollidedReturn.site = "demo";
+        bmCollidedReturn.id = "v_col";
+        bmCollidedReturn.line = "剧场线";
+        bmCollidedReturn.lineId = "剧场线";
+        bmCollidedReturn.episode = "返航";
+        bmCollidedReturn.episodeKey =
+                WatchHistory.stableEpisodeKey("https://site.example/same_route");
+        bmCollidedReturn.index = 1;
+        bmCollidedReturn.position = 42_000;
+        bmCollidedReturn.duration = 240_000;
+        check(
+                HistoryResumeMatcher.resolveResumePositionMs(titledELine, epReturn, 1, bmReturn)
+                                == 42_000
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        titledELine, epStart, 0, bmReturn)
+                                == 0
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        collidedLine, colReturn, 1, bmCollidedReturn)
+                                == 42_000
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        collidedLine, colStart, 0, bmCollidedReturn)
+                                == 0
+                        && HistoryResumeMatcher.findMatchedEpisodeIndex(
+                                        collidedLine, bmCollidedReturn)
+                                == 1,
+                "R7 P1-2C: 返航 never leaks 42000ms to 开端 across both e=1/2 distinction and forced fingerprint collision");
+
+        // 19. Round-7 P1-3: Cross-source failover allows different drive (orig Quark failed -> alt
+        //     site ONLY has Baidu with confirmed Ep 2 -> resumes 42,000 ms!), while same-site
+        //     duplicate-named lines still preserve Quark and alt missing Ep 2 returns 0ms!
+        WatchHistory.Entry bmQuarkOrigEp2 = new WatchHistory.Entry();
+        bmQuarkOrigEp2.site = "orig_site";
+        bmQuarkOrigEp2.id = "v_failover_drive";
+        bmQuarkOrigEp2.line = "原画";
+        bmQuarkOrigEp2.lineId = "原画";
+        bmQuarkOrigEp2.driveKey = NetdiskStore.DRIVE_QUARK;
+        bmQuarkOrigEp2.episode = "第2集";
+        bmQuarkOrigEp2.episodeKey =
+                WatchHistory.stableEpisodeKey("https://pan.quark.cn/s/orig_ep2");
+        bmQuarkOrigEp2.index = 1;
+        bmQuarkOrigEp2.position = 42_000;
+        bmQuarkOrigEp2.duration = 240_000;
+
+        Cms.Line altBaiduOnlyLine = new Cms.Line();
+        altBaiduOnlyLine.lineId = "百度原画";
+        altBaiduOnlyLine.name = "百度原画";
+        altBaiduOnlyLine.rawName = "百度原画";
+        Cms.Episode altBdE1 = new Cms.Episode();
+        altBdE1.name = "第1集";
+        altBdE1.url = "https://pan.baidu.com/s/alt_bd_e1";
+        Cms.Episode altBdE2 = new Cms.Episode();
+        altBdE2.name = "第2集";
+        altBdE2.url = "https://pan.baidu.com/s/alt_bd_e2";
+        altBaiduOnlyLine.episodes.add(altBdE1);
+        altBaiduOnlyLine.episodes.add(altBdE2);
+        Cms.Video altBaiduOnlyVideo = new Cms.Video();
+        altBaiduOnlyVideo.id = "alt_bd_v";
+        altBaiduOnlyVideo.lines.add(altBaiduOnlyLine);
+
+        Cms.Line altBaiduMissingEp2 = new Cms.Line();
+        altBaiduMissingEp2.lineId = "百度原画";
+        altBaiduMissingEp2.name = "百度原画";
+        altBaiduMissingEp2.rawName = "百度原画";
+        Cms.Episode altBdMissE5 = new Cms.Episode();
+        altBdMissE5.name = "第5集";
+        altBdMissE5.url = "https://pan.baidu.com/s/alt_bd_e5";
+        altBaiduMissingEp2.episodes.add(altBdE1);
+        altBaiduMissingEp2.episodes.add(altBdMissE5);
+        Cms.Video altBaiduMissingVideo = new Cms.Video();
+        altBaiduMissingVideo.id = "alt_bd_miss";
+        altBaiduMissingVideo.lines.add(altBaiduMissingEp2);
+
+        // Same-site twin lines (Quark + Baidu) -> matchEpisode (same-site) still strictly picks
+        // Quark
+        Cms.Video sameSiteTwinVideo = new Cms.Video();
+        sameSiteTwinVideo.id = "v_failover_drive";
+        sameSiteTwinVideo.lines.addAll(Arrays.asList(twinBaidu, twinQuark));
+        HistoryResumeMatcher.EpisodeMatch sameSitePick =
+                HistoryResumeMatcher.matchEpisode(sameSiteTwinVideo, bmQuarkOrigEp2);
+        HistoryResumeMatcher.EpisodeMatch failoverBaiduPick =
+                HistoryResumeMatcher.matchEpisodeForFailover(altBaiduOnlyVideo, bmQuarkOrigEp2);
+        HistoryResumeMatcher.EpisodeMatch failoverMissingPick =
+                HistoryResumeMatcher.matchEpisodeForFailover(altBaiduMissingVideo, bmQuarkOrigEp2);
+        check(
+                sameSitePick != null
+                        && sameSitePick.line == twinQuark
+                        && failoverBaiduPick != null
+                        && failoverBaiduPick.line == altBaiduOnlyLine
+                        && failoverBaiduPick.episode == altBdE2
+                        && HistoryResumeMatcher.resolveFailoverResumePositionMs(
+                                        failoverBaiduPick, bmQuarkOrigEp2)
+                                == 42_000
+                        && failoverMissingPick == null,
+                "R7 P1-3: same-site keeps Quark, cross-source failover onto Baidu-only alt source recovers Ep2 with 42000ms, missing Ep2 returns null/0ms");
+
+        // 20. Round-7 P2-3: Explicit share host overrides display alias ("百度的备用线路" with
+        //     pan.quark.cn stays quark & matches Quark bookmark); leading direct .mp4 trailer
+        //     followed by Quark main episodes obeys drive ordering while pure direct keeps slot!
+        Cms.Line aliasedQuark = new Cms.Line();
+        aliasedQuark.lineId = "原画";
+        aliasedQuark.rawName = "原画";
+        aliasedQuark.name = "百度的备用线路";
+        Cms.Episode aq1 = new Cms.Episode();
+        aq1.name = "第1集";
+        aq1.url = "https://pan.quark.cn/s/orig_ep1";
+        Cms.Episode aq2 = new Cms.Episode();
+        aq2.name = "第2集";
+        aq2.url = "https://pan.quark.cn/s/orig_ep2";
+        aliasedQuark.episodes.add(aq1);
+        aliasedQuark.episodes.add(aq2);
+
+        Cms.Line trailerThenQuark = new Cms.Line();
+        trailerThenQuark.lineId = "夸克混排";
+        trailerThenQuark.rawName = "夸克混排";
+        trailerThenQuark.name = "夸克混排";
+        Cms.Episode ttq0 = new Cms.Episode();
+        ttq0.name = "预告片";
+        ttq0.url = "https://cdn.example/trailer/preview.mp4";
+        Cms.Episode ttq1 = new Cms.Episode();
+        ttq1.name = "第1集";
+        ttq1.url = "https://pan.quark.cn/s/main_ep1";
+        Cms.Episode ttq2 = new Cms.Episode();
+        ttq2.name = "第2集";
+        ttq2.url = "https://pan.quark.cn/s/main_ep2";
+        trailerThenQuark.episodes.add(ttq0);
+        trailerThenQuark.episodes.add(ttq1);
+        trailerThenQuark.episodes.add(ttq2);
+
+        Cms.Line pureDirectLine = mkLineWithUrl("纯直连主线", "https://cdn.example/pure/ep1.m3u8");
+        Cms.Line realBaiduLine = mkLineWithUrl("百度正片", "https://pan.baidu.com/s/bd_main_ep1");
+
+        check(
+                NetdiskStore.DRIVE_QUARK.equals(NetdiskStore.detectLineDriveKey(aliasedQuark))
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        aliasedQuark, aq2, 1, bmQuarkOrigEp2)
+                                == 42_000
+                        && !NetdiskStore.hasExplicitDirectMediaUrl(trailerThenQuark)
+                        && NetdiskStore.DRIVE_QUARK.equals(
+                                NetdiskStore.detectLineDriveKey(trailerThenQuark))
+                        && NetdiskStore.hasExplicitDirectMediaUrl(pureDirectLine),
+                "R7 P2-3A: explicit pan.quark.cn host overrides alias '百度的备用线路' and matches Quark bookmark; leading direct trailer + Quark main episodes classifies as Quark");
+
+        JSONObject aliasRule = new JSONObject();
+        PlaybackLineRules.setAlias(aliasRule, "原画", "百度的备用线路");
+        List<Cms.Line> r7MixedOrder =
+                PlaybackLineRules.applyToLines(
+                        Arrays.asList(
+                                trailerThenQuark, pureDirectLine, aliasedQuark, realBaiduLine),
+                        aliasRule,
+                        Arrays.asList(
+                                NetdiskStore.DRIVE_BAIDU,
+                                NetdiskStore.DRIVE_QUARK,
+                                NetdiskStore.DRIVE_UC,
+                                NetdiskStore.DRIVE_ALI));
+        check(
+                "百度正片".equals(r7MixedOrder.get(0).name)
+                        && "纯直连主线".equals(r7MixedOrder.get(1).name)
+                        && "夸克混排".equals(r7MixedOrder.get(2).name)
+                        && "百度的备用线路".equals(r7MixedOrder.get(3).name),
+                "R7 P2-3B: Baidu pinned moves Baidu ahead of trailer+Quark and aliased Quark lines while keeping pure direct slot 1 untouched");
+
         pass(
-                "DriveOrder + R4/R5/R6 P1-1/P1-2/P1-3/P2-1: CloudSync/backup legacy stripping, /play?id & split-part & failover resume, and hostname-safe drive order verified");
+                "DriveOrder + R4/R5/R6/R7 P1-1..P2-3: lossless subscribe-only sync, ambiguous/failover resume, and host-first/trailer-mixed drive order verified");
     }
 }

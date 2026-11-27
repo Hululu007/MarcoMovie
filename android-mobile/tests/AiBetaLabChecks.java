@@ -2118,6 +2118,98 @@ public final class AiBetaLabChecks {
                             + "' cancels in-flight translation (0 model/overlay/mount)");
         }
 
+        // 7e. Round-7 P2-1: Mounting a new app-generated AI subtitle track MUST preserve same-named
+        //     embedded tracks, source-provided external tracks (no explicit id), and manually
+        //     imported tracks (marco_ext_sub_*), replacing ONLY confirmed prior app-AI tracks!
+        JSONObject r7Media3Opts = new JSONObject();
+        org.json.JSONArray r7InitialSubs = new org.json.JSONArray();
+        r7InitialSubs.put(
+                new JSONObject()
+                        .put("url", "https://src.example/sub/source_ai.srt")
+                        .put("name", AiSubtitleTranslator.AI_TRACK_NAME)
+                        .put("mimeType", "application/x-subrip"));
+        r7InitialSubs.put(
+                new JSONObject()
+                        .put("id", "marco_ext_sub_1")
+                        .put("url", "file:///sdcard/manual_ai.srt")
+                        .put("name", AiSubtitleTranslator.AI_TRACK_NAME)
+                        .put("mimeType", "application/x-subrip"));
+        r7InitialSubs.put(
+                new JSONObject()
+                        .put("id", "marco_ai_sub_2")
+                        .put("url", "file:///cache/app_ai_v1.srt")
+                        .put("name", AiSubtitleTranslator.AI_TRACK_NAME)
+                        .put("mimeType", "application/x-subrip"));
+        r7Media3Opts.put("subtitles", r7InitialSubs);
+        MoviePlayer.upsertSubtitleTrackJson(
+                r7Media3Opts,
+                "file:///cache/app_ai_v2.srt",
+                AiSubtitleTranslator.AI_TRACK_NAME,
+                "application/x-subrip",
+                "marco_ai_sub_3");
+        org.json.JSONArray r7AfterSubs = r7Media3Opts.getJSONArray("subtitles");
+        check(
+                r7AfterSubs.length() == 3
+                        && "https://src.example/sub/source_ai.srt"
+                                .equals(r7AfterSubs.getJSONObject(0).optString("url"))
+                        && "marco_ext_sub_1".equals(r7AfterSubs.getJSONObject(1).optString("id"))
+                        && "marco_ai_sub_3".equals(r7AfterSubs.getJSONObject(2).optString("id"))
+                        && "file:///cache/app_ai_v2.srt"
+                                .equals(r7AfterSubs.getJSONObject(2).optString("url")),
+                "R7 P2-1A: Media3 upsertSubtitleTrackJson preserves same-named source external (no id) & manual tracks, replacing ONLY marco_ai_sub_*");
+
+        JSONObject mpvSrcExtSameName =
+                new JSONObject()
+                        .put("id", 3)
+                        .put("external", true)
+                        .put("title", AiSubtitleTranslator.AI_TRACK_NAME)
+                        .put("external-filename", "https://src.example/sub/source_ai.srt");
+        JSONObject mpvManualExtSameName =
+                new JSONObject()
+                        .put("id", 4)
+                        .put("external", true)
+                        .put("title", AiSubtitleTranslator.AI_TRACK_NAME)
+                        .put("external-filename", "file:///sdcard/manual_ai.srt");
+        // Case 1: First app-AI mount (no prior app AI yet) -> ZERO sub-remove for
+        // embedded/source/manual!
+        List<String[]> mpvFirstMountPlan =
+                MpvPlayer.planExternalSubtitleUpsertCommands(
+                        Arrays.asList(
+                                mpvEmbeddedSameTitle, mpvSrcExtSameName, mpvManualExtSameName),
+                        "file:///cache/app_ai_v1.srt",
+                        AiSubtitleTranslator.AI_TRACK_NAME,
+                        -1,
+                        "",
+                        true);
+        // Case 2: Updating prior app-AI track id=9 -> emits sub-remove ONLY for id=9!
+        List<String[]> mpvUpdatePlan =
+                MpvPlayer.planExternalSubtitleUpsertCommands(
+                        Arrays.asList(
+                                mpvEmbeddedSameTitle,
+                                mpvSrcExtSameName,
+                                mpvManualExtSameName,
+                                mpvAppAi),
+                        "file:///cache/app_ai_v2.srt",
+                        AiSubtitleTranslator.AI_TRACK_NAME,
+                        9,
+                        "file:///cache/ai_ep1.srt",
+                        true);
+        boolean firstMountRemovedAny = false;
+        for (String[] c : mpvFirstMountPlan) {
+            if ("sub-remove".equals(c[0])) firstMountRemovedAny = true;
+        }
+        int updateRemoveCount = 0;
+        boolean updateRemoved9 = false;
+        for (String[] c : mpvUpdatePlan) {
+            if ("sub-remove".equals(c[0])) {
+                updateRemoveCount++;
+                if ("9".equals(c[1])) updateRemoved9 = true;
+            }
+        }
+        check(
+                !firstMountRemovedAny && updateRemoveCount == 1 && updateRemoved9,
+                "R7 P2-1B: MPV planExternalSubtitleUpsertCommands preserves embedded, source external & manual same-named tracks and removes ONLY confirmed prior app AI track");
+
         // 8. Round-4 P1-5: Unified 4 MiB subtitle completion disk cache write/read limit — verify
         //    742,995-byte complete full-episode sample hits disk cache on 2nd open with 0 model
         //    requests, oversize payload is symmetrically rejected, and legacy half-baked rejected!

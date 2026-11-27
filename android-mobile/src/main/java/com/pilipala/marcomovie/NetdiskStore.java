@@ -770,93 +770,133 @@ final class NetdiskStore {
         return false;
     }
 
+    private static boolean isExplicitDirectStreamUrl(String url) {
+        if (url == null || url.isEmpty() || isNetdiskShareUrl(url)) return false;
+        String lower = url.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("rtsp://")
+                || lower.startsWith("rtsps://")
+                || lower.startsWith("rtmp://")
+                || lower.startsWith("rtmps://")
+                || lower.startsWith("rtmpt://")
+                || lower.startsWith("rtmpe://")
+                || lower.startsWith("rtmfp://")
+                || lower.startsWith("udp://")
+                || lower.startsWith("rtp://")
+                || lower.startsWith("mms://")
+                || lower.startsWith("mmsh://")
+                || lower.startsWith("mmst://")
+                || lower.startsWith("srt://")
+                || lower.startsWith("rist://")
+                || lower.startsWith("webrtc://")
+                || lower.startsWith("file://")
+                || lower.startsWith("content://")) {
+            return true;
+        }
+        if (!Cms.isHttp(url)) return false;
+        String path = url.split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
+        return path.endsWith(".m3u8")
+                || path.endsWith(".mp4")
+                || path.endsWith(".flv")
+                || path.endsWith(".mkv")
+                || path.endsWith(".ts")
+                || path.endsWith(".webm")
+                || path.endsWith(".mpd")
+                || path.endsWith(".mov")
+                || path.endsWith(".avi");
+    }
+
     /**
-     * Returns {@code true} ONLY when a line carries explicit direct playable stream URLs (e.g.
-     * {@code .m3u8} / {@code .mp4} / {@code .mkv} / {@code rtsp://} on non-netdisk-share hosts).
-     * Ordinary HTTP redirect/interstitial pages (e.g. {@code https://site.example/play/123} or
-     * {@code /proxy?...}) MUST return {@code false} so netdisk lines named after Quark/Baidu/UC/Ali
-     * or supported extended drives obey user drive ordering.
+     * Returns {@code true} ONLY when a line is genuinely a pure direct playable stream line (e.g.
+     * {@code .m3u8} / {@code .mp4} / {@code .mkv} / {@code rtsp://} on non-netdisk-share hosts). A
+     * line containing any explicit netdisk share episode — or a leading direct trailer followed by
+     * non-direct netdisk/redirect main episodes — MUST return {@code false} so drive ordering still
+     * applies.
      */
     static boolean hasExplicitDirectMediaUrl(Cms.Line line) {
         if (line == null || line.episodes == null || line.episodes.isEmpty()) return false;
+        boolean sawDirect = false;
+        boolean sawNonTrailerDirect = false;
+        boolean sawNonTrailerNonDirect = false;
         int checked = 0;
-        for (int i = 0; i < line.episodes.size() && checked < 3; i++) {
+        int checkedNonTrailer = 0;
+        for (int i = 0; i < line.episodes.size() && (checked < 8 || checkedNonTrailer < 3); i++) {
             Cms.Episode ep = line.episodes.get(i);
             if (ep == null || ep.url == null) continue;
             String url = ep.url.trim();
             if (url.isEmpty()) continue;
             checked++;
-            if (isNetdiskShareUrl(url)) return false;
-            String lower = url.toLowerCase(Locale.ROOT);
-            if (lower.startsWith("rtsp://")
-                    || lower.startsWith("rtsps://")
-                    || lower.startsWith("rtmp://")
-                    || lower.startsWith("rtmps://")
-                    || lower.startsWith("rtmpt://")
-                    || lower.startsWith("rtmpe://")
-                    || lower.startsWith("rtmfp://")
-                    || lower.startsWith("udp://")
-                    || lower.startsWith("rtp://")
-                    || lower.startsWith("mms://")
-                    || lower.startsWith("mmsh://")
-                    || lower.startsWith("mmst://")
-                    || lower.startsWith("srt://")
-                    || lower.startsWith("rist://")
-                    || lower.startsWith("webrtc://")
-                    || lower.startsWith("file://")
-                    || lower.startsWith("content://")) {
-                return true;
+            if (isNetdiskShareUrl(url)) {
+                return false;
             }
-            if (!Cms.isHttp(url)) continue;
-            String path = url.split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
-            if (path.endsWith(".m3u8")
-                    || path.endsWith(".mp4")
-                    || path.endsWith(".flv")
-                    || path.endsWith(".mkv")
-                    || path.endsWith(".ts")
-                    || path.endsWith(".webm")
-                    || path.endsWith(".mpd")
-                    || path.endsWith(".mov")
-                    || path.endsWith(".avi")) {
-                return true;
+            boolean isTrailer = HistoryResumeMatcher.isTrailerOrExtraName(ep.name);
+            boolean direct = isExplicitDirectStreamUrl(url);
+            if (direct) {
+                sawDirect = true;
+                if (!isTrailer) {
+                    sawNonTrailerDirect = true;
+                    checkedNonTrailer++;
+                }
+            } else if (!isTrailer) {
+                sawNonTrailerNonDirect = true;
+                checkedNonTrailer++;
             }
         }
-        return false;
+        if (sawNonTrailerDirect) return true;
+        return sawDirect && !sawNonTrailerNonDirect;
     }
 
     /**
      * Classifies a playback {@link Cms.Line} into one of the 4 core netdisk keys ({@code quark},
-     * {@code uc}, {@code baidu}, {@code ali}), inspecting {@code rawName}, display {@code name},
-     * and (as fallback) episode share URLs. Explicit direct-stream media URLs are never
-     * misclassified as netdisk lines.
+     * {@code uc}, {@code baidu}, {@code ali}). Explicit netdisk share hostnames on episodes take
+     * strict precedence over display aliases (e.g. a real {@code pan.quark.cn} share renamed to
+     * "百度的备用线路" stays {@code quark}); only lines without explicit share hosts fall back to
+     * {@code rawName}/{@code name}. Pure direct-stream lines return {@code ""}.
      */
     static String detectLineDriveKey(Cms.Line line) {
         if (line == null || hasExplicitDirectMediaUrl(line)) return "";
-        String byRaw = detectDriveKeyFromLineName(line.rawName());
-        if (!byRaw.isEmpty()) return byRaw;
-        String byName = detectDriveKeyFromLineName(line.name);
-        if (!byName.isEmpty()) return byName;
         if (line.episodes != null) {
-            int limit = Math.min(2, line.episodes.size());
-            for (int i = 0; i < limit; i++) {
+            int checked = 0;
+            for (int i = 0; i < line.episodes.size() && checked < 8; i++) {
                 Cms.Episode ep = line.episodes.get(i);
-                if (ep == null) continue;
+                if (ep == null || ep.url == null || ep.url.trim().isEmpty()) continue;
+                checked++;
                 String byUrl = detectDriveKeyFromEpisodeUrl(ep.url);
                 if (!byUrl.isEmpty()) return byUrl;
+                if (isExtendedNetdiskShareHost(ep.url)) {
+                    // Explicit extended share host (e.g. 115.com) must not be hijacked by a core
+                    // drive alias in rawName/name.
+                    return "";
+                }
             }
         }
-        return "";
+        String byRaw = detectDriveKeyFromLineName(line.rawName());
+        if (!byRaw.isEmpty()) return byRaw;
+        return detectDriveKeyFromLineName(line.name);
     }
 
     static boolean isExtendedNetdiskLine(Cms.Line line) {
         if (line == null || hasExplicitDirectMediaUrl(line)) return false;
+        if (line.episodes != null) {
+            int checked = 0;
+            for (int i = 0; i < line.episodes.size() && checked < 8; i++) {
+                Cms.Episode ep = line.episodes.get(i);
+                if (ep == null || ep.url == null || ep.url.trim().isEmpty()) continue;
+                checked++;
+                if (!detectDriveKeyFromEpisodeUrl(ep.url).isEmpty()) {
+                    return false;
+                }
+                if (isExtendedNetdiskShareHost(ep.url)) {
+                    return true;
+                }
+            }
+        }
         String rawName = line.rawName() == null ? "" : line.rawName();
         String dispName = line.name == null ? "" : line.name;
         if (isBare115Name(rawName) || isBare115Name(dispName)) {
             return true;
         }
         String combined = (rawName + " " + dispName).toLowerCase(Locale.ROOT);
-        if (combined.contains("115网盘")
+        return combined.contains("115网盘")
                 || combined.contains("115云")
                 || combined.contains("115盘")
                 || combined.contains("115原画")
@@ -879,19 +919,7 @@ final class NetdiskStore {
                 || combined.contains("pan123")
                 || combined.contains("迅雷")
                 || combined.contains("thunder")
-                || combined.contains("pikpak")) {
-            return true;
-        }
-        if (line.episodes != null && !line.episodes.isEmpty()) {
-            int limit = Math.min(2, line.episodes.size());
-            for (int i = 0; i < limit; i++) {
-                Cms.Episode ep = line.episodes.get(i);
-                if (ep != null && isExtendedNetdiskShareHost(ep.url)) {
-                    return true;
-                }
-            }
-        }
-        return false;
+                || combined.contains("pikpak");
     }
 
     /**

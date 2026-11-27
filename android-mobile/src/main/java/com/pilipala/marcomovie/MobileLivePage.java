@@ -44,9 +44,12 @@ final class MobileLivePage {
         final String sourceUrl;
         final int sourceIndex;
         final int groupIndex;
+        final String groupName;
         final String filterQuery;
         final int groupScrollY;
         final int channelScrollY;
+        final int previewGroupIndex;
+        final String previewGroupName;
         final String channelName;
         final String streamUrl;
         final int streamIndex;
@@ -62,9 +65,12 @@ final class MobileLivePage {
                     sourceUrl,
                     sourceIndex,
                     groupIndex,
+                    "",
                     filterQuery,
                     groupScrollY,
                     channelScrollY,
+                    -1,
+                    "",
                     "",
                     "",
                     0);
@@ -80,12 +86,43 @@ final class MobileLivePage {
                 String channelName,
                 String streamUrl,
                 int streamIndex) {
+            this(
+                    sourceUrl,
+                    sourceIndex,
+                    groupIndex,
+                    "",
+                    filterQuery,
+                    groupScrollY,
+                    channelScrollY,
+                    groupIndex,
+                    "",
+                    channelName,
+                    streamUrl,
+                    streamIndex);
+        }
+
+        LiveRelayoutState(
+                String sourceUrl,
+                int sourceIndex,
+                int groupIndex,
+                String groupName,
+                String filterQuery,
+                int groupScrollY,
+                int channelScrollY,
+                int previewGroupIndex,
+                String previewGroupName,
+                String channelName,
+                String streamUrl,
+                int streamIndex) {
             this.sourceUrl = sourceUrl == null ? "" : sourceUrl;
             this.sourceIndex = Math.max(0, sourceIndex);
             this.groupIndex = Math.max(0, groupIndex);
+            this.groupName = groupName == null ? "" : groupName;
             this.filterQuery = filterQuery == null ? "" : filterQuery;
             this.groupScrollY = Math.max(0, groupScrollY);
             this.channelScrollY = Math.max(0, channelScrollY);
+            this.previewGroupIndex = previewGroupIndex;
+            this.previewGroupName = previewGroupName == null ? "" : previewGroupName;
             this.channelName = channelName == null ? "" : channelName;
             this.streamUrl = streamUrl == null ? "" : streamUrl;
             this.streamIndex = Math.max(0, streamIndex);
@@ -137,6 +174,38 @@ final class MobileLivePage {
             String activeChannelName,
             String activeStreamUrl,
             int activeStreamIndex) {
+        return buildConsecutiveRelayoutSnapshot(
+                sourceUrl,
+                sourceIndex,
+                groupIndex,
+                "",
+                filterQuery,
+                liveGroupScrollY,
+                liveChannelScrollY,
+                scrollRestorePending,
+                unapplied,
+                activeChannelName != null && !activeChannelName.isEmpty() ? groupIndex : -1,
+                "",
+                activeChannelName,
+                activeStreamUrl,
+                activeStreamIndex);
+    }
+
+    static LiveRelayoutState buildConsecutiveRelayoutSnapshot(
+            String sourceUrl,
+            int sourceIndex,
+            int groupIndex,
+            String browseGroupName,
+            String filterQuery,
+            int liveGroupScrollY,
+            int liveChannelScrollY,
+            boolean scrollRestorePending,
+            LiveRelayoutState unapplied,
+            int activePreviewGroupIndex,
+            String activePreviewGroupName,
+            String activeChannelName,
+            String activeStreamUrl,
+            int activeStreamIndex) {
         int effectiveGroupScrollY =
                 (scrollRestorePending && liveGroupScrollY == 0 && unapplied != null)
                         ? unapplied.groupScrollY
@@ -145,25 +214,47 @@ final class MobileLivePage {
                 (scrollRestorePending && liveChannelScrollY == 0 && unapplied != null)
                         ? unapplied.channelScrollY
                         : Math.max(0, liveChannelScrollY);
+        String effBrowseGrpName =
+                browseGroupName != null && !browseGroupName.isEmpty()
+                        ? browseGroupName
+                        : (unapplied != null && groupIndex == unapplied.groupIndex
+                                ? unapplied.groupName
+                                : "");
+        boolean hasLivePreview = activeChannelName != null && !activeChannelName.isEmpty();
         String effChan =
-                activeChannelName != null && !activeChannelName.isEmpty()
+                hasLivePreview
                         ? activeChannelName
                         : (unapplied != null ? unapplied.channelName : "");
         String effStreamUrl =
-                activeStreamUrl != null && !activeStreamUrl.isEmpty()
+                hasLivePreview && activeStreamUrl != null && !activeStreamUrl.isEmpty()
                         ? activeStreamUrl
                         : (unapplied != null ? unapplied.streamUrl : "");
         int effStreamIdx =
-                activeChannelName != null && !activeChannelName.isEmpty()
+                hasLivePreview
                         ? Math.max(0, activeStreamIndex)
                         : (unapplied != null ? unapplied.streamIndex : 0);
+        int effPreviewGrpIdx =
+                hasLivePreview
+                        ? activePreviewGroupIndex
+                        : (unapplied != null ? unapplied.previewGroupIndex : -1);
+        String effPreviewGrpName =
+                hasLivePreview
+                                && activePreviewGroupName != null
+                                && !activePreviewGroupName.isEmpty()
+                        ? activePreviewGroupName
+                        : (hasLivePreview
+                                ? ""
+                                : (unapplied != null ? unapplied.previewGroupName : ""));
         return new LiveRelayoutState(
                 sourceUrl,
                 sourceIndex,
                 groupIndex,
+                effBrowseGrpName,
                 filterQuery,
                 effectiveGroupScrollY,
                 effectiveChannelScrollY,
+                effPreviewGrpIdx,
+                effPreviewGrpName,
                 effChan,
                 effStreamUrl,
                 effStreamIdx);
@@ -182,6 +273,50 @@ final class MobileLivePage {
     static int resolveRestoredGroupIndex(LiveRelayoutState saved, int groupCount) {
         if (saved == null || groupCount <= 0) return 0;
         return Math.min(saved.groupIndex, groupCount - 1);
+    }
+
+    /**
+     * Restores the currently browsed group index, matching {@link LiveRelayoutState#groupName}
+     * first so catalog group reordering does not jump the browse pane to another group.
+     */
+    static int resolveRestoredBrowseGroupIndex(
+            LiveCatalog.Catalog catalog, LiveRelayoutState saved) {
+        if (catalog == null || catalog.groups == null || catalog.groups.isEmpty()) return 0;
+        if (saved == null) return 0;
+        if (!saved.groupName.isEmpty()) {
+            for (int i = 0; i < catalog.groups.size(); i++) {
+                LiveCatalog.Group g = catalog.groups.get(i);
+                if (g != null && saved.groupName.equals(g.name)) {
+                    return i;
+                }
+            }
+        }
+        return Math.min(saved.groupIndex, catalog.groups.size() - 1);
+    }
+
+    /**
+     * Restores the owning group index of the active preview channel independently from the
+     * currently browsed group, matching {@link LiveRelayoutState#previewGroupName} first so
+     * catalog group reordering preserves exact preview channel identity.
+     */
+    static int resolveRestoredPreviewGroupIndex(
+            LiveCatalog.Catalog catalog, int fallbackBrowseGroupIndex, LiveRelayoutState saved) {
+        if (catalog == null || catalog.groups == null || catalog.groups.isEmpty()) return 0;
+        int clampedBrowse =
+                Math.max(0, Math.min(catalog.groups.size() - 1, fallbackBrowseGroupIndex));
+        if (saved == null) return clampedBrowse;
+        if (!saved.previewGroupName.isEmpty()) {
+            for (int i = 0; i < catalog.groups.size(); i++) {
+                LiveCatalog.Group g = catalog.groups.get(i);
+                if (g != null && saved.previewGroupName.equals(g.name)) {
+                    return i;
+                }
+            }
+        }
+        if (saved.previewGroupIndex >= 0) {
+            return Math.min(saved.previewGroupIndex, catalog.groups.size() - 1);
+        }
+        return clampedBrowse;
     }
 
     private static boolean channelHasStreamUrl(LiveCatalog.Channel ch, String url) {
@@ -224,21 +359,22 @@ final class MobileLivePage {
     }
 
     /**
-     * Restores the active preview channel after relayout, strictly prioritizing the original group
-     * ({@code groupIndex}) and matching {@code (channelName + streamUrl)} before falling back to
-     * {@code channelName} or {@code streamUrl} inside that group, and only then across other
-     * groups. Prevents cross-group channels sharing the same stream URL from hijacking the preview
-     * title, row highlight, or fullscreen entry.
+     * Restores the active preview channel after relayout using the saved preview channel's own
+     * group ({@link #resolveRestoredPreviewGroupIndex}) — NOT the separately browsed group —
+     * matching {@code (channelName + streamUrl)} before {@code channelName} or {@code streamUrl}
+     * inside the preview group, and only then across other groups. Prevents browsing Group B while
+     * playing Group A from jumping the browse group or switching to a shared-URL alias in Group B.
      */
     static LiveCatalog.Channel resolveRestoredChannel(
-            LiveCatalog.Catalog catalog, int groupIndex, LiveRelayoutState saved) {
+            LiveCatalog.Catalog catalog, int browseGroupIndex, LiveRelayoutState saved) {
         if (catalog == null || catalog.groups == null || catalog.groups.isEmpty()) return null;
-        int clampedG = Math.max(0, Math.min(catalog.groups.size() - 1, groupIndex));
-        LiveCatalog.Group prefGroup = catalog.groups.get(clampedG);
-        if (saved != null) {
-            LiveCatalog.Channel inPref =
-                    findChannelInGroup(prefGroup, saved.channelName, saved.streamUrl);
-            if (inPref != null) return inPref;
+        int clampedBrowse = Math.max(0, Math.min(catalog.groups.size() - 1, browseGroupIndex));
+        if (saved != null && (!saved.channelName.isEmpty() || !saved.streamUrl.isEmpty())) {
+            int previewGrpIdx = resolveRestoredPreviewGroupIndex(catalog, clampedBrowse, saved);
+            LiveCatalog.Group previewGroup = catalog.groups.get(previewGrpIdx);
+            LiveCatalog.Channel inPreviewGrp =
+                    findChannelInGroup(previewGroup, saved.channelName, saved.streamUrl);
+            if (inPreviewGrp != null) return inPreviewGrp;
 
             boolean hasName = !saved.channelName.isEmpty();
             boolean hasUrl = !saved.streamUrl.isEmpty();
@@ -275,8 +411,11 @@ final class MobileLivePage {
                 }
             }
         }
-        if (prefGroup != null && prefGroup.channels != null && !prefGroup.channels.isEmpty()) {
-            return prefGroup.channels.get(0);
+        LiveCatalog.Group browseGroup = catalog.groups.get(clampedBrowse);
+        if (browseGroup != null
+                && browseGroup.channels != null
+                && !browseGroup.channels.isEmpty()) {
+            return browseGroup.channels.get(0);
         }
         return null;
     }
@@ -534,6 +673,7 @@ final class MobileLivePage {
         final MoviePlayer[] inlineLivePlayer = {null};
         final Surface[] readySurface = {null};
         final LiveCatalog.Source[] curSource = {null};
+        final LiveCatalog.Group[] curPreviewGroup = {null};
         final LiveCatalog.Channel[] curChannel = {null};
         final LiveCatalog.Stream[] curStream = {null};
         final List<ChannelRowHolder> renderedRows = new ArrayList<>();
@@ -721,6 +861,36 @@ final class MobileLivePage {
                             srcIdx[0] >= 0 && srcIdx[0] < sources.size()
                                     ? sources.get(srcIdx[0]).url
                                     : "";
+                    LiveCatalog.Catalog curCat = catHolder[0];
+                    String browseGrpName =
+                            (curCat != null
+                                            && curCat.groups != null
+                                            && grpIdx[0] >= 0
+                                            && grpIdx[0] < curCat.groups.size()
+                                            && curCat.groups.get(grpIdx[0]) != null
+                                            && curCat.groups.get(grpIdx[0]).name != null)
+                                    ? curCat.groups.get(grpIdx[0]).name
+                                    : "";
+                    int previewGrpIdx = -1;
+                    String previewGrpName = "";
+                    if (curPreviewGroup[0] != null) {
+                        previewGrpName =
+                                curPreviewGroup[0].name != null ? curPreviewGroup[0].name : "";
+                        if (curCat != null && curCat.groups != null) {
+                            previewGrpIdx = curCat.groups.indexOf(curPreviewGroup[0]);
+                        }
+                    } else if (curChannel[0] != null && curCat != null && curCat.groups != null) {
+                        for (int gi = 0; gi < curCat.groups.size(); gi++) {
+                            LiveCatalog.Group gg = curCat.groups.get(gi);
+                            if (gg != null
+                                    && gg.channels != null
+                                    && gg.channels.contains(curChannel[0])) {
+                                previewGrpIdx = gi;
+                                previewGrpName = gg.name != null ? gg.name : "";
+                                break;
+                            }
+                        }
+                    }
                     String chName =
                             curChannel[0] != null && curChannel[0].name != null
                                     ? curChannel[0].name
@@ -738,11 +908,14 @@ final class MobileLivePage {
                                     sUrl,
                                     srcIdx[0],
                                     grpIdx[0],
+                                    browseGrpName,
                                     filterInput.getText().toString(),
                                     groupSv.getScrollY(),
                                     chanSv.getScrollY(),
                                     scrollRestorePending[0],
                                     unappliedRelayout[0],
+                                    previewGrpIdx,
+                                    previewGrpName,
                                     chName,
                                     stUrl,
                                     stIdx));
@@ -861,6 +1034,7 @@ final class MobileLivePage {
                                         v -> {
                                             if (ch.streams.isEmpty()) return;
                                             curSource[0] = sources.get(srcIdx[0]);
+                                            curPreviewGroup[0] = grp;
                                             curChannel[0] = ch;
                                             curStream[0] = ch.streams.get(0);
                                             startPreview.run();
@@ -1011,14 +1185,18 @@ final class MobileLivePage {
                                                         || ticket != a.generation
                                                         || myReq != reqSeq[0]) return;
                                                 catHolder[0] = catalog;
-                                                grpIdx[0] =
-                                                        resolveRestoredGroupIndex(
-                                                                new LiveRelayoutState(
-                                                                        "", 0, grpIdx[0], "", 0, 0),
-                                                                catalog.groups.size());
-                                                a.liveSession = new LiveSession(selSrc, catalog);
                                                 LiveRelayoutState pendingRestore =
                                                         unappliedRelayout[0];
+                                                grpIdx[0] =
+                                                        pendingRestore != null
+                                                                ? resolveRestoredBrowseGroupIndex(
+                                                                        catalog, pendingRestore)
+                                                                : resolveRestoredGroupIndex(
+                                                                        new LiveRelayoutState(
+                                                                                "", 0, grpIdx[0],
+                                                                                "", 0, 0),
+                                                                        catalog.groups.size());
+                                                a.liveSession = new LiveSession(selSrc, catalog);
                                                 if (curChannel[0] == null
                                                         && !catalog.groups.isEmpty()) {
                                                     LiveCatalog.Channel targetCh =
@@ -1030,10 +1208,23 @@ final class MobileLivePage {
                                                             resolveRestoredStream(
                                                                     targetCh, pendingRestore);
                                                     if (targetCh != null && targetSt != null) {
-                                                        grpIdx[0] =
+                                                        int previewGrpIdx =
                                                                 resolveRestoredGroupIndexForChannel(
-                                                                        catalog, grpIdx[0],
+                                                                        catalog,
+                                                                        resolveRestoredPreviewGroupIndex(
+                                                                                catalog,
+                                                                                grpIdx[0],
+                                                                                pendingRestore),
                                                                         targetCh);
+                                                        curPreviewGroup[0] =
+                                                                (previewGrpIdx >= 0
+                                                                                && previewGrpIdx
+                                                                                        < catalog
+                                                                                                .groups
+                                                                                                .size())
+                                                                        ? catalog.groups.get(
+                                                                                previewGrpIdx)
+                                                                        : null;
                                                         curSource[0] = selSrc;
                                                         curChannel[0] = targetCh;
                                                         curStream[0] = targetSt;

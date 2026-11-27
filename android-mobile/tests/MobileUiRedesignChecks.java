@@ -2361,6 +2361,78 @@ public final class MobileUiRedesignChecks {
                         && r6Snap2.channelScrollY == 640,
                 "R6 P2-2: cross-group shared stream URL restores original group 1, non-first channel 高清综合 (not group 0 央视综合), exact stream, and scrolls across 2 consecutive rebuilds");
 
+        // Round-7 P2-2: Playing Group A ("央视" -> "央视综合", shared_hd.m3u8) while browsing Group B
+        // ("高清专区", which ALSO has alias "高清综合" sharing shared_hd.m3u8!), followed by TWO
+        // consecutive rebuilds AND catalog group reordering MUST keep browse group on Group B,
+        // keep preview & fullscreen on Group A's "央视综合" + exact stream, and preserve scrolls!
+        MobileLivePage.LiveRelayoutState r7BrowseBPlayASnap1 =
+                new MobileLivePage.LiveRelayoutState(
+                        "https://live.example/main.m3u",
+                        0,
+                        1,
+                        "高清专区",
+                        "",
+                        150,
+                        480,
+                        0,
+                        "央视",
+                        "央视综合",
+                        "https://live.example/shared_hd.m3u8",
+                        0);
+        // Second consecutive rebuild BEFORE slow catalog returns (catHolder=null, curChannel=null,
+        // scrolls=0)
+        MobileLivePage.LiveRelayoutState r7BrowseBPlayASnap2 =
+                MobileLivePage.buildConsecutiveRelayoutSnapshot(
+                        "https://live.example/main.m3u",
+                        0,
+                        1,
+                        "",
+                        "",
+                        0,
+                        0,
+                        true,
+                        r7BrowseBPlayASnap1,
+                        -1,
+                        "",
+                        "",
+                        "",
+                        0);
+        // Catalog returns with REORDERED groups: [新插入体育组, 高清专区(1), 央视(2)]!
+        LiveCatalog.Catalog reorderedCat = new LiveCatalog.Catalog();
+        LiveCatalog.Group grpExtra = new LiveCatalog.Group();
+        grpExtra.name = "体育专区";
+        LiveCatalog.Channel gExCh = new LiveCatalog.Channel();
+        gExCh.name = "体育一台";
+        LiveCatalog.Stream gExSt = new LiveCatalog.Stream();
+        gExSt.url = "https://live.example/sports1.m3u8";
+        gExCh.streams.add(gExSt);
+        grpExtra.channels.add(gExCh);
+        reorderedCat.groups.add(grpExtra);
+        reorderedCat.groups.add(grp1); // "高清专区" now at index 1
+        reorderedCat.groups.add(grp0); // "央视" moved from index 0 -> index 2!
+
+        int r7BrowseIdx =
+                MobileLivePage.resolveRestoredBrowseGroupIndex(reorderedCat, r7BrowseBPlayASnap2);
+        int r7PreviewGrpIdx =
+                MobileLivePage.resolveRestoredPreviewGroupIndex(
+                        reorderedCat, r7BrowseIdx, r7BrowseBPlayASnap2);
+        LiveCatalog.Channel r7PreviewCh =
+                MobileLivePage.resolveRestoredChannel(
+                        reorderedCat, r7BrowseIdx, r7BrowseBPlayASnap2);
+        LiveCatalog.Stream r7PreviewSt =
+                MobileLivePage.resolveRestoredStream(r7PreviewCh, r7BrowseBPlayASnap2);
+        check(
+                r7BrowseIdx == 1
+                        && "高清专区".equals(reorderedCat.groups.get(r7BrowseIdx).name)
+                        && r7PreviewGrpIdx == 2
+                        && "央视".equals(reorderedCat.groups.get(r7PreviewGrpIdx).name)
+                        && r7PreviewCh == g0Shared
+                        && "央视综合".equals(r7PreviewCh.name)
+                        && r7PreviewSt == g0SharedSt
+                        && r7BrowseBPlayASnap2.groupScrollY == 150
+                        && r7BrowseBPlayASnap2.channelScrollY == 480,
+                "R7 P2-2: playing Group A while browsing Group B across 2 consecutive rebuilds & group reordering preserves browse Group B, preview/fullscreen Group A 央视综合 (not Group B alias 高清综合), stream & scrolls");
+
         // Round-4 P2-2b: Short scrollable Dock quick menu rejects finger release outside viewport
         // OR over rows scrolled outside the visible viewport!
         float[] qTops = {100f, 150f, 200f, 250f};

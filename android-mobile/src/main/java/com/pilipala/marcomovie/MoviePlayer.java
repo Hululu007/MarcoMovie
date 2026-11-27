@@ -1796,7 +1796,11 @@ public class MoviePlayer {
      */
     static boolean upsertSubtitleTrackJson(
             org.json.JSONObject options, String url, String name, String mime) throws Exception {
-        return upsertSubtitleTrackJson(options, url, name, mime, "");
+        String legacyId =
+                AiSubtitleTranslator.AI_TRACK_NAME.equals(name == null ? "" : name.trim())
+                        ? "marco_ai_sub_legacy"
+                        : "";
+        return upsertSubtitleTrackJson(options, url, name, mime, legacyId);
     }
 
     static boolean upsertSubtitleTrackJson(
@@ -1810,10 +1814,7 @@ public class MoviePlayer {
         }
         String safeName = name == null ? "外挂字幕" : name;
         boolean hasExplicitId = trackId != null && !trackId.isEmpty();
-        boolean isAiTrack =
-                hasExplicitId
-                        ? trackId.startsWith("marco_ai_sub_")
-                        : AiSubtitleTranslator.AI_TRACK_NAME.equals(safeName);
+        boolean isAiTrack = hasExplicitId && trackId.startsWith("marco_ai_sub_");
         org.json.JSONObject entry =
                 new org.json.JSONObject()
                         .put("url", url)
@@ -1827,11 +1828,10 @@ public class MoviePlayer {
             if (existing == null) continue;
             String existingUrl = existing.optString("url", "");
             String existingId = existing.optString("id", "");
-            String existingName = existing.optString("name", "");
-            boolean existingIsAppAi =
-                    existingId.startsWith("marco_ai_sub_")
-                            || (existingId.isEmpty()
-                                    && AiSubtitleTranslator.AI_TRACK_NAME.equals(existingName));
+            // Strictly match ONLY tracks confirmed to carry our app-generated marco_ai_sub_ ID
+            // (never replacing source-provided external tracks that lack an ID or user-imported
+            // tracks even when they share the exact same display name).
+            boolean existingIsAppAi = existingId.startsWith("marco_ai_sub_");
             if (url.equals(existingUrl) || (isAiTrack && existingIsAppAi)) {
                 tracks.put(i, entry);
                 return false;

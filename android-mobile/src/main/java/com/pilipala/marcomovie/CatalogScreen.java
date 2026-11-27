@@ -429,7 +429,7 @@ final class CatalogScreen {
                                 final Cms.Video readyVideo = detailVideo;
                                 final HistoryResumeMatcher.EpisodeMatch matched =
                                         readyVideo != null
-                                                ? HistoryResumeMatcher.matchEpisode(
+                                                ? HistoryResumeMatcher.matchEpisodeForFailover(
                                                         readyVideo, bookmark)
                                                 : null;
                                 a.ui.post(

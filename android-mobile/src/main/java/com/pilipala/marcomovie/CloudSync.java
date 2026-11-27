@@ -1032,7 +1032,8 @@ final class CloudSync {
                                 .put("updatedAt", now)
                                 .put(
                                         "watch_history",
-                                        WatchHistory.sanitizeHistoryArray(rawRemoteHistArray))
+                                        WatchHistory.sanitizePreservingHistoryArray(
+                                                rawRemoteHistArray))
                                 .put(
                                         "favorites",
                                         rawRemoteFavsArray != null

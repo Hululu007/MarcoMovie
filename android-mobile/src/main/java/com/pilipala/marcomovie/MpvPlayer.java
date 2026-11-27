@@ -1058,16 +1058,13 @@ public final class MpvPlayer extends MoviePlayer {
                 boolean external = t.optBoolean("external", false);
                 if (!external) continue;
                 String extFile = t.optString("external-filename", "").trim();
-                String title = t.optString("title", "").trim();
                 boolean sameFile = !extFile.isEmpty() && extFile.equals(safeUri);
+                // Strictly replace ONLY the exact same file URI OR a track confirmed to be our
+                // prior app-generated AI track (by recorded SID/URI). Never remove same-named
+                // source external tracks or user-imported tracks.
                 boolean priorAppAi =
-                        appGeneratedAi
-                                && (isAppGeneratedAiMpvTrack(t, priorAiSid, priorAiUri)
-                                        || (priorAiSid <= 0
-                                                && (priorAiUri == null || priorAiUri.isEmpty())
-                                                && AiSubtitleTranslator.AI_TRACK_NAME.equals(
-                                                        title)));
-                if (sameFile || priorAppAi || title.equals(safeName)) {
+                        appGeneratedAi && isAppGeneratedAiMpvTrack(t, priorAiSid, priorAiUri);
+                if (sameFile || priorAppAi) {
                     cmds.add(new String[] {"sub-remove", Integer.toString(id)});
                 }
             }

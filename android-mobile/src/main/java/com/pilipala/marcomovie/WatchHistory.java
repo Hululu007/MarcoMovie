@@ -385,13 +385,11 @@ final class WatchHistory {
                                     "jwt",
                                     "ticket",
                                     "st",
-                                    "e",
                                     "exp",
                                     "expire",
                                     "expires",
                                     "expires_in",
                                     "ts",
-                                    "t",
                                     "time",
                                     "timestamp",
                                     "nonce",
@@ -437,10 +435,46 @@ final class WatchHistory {
                                     "googleaccessid",
                                     "awsaccesskeyid")));
 
-    private static boolean isVolatileOrSensitiveQueryParam(String rawKey) {
+    private static boolean looksLikeEpochOrHexTimestamp(String rawValue) {
+        if (rawValue == null) return false;
+        String v = rawValue.trim();
+        int n = v.length();
+        if (n >= 9 && n <= 13) {
+            boolean allDigits = true;
+            for (int i = 0; i < n; i++) {
+                if (!Character.isDigit(v.charAt(i))) {
+                    allDigits = false;
+                    break;
+                }
+            }
+            if (allDigits) return true;
+        }
+        if (n >= 8 && n <= 16) {
+            boolean allHex = true;
+            boolean hasAlphaHex = false;
+            for (int i = 0; i < n; i++) {
+                char ch = v.charAt(i);
+                if ((ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
+                    hasAlphaHex = true;
+                } else if (ch < '0' || ch > '9') {
+                    allHex = false;
+                    break;
+                }
+            }
+            if (allHex && hasAlphaHex) return true;
+        }
+        return false;
+    }
+
+    private static boolean isVolatileOrSensitiveQueryParam(String rawKey, String rawValue) {
         if (rawKey == null || rawKey.isEmpty()) return true;
         String k = rawKey.trim().toLowerCase(Locale.ROOT);
         if (k.isEmpty()) return true;
+        // Single-letter "e" / "t" can identify episodes (e=1, e=2) on CMS routes, while CDNs use
+        // Unix epoch or hex timestamps (e=1799999999, t=65a0b1c2) for expiration.
+        if ("e".equals(k) || "t".equals(k)) {
+            return looksLikeEpochOrHexTimestamp(rawValue);
+        }
         if (VOLATILE_QUERY_KEYS.contains(k)) return true;
         if (k.startsWith("x-amz-")
                 || k.startsWith("x-oss-")
@@ -479,7 +513,7 @@ final class WatchHistory {
             int eq = part.indexOf('=');
             String k = (eq >= 0 ? part.substring(0, eq) : part).trim().toLowerCase(Locale.ROOT);
             String v = eq >= 0 ? part.substring(eq + 1).trim() : "";
-            if (isVolatileOrSensitiveQueryParam(k)) continue;
+            if (isVolatileOrSensitiveQueryParam(k, v)) continue;
             kept.add(k + "=" + v);
         }
         if (kept.isEmpty()) return "";
@@ -585,48 +619,92 @@ final class WatchHistory {
         return "epk1:" + sha256Hex(canonical).substring(0, 24);
     }
 
+    private static boolean isSensitiveHistoryUrlKey(String key) {
+        return "episodeUrl".equals(key)
+                || "episode_url".equals(key)
+                || "playUrl".equals(key)
+                || "play_url".equals(key)
+                || "downloadUrl".equals(key)
+                || "download_url".equals(key)
+                || "proxyUrl".equals(key)
+                || "proxy_url".equals(key);
+    }
+
+    /**
+     * Losslessly strips legacy sensitive playback URL fields from a raw history array without
+     * truncating entries (e.g. > 60), dropping legacy {@code siteKey}/{@code vodId} schemas,
+     * reordering entries, or removing cross-platform non-sensitive extension fields such as Windows
+     * 0.7.3's {@code episodeMediaId}. Used when preserving remote history during subscribe-only
+     * sync or sanitizing backups.
+     */
+    static JSONArray sanitizePreservingHistoryArray(JSONArray rawArr) {
+        JSONArray clean = new JSONArray();
+        if (rawArr == null) return clean;
+        for (int i = 0; i < rawArr.length(); i++) {
+            Object rawElem = rawArr.opt(i);
+            if (!(rawElem instanceof JSONObject)) {
+                if (rawElem != null) clean.put(rawElem);
+                continue;
+            }
+            JSONObject src = (JSONObject) rawElem;
+            JSONObject copy = new JSONObject();
+            String legacyUrl = "";
+            Iterator<String> it = src.keys();
+            while (it.hasNext()) {
+                String k = it.next();
+                if (k == null) continue;
+                if (isSensitiveHistoryUrlKey(k)) {
+                    if (legacyUrl.isEmpty()) {
+                        legacyUrl = Cms.optSafeString(src, k);
+                    }
+                    continue;
+                }
+                try {
+                    copy.put(k, src.get(k));
+                } catch (JSONException ignored) {
+                }
+            }
+            if (!legacyUrl.isEmpty()) {
+                try {
+                    if (Cms.optSafeString(copy, "episodeKey").isEmpty()) {
+                        String derivedEpKey = stableEpisodeKey(legacyUrl);
+                        if (!derivedEpKey.isEmpty()) {
+                            copy.put("episodeKey", derivedEpKey);
+                        }
+                    }
+                    if (Cms.optSafeString(copy, "driveKey").isEmpty()) {
+                        String derivedDrive = detectDriveKeyFromUrl(legacyUrl);
+                        if (derivedDrive.isEmpty()) {
+                            derivedDrive =
+                                    detectDriveKeyFromLineName(Cms.optSafeString(copy, "line"));
+                        }
+                        if (!derivedDrive.isEmpty()) {
+                            copy.put("driveKey", derivedDrive);
+                        }
+                    }
+                } catch (JSONException ignored) {
+                }
+            } else if (Cms.optSafeString(copy, "driveKey").isEmpty()) {
+                String derivedDrive = detectDriveKeyFromLineName(Cms.optSafeString(copy, "line"));
+                if (!derivedDrive.isEmpty()) {
+                    try {
+                        copy.put("driveKey", derivedDrive);
+                    } catch (JSONException ignored) {
+                    }
+                }
+            }
+            clean.put(copy);
+        }
+        return clean;
+    }
+
     /**
      * Sanitizes a raw watch-history JSON array (e.g. from legacy backups or remote sync payloads),
      * migrating non-sensitive {@code episodeKey}/{@code driveKey} while stripping any legacy {@code
      * episodeUrl}, temporary download URLs, signed parameters, or local proxy leases.
      */
     static JSONArray sanitizeHistoryArray(JSONArray rawArr) {
-        JSONArray clean = new JSONArray();
-        if (rawArr == null) return clean;
-        Set<String> keys = new HashSet<>();
-        for (int i = 0; i < rawArr.length() && clean.length() < LIMIT; i++) {
-            JSONObject o = rawArr.optJSONObject(i);
-            if (o == null) continue;
-            Entry e = new Entry();
-            e.site = Cms.optSafeString(o, "site");
-            e.id = Cms.optSafeString(o, "id");
-            e.title = Cms.optSafeString(o, "title");
-            e.poster = Cms.optSafeString(o, "poster");
-            e.line = Cms.optSafeString(o, "line");
-            e.lineId = Cms.optSafeString(o, "lineId");
-            e.driveKey = Cms.optSafeString(o, "driveKey");
-            e.episode = Cms.optSafeString(o, "episode");
-            e.episodeKey = Cms.optSafeString(o, "episodeKey");
-            String legacyUrl = Cms.optSafeString(o, "episodeUrl");
-            if (e.episodeKey.isEmpty() && !legacyUrl.isEmpty()) {
-                e.episodeKey = stableEpisodeKey(legacyUrl);
-            }
-            if (e.driveKey.isEmpty() && !legacyUrl.isEmpty()) {
-                e.driveKey = detectDriveKeyFromUrl(legacyUrl);
-            }
-            e.episodeUrl = "";
-            e.index = Math.max(0, o.optInt("index"));
-            e.position = Math.max(0, o.optInt("position"));
-            e.duration = Math.max(0, o.optInt("duration"));
-            e.updated = o.optLong("updated");
-            if (!e.site.isEmpty() && !e.id.isEmpty() && keys.add(e.key())) {
-                try {
-                    clean.put(e.json());
-                } catch (JSONException ignored) {
-                }
-            }
-        }
-        return clean;
+        return sanitizePreservingHistoryArray(rawArr);
     }
 
     /**
@@ -640,7 +718,7 @@ final class WatchHistory {
         if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return null;
         try {
             JSONArray rawArr = new JSONArray(trimmed);
-            return sanitizeHistoryArray(rawArr).toString();
+            return sanitizePreservingHistoryArray(rawArr).toString();
         } catch (Exception ignored) {
             return null;
         }
