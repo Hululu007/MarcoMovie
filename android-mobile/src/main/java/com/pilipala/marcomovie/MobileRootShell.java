@@ -95,6 +95,77 @@ final class MobileRootShell {
     private int renderedDockPref = DOCK_POS_AUTO;
     private FrameLayout sideRailWrap;
     private int lastRenderedTab = -1;
+    private int lastInsetTop;
+    private int lastInsetBottom;
+    private int lastInsetLeft;
+    private int lastInsetRight;
+
+    /**
+     * Pure-JVM check determining whether a layout change requires rebuilding the shell and Hero
+     * carousel (handles orientation switches, Dock-edge changes, AND same-orientation foldable
+     * fold/unfold or split-screen width changes).
+     */
+    static boolean shouldRelayoutForResize(
+            boolean prevPortrait,
+            int prevWidthPx,
+            int prevDockPos,
+            int nextW,
+            int nextH,
+            int nextDockPos,
+            int widthThresholdPx) {
+        if (nextW <= 0 || nextH <= 0) return false;
+        boolean orientChanged = (nextW < nextH) != prevPortrait;
+        boolean dockChanged = nextDockPos != prevDockPos;
+        boolean widthChanged =
+                prevWidthPx > 0 && Math.abs(nextW - prevWidthPx) >= Math.max(1, widthThresholdPx);
+        return orientChanged || dockChanged || widthChanged;
+    }
+
+    /**
+     * Pure-JVM viewport-clamped anchor math for the Dock quick-action menu across all four Dock
+     * edges (Top / Bottom / Left / Right), guaranteed to stay strictly within real viewport bounds
+     * and system insets regardless of menu height or split-screen compactness.
+     */
+    static int[] computeQuickMenuOrigin(
+            int dockPos,
+            int rootW,
+            int rootH,
+            int insetL,
+            int insetT,
+            int insetR,
+            int insetB,
+            int ancLeft,
+            int ancTop,
+            int ancW,
+            int ancH,
+            int menuW,
+            int menuH,
+            int padPx,
+            int gapPx) {
+        int minLeft = Math.max(0, insetL) + Math.max(0, padPx);
+        int maxLeft = Math.max(minLeft, rootW - Math.max(0, insetR) - menuW - Math.max(0, padPx));
+        int minTop = Math.max(0, insetT) + Math.max(0, padPx);
+        int maxTop = Math.max(minTop, rootH - Math.max(0, insetB) - menuH - Math.max(0, padPx));
+
+        int rawLeft;
+        int rawTop;
+        if (dockPos == DOCK_POS_LEFT) {
+            rawLeft = ancLeft + ancW + gapPx;
+            rawTop = ancTop;
+        } else if (dockPos == DOCK_POS_RIGHT) {
+            rawLeft = ancLeft - menuW - gapPx;
+            rawTop = ancTop;
+        } else if (dockPos == DOCK_POS_TOP) {
+            rawLeft = (ancLeft + ancW / 2) - menuW / 2;
+            rawTop = ancTop + ancH + gapPx;
+        } else {
+            rawLeft = (ancLeft + ancW / 2) - menuW / 2;
+            rawTop = ancTop - menuH - gapPx;
+        }
+        int clampedLeft = Math.max(minLeft, Math.min(maxLeft, rawLeft));
+        int clampedTop = Math.max(minTop, Math.min(maxTop, rawTop));
+        return new int[] {clampedLeft, clampedTop};
+    }
 
     /**
      * Pure-JVM large-screen tablet &amp; foldable detector.
@@ -775,15 +846,27 @@ final class MobileRootShell {
                 activeDockPosition == DOCK_POS_LEFT || activeDockPosition == DOCK_POS_RIGHT;
         final boolean builtPortrait = renderedPortrait;
         final int builtDockPosition = activeDockPosition;
+        final int[] builtWidthRef = {Math.max(0, a.windowWidth())};
+        final int widthRelayoutThreshold = a.dp(48);
         shellRoot.addOnLayoutChangeListener(
                 (view, l, t, r, b, ol, ot, or, ob) -> {
                     int w = r - l, h = b - t;
                     if (w <= 0 || h <= 0 || a.root != shellRoot) return;
                     a.usableWidth = w;
                     a.usableHeight = h;
-                    boolean orientChanged = (w < h) != builtPortrait;
-                    boolean dockChanged = currentEffectiveDockPosition(a) != builtDockPosition;
-                    if (orientChanged || dockChanged) {
+                    if (builtWidthRef[0] <= 0) {
+                        builtWidthRef[0] = w;
+                    }
+                    int nextDockPos = currentEffectiveDockPosition(a);
+                    if (shouldRelayoutForResize(
+                            builtPortrait,
+                            builtWidthRef[0],
+                            builtDockPosition,
+                            w,
+                            h,
+                            nextDockPos,
+                            widthRelayoutThreshold)) {
+                        builtWidthRef[0] = w;
                         a.ui.post(
                                 () -> {
                                     if (!a.isFinishing()
@@ -813,9 +896,20 @@ final class MobileRootShell {
                     a.statusBarHeight() + a.dp(12),
                     a.dp(rightRail ? 12 : 6),
                     a.navigationBarHeight() + a.dp(12));
+
+            // Wrap vertical side rail in a fill-viewport ScrollView so compact split-screen or
+            // short landscape heights remain smoothly scrollable with zero clipped items.
+            android.widget.ScrollView railScroll = new android.widget.ScrollView(a);
+            railScroll.setTag("mobile-side-rail-scroll");
+            railScroll.setFillViewport(true);
+            railScroll.setVerticalScrollBarEnabled(false);
+            railScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+            FrameLayout railCenterHost = new FrameLayout(a);
             LinearLayout rail = buildVerticalSideRail(p);
-            railWrap.addView(
+            railCenterHost.addView(
                     rail, new FrameLayout.LayoutParams(a.dp(76), -2, Gravity.CENTER_VERTICAL));
+            railScroll.addView(railCenterHost, new FrameLayout.LayoutParams(-2, -2));
+            railWrap.addView(railScroll, new FrameLayout.LayoutParams(-2, -1));
             sideRailWrap = railWrap;
 
             contentContainer = new FrameLayout(a);
@@ -866,8 +960,9 @@ final class MobileRootShell {
             shellRoot.addView(floatingDockWrap, dockLp);
         }
 
-        // Live Android 15/16 WindowInsets listener keeps status-bar veil & floating dock/rail
-        // margins pixel-locked to real system gesture bars and cutouts across all 4 edges.
+        // Live Android 15/16 WindowInsets listener keeps status-bar veil, horizontal dock
+        // left/right cutouts, and side-rail opposite-edge content padding pixel-locked on all 4
+        // edges.
         if (Build.VERSION.SDK_INT >= 23) {
             shellRoot.setOnApplyWindowInsetsListener(
                     (v, insets) -> {
@@ -893,6 +988,10 @@ final class MobileRootShell {
                                 leftInset = insets.getSystemWindowInsetLeft();
                                 rightInset = insets.getSystemWindowInsetRight();
                             }
+                            lastInsetTop = Math.max(0, topInset);
+                            lastInsetBottom = Math.max(0, bottomInset);
+                            lastInsetLeft = Math.max(0, leftInset);
+                            lastInsetRight = Math.max(0, rightInset);
                             if (statusBarVeil != null && topInset > 0) {
                                 ViewGroup.LayoutParams slp = statusBarVeil.getLayoutParams();
                                 int targetH = topInset + a.dp(14);
@@ -906,12 +1005,13 @@ final class MobileRootShell {
                                         (FrameLayout.LayoutParams)
                                                 floatingDockWrap.getLayoutParams();
                                 if (dlp != null) {
+                                    boolean changed = false;
                                     if (activeDockPosition == DOCK_POS_TOP) {
                                         int clampedTop = Math.max(0, Math.min(a.dp(64), topInset));
                                         int targetTop = clampedTop + a.dp(8);
                                         if (dlp.topMargin != targetTop) {
                                             dlp.topMargin = targetTop;
-                                            floatingDockWrap.setLayoutParams(dlp);
+                                            changed = true;
                                         }
                                     } else {
                                         int clampedBottom =
@@ -919,25 +1019,51 @@ final class MobileRootShell {
                                         int targetBottom = clampedBottom + a.dp(10);
                                         if (dlp.bottomMargin != targetBottom) {
                                             dlp.bottomMargin = targetBottom;
-                                            floatingDockWrap.setLayoutParams(dlp);
+                                            changed = true;
                                         }
                                     }
+                                    if (dlp.leftMargin != lastInsetLeft
+                                            || dlp.rightMargin != lastInsetRight) {
+                                        dlp.leftMargin = lastInsetLeft;
+                                        dlp.rightMargin = lastInsetRight;
+                                        changed = true;
+                                    }
+                                    if (changed) {
+                                        floatingDockWrap.setLayoutParams(dlp);
+                                    }
+                                }
+                                if (contentContainer != null
+                                        && (contentContainer.getPaddingLeft() != lastInsetLeft
+                                                || contentContainer.getPaddingRight()
+                                                        != lastInsetRight)) {
+                                    contentContainer.setPadding(
+                                            lastInsetLeft, 0, lastInsetRight, 0);
                                 }
                             }
                             if (sideRailWrap != null) {
                                 boolean rightRail = activeDockPosition == DOCK_POS_RIGHT;
-                                int padL =
-                                        rightRail ? a.dp(6) : (Math.max(0, leftInset) + a.dp(12));
-                                int padR =
-                                        rightRail ? (Math.max(0, rightInset) + a.dp(12)) : a.dp(6);
-                                int padT = Math.max(a.statusBarHeight(), topInset) + a.dp(12);
+                                int padL = rightRail ? a.dp(6) : (lastInsetLeft + a.dp(12));
+                                int padR = rightRail ? (lastInsetRight + a.dp(12)) : a.dp(6);
+                                int padT = Math.max(a.statusBarHeight(), lastInsetTop) + a.dp(12);
                                 int padB =
-                                        Math.max(a.navigationBarHeight(), bottomInset) + a.dp(12);
+                                        Math.max(a.navigationBarHeight(), lastInsetBottom)
+                                                + a.dp(12);
                                 if (sideRailWrap.getPaddingLeft() != padL
                                         || sideRailWrap.getPaddingRight() != padR
                                         || sideRailWrap.getPaddingTop() != padT
                                         || sideRailWrap.getPaddingBottom() != padB) {
                                     sideRailWrap.setPadding(padL, padT, padR, padB);
+                                }
+                                // Apply opposite-side inset to contentContainer so right cutout/nav
+                                // bar is respected with Left rail and left cutout/nav bar with
+                                // Right rail.
+                                if (contentContainer != null) {
+                                    int cPadL = rightRail ? lastInsetLeft : 0;
+                                    int cPadR = rightRail ? 0 : lastInsetRight;
+                                    if (contentContainer.getPaddingLeft() != cPadL
+                                            || contentContainer.getPaddingRight() != cPadR) {
+                                        contentContainer.setPadding(cPadL, 0, cPadR, 0);
+                                    }
                                 }
                             }
                         }
@@ -1443,48 +1569,51 @@ final class MobileRootShell {
             rowLabels.add(tv);
         }
 
-        // Compute anchored position inward from whichever edge hosts the Dock
-        // (Top/Bottom/Left/Right)
+        // Compute anchored position inward from whichever edge hosts the Dock, clamped strictly to
+        // real viewport bounds and live system insets (never assuming fixed 240dp height).
         int[] rootLoc = new int[2];
         int[] ancLoc = new int[2];
         shellRoot.getLocationOnScreen(rootLoc);
         anchor.getLocationOnScreen(ancLoc);
-        int rootW = Math.max(a.dp(300), shellRoot.getWidth());
-        int rootH = Math.max(a.dp(480), shellRoot.getHeight());
-        int ancLeftX = ancLoc[0] - rootLoc[0];
-        int ancCenterX = ancLeftX + anchor.getWidth() / 2;
-        int ancTopY = ancLoc[1] - rootLoc[1];
-        int ancBottomY = ancTopY + anchor.getHeight();
+        int rootW = Math.max(1, shellRoot.getWidth());
+        int rootH = Math.max(1, shellRoot.getHeight());
+        int insetL = Math.max(0, lastInsetLeft);
+        int insetR = Math.max(0, lastInsetRight);
+        int insetT = Math.max(a.statusBarHeight(), lastInsetTop);
+        int insetB = Math.max(a.navigationBarHeight(), lastInsetBottom);
+        int pad = a.dp(12);
+        int maxMenuW = Math.max(a.dp(120), rootW - insetL - insetR - pad * 2);
+        int maxMenuH = Math.max(a.dp(64), rootH - insetT - insetB - pad * 2);
+        card.measure(
+                View.MeasureSpec.makeMeasureSpec(maxMenuW, View.MeasureSpec.AT_MOST),
+                View.MeasureSpec.makeMeasureSpec(maxMenuH, View.MeasureSpec.AT_MOST));
+        int actualMenuW = Math.min(maxMenuW, Math.max(menuW, card.getMeasuredWidth()));
+        int actualMenuH = Math.min(maxMenuH, Math.max(a.dp(48), card.getMeasuredHeight()));
 
-        FrameLayout.LayoutParams clp;
-        if (activeDockPosition == DOCK_POS_LEFT) {
-            clp = new FrameLayout.LayoutParams(-2, -2, Gravity.LEFT | Gravity.TOP);
-            clp.leftMargin =
-                    Math.min(rootW - menuW - a.dp(16), ancLeftX + anchor.getWidth() + a.dp(12));
-            clp.topMargin =
-                    Math.max(a.statusBarHeight() + a.dp(16), Math.min(rootH - a.dp(240), ancTopY));
-        } else if (activeDockPosition == DOCK_POS_RIGHT) {
-            clp = new FrameLayout.LayoutParams(-2, -2, Gravity.LEFT | Gravity.TOP);
-            clp.leftMargin = Math.max(a.dp(14), ancLeftX - menuW - a.dp(24));
-            clp.topMargin =
-                    Math.max(a.statusBarHeight() + a.dp(16), Math.min(rootH - a.dp(240), ancTopY));
-        } else if (activeDockPosition == DOCK_POS_TOP) {
-            clp = new FrameLayout.LayoutParams(-2, -2, Gravity.LEFT | Gravity.TOP);
-            int left = ancCenterX - (menuW + a.dp(12)) / 2;
-            left = Math.max(a.dp(14), Math.min(rootW - menuW - a.dp(26), left));
-            clp.leftMargin = left;
-            clp.topMargin =
-                    Math.max(
-                            a.statusBarHeight() + a.dp(76),
-                            Math.min(rootH - a.dp(240), ancBottomY + a.dp(10)));
-        } else {
-            clp = new FrameLayout.LayoutParams(-2, -2, Gravity.LEFT | Gravity.BOTTOM);
-            int left = ancCenterX - (menuW + a.dp(12)) / 2;
-            left = Math.max(a.dp(14), Math.min(rootW - menuW - a.dp(26), left));
-            clp.leftMargin = left;
-            clp.bottomMargin =
-                    Math.max(a.navigationBarHeight() + a.dp(82), rootH - ancTopY + a.dp(12));
-        }
+        int ancLeftX = ancLoc[0] - rootLoc[0];
+        int ancTopY = ancLoc[1] - rootLoc[1];
+        int[] pos =
+                computeQuickMenuOrigin(
+                        activeDockPosition,
+                        rootW,
+                        rootH,
+                        insetL,
+                        insetT,
+                        insetR,
+                        insetB,
+                        ancLeftX,
+                        ancTopY,
+                        anchor.getWidth(),
+                        anchor.getHeight(),
+                        actualMenuW,
+                        actualMenuH,
+                        pad,
+                        a.dp(12));
+
+        FrameLayout.LayoutParams clp =
+                new FrameLayout.LayoutParams(-2, -2, Gravity.LEFT | Gravity.TOP);
+        clp.leftMargin = pos[0];
+        clp.topMargin = pos[1];
         overlay.addView(card, clp);
         shellRoot.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
         activeQuickMenuOverlay = overlay;

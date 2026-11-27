@@ -83,12 +83,12 @@ final class AiAssistantService {
         if ("kimi".equals(provider)) return "moonshot-v1-8k";
         if ("glm".equals(provider)) return "glm-4-flash";
         if ("openai".equals(provider)) return "gpt-4o-mini";
-        if ("anthropic".equals(provider)) return "claude-3-5-haiku-latest";
+        if ("anthropic".equals(provider)) return "claude-haiku-5-5";
         if ("gemini".equals(provider)) return "gemini-2.5-flash";
         if ("openrouter".equals(provider)) return "openai/gpt-4o-mini";
         if ("ollama".equals(provider)) return "qwen2.5:7b";
         if ("custom".equals(provider)) return "gpt-4o-mini";
-        return "deepseek-chat";
+        return "deepseek-flash";
     }
 
     static String providerLabel(String provider) {
@@ -110,6 +110,11 @@ final class AiAssistantService {
         SharedPreferences mp = a.mobilePrefs();
         String provider = mp.getString(Prefs.AI_PROVIDER, "deepseek");
         String custom = mp.getString(Prefs.AI_BASE_URL, "").trim();
+        return resolveBaseUrl(provider, custom);
+    }
+
+    static String resolveBaseUrl(String provider, String customBaseUrl) {
+        String custom = customBaseUrl == null ? "" : customBaseUrl.trim();
         String url = custom.isEmpty() ? defaultBaseUrl(provider) : custom;
         while (url.endsWith("/")) url = url.substring(0, url.length() - 1);
         return url;

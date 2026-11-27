@@ -431,9 +431,12 @@ final class OnlineSubtitleDanmakuService {
                             out.write(bytes);
                         }
 
-                        if (bilingualAiTranslate
-                                && AiAssistantService.isConfigured(a)
-                                && safeName.toLowerCase(Locale.ROOT).endsWith(".srt")) {
+                        final boolean runAiBilingual =
+                                bilingualAiTranslate
+                                        && AiBetaGate.isUnlocked(a)
+                                        && AiAssistantService.isConfigured(a)
+                                        && safeName.toLowerCase(Locale.ROOT).endsWith(".srt");
+                        if (runAiBilingual) {
                             String showTitle =
                                     a.playbackControls != null
                                                     && a.playbackControls.video != null
@@ -446,12 +449,15 @@ final class OnlineSubtitleDanmakuService {
                                             : 0L;
                             AiSubtitleTranslator.translateAndMountFullEpisodeAsync(
                                     a, showTitle, new String(bytes, "UTF-8"), outFile, posMs, null);
+                            a.ui.post(() -> a.toast("正在后台生成全片 AI 双语字幕，首段就绪后自动无打断呈现…"));
+                            return;
                         }
 
                         final String display = cand.title;
                         a.ui.post(
                                 () -> {
                                     if (a.playbackControls != null) {
+                                        a.playbackControls.clearLiveAiSubtitles();
                                         a.playbackControls.setActiveSubtitleFile(outFile);
                                     }
                                     if (a.player != null && a.prepared) {

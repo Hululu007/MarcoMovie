@@ -1446,7 +1446,7 @@ final class AccountPanel {
                         ICON_CLOUD,
                         0xff6366f1,
                         "挂载 Emby 私人媒体库",
-                        com.pilipala.emby.EmbyAccounts.statusSummary(a),
+                        MobileEmbyAccounts.statusSummary(a),
                         () -> EmbyEngine.openManager(a)));
 
         section.addView(card, new LinearLayout.LayoutParams(-1, -2));

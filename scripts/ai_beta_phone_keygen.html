@@ -11,15 +11,19 @@
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 body{margin:0;padding:max(16px,env(safe-area-inset-top)) 14px max(28px,env(safe-area-inset-bottom));font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",sans-serif;background:var(--bg);color:var(--fg);line-height:1.45}
 .wrap{max-width:560px;margin:0 auto}
-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:14px}
 h1{font-size:19px;margin:0;letter-spacing:.2px}
-.badge{font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;background:rgba(0,122,255,.18);color:#58a6ff}
+.badge{font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;background:rgba(0,122,255,.18);color:#58a6ff;white-space:nowrap}
 .badge.ok{background:rgba(16,185,129,.18);color:#34d399}
+.badge.warn{background:rgba(245,158,11,.2);color:#fbbf24}
 .card{background:var(--card);border-radius:var(--r);padding:16px;margin-bottom:14px}
-.card h2{font-size:15px;margin:0 0 10px;display:flex;align-items:center;justify-content:space-between}
+.card h2{font-size:15px;margin:0 0 10px;display:flex;align-items:center;justify-content:space-between;gap:8px}
 .hint{font-size:12px;color:var(--muted);margin:0 0 10px}
+.warn-box{background:rgba(255,69,58,.14);border:1px solid rgba(255,69,58,.35);color:#fca5a5;border-radius:12px;padding:10px 12px;font-size:12px;margin-bottom:10px}
+.info-box{background:rgba(0,122,255,.12);border:1px solid rgba(0,122,255,.28);color:#93c5fd;border-radius:12px;padding:9px 12px;font-size:12px;margin-top:8px}
 label.lbl{display:block;font-size:12px;color:var(--muted);margin:10px 0 5px;font-weight:600}
 input,textarea{width:100%;background:var(--sub);color:var(--fg);border:none;border-radius:12px;padding:11px 12px;font-size:14px;outline:none}
+input:disabled{opacity:.45;cursor:not-allowed}
 textarea{resize:vertical;min-height:74px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
 .row{display:flex;gap:8px;align-items:center}
 .row>*{flex:1}
@@ -29,15 +33,15 @@ textarea{resize:vertical;min-height:74px;font-family:ui-monospace,SFMono-Regular
 .btn{display:inline-flex;align-items:center;justify-content:center;width:100%;padding:12px 14px;border-radius:12px;border:none;font-size:14px;font-weight:700;cursor:pointer;background:var(--accent);color:#fff}
 .btn.sec{background:var(--sub);color:var(--fg)}
 .btn.sm{width:auto;padding:7px 12px;font-size:12px;border-radius:10px}
-.code-box{background:#0e1016;border-radius:12px;padding:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all;margin:8px 0;color:#d8e7ff}
+.code-box{background:#0e1016;border-radius:12px;padding:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all;white-space:pre-wrap;margin:8px 0;color:#d8e7ff}
 .item{background:var(--sub);border-radius:12px;padding:11px 12px;margin-top:8px}
 .item-top{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12.5px;font-weight:700}
-.item-meta{font-size:11.5px;color:var(--muted);margin-top:3px}
-.toast{position:fixed;left:50%;bottom:max(24px,env(safe-area-inset-bottom));transform:translateX(-50%);background:#1f2430;color:#fff;padding:9px 16px;border-radius:999px;font-size:13px;font-weight:600;box-shadow:0 8px 28px rgba(0,0,0,.45);opacity:0;pointer-events:none;transition:opacity .18s}
+.item-meta{font-size:11.5px;color:var(--muted);margin-top:3px;word-break:break-word}
+.toast{position:fixed;left:50%;bottom:max(24px,env(safe-area-inset-bottom));transform:translateX(-50%);background:#1f2430;color:#fff;padding:9px 16px;border-radius:999px;font-size:13px;font-weight:600;box-shadow:0 8px 28px rgba(0,0,0,.45);opacity:0;pointer-events:none;transition:opacity .18s;max-width:90vw;text-align:center}
 .toast.show{opacity:1}
 .hidden{display:none!important}
-.sw{display:flex;justify-content:space-between;align-items:center;padding:8px 0;font-size:13.5px}
-input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent)}
+.sw{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 0;font-size:13.5px}
+input[type=checkbox]{width:20px;height:20px;flex:0 0 auto;accent-color:var(--accent)}
 </style>
 </head>
 <body>
@@ -48,14 +52,14 @@ input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent)}
   </header>
 
   <section id="vaultCard" class="card">
-    <h2>Ed25519 签名密钥库 <button id="lockBtn" class="btn sm sec hidden" onclick="lockVault()">锁定</button></h2>
+    <h2>Ed25519 签名密钥库 <button id="lockBtn" type="button" class="btn sm sec hidden" onclick="lockVault()">锁定</button></h2>
     <p id="vaultHint" class="hint">纯离线运行（零联网）。签发 MMAILAB1 统一口令：Android 移动端 · iOS · Windows 三端共用同一把 Ed25519 密钥。</p>
 
     <div id="unlockPane">
       <label class="lbl">输入主密码解锁</label>
       <div class="row">
         <input id="unlockPwd" type="password" autocomplete="current-password" placeholder="输入主密码">
-        <button class="btn" style="flex:0 0 96px" onclick="unlockStoredVault()">解锁</button>
+        <button type="button" class="btn" style="flex:0 0 96px" onclick="unlockStoredVault()">解锁</button>
       </div>
     </div>
 
@@ -66,7 +70,7 @@ input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent)}
         <label class="lbl">为导入的 Ed25519 私钥设置本机加密主密码（至少 6 位）</label>
         <div class="row">
           <input id="newVaultPwd" type="password" placeholder="设置主密码">
-          <button class="btn" style="flex:0 0 108px" onclick="finishRawImport()">加密保存</button>
+          <button type="button" class="btn" style="flex:0 0 108px" onclick="finishRawImport()">加密保存</button>
         </div>
       </div>
     </div>
@@ -74,45 +78,58 @@ input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent)}
 
   <section id="issueCard" class="card hidden">
     <h2>签发统一内测口令 (MMAILAB1)</h2>
-    <label class="lbl">适用平台（全选或留空 = 三端通用）</label>
+    <div id="testKeyWarn" class="warn-box hidden">
+      <div id="testKeyWarnText"></div>
+      <div class="sw" style="padding:6px 0 0">
+        <span>允许使用非正式测试密钥签发（正式版客户端将拒绝激活）</span>
+        <input id="allowTestKeyChk" type="checkbox">
+      </div>
+    </div>
+
+    <label class="lbl">适用平台（多选单端时将拆为各端独立定向码，不自动扩大为 all）</label>
     <div class="pills" id="platPills">
-      <button type="button" class="pill on" data-p="all" onclick="pickPlat('all')">三端通用</button>
+      <button type="button" class="pill on" data-p="all" onclick="pickPlat('all')">三端通用 (all)</button>
       <button type="button" class="pill" data-p="android" onclick="pickPlat('android')">Android</button>
       <button type="button" class="pill" data-p="ios" onclick="pickPlat('ios')">iOS</button>
       <button type="button" class="pill" data-p="windows" onclick="pickPlat('windows')">Windows</button>
     </div>
+    <div id="platModeNotice" class="info-box hidden"></div>
 
-    <label class="lbl">有效期</label>
+    <label class="lbl">有效期（需明确选择天数或勾选永久有效，空白或负数将被拒绝）</label>
     <div class="pills" id="daysPills">
-      <button type="button" class="pill" onclick="setDays(7,this)">7 天</button>
-      <button type="button" class="pill on" onclick="setDays(30,this)">30 天</button>
-      <button type="button" class="pill" onclick="setDays(90,this)">90 天</button>
-      <button type="button" class="pill" onclick="setDays(0,this)">永久有效</button>
+      <button type="button" class="pill" data-d="7" onclick="setDaysPreset(7,this)">7 天</button>
+      <button type="button" class="pill on" data-d="30" onclick="setDaysPreset(30,this)">30 天</button>
+      <button type="button" class="pill" data-d="90" onclick="setDaysPreset(90,this)">90 天</button>
+      <button type="button" class="pill" data-d="never" onclick="setNeverExpirePreset(this)">永久有效</button>
+    </div>
+    <div class="sw" style="padding:6px 0 2px">
+      <span>永久有效（显式关闭过期限制）</span>
+      <input id="neverExpireChk" type="checkbox" onchange="onNeverExpireToggle()">
     </div>
 
-    <div class="row" style="margin-top:8px">
+    <div class="row" style="margin-top:4px">
       <div>
         <label class="lbl">标签 / 批次 Tag</label>
-        <input id="tagIn" type="text" value="channel-01" placeholder="如：channel-01">
+        <input id="tagIn" type="text" maxlength="48" value="channel-01" placeholder="如：channel-01">
       </div>
       <div>
-        <label class="lbl">有效天数（0=永久）</label>
-        <input id="daysIn" type="number" min="0" max="60000" value="30">
+        <label class="lbl">有效天数（1-3650）</label>
+        <input id="daysIn" type="number" min="1" max="3650" step="1" value="30">
       </div>
       <div>
-        <label class="lbl">生成数量</label>
-        <input id="countIn" type="number" min="1" max="50" value="1">
+        <label class="lbl">每端数量（1-50）</label>
+        <input id="countIn" type="number" min="1" max="50" step="1" value="1">
       </div>
     </div>
 
     <div class="row" style="margin-top:4px">
       <div>
-        <label class="lbl">最低版本码（三端通用填 0）</label>
-        <input id="minVcIn" type="number" min="0" max="65535" value="0">
+        <label class="lbl" id="minVcLbl">最低版本码（仅单选 Android 可设）</label>
+        <input id="minVcIn" type="number" min="0" max="65535" step="1" value="0" disabled>
       </div>
       <div>
         <label class="lbl">发放备注（仅存本机台账）</label>
-        <input id="noteIn" type="text" placeholder="如：腾讯频道第一批">
+        <input id="noteIn" type="text" maxlength="80" placeholder="如：腾讯频道第一批">
       </div>
     </div>
 
@@ -125,27 +142,34 @@ input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent)}
       <input id="expChk" type="checkbox">
     </div>
 
-    <button class="btn" style="margin-top:8px" onclick="issueNow()">立即离线签发口令</button>
+    <button type="button" class="btn" style="margin-top:8px" onclick="issueNow()">立即离线签发口令</button>
 
     <div id="resultWrap" class="hidden" style="margin-top:12px">
       <div id="resultMeta" class="hint"></div>
       <div id="resultCodes" class="code-box"></div>
       <div class="row">
-        <button class="btn" onclick="copyLastCodes(false)">一键复制口令</button>
-        <button class="btn sec" onclick="copyLastCodes(true)">复制带频道说明文案</button>
+        <button type="button" class="btn" onclick="copyLastCodes(false)">一键复制口令</button>
+        <button type="button" class="btn sec" onclick="copyLastCodes(true)">复制带频道说明文案</button>
       </div>
     </div>
   </section>
 
   <section class="card">
-    <h2>离线验签与口令解析</h2>
-    <textarea id="verifyIn" placeholder="粘贴 MMAILAB1.… 口令离线检验 Ed25519 真伪、适用平台与有效期"></textarea>
-    <button class="btn sec" style="margin-top:8px" onclick="verifyInputCode()">立即离线验证</button>
+    <h2>离线验签与各端激活检查</h2>
+    <textarea id="verifyIn" placeholder="粘贴 MMAILAB1.… 口令（支持折行或含说明文案）离线检查签名真伪与三端可激活状态"></textarea>
+    <button type="button" class="btn sec" style="margin-top:8px" onclick="verifyInputCode()">立即离线验证</button>
     <div id="verifyOut" class="code-box hidden"></div>
   </section>
 
   <section id="ledgerCard" class="card hidden">
-    <h2>本机发码台账 <button class="btn sm sec" onclick="exportLedger()">导出备份</button></h2>
+    <h2>
+      <span>本机审计台账</span>
+      <span style="display:flex;gap:6px">
+        <button type="button" class="btn sm sec" onclick="exportLedger()">导出元数据</button>
+        <button type="button" class="btn sm sec" onclick="clearLedger()">清空</button>
+      </span>
+    </h2>
+    <p class="hint">安全可见范围：本机台账仅保存时间、标签、平台、脱敏摘要（不含完整可用口令），锁定时立即隐藏并清空内存中刚生成的口令；导出文件同样仅含审计元数据。</p>
     <div id="ledgerList"></div>
   </section>
 </div>
@@ -158,8 +182,15 @@ const MarcoEd25519 = (() => {
   const TOKEN_PREFIX = "MMAILAB1.";
   const SIGN_DOMAIN = new TextEncoder().encode("marco-ai-lab-v1:");
   const DEFAULT_PUB_HEX = "1dbeaed851b873d7c327d30d718fca0ac1509ef5ac4061b9bd1aa90c841c6929";
+  const SINGLE_PLATFORMS = ["android", "ios", "windows"];
+  const VALID_TOKEN_PLATFORMS = ["all", "android", "ios", "windows"];
+  const ED25519_SIG_B64URL_LEN = 86;
+  const MAX_DAYS = 3650;
+  const MAX_COUNT = 50;
+  const MAX_MIN_VC = 65535;
+  const MAX_TAG_LEN = 48;
 
-  // --- SHA-256 (for PBKDF2 & encrypted local vault) ---
+  // --- SHA-256 (for PBKDF2, encrypted local vault, and ledger fingerprints) ---
   const K256 = new Uint32Array([
     0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
     0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
@@ -394,7 +425,7 @@ const MarcoEd25519 = (() => {
   }
 
   function hexToBytes(hex) {
-    const clean = hex.replace(/[^0-9a-fA-F]/g, "");
+    const clean = String(hex || "").replace(/[^0-9a-fA-F]/g, "");
     const out = new Uint8Array(clean.length / 2);
     for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.slice(i*2, i*2+2), 16);
     return out;
@@ -412,7 +443,8 @@ const MarcoEd25519 = (() => {
     return out;
   }
   function b64UrlDecode(str) {
-    const s = str.replace(/=+$/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+    const s = String(str || "").replace(/=+$/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+    if (!s || (s.length & 3) === 1) return null;
     const out = new Uint8Array(Math.floor((s.length * 3) / 4));
     let p = 0;
     for (let i = 0; i < s.length; i += 4) {
@@ -428,10 +460,19 @@ const MarcoEd25519 = (() => {
     return out;
   }
   function randomBytes(n) {
-    const b = new Uint8Array(n);
-    if (typeof crypto !== "undefined" && crypto.getRandomValues) crypto.getRandomValues(b);
-    else for (let i = 0; i < n; i++) b[i] = Math.floor(Math.random() * 256);
-    return b;
+    const g = typeof globalThis !== "undefined" ? globalThis : (typeof window !== "undefined" ? window : {});
+    if (g.crypto && typeof g.crypto.getRandomValues === "function") {
+      const b = new Uint8Array(n);
+      g.crypto.getRandomValues(b);
+      return b;
+    }
+    if (typeof require === "function") {
+      const nodeCrypto = require("crypto");
+      if (nodeCrypto && typeof nodeCrypto.randomBytes === "function") {
+        return new Uint8Array(nodeCrypto.randomBytes(n));
+      }
+    }
+    throw new Error("缺少密码学安全随机源 (crypto.getRandomValues)，无法生成安全随机数");
   }
   function canonicalizeJson(obj) {
     if (obj && typeof obj === "object" && !Array.isArray(obj)) {
@@ -450,6 +491,7 @@ const MarcoEd25519 = (() => {
     return out;
   }
   function encryptVault(seed, pub, password, iters = 100000) {
+    if (!password || password.length < 6) throw new Error("主密码至少 6 位");
     const salt = randomBytes(16), nonce = randomBytes(16);
     const derived = pbkdf2Sha256(new TextEncoder().encode(password), salt, iters, 64);
     const encKey = derived.slice(0, 32), macKey = derived.slice(32, 64);
@@ -474,37 +516,226 @@ const MarcoEd25519 = (() => {
     const ks = keystream(encKey, nonce, 32), seed = new Uint8Array(32);
     for (let i = 0; i < 32; i++) seed[i] = ct[i] ^ ks[i];
     const pub = hexToBytes(vault.pub_hex);
-    if (bytesToHex(publicKeyFromSeed(seed)) !== vault.pub_hex.toLowerCase()) throw new Error("公钥一致性校验失败");
+    if (bytesToHex(publicKeyFromSeed(seed)) !== String(vault.pub_hex || "").toLowerCase()) throw new Error("公钥一致性校验失败");
     return { seed, pub };
   }
-  function encodePasscode(seed, { tag = "channel-01", days = 30, plat = "all", shared = false, expOAuth = false, minVc = 0, nowEpochSec = null }) {
+  function isOfficialPublicKey(pubHex) {
+    return String(pubHex || "").trim().toLowerCase() === DEFAULT_PUB_HEX;
+  }
+  function tokenFingerprint(code) {
+    const digest = bytesToHex(sha256(new TextEncoder().encode(String(code || "")))).slice(0, 8);
+    const tail = String(code || "").slice(-6);
+    return `MMAILAB1…${tail} (sha256:${digest})`;
+  }
+  function isB64UrlChar(ch) {
+    const c = ch.charCodeAt(0);
+    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || ch === "-" || ch === "_";
+  }
+  function scanWrappedToken(text, start) {
+    let pos = start + TOKEN_PREFIX.length;
+    const len = text.length;
+    let payload = "";
+    let sawDot = false;
+    while (pos < len) {
+      const ch = text[pos];
+      if (/\s/.test(ch)) { pos++; continue; }
+      if (ch === ".") { pos++; sawDot = true; break; }
+      if (isB64UrlChar(ch)) { payload += ch; pos++; continue; }
+      return "";
+    }
+    if (!sawDot || !payload) return "";
+    let sig = "";
+    while (pos < len) {
+      const ch = text[pos];
+      if (/\s/.test(ch)) {
+        if (sig.length >= ED25519_SIG_B64URL_LEN) break;
+        pos++;
+        continue;
+      }
+      if (isB64UrlChar(ch)) { sig += ch; pos++; continue; }
+      break;
+    }
+    return sig ? (TOKEN_PREFIX + payload + "." + sig) : "";
+  }
+  function extractToken(raw) {
+    const trimmed = String(raw || "").trim();
+    if (!trimmed) return "";
+    const re = /MMAILAB1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)/g;
+    let m;
+    while ((m = re.exec(trimmed)) !== null) {
+      const sig = b64UrlDecode(m[2]);
+      if (sig && sig.length === 64) return m[0];
+    }
+    const idx = trimmed.indexOf(TOKEN_PREFIX);
+    if (idx >= 0) {
+      const scanned = scanWrappedToken(trimmed, idx);
+      if (scanned) return scanned;
+    }
+    const collapsed = trimmed.replace(/\s+/g, "");
+    const cidx = collapsed.indexOf(TOKEN_PREFIX);
+    if (cidx >= 0) {
+      const scanned = scanWrappedToken(collapsed, cidx);
+      if (scanned) return scanned;
+    }
+    const fm = collapsed.match(/MMAILAB1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)/);
+    return fm ? fm[0] : collapsed;
+  }
+  function normalizeSinglePlatform(p) {
+    const s = String(p || "").trim().toLowerCase();
+    if (s === "android-mobile" || s === "mobile") return "android";
+    if (s === "win" || s === "pc") return "windows";
+    if (s === "iphone" || s === "ipad") return "ios";
+    return s;
+  }
+  function planTargetPlatforms(input) {
+    const list = Array.isArray(input) ? input : String(input || "").split(/[,;/\s]+/);
+    const clean = list.map(normalizeSinglePlatform).filter(Boolean);
+    if (!clean.length) throw new Error("请至少选择一个适用平台");
+    if (clean.includes("all") || clean.includes("*")) {
+      if (clean.length > 1) throw new Error("不能同时混选 all 与单端平台");
+      return ["all"];
+    }
+    const seen = [];
+    for (const p of clean) {
+      if (!SINGLE_PLATFORMS.includes(p)) throw new Error("未知平台：" + p);
+      if (!seen.includes(p)) seen.push(p);
+    }
+    return seen;
+  }
+  function validateIssuanceInput({ tag, days, neverExpire = false, plat, minVc = 0, count = 1 }) {
+    const cleanTag = String(tag || "").trim();
+    if (!cleanTag) throw new Error("标签 Tag 不能为空");
+    if (cleanTag.length > MAX_TAG_LEN) throw new Error("标签 Tag 最长 48 字符");
+    if (!VALID_TOKEN_PLATFORMS.includes(plat)) {
+      throw new Error("单枚口令平台仅允许 all/android/ios/windows，多端请拆分签发（禁止逗号组合）");
+    }
+    let effDays = 0;
+    if (!neverExpire) {
+      const rawDays = typeof days === "string" ? days.trim() : days;
+      if (rawDays === "" || rawDays === null || rawDays === undefined) {
+        throw new Error("有效天数不能为空；如需永久有效请显式勾选「永久有效」");
+      }
+      const numDays = Number(rawDays);
+      if (!Number.isInteger(numDays) || numDays < 1 || numDays > MAX_DAYS) {
+        throw new Error("有效天数必须为 1 到 3650 之间的整数（负数或 0 不会自动变为永久）");
+      }
+      effDays = numDays;
+    }
+    const numCount = Number(typeof count === "string" ? count.trim() : count);
+    if (!Number.isInteger(numCount) || numCount < 1 || numCount > MAX_COUNT) {
+      throw new Error("生成数量必须为 1 到 50 之间的整数");
+    }
+    const numMinVc = Number(typeof minVc === "string" ? (minVc.trim() === "" ? "0" : minVc.trim()) : minVc);
+    if (!Number.isInteger(numMinVc) || numMinVc < 0 || numMinVc > MAX_MIN_VC) {
+      throw new Error("最低版本码必须为 0 到 65535 之间的整数");
+    }
+    if (numMinVc > 0 && plat !== "android") {
+      throw new Error("Windows/iOS 正式版不执行 min_vc，仅单端 Android 口令允许设置最低版本码");
+    }
+    return { cleanTag, effDays, plat, numMinVc, numCount };
+  }
+  function encodePasscode(seed, { tag = "channel-01", days = 30, neverExpire = false, plat = "all", shared = false, expOAuth = false, minVc = 0, nowEpochSec = null }) {
+    const v = validateIssuanceInput({ tag, days, neverExpire, plat, minVc, count: 1 });
     const iat = nowEpochSec === null ? Math.floor(Date.now() / 1000) : Math.floor(nowEpochSec);
-    const exp = days <= 0 ? 0 : iat + Math.floor(days) * 86400;
-    const obj = { exp, iat, plat: plat || "all", tag: (tag || "beta").trim() || "beta", v: 1, n: bytesToHex(randomBytes(3)) };
+    const exp = v.effDays === 0 ? 0 : iat + v.effDays * 86400;
+    const obj = { exp, iat, plat: v.plat, tag: v.cleanTag, v: 1, n: bytesToHex(randomBytes(4)) };
     if (shared) obj.shared = true;
     if (expOAuth) obj.exp_oauth = true;
-    if (minVc > 0) obj.min_vc = Math.floor(minVc);
+    if (v.numMinVc > 0) obj.min_vc = v.numMinVc;
     const payloadBytes = new TextEncoder().encode(canonicalizeJson(obj));
     const sig = sign(seed, concat(SIGN_DOMAIN, payloadBytes));
     return TOKEN_PREFIX + b64UrlEncode(payloadBytes) + "." + b64UrlEncode(sig);
   }
-  function verifyPasscode(code, pubHex = DEFAULT_PUB_HEX) {
-    const collapsed = (code || "").replace(/\s+/g, "");
-    const m = collapsed.match(/MMAILAB1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)/);
-    if (!m) return { valid: false, error: "格式不是 MMAILAB1.<载荷>.<签名>" };
+  function issueBatch(seed, pubHex, { tag = "channel-01", days = 30, neverExpire = false, platforms = ["all"], shared = false, expOAuth = false, minVc = 0, count = 1, nowEpochSec = null }) {
+    const targets = planTargetPlatforms(platforms);
+    const seen = new Set();
+    const items = [];
+    for (const plat of targets) {
+      const v = validateIssuanceInput({ tag, days, neverExpire, plat, minVc, count });
+      for (let i = 0; i < v.numCount; i++) {
+        let code = "";
+        for (let attempt = 0; attempt < 8; attempt++) {
+          const candidate = encodePasscode(seed, { tag: v.cleanTag, days: v.effDays, neverExpire, plat, shared, expOAuth, minVc: v.numMinVc, nowEpochSec });
+          if (!seen.has(candidate)) { seen.add(candidate); code = candidate; break; }
+        }
+        if (!code) throw new Error("批次去重失败");
+        const chk = verifyPasscode(code, pubHex, { nowEpochSec });
+        if (!chk.signatureValid) throw new Error("签名自检失败");
+        items.push({ platform: plat, code, expireDate: chk.expireDate, fingerprint: tokenFingerprint(code) });
+      }
+    }
+    return { targets, items };
+  }
+  function evaluatePlatformActivation(claims, signatureValid, targetPlatform, nowSec, appVersionCode = 0) {
+    if (!signatureValid) return { ok: false, reason: "Ed25519 签名无效" };
+    if (!claims || typeof claims !== "object") return { ok: false, reason: "载荷 JSON 无效" };
+    if (claims.v !== 1) return { ok: false, reason: `不支持的版本 v=${claims.v}` };
+    const rawPlat = String(claims.plat || "all").trim().toLowerCase();
+    let platOk = false;
+    if (targetPlatform === "windows" || targetPlatform === "ios") {
+      // Exact Windows 0.7.3 released client rule (rejects comma combinations!)
+      platOk = rawPlat === "" || rawPlat === "all" || rawPlat === targetPlatform;
+    } else {
+      const parts = rawPlat.split(/[,;/\s]+/).map(normalizeSinglePlatform).filter(Boolean);
+      platOk = !parts.length || parts.includes("all") || parts.includes(targetPlatform);
+    }
+    if (!platOk) return { ok: false, reason: `平台字段 "${rawPlat}" 不被 ${targetPlatform} 客户端接受` };
+    const minVc = Number(claims.min_vc || 0);
+    if (targetPlatform === "android" && minVc > 0 && appVersionCode > 0 && appVersionCode < minVc) {
+      return { ok: false, reason: `版本码 ${appVersionCode} 低于最低要求 ${minVc}` };
+    }
+    const exp = Number(claims.exp || 0);
+    if (exp > 0 && nowSec > exp) return { ok: false, reason: "口令已过期" };
+    const res = { ok: true, reason: "可激活" };
+    if ((targetPlatform === "windows" || targetPlatform === "ios") && minVc > 0) {
+      res.warning = "Windows/iOS 正式版不校验 min_vc";
+    }
+    return res;
+  }
+  function verifyPasscode(code, pubHex = DEFAULT_PUB_HEX, opts = {}) {
+    const canonical = extractToken(code);
+    const m = canonical.match(/^MMAILAB1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/);
+    if (!m) return { signatureValid: false, valid: false, error: "格式不是 MMAILAB1.<载荷>.<签名>" };
     const payloadBytes = b64UrlDecode(m[1]), sig = b64UrlDecode(m[2]);
-    if (!payloadBytes || !sig || sig.length !== 64) return { valid: false, error: "编码损坏" };
-    const ok = verify(hexToBytes(pubHex), concat(SIGN_DOMAIN, payloadBytes), sig);
+    if (!payloadBytes || !sig || sig.length !== 64) return { signatureValid: false, valid: false, error: "编码损坏（签名非 64 字节）" };
+    const signatureValid = verify(hexToBytes(pubHex), concat(SIGN_DOMAIN, payloadBytes), sig);
     let claims = null;
     try { claims = JSON.parse(new TextDecoder().decode(payloadBytes)); } catch (_) {}
+    const nowSec = opts && opts.nowEpochSec != null ? Math.floor(opts.nowEpochSec) : Math.floor(Date.now() / 1000);
+    const appVc = opts && opts.appVersionCode ? Math.floor(opts.appVersionCode) : 0;
     const exp = claims && claims.exp ? Number(claims.exp) : 0;
+    const expired = exp > 0 && nowSec > exp;
     const expireDate = exp <= 0 ? "永久有效" : new Date(exp * 1000).toISOString().slice(0, 10);
-    return { valid: ok, claims, expireDate, canonical: m[0] };
+    const activatable = {
+      android: evaluatePlatformActivation(claims, signatureValid, "android", nowSec, appVc),
+      ios: evaluatePlatformActivation(claims, signatureValid, "ios", nowSec, 0),
+      windows: evaluatePlatformActivation(claims, signatureValid, "windows", nowSec, 0)
+    };
+    const out = {
+      signatureValid,
+      valid: signatureValid,
+      officialPublicKey: isOfficialPublicKey(pubHex),
+      expired,
+      expireDate,
+      activatable,
+      claims,
+      canonical
+    };
+    if (opts && opts.targetPlatform) {
+      const tp = normalizeSinglePlatform(opts.targetPlatform);
+      const ev = activatable[tp] || { ok: false, reason: "未知目标平台" };
+      out.targetPlatform = tp;
+      out.activatableForTarget = ev.ok;
+      out.targetReason = ev.reason;
+    }
+    return out;
   }
 
   return {
-    DEFAULT_PUB_HEX, hexToBytes, bytesToHex, publicKeyFromSeed,
-    encryptVault, decryptVault, encodePasscode, verifyPasscode
+    DEFAULT_PUB_HEX, SINGLE_PLATFORMS, VALID_TOKEN_PLATFORMS,
+    hexToBytes, bytesToHex, publicKeyFromSeed, isOfficialPublicKey,
+    extractToken, planTargetPlatforms, validateIssuanceInput, tokenFingerprint,
+    encryptVault, decryptVault, encodePasscode, issueBatch, verifyPasscode
   };
 })();
 
@@ -512,21 +743,23 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = MarcoEd25519;
 }
 
-// --- Mobile UI Controller ---
+// --- Mobile UI Controller (DOM-safe: zero innerHTML, metadata-only audit ledger) ---
 const PRELOADED_VAULT = /*__PRELOADED_ENCRYPTED_VAULT__*/null;
 const LS_VAULT = "marco_ai_ed25519_vault_v1";
-const LS_LEDGER = "marco_ai_ed25519_ledger_v1";
+const LS_LEDGER = "marco_ai_ed25519_ledger_v2";
 let activeSeed = null;
 let activePubHex = MarcoEd25519.DEFAULT_PUB_HEX;
 let pendingRawSeed = null;
 let selectedPlats = new Set(["all"]);
-let lastIssued = { codes: [], summary: "" };
+let lastIssued = { items: [], summary: "" };
 
 function toast(msg) {
   const el = document.getElementById("toast");
   if (!el) return;
-  el.textContent = msg; el.classList.add("show");
-  clearTimeout(window._tId); window._tId = setTimeout(() => el.classList.remove("show"), 2200);
+  el.textContent = String(msg || "");
+  el.classList.add("show");
+  clearTimeout(window._tId);
+  window._tId = setTimeout(() => el.classList.remove("show"), 2500);
 }
 function getStoredVault() {
   try { const s = localStorage.getItem(LS_VAULT); if (s) return JSON.parse(s); } catch (_) {}
@@ -534,14 +767,20 @@ function getStoredVault() {
 }
 function initUi() {
   if (typeof document === "undefined") return;
+  // Purge legacy v1 ledger that previously stored plaintext codes
+  try { localStorage.removeItem("marco_ai_ed25519_ledger_v1"); } catch (_) {}
   const v = getStoredVault();
   if (v) {
     activePubHex = v.pub_hex || MarcoEd25519.DEFAULT_PUB_HEX;
-    document.getElementById("vaultHint").textContent = "已载入加密 Ed25519 签名密钥库，输入主密码解锁即可签发三端通用 MMAILAB1 口令。";
+    document.getElementById("vaultHint").textContent =
+      MarcoEd25519.isOfficialPublicKey(activePubHex)
+        ? "已载入官方加密 Ed25519 密钥库，输入主密码解锁即可离线签发三端统一 MMAILAB1 口令。"
+        : "已载入非正式测试密钥库（公钥与官方钉住公钥不匹配），仅可用于本地测试。";
   } else {
     document.getElementById("unlockPane").classList.add("hidden");
   }
-  renderLedger();
+  syncPlatformControls();
+  syncUnlockedUi(false);
 }
 function unlockStoredVault() {
   const v = getStoredVault();
@@ -550,21 +789,69 @@ function unlockStoredVault() {
   if (!pwd) return toast("请输入主密码");
   try {
     const res = MarcoEd25519.decryptVault(v, pwd);
-    activeSeed = res.seed; activePubHex = MarcoEd25519.bytesToHex(res.pub);
+    activeSeed = res.seed;
+    activePubHex = MarcoEd25519.bytesToHex(res.pub);
     document.getElementById("unlockPwd").value = "";
-    syncUnlockedUi(true); toast("Ed25519 密钥库已解锁");
+    syncUnlockedUi(true);
+    toast(MarcoEd25519.isOfficialPublicKey(activePubHex)
+      ? "官方 Ed25519 密钥库已解锁"
+      : "已解锁（警告：非正式公钥，正式版客户端将拒绝激活）");
   } catch (e) { toast(e.message || "解锁失败"); }
 }
-function lockVault() { activeSeed = null; syncUnlockedUi(false); toast("已锁定密钥库"); }
+function lockVault() {
+  if (activeSeed && activeSeed.fill) activeSeed.fill(0);
+  activeSeed = null;
+  lastIssued = { items: [], summary: "" };
+  const rc = document.getElementById("resultCodes");
+  const rm = document.getElementById("resultMeta");
+  const rw = document.getElementById("resultWrap");
+  const vi = document.getElementById("verifyIn");
+  const vo = document.getElementById("verifyOut");
+  const ll = document.getElementById("ledgerList");
+  if (rc) rc.textContent = "";
+  if (rm) rm.textContent = "";
+  if (rw) rw.classList.add("hidden");
+  if (vi) vi.value = "";
+  if (vo) { vo.textContent = ""; vo.classList.add("hidden"); }
+  if (ll) ll.textContent = "";
+  syncUnlockedUi(false);
+  toast("已锁定密钥库并清空界面口令");
+}
 function syncUnlockedUi(on) {
   const b = document.getElementById("lockBadge");
-  b.textContent = on ? "已解锁 · 三端离线签发就绪" : "未解锁";
-  b.classList.toggle("ok", on);
+  const official = MarcoEd25519.isOfficialPublicKey(activePubHex);
+  b.classList.remove("ok", "warn");
+  if (!on) {
+    b.textContent = "未解锁";
+  } else if (official) {
+    b.textContent = "已解锁 · 官方公钥就绪";
+    b.classList.add("ok");
+  } else {
+    b.textContent = "非正式密钥 · 仅测试";
+    b.classList.add("warn");
+  }
   document.getElementById("lockBtn").classList.toggle("hidden", !on);
   document.getElementById("unlockPane").classList.toggle("hidden", on || !getStoredVault());
   document.getElementById("importPane").classList.toggle("hidden", on);
   document.getElementById("issueCard").classList.toggle("hidden", !on);
   document.getElementById("ledgerCard").classList.toggle("hidden", !on);
+
+  const warnBox = document.getElementById("testKeyWarn");
+  const warnTxt = document.getElementById("testKeyWarnText");
+  const allowChk = document.getElementById("allowTestKeyChk");
+  if (on && !official) {
+    warnTxt.textContent =
+      `警告：当前解锁密钥的公钥 (${activePubHex.slice(0, 12)}…) 与官方钉住公钥 (${MarcoEd25519.DEFAULT_PUB_HEX.slice(0, 12)}…) 不一致，正式签发已锁定。`;
+    warnBox.classList.remove("hidden");
+  } else {
+    warnBox.classList.add("hidden");
+    if (allowChk) allowChk.checked = false;
+  }
+  if (on) renderLedger();
+  else {
+    const ll = document.getElementById("ledgerList");
+    if (ll) ll.textContent = "";
+  }
 }
 function handleImportFile(ev) {
   const f = ev.target.files && ev.target.files[0]; if (!f) return;
@@ -578,7 +865,9 @@ function handleImportFile(ev) {
         activePubHex = obj.pub_hex || MarcoEd25519.DEFAULT_PUB_HEX;
         document.getElementById("unlockPane").classList.remove("hidden");
         document.getElementById("rawPwdBox").classList.add("hidden");
-        return toast("已导入加密密钥库，请输入主密码解锁");
+        return toast(MarcoEd25519.isOfficialPublicKey(activePubHex)
+          ? "已导入官方加密密钥库，请输入主密码解锁"
+          : "已导入密钥库（注意：非官方钉住公钥），请输入主密码解锁");
       }
     } catch (_) {}
     const hex = text.split(/\r?\n/).filter(l => l.trim() && !l.trim().startsWith("#")).join("").trim();
@@ -595,56 +884,134 @@ function finishRawImport() {
   if (!pendingRawSeed) return;
   const pwd = document.getElementById("newVaultPwd").value;
   if (!pwd || pwd.length < 6) return toast("主密码至少 6 位");
-  const pub = MarcoEd25519.publicKeyFromSeed(pendingRawSeed);
-  const vault = MarcoEd25519.encryptVault(pendingRawSeed, pub, pwd);
-  localStorage.setItem(LS_VAULT, JSON.stringify(vault));
-  activeSeed = pendingRawSeed; activePubHex = MarcoEd25519.bytesToHex(pub);
-  pendingRawSeed = null; document.getElementById("newVaultPwd").value = "";
-  document.getElementById("rawPwdBox").classList.add("hidden");
-  syncUnlockedUi(true); toast("私钥已加密存入本机并解锁");
+  try {
+    const pub = MarcoEd25519.publicKeyFromSeed(pendingRawSeed);
+    const vault = MarcoEd25519.encryptVault(pendingRawSeed, pub, pwd);
+    localStorage.setItem(LS_VAULT, JSON.stringify(vault));
+    activeSeed = pendingRawSeed;
+    activePubHex = MarcoEd25519.bytesToHex(pub);
+    pendingRawSeed = null;
+    document.getElementById("newVaultPwd").value = "";
+    document.getElementById("rawPwdBox").classList.add("hidden");
+    syncUnlockedUi(true);
+    toast(MarcoEd25519.isOfficialPublicKey(activePubHex)
+      ? "官方私钥已加密存入本机并解锁"
+      : "测试私钥已加密存入本机（非正式公钥）");
+  } catch (e) { toast(e.message || "加密保存失败"); }
 }
 function pickPlat(p) {
-  if (p === "all") selectedPlats = new Set(["all"]);
-  else {
+  if (p === "all") {
+    selectedPlats = new Set(["all"]);
+  } else {
     selectedPlats.delete("all");
     if (selectedPlats.has(p)) selectedPlats.delete(p); else selectedPlats.add(p);
-    if (selectedPlats.size === 0 || selectedPlats.size === 3) selectedPlats = new Set(["all"]);
+    if (selectedPlats.size === 0) selectedPlats = new Set(["all"]);
   }
-  document.querySelectorAll("#platPills .pill").forEach(b => b.classList.toggle("on", selectedPlats.has(b.dataset.p)));
+  syncPlatformControls();
 }
-function setDays(d, btn) {
-  document.getElementById("daysIn").value = d;
+function syncPlatformControls() {
+  document.querySelectorAll("#platPills .pill").forEach(b => b.classList.toggle("on", selectedPlats.has(b.dataset.p)));
+  const targets = Array.from(selectedPlats);
+  const androidOnly = targets.length === 1 && targets[0] === "android";
+  const minVcIn = document.getElementById("minVcIn");
+  const minVcLbl = document.getElementById("minVcLbl");
+  const notice = document.getElementById("platModeNotice");
+  if (minVcIn) {
+    minVcIn.disabled = !androidOnly;
+    if (!androidOnly) minVcIn.value = "0";
+  }
+  if (minVcLbl) {
+    minVcLbl.textContent = androidOnly
+      ? "最低版本码（仅 Android 生效，0=不限）"
+      : "最低版本码（仅单选 Android 可设）";
+  }
+  if (notice) {
+    if (targets.length > 1) {
+      notice.textContent = `已多选 ${targets.join(" / ")}：为兼容 Windows 正式版（仅接受单端或 all），将自动拆分为各端独立定向口令，绝不自动扩大为 all。`;
+      notice.classList.remove("hidden");
+    } else {
+      notice.textContent = "";
+      notice.classList.add("hidden");
+    }
+  }
+}
+function setDaysPreset(d, btn) {
+  document.getElementById("neverExpireChk").checked = false;
+  const daysIn = document.getElementById("daysIn");
+  daysIn.disabled = false;
+  daysIn.value = String(d);
   document.querySelectorAll("#daysPills .pill").forEach(b => b.classList.toggle("on", b === btn));
+}
+function setNeverExpirePreset(btn) {
+  document.getElementById("neverExpireChk").checked = true;
+  document.getElementById("daysIn").disabled = true;
+  document.querySelectorAll("#daysPills .pill").forEach(b => b.classList.toggle("on", b === btn));
+}
+function onNeverExpireToggle() {
+  const on = document.getElementById("neverExpireChk").checked;
+  document.getElementById("daysIn").disabled = on;
+  document.querySelectorAll("#daysPills .pill").forEach(b => {
+    b.classList.toggle("on", on && b.dataset.d === "never");
+  });
 }
 function issueNow() {
   if (!activeSeed) return toast("请先解锁密钥库");
-  const tag = (document.getElementById("tagIn").value || "channel-01").trim();
-  const days = Math.max(0, Number(document.getElementById("daysIn").value) || 0);
-  const count = Math.max(1, Math.min(50, Number(document.getElementById("countIn").value) || 1));
-  const minVc = Math.max(0, Math.min(65535, Number(document.getElementById("minVcIn").value) || 0));
+  const official = MarcoEd25519.isOfficialPublicKey(activePubHex);
+  if (!official && !document.getElementById("allowTestKeyChk").checked) {
+    return toast("当前非官方公钥，请先勾选允许测试密钥签发，或导入官方密钥");
+  }
+  const tag = document.getElementById("tagIn").value;
+  const neverExpire = document.getElementById("neverExpireChk").checked;
+  const daysRaw = document.getElementById("daysIn").value;
+  const countRaw = document.getElementById("countIn").value;
+  const minVcRaw = document.getElementById("minVcIn").value;
   const note = (document.getElementById("noteIn").value || "").trim();
   const shared = document.getElementById("sharedChk").checked;
   const expOAuth = document.getElementById("expChk").checked;
-  const plat = selectedPlats.has("all") ? "all" : Array.from(selectedPlats).join(",");
-  const codes = [];
-  let expireLabel = "永久有效";
-  for (let i = 0; i < count; i++) {
-    const c = MarcoEd25519.encodePasscode(activeSeed, { tag, days, plat, shared, expOAuth, minVc });
-    const chk = MarcoEd25519.verifyPasscode(c, activePubHex);
-    if (!chk.valid) return toast("签名自检失败");
-    expireLabel = chk.expireDate;
-    codes.push(c);
+  try {
+    const batch = MarcoEd25519.issueBatch(activeSeed, activePubHex, {
+      tag,
+      days: neverExpire ? 0 : daysRaw,
+      neverExpire,
+      platforms: Array.from(selectedPlats),
+      shared,
+      expOAuth,
+      minVc: minVcRaw,
+      count: countRaw
+    });
+    const multiTarget = batch.targets.length > 1;
+    const platZh = multiTarget
+      ? ("拆分定向：" + batch.targets.join(" + "))
+      : (batch.targets[0] === "all" ? "三端通用 (all)" : ("仅限 " + batch.targets[0]));
+    const expireLabel = batch.items[0].expireDate;
+    const summary = `${official ? "" : "[测试密钥] "}${tag.trim()} · ${platZh} · ${shared ? "频道通用" : "专属测试"} · 有效至 ${expireLabel}`;
+    lastIssued = { items: batch.items, summary, multiTarget };
+    document.getElementById("resultMeta").textContent = summary;
+    document.getElementById("resultCodes").textContent = batch.items
+      .map(it => multiTarget ? `[${it.platform}] ${it.code}` : it.code)
+      .join("\n");
+    document.getElementById("resultWrap").classList.remove("hidden");
+
+    // Metadata-only audit ledger: NEVER persist full usable passcodes to localStorage!
+    const ledger = loadLedger();
+    ledger.unshift({
+      at: new Date().toLocaleString("zh-CN", { hour12: false }),
+      tag: tag.trim(),
+      plat: platZh,
+      shared,
+      expOAuth,
+      expireLabel,
+      count: batch.items.length,
+      note,
+      officialKey: official,
+      fingerprints: batch.items.map(it => `${it.platform}: ${it.fingerprint}`)
+    });
+    localStorage.setItem(LS_LEDGER, JSON.stringify(ledger.slice(0, 100)));
+    renderLedger();
+    toast(`已签发 ${batch.items.length} 枚 MMAILAB1 口令`);
+  } catch (e) {
+    toast(e.message || "参数校验失败");
   }
-  const platZh = plat === "all" ? "三端通用 (Android/iOS/Windows)" : ("仅限 " + plat);
-  const summary = `${tag} · ${platZh} · ${shared ? "频道通用" : "专属测试"} · 有效至 ${expireLabel}`;
-  lastIssued = { codes, summary };
-  document.getElementById("resultMeta").textContent = summary;
-  document.getElementById("resultCodes").textContent = codes.join("\n");
-  document.getElementById("resultWrap").classList.remove("hidden");
-  const ledger = loadLedger();
-  ledger.unshift({ at: new Date().toLocaleString("zh-CN", { hour12: false }), tag, plat: platZh, shared, expireLabel, count, note, codes });
-  localStorage.setItem(LS_LEDGER, JSON.stringify(ledger.slice(0, 100)));
-  renderLedger(); toast(`已签发 ${count} 枚 MMAILAB1 口令`);
 }
 function copyText(t) {
   if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(()=>toast("已复制到剪贴板")).catch(()=>fallbackCopy(t));
@@ -655,28 +1022,95 @@ function fallbackCopy(t) {
   document.execCommand("copy"); document.body.removeChild(ta); toast("已复制到剪贴板");
 }
 function copyLastCodes(withCaption) {
-  if (!lastIssued.codes.length) return;
-  const raw = lastIssued.codes.join("\n");
+  if (!lastIssued.items.length) return;
+  const raw = lastIssued.items
+    .map(it => lastIssued.multiTarget ? `[${it.platform}] ${it.code}` : it.code)
+    .join("\n");
   if (!withCaption) return copyText(raw);
-  copyText(`【Marco Movie · AI 观影实验室测试口令】\n${lastIssued.summary}\n复制下方口令前往设置「AI 观影实验室」粘贴解锁：\n${raw}`);
+  copyText(`【Marco Movie · AI 观影实验室测试口令】\n${lastIssued.summary}\n复制对应平台口令前往设置「AI 观影实验室」粘贴解锁：\n${raw}`);
 }
 function verifyInputCode() {
   const res = MarcoEd25519.verifyPasscode(document.getElementById("verifyIn").value, activePubHex);
   const out = document.getElementById("verifyOut");
-  out.textContent = JSON.stringify(res, null, 2); out.classList.remove("hidden");
-  toast(res.valid ? "Ed25519 签名验证通过" : ("验证失败：" + (res.error || "签名无效")));
+  const lines = [];
+  lines.push(`Ed25519 签名有效：${res.signatureValid ? "是" : "否"}${res.error ? "（" + res.error + "）" : ""}`);
+  if (res.activatable) {
+    lines.push(`验签公钥：${res.officialPublicKey ? "官方钉住公钥" : "当前自定义测试公钥"}`);
+    lines.push(`有效期至：${res.expireDate}${res.expired ? "（已过期）" : ""}`);
+    for (const p of MarcoEd25519.SINGLE_PLATFORMS) {
+      const a = res.activatable[p];
+      lines.push(`- ${p} 端可激活：${a.ok ? "是" : "否"}（${a.reason}${a.warning ? "；" + a.warning : ""}）`);
+    }
+    if (res.claims) lines.push("\n原始载荷：\n" + JSON.stringify(res.claims, null, 2));
+  }
+  out.textContent = lines.join("\n");
+  out.classList.remove("hidden");
+  const anyOk = res.activatable && MarcoEd25519.SINGLE_PLATFORMS.some(p => res.activatable[p].ok);
+  toast(!res.signatureValid ? "签名校验未通过" : (anyOk ? "签名有效，请核对上方各端可激活状态" : "签名有效，但当前无端可激活（已过期或平台不兼容）"));
 }
-function loadLedger() { try { return JSON.parse(localStorage.getItem(LS_LEDGER) || "[]"); } catch (_) { return []; } }
+function loadLedger() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(LS_LEDGER) || "[]");
+    return Array.isArray(arr) ? arr : [];
+  } catch (_) { return []; }
+}
 function renderLedger() {
-  const box = document.getElementById("ledgerList"); if (!box) return;
+  const box = document.getElementById("ledgerList");
+  if (!box) return;
+  box.textContent = "";
+  if (!activeSeed) return;
   const list = loadLedger();
-  if (!list.length) { box.innerHTML = '<p class="hint">暂无发码记录。</p>'; return; }
-  box.innerHTML = list.map((it, idx) => `<div class="item"><div class="item-top"><span>${it.tag} · ${it.note || (it.shared ? "频道通用" : "专属测试")} (${it.count}枚)</span><button class="btn sm sec" onclick="copyLedger(${idx})">复制</button></div><div class="item-meta">${it.plat} · 有效至 ${it.expireLabel} · ${it.at}</div></div>`).join("");
+  if (!list.length) {
+    const empty = document.createElement("p");
+    empty.className = "hint";
+    empty.textContent = "暂无发码审计记录。";
+    box.appendChild(empty);
+    return;
+  }
+  for (const it of list) {
+    const card = document.createElement("div");
+    card.className = "item";
+
+    const top = document.createElement("div");
+    top.className = "item-top";
+    const titleSpan = document.createElement("span");
+    const label = `${it.officialKey === false ? "[测试] " : ""}${String(it.tag || "")} · ${String(it.note || (it.shared ? "频道通用" : "专属测试"))} (${Number(it.count || 0)}枚)`;
+    titleSpan.textContent = label;
+    top.appendChild(titleSpan);
+    card.appendChild(top);
+
+    const meta = document.createElement("div");
+    meta.className = "item-meta";
+    meta.textContent = `${String(it.plat || "")} · 有效至 ${String(it.expireLabel || "")} · ${String(it.at || "")}`;
+    card.appendChild(meta);
+
+    if (Array.isArray(it.fingerprints) && it.fingerprints.length) {
+      const fp = document.createElement("div");
+      fp.className = "item-meta";
+      fp.textContent = "摘要：" + it.fingerprints.slice(0, 3).join(" | ") + (it.fingerprints.length > 3 ? ` 等共 ${it.fingerprints.length} 条` : "");
+      card.appendChild(fp);
+    }
+    box.appendChild(card);
+  }
 }
-function copyLedger(idx) { const it = loadLedger()[idx]; if (it && it.codes) copyText(it.codes.join("\n")); }
+function clearLedger() {
+  localStorage.removeItem(LS_LEDGER);
+  renderLedger();
+  toast("已清空本机审计台账");
+}
 function exportLedger() {
-  const blob = new Blob([JSON.stringify(loadLedger(), null, 2)], { type: "application/json" });
-  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "marco-ai-passcode-ledger.json"; a.click();
+  if (!activeSeed) return toast("请先解锁密钥库");
+  const payload = {
+    exported_at: new Date().toISOString(),
+    contains_usable_passcodes: false,
+    note: "Metadata-only audit log; raw usable passcodes are intentionally never persisted.",
+    entries: loadLedger()
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "marco-ai-passcode-audit-ledger.json";
+  a.click();
 }
 if (typeof window !== "undefined") window.addEventListener("DOMContentLoaded", initUi);
 </script>

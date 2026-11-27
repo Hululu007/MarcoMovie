@@ -360,7 +360,8 @@ def verify_apk_python_mutants(apk: Path):
 
 
 def verify_apk_dex_no_put_if_absent(apk: Path):
-    """Test item #1: verify final APK DEX has zero putIfAbsent calls in Cms."""
+    """Test item #1 & P1-7: verify final APK DEX is API 23 safe (zero putIfAbsent in Cms,
+    zero getContentLengthLong across all app classes, zero java/util/Base64 calls)."""
     from android_build_common import SDK, exe
     dexdump = exe(SDK, 'dexdump')
     with tempfile.TemporaryDirectory(prefix='mobile-dex-check-') as tmp:
@@ -384,9 +385,30 @@ def verify_apk_dex_no_put_if_absent(apk: Path):
                         raise AssertionError(
                             f'Found API 24+ putIfAbsent call inside Cms in {dex_name}!'
                         )
+                # Scan every com/pilipala/marcomovie/* class for API 24+ getContentLengthLong
+                # and API 26+ java/util/Base64 direct calls.
+                pos = 0
+                while True:
+                    c_idx = dump.find("Class descriptor  : 'Lcom/pilipala/marcomovie/", pos)
+                    if c_idx < 0:
+                        break
+                    end_cls = dump.find('Class descriptor  :', c_idx + 20)
+                    cls_section = dump[c_idx:] if end_cls < 0 else dump[c_idx:end_cls]
+                    cls_header = cls_section.splitlines()[0]
+                    if 'getContentLengthLong' in cls_section:
+                        raise AssertionError(
+                            f'Found API 24+ getContentLengthLong in {cls_header} ({dex_name})!'
+                        )
+                    if 'Ljava/util/Base64;' in cls_section:
+                        raise AssertionError(
+                            f'Found API 26+ java.util.Base64 call in {cls_header} ({dex_name})!'
+                        )
+                    pos = c_idx + 20
             if not found_cms:
                 raise AssertionError('Did not find Lcom/pilipala/marcomovie/Cms; in APK DEX files')
-    print('PASS #1 final APK DEX contains zero putIfAbsent calls in Cms (API 23 safe)')
+    print(
+        'PASS #1/P1-7 final APK DEX API 23 safety (zero putIfAbsent in Cms, zero getContentLengthLong, zero java.util.Base64)'
+    )
 
 
 def _mobile_version() -> str:

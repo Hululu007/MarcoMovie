@@ -25,13 +25,28 @@ final class MobileSettingsIndex {
         final String groupName;
         final String title;
         final String keywords;
+        final boolean requiresAiUnlock;
+        final boolean requiresTabletOrFoldable;
 
         Entry(int subPage, String key, String groupName, String title, String keywords) {
+            this(subPage, key, groupName, title, keywords, false, false);
+        }
+
+        Entry(
+                int subPage,
+                String key,
+                String groupName,
+                String title,
+                String keywords,
+                boolean requiresAiUnlock,
+                boolean requiresTabletOrFoldable) {
             this.subPage = subPage;
             this.key = key;
             this.groupName = groupName;
             this.title = title;
             this.keywords = keywords;
+            this.requiresAiUnlock = requiresAiUnlock;
+            this.requiresTabletOrFoldable = requiresTabletOrFoldable;
         }
     }
 
@@ -53,7 +68,7 @@ final class MobileSettingsIndex {
                 "外观与导航",
                 "底部导航栏形态（4+1 分离搜索 / 五栏一体）",
                 "底栏 搜索按钮 分离 胶囊 导航");
-        add(
+        addTabletOnly(
                 SUB_APPEARANCE,
                 "ms-tablet-dock-pos",
                 "外观与导航",
@@ -106,7 +121,7 @@ final class MobileSettingsIndex {
 
         // Cluster 2: 内容与观影 — 播放与触控手势 (subPage = 3)
         add(SUB_PLAYBACK, "ms-detail-tap", "播放与触控手势", "点选剧集时的起播方式", "内嵌 小窗 全屏 竖屏 详情页 起播");
-        add(SUB_PLAYBACK, "ms-ep-clean", "播放与触控手势", "自动整理清晰集名", "正则 净化 原名 乱码 集名 ai");
+        add(SUB_PLAYBACK, "ms-ep-clean", "播放与触控手势", "自动整理清晰集名", "正则 净化 原名 乱码 集名");
         add(SUB_PLAYBACK, "ms-auto-next", "播放与触控手势", "播完自动连播下一集", "连播 下一集 自动播放");
         add(SUB_PLAYBACK, "ms-repeat-mode", "播放与触控手势", "循环播放模式", "循环 单集循环 列表循环");
         add(
@@ -161,7 +176,7 @@ final class MobileSettingsIndex {
 
         // Cluster 2: 内容与观影 — 字幕与弹幕 (subPage = 4)
         add(SUB_SUBTITLE, "ms-sub-adjust", "字幕与弹幕", "全屏手势预览调校字幕", "字幕 字号 底距 缩放 拖拽 调校");
-        add(SUB_SUBTITLE, "ms-sub-bilingual", "字幕与弹幕", "AI 双语对照同屏字幕", "双语 翻译 ai 字幕 对照");
+        addAiOnly(SUB_SUBTITLE, "ms-sub-bilingual", "字幕与弹幕", "AI 双语对照同屏字幕", "双语 翻译 ai 字幕 对照");
         add(SUB_SUBTITLE, "ms-sub-style", "字幕与弹幕", "字幕配色与底衬样式", "字幕 颜色 描边 样式 底衬");
         add(SUB_SUBTITLE, "ms-sub-weight", "字幕与弹幕", "字幕字体粗细", "字重 加粗 描边 粗细 字幕");
         add(SUB_SUBTITLE, "ms-sub-offset", "字幕与弹幕", "字幕水平位置微调", "偏移 水平 居中 位置 字幕");
@@ -199,27 +214,27 @@ final class MobileSettingsIndex {
                 "网盘、追剧与 AI 助手",
                 "AI 观影实验室（内测口令开启）",
                 "ai 内测 口令 实验室 观影助手 找片 前情提要 双语字幕");
-        add(SUB_SERVICES, "ms-ai-enable", "网盘、追剧与 AI 助手", "启用 AI 观影助手", "ai 智能 开关 大模型");
-        add(
+        addAiOnly(SUB_SERVICES, "ms-ai-enable", "网盘、追剧与 AI 助手", "启用 AI 观影助手", "ai 智能 开关 大模型");
+        addAiOnly(
                 SUB_SERVICES,
                 "ms-ai-cfg",
                 "网盘、追剧与 AI 助手",
                 "AI 认证中心（API Key / 订阅账号登录）",
                 "ai api key oauth 订阅账号 openrouter kimi code openai claude anthropic gemini deepseek 通义千问 硅基流动 glm ollama");
-        add(
+        addAiOnly(
                 SUB_SERVICES,
                 "ms-ai-discovery",
                 "网盘、追剧与 AI 助手",
                 "今晚看什么 · AI 找片",
                 "ai 找片 推荐 选片 今晚看什么 电影 电视剧");
-        add(SUB_SERVICES, "ms-ai-clean-search", "网盘、追剧与 AI 助手", "AI 净化搜索结果片名", "ai 搜索 净化 片名");
-        add(
+        addAiOnly(SUB_SERVICES, "ms-ai-clean-search", "网盘、追剧与 AI 助手", "AI 净化搜索结果片名", "ai 搜索 净化 片名");
+        addAiOnly(
                 SUB_SERVICES,
                 "ms-ai-translate-sub",
                 "网盘、追剧与 AI 助手",
                 "全片 AI 滑动窗口双语字幕",
                 "ai 字幕 翻译 双语 全片");
-        add(
+        addAiOnly(
                 SUB_SERVICES,
                 "ms-ai-py-audit",
                 "网盘、追剧与 AI 助手",
@@ -284,7 +299,15 @@ final class MobileSettingsIndex {
     private MobileSettingsIndex() {}
 
     private static void add(int sub, String key, String grp, String title, String kw) {
-        ALL.add(new Entry(sub, key, grp, title, kw));
+        ALL.add(new Entry(sub, key, grp, title, kw, false, false));
+    }
+
+    private static void addAiOnly(int sub, String key, String grp, String title, String kw) {
+        ALL.add(new Entry(sub, key, grp, title, kw, true, false));
+    }
+
+    private static void addTabletOnly(int sub, String key, String grp, String title, String kw) {
+        ALL.add(new Entry(sub, key, grp, title, kw, false, true));
     }
 
     static List<Entry> all() {
@@ -292,11 +315,22 @@ final class MobileSettingsIndex {
     }
 
     static List<Entry> search(String rawQuery) {
+        return search(rawQuery, true, true);
+    }
+
+    /**
+     * Context-aware settings search that strictly hides AI-only settings when the beta gate is
+     * locked (keeping only the passcode entry {@code ms-ai-lab-gate}) and hides tablet/foldable
+     * Dock placement on ordinary bar phones.
+     */
+    static List<Entry> search(String rawQuery, boolean aiUnlocked, boolean isTabletOrFoldable) {
         List<Entry> hits = new ArrayList<>();
         if (rawQuery == null) return hits;
         String q = rawQuery.trim().toLowerCase(Locale.ROOT);
         if (q.isEmpty()) return hits;
         for (Entry e : ALL) {
+            if (e.requiresAiUnlock && !aiUnlocked) continue;
+            if (e.requiresTabletOrFoldable && !isTabletOrFoldable) continue;
             if (e.title.toLowerCase(Locale.ROOT).contains(q)
                     || e.groupName.toLowerCase(Locale.ROOT).contains(q)
                     || e.keywords.toLowerCase(Locale.ROOT).contains(q)) {

@@ -654,7 +654,7 @@ public final class MainActivity extends Activity {
     TouchPlayerGesture touchPlayerGesture;
     PlayerChrome playerChrome;
     MoviePlayer player;
-    com.pilipala.emby.EmbyLibrary.Reporter embyReporter;
+    MobileEmbyLibrary.Reporter embyReporter;
     String configOrigin = "";
     TextView playStatus, playClock;
     final SeekGesture seekGesture = new SeekGesture();
@@ -1393,7 +1393,7 @@ public final class MainActivity extends Activity {
             config = null;
         }
         if (config == null
-                && (!com.pilipala.emby.EmbyAccounts.listSaved(this).isEmpty()
+                && (!MobileEmbyAccounts.listSaved(this).isEmpty()
                         || !AlistAccounts.list(this).isEmpty())) {
             config = new Cms.Config();
             EmbyEngine.reattachSavedLibraries(this, config);

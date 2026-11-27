@@ -2094,17 +2094,68 @@ public final class MobileUiRedesignChecks {
                         && Prefs.KEYS.length == 46,
                 "Pillar 10 dock: TABLET_DOCK_POSITION accepts 0..4, rejects out-of-range, and preserves Prefs.KEYS=46");
 
-        // 4. Settings index & static wiring
+        // 4. Settings index & static wiring (P2-2: straight phone hides tablet dock,
+        // foldable/tablet
+        //    rebuilds on same-orientation width change, quick menu clamps to real viewport, rail
+        //    scrolls, insets cover all 4 edges)
         check(
                 hasHit(
-                                MobileSettingsIndex.search("dock"),
+                                MobileSettingsIndex.search("dock", true, true),
                                 MobileSettingsIndex.SUB_APPEARANCE,
                                 "ms-tablet-dock-pos")
                         && hasHit(
-                                MobileSettingsIndex.search("折叠屏"),
+                                MobileSettingsIndex.search("折叠屏", true, true),
+                                MobileSettingsIndex.SUB_APPEARANCE,
+                                "ms-tablet-dock-pos")
+                        && !hasHit(
+                                MobileSettingsIndex.search("dock", true, false),
                                 MobileSettingsIndex.SUB_APPEARANCE,
                                 "ms-tablet-dock-pos"),
-                "Pillar 10 dock: MobileSettingsIndex resolves dock/tablet/foldable queries");
+                "Pillar 10 dock (P2-2): MobileSettingsIndex shows dock setting on tablets/foldables and hides it on ordinary bar phones");
+
+        check(
+                MobileRootShell.shouldRelayoutForResize(
+                                true,
+                                1080,
+                                MobileRootShell.DOCK_POS_BOTTOM,
+                                1800,
+                                2200,
+                                MobileRootShell.DOCK_POS_BOTTOM,
+                                120)
+                        && !MobileRootShell.shouldRelayoutForResize(
+                                true,
+                                1080,
+                                MobileRootShell.DOCK_POS_BOTTOM,
+                                1090,
+                                2200,
+                                MobileRootShell.DOCK_POS_BOTTOM,
+                                120),
+                "Pillar 10 dock (P2-2): same-orientation foldable width change triggers shell & Hero carousel relayout");
+
+        int[] qmShort =
+                MobileRootShell.computeQuickMenuOrigin(
+                        MobileRootShell.DOCK_POS_LEFT,
+                        1200,
+                        420,
+                        40,
+                        32,
+                        40,
+                        28,
+                        40,
+                        350,
+                        80,
+                        60,
+                        200,
+                        260,
+                        12,
+                        12);
+        check(
+                qmShort[0] >= 52
+                        && qmShort[0] + 200 <= 1200 - 40 - 12
+                        && qmShort[1] >= 44
+                        && qmShort[1] + 260 <= 420 - 28 - 12,
+                "Pillar 10 dock (P2-2): quick-action menu clamps strictly inside compact viewport & insets");
+
         String settingsSrc =
                 readUtf8(
                         root,
@@ -2113,14 +2164,37 @@ public final class MobileUiRedesignChecks {
                 readUtf8(
                         root,
                         "android-mobile/src/main/java/com/pilipala/marcomovie/MobileRootShell.java");
+        String homeSrc =
+                readUtf8(
+                        root,
+                        "android-mobile/src/main/java/com/pilipala/marcomovie/MobileHomePage.java");
+        String sourceCtrlSrc =
+                readUtf8(
+                        root,
+                        "android-mobile/src/main/java/com/pilipala/marcomovie/SourceController.java");
+        String dlnaSrc =
+                readUtf8(
+                        root,
+                        "android-mobile/src/main/java/com/pilipala/marcomovie/DlnaCastClient.java");
         check(
                 settingsSrc.contains("MobileRootShell.isTabletOrFoldable(a)")
                         && settingsSrc.contains("\"ms-tablet-dock-pos\"")
                         && shellSrc.contains("DOCK_POS_TOP")
                         && shellSrc.contains("DOCK_POS_BOTTOM")
                         && shellSrc.contains("DOCK_POS_LEFT")
-                        && shellSrc.contains("DOCK_POS_RIGHT"),
-                "Pillar 10 dock: Settings gates ms-tablet-dock-pos on tablet/foldable detection and MobileRootShell renders all 4 edges");
+                        && shellSrc.contains("DOCK_POS_RIGHT")
+                        && shellSrc.contains("mobile-side-rail-scroll")
+                        && shellSrc.contains("dlp.leftMargin = lastInsetLeft")
+                        && shellSrc.contains("int cPadL = rightRail ? lastInsetLeft : 0;")
+                        && homeSrc.contains("void updatePageWidth(int newWidthPx)"),
+                "Pillar 10 dock (P2-2): Settings, 4-edge insets, scrollable side rail, and HeroPagerView width sync verified");
+        check(
+                !sourceCtrlSrc.contains("\uD83D\uDCCB")
+                        && !sourceCtrlSrc.contains("\uD83D\uDCC2")
+                        && !sourceCtrlSrc.contains("\uD83C\uDF10")
+                        && !sourceCtrlSrc.contains("\uD83D\uDCC5")
+                        && !dlnaSrc.contains("\uD83D\uDCFA"),
+                "Pillar 10 icons (P2-4): live import dialog & DLNA cast picker replaced emojis with MobileIcons vectors");
     }
 
     public static void main(String[] args) throws Exception {

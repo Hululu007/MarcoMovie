@@ -617,91 +617,108 @@ final class DlnaCastClient {
                                             for (int i = 0; i < found.size(); i++) {
                                                 final Device dev = found.get(i);
                                                 String label =
-                                                        "📺  "
-                                                                + dev.friendlyName
+                                                        dev.friendlyName
                                                                 + (dev.hostIp.isEmpty()
                                                                         ? ""
                                                                         : "   ("
                                                                                 + dev.hostIp
                                                                                 + ")");
-                                                Button btn =
-                                                        a.button(
-                                                                label,
-                                                                "dlna-target:" + i,
-                                                                () -> {
-                                                                    if (mediaUrl == null
-                                                                            || mediaUrl.trim()
-                                                                                    .isEmpty()) {
-                                                                        a.toast(
-                                                                                "已选中投屏设备："
-                                                                                        + dev.friendlyName
-                                                                                        + "，播放影片时点「投屏」即可直接推送");
-                                                                        if (dlgRef[0] != null) {
-                                                                            dlgRef[0].dismiss();
-                                                                        }
-                                                                        return;
-                                                                    }
-                                                                    status.setText(
-                                                                            "正在向「"
-                                                                                    + dev.friendlyName
-                                                                                    + "」发起投屏…");
-                                                                    status.setTextColor(0xff9ec5ff);
-                                                                    a.worker.execute(
-                                                                            () -> {
-                                                                                try {
-                                                                                    castUrl(
-                                                                                            dev,
-                                                                                            mediaUrl,
-                                                                                            mediaTitle);
-                                                                                    a.ui.post(
-                                                                                            () -> {
-                                                                                                if (dlgRef[
-                                                                                                                0]
-                                                                                                        != null) {
-                                                                                                    dlgRef[
-                                                                                                            0]
-                                                                                                            .dismiss();
-                                                                                                }
-                                                                                                if (onCastStarted
-                                                                                                        != null) {
-                                                                                                    onCastStarted
-                                                                                                            .run();
-                                                                                                }
-                                                                                                showActiveRemoteDialog(
-                                                                                                        a,
-                                                                                                        dev,
-                                                                                                        mediaUrl,
-                                                                                                        mediaTitle);
-                                                                                            });
-                                                                                } catch (
-                                                                                        Throwable
-                                                                                                err) {
-                                                                                    a.ui.post(
-                                                                                            () -> {
-                                                                                                status
-                                                                                                        .setText(
-                                                                                                                "投屏失败："
-                                                                                                                        + (err
-                                                                                                                                                .getMessage()
-                                                                                                                                        != null
-                                                                                                                                ? err
+                                                Runnable onPickDevice =
+                                                        () -> {
+                                                            if (mediaUrl == null
+                                                                    || mediaUrl.trim().isEmpty()) {
+                                                                a.toast(
+                                                                        "已选中投屏设备："
+                                                                                + dev.friendlyName
+                                                                                + "，播放影片时点「投屏」即可直接推送");
+                                                                if (dlgRef[0] != null) {
+                                                                    dlgRef[0].dismiss();
+                                                                }
+                                                                return;
+                                                            }
+                                                            status.setText(
+                                                                    "正在向「"
+                                                                            + dev.friendlyName
+                                                                            + "」发起投屏…");
+                                                            status.setTextColor(0xff9ec5ff);
+                                                            a.worker.execute(
+                                                                    () -> {
+                                                                        try {
+                                                                            castUrl(
+                                                                                    dev,
+                                                                                    mediaUrl,
+                                                                                    mediaTitle);
+                                                                            a.ui.post(
+                                                                                    () -> {
+                                                                                        if (dlgRef[
+                                                                                                        0]
+                                                                                                != null) {
+                                                                                            dlgRef[
+                                                                                                    0]
+                                                                                                    .dismiss();
+                                                                                        }
+                                                                                        if (onCastStarted
+                                                                                                != null) {
+                                                                                            onCastStarted
+                                                                                                    .run();
+                                                                                        }
+                                                                                        showActiveRemoteDialog(
+                                                                                                a,
+                                                                                                dev,
+                                                                                                mediaUrl,
+                                                                                                mediaTitle);
+                                                                                    });
+                                                                        } catch (Throwable err) {
+                                                                            a.ui.post(
+                                                                                    () -> {
+                                                                                        status
+                                                                                                .setText(
+                                                                                                        "投屏失败："
+                                                                                                                + (err
                                                                                                                                         .getMessage()
-                                                                                                                                : "设备无响应"));
-                                                                                                status
-                                                                                                        .setTextColor(
-                                                                                                                0xffff8b7b);
-                                                                                            });
-                                                                                }
-                                                                            });
-                                                                });
-                                                btn.setGravity(
+                                                                                                                                != null
+                                                                                                                        ? err
+                                                                                                                                .getMessage()
+                                                                                                                        : "设备无响应"));
+                                                                                        status
+                                                                                                .setTextColor(
+                                                                                                        0xffff8b7b);
+                                                                                    });
+                                                                        }
+                                                                    });
+                                                        };
+                                                LinearLayout devRow = a.row();
+                                                devRow.setTag("dlna-target:" + i);
+                                                devRow.setGravity(
                                                         Gravity.START | Gravity.CENTER_VERTICAL);
-                                                btn.setPadding(
-                                                        a.dp(16), a.dp(10), a.dp(16), a.dp(10));
+                                                devRow.setPadding(
+                                                        a.dp(14), a.dp(11), a.dp(14), a.dp(11));
+                                                devRow.setBackground(a.bg(0xff1e2430, 12));
+                                                MobileIcons.IconView castIc =
+                                                        MobileIcons.create(
+                                                                a,
+                                                                MobileIcons.IC_CAST,
+                                                                18f,
+                                                                0xff7ee7c6);
+                                                LinearLayout.LayoutParams ilp =
+                                                        new LinearLayout.LayoutParams(
+                                                                a.dp(18), a.dp(18));
+                                                ilp.rightMargin = a.dp(10);
+                                                devRow.addView(castIc, ilp);
+                                                TextView nameTv =
+                                                        a.text(label, 14f, MainActivity.WHITE);
+                                                nameTv.setSingleLine(true);
+                                                nameTv.setEllipsize(
+                                                        android.text.TextUtils.TruncateAt.END);
+                                                devRow.addView(
+                                                        nameTv,
+                                                        new LinearLayout.LayoutParams(0, -2, 1f));
+                                                MobileDetailScreen.bindTouchFeedback(devRow);
+                                                devRow.setOnClickListener(v -> onPickDevice.run());
                                                 LinearLayout.LayoutParams lp =
-                                                        new LinearLayout.LayoutParams(-1, a.dp(46));
+                                                        new LinearLayout.LayoutParams(-1, -2);
                                                 lp.bottomMargin = a.dp(8);
-                                                listHost.addView(btn, lp);
+                                                listHost.addView(devRow, lp);
                                             }
                                             if (listHost.getChildCount() > 0) {
                                                 listHost.getChildAt(0).requestFocus();

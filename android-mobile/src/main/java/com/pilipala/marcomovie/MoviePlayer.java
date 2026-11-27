@@ -1616,26 +1616,60 @@ public class MoviePlayer {
         return item.build();
     }
 
+    /**
+     * Pure-JVM helper that inserts or updates an external subtitle entry in {@code options}
+     * without ever creating duplicate tracks for the same URI or the single AI bilingual track.
+     *
+     * @return {@code true} if a new track was inserted; {@code false} if an existing entry was
+     *     updated in place.
+     */
+    static boolean upsertSubtitleTrackJson(
+            org.json.JSONObject options, String url, String name, String mime) throws Exception {
+        if (options == null || url == null || url.trim().isEmpty()) return false;
+        org.json.JSONArray tracks = options.optJSONArray("subtitles");
+        if (tracks == null) {
+            tracks = new org.json.JSONArray();
+            options.put("subtitles", tracks);
+        }
+        String safeName = name == null ? "外挂字幕" : name;
+        boolean isAiTrack = safeName.startsWith("AI ");
+        org.json.JSONObject entry =
+                new org.json.JSONObject()
+                        .put("url", url)
+                        .put("name", safeName)
+                        .put("mimeType", mime == null ? "" : mime);
+        for (int i = 0; i < tracks.length(); i++) {
+            org.json.JSONObject existing = tracks.optJSONObject(i);
+            if (existing == null) continue;
+            String existingUrl = existing.optString("url", "");
+            String existingName = existing.optString("name", "");
+            if (url.equals(existingUrl) || (isAiTrack && existingName.startsWith("AI "))) {
+                tracks.put(i, entry);
+                return false;
+            }
+        }
+        tracks.put(entry);
+        return true;
+    }
+
     public void addExternalSubtitle(Uri subtitle, String name, String mime) {
+        upsertExternalSubtitle(subtitle, name, mime, true);
+    }
+
+    public void upsertExternalSubtitle(
+            Uri subtitle, String name, String mime, boolean reloadMediaSource) {
         onMain(
                 () -> {
                     check();
                     if (mediaSourceFactory == null) throw new IllegalStateException("请等待视频开始播放");
-                    org.json.JSONArray tracks = options.optJSONArray("subtitles");
-                    if (tracks == null) {
-                        tracks = new org.json.JSONArray();
-                        options.put("subtitles", tracks);
+                    upsertSubtitleTrackJson(options, subtitle.toString(), name, mime);
+                    if (reloadMediaSource) {
+                        long position = exo.getCurrentPosition();
+                        boolean play = exo.getPlayWhenReady();
+                        exo.setMediaSource(playbackSource(uri), position);
+                        exo.prepare();
+                        exo.setPlayWhenReady(play);
                     }
-                    tracks.put(
-                            new org.json.JSONObject()
-                                    .put("url", subtitle.toString())
-                                    .put("name", name)
-                                    .put("mimeType", mime));
-                    long position = exo.getCurrentPosition();
-                    boolean play = exo.getPlayWhenReady();
-                    exo.setMediaSource(playbackSource(uri), position);
-                    exo.prepare();
-                    exo.setPlayWhenReady(play);
                     return null;
                 });
     }

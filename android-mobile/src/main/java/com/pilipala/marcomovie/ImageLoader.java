@@ -1000,8 +1000,8 @@ final class ImageLoader {
                             connection.setRequestProperty(header.getKey(), header.getValue());
                         String fragment = new URL(currentUrl).getRef();
                         if (fragment != null && fragment.startsWith("mm-emby=")) {
-                            com.pilipala.emby.EmbyLibrary library =
-                                    com.pilipala.emby.EmbyAccounts.open(
+                            MobileEmbyLibrary library =
+                                    MobileEmbyAccounts.open(
                                             a, "emby://account/" + fragment.substring(8));
                             for (Map.Entry<String, String> h :
                                     library.imageHeaders(currentUrl).entrySet())

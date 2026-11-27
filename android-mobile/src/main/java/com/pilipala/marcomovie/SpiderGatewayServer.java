@@ -650,7 +650,7 @@ final class SpiderGatewayServer implements Closeable {
                     .append("\r\nContent-Type: ")
                     .append(ctype)
                     .append("\r\nConnection: close\r\n");
-            long len = conn.getContentLengthLong();
+            long len = CloudMediaProxy.parseContentLengthHeader(conn);
             if (len >= 0) head.append("Content-Length: ").append(len).append("\r\n");
             String cr = conn.getHeaderField("Content-Range");
             if (cr != null && !cr.isEmpty()) {

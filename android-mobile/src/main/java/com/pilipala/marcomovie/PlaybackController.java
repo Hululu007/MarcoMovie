@@ -504,11 +504,9 @@ final class PlaybackController {
                                                         && s != null
                                                         && s.api != null
                                                         && s.api.startsWith(
-                                                                com.pilipala.emby.EmbyLibrary
-                                                                        .PREFIX))
+                                                                MobileEmbyLibrary.PREFIX))
                                                     try {
-                                                        com.pilipala.emby.EmbyAccounts.open(
-                                                                        a, s.api)
+                                                        MobileEmbyAccounts.open(a, s.api)
                                                                 .track(unused)
                                                                 .stop(0);
                                                     } catch (Exception ignored) {
@@ -1169,7 +1167,7 @@ final class PlaybackController {
                         && !a.miniMode
                         && a.playerLocked;
         JSONObject embySession = ep.media.optJSONObject("embySession");
-        com.pilipala.emby.EmbyLibrary.Reporter retained = a.embyReporter;
+        MobileEmbyLibrary.Reporter retained = a.embyReporter;
         if (retained != null && retained.matches(embySession)) a.embyReporter = null;
         else retained = null;
         String incomingLeaseId = ep.media != null ? ep.media.optString("_cloudLeaseId", "") : "";
@@ -1192,12 +1190,11 @@ final class PlaybackController {
         a.playingBookmark = null;
         if (s != null
                 && s.api != null
-                && s.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)
+                && s.api.startsWith(MobileEmbyLibrary.PREFIX)
                 && embySession != null) {
             try {
                 if (a.embyReporter == null)
-                    a.embyReporter =
-                            com.pilipala.emby.EmbyAccounts.open(a, s.api).track(embySession);
+                    a.embyReporter = MobileEmbyAccounts.open(a, s.api).track(embySession);
             } catch (Exception ignored) {
                 // Check-in setup must not prevent an already resolved video from playing.
             }
@@ -2356,7 +2353,7 @@ final class PlaybackController {
                 && a.playbackControls != null
                 && a.playbackControls.site != null
                 && a.playbackControls.site.api != null
-                && a.playbackControls.site.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)) {
+                && a.playbackControls.site.api.startsWith(MobileEmbyLibrary.PREFIX)) {
             a.resumeAt = -1;
             resolvePlayer(
                     a,

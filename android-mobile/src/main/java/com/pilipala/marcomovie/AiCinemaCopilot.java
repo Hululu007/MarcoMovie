@@ -127,7 +127,9 @@ final class AiCinemaCopilot {
         }
         sb.append('\n');
         if (subtitleContext != null && !subtitleContext.trim().isEmpty()) {
-            sb.append("当前时间点附近字幕台词：\n").append(subtitleContext.trim()).append("\n\n");
+            sb.append("截至当前播放进度的已播字幕台词（严格不含后续未播内容）：\n")
+                    .append(subtitleContext.trim())
+                    .append("\n\n");
         }
         sb.append("用户提问：").append(userQuestion == null ? "" : userQuestion.trim());
         return sb.toString();
@@ -245,9 +247,9 @@ final class AiCinemaCopilot {
             subBox.setBackground(a.bg(p.bgSubtle, 12));
             TextView subHdr =
                     a.text(
-                            "已捕获当前进度（"
+                            "已捕获截至当前进度（"
                                     + AiSubtitleTranslator.formatShortClock(positionMs)
-                                    + "）附近字幕台词：",
+                                    + "）已播字幕台词（不含后续未播内容）：",
                             11.5f,
                             p.textSecondary);
             subHdr.setTypeface(null, Typeface.BOLD);

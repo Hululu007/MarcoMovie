@@ -19,21 +19,27 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
- * Full-episode sliding-window AI bilingual subtitle translator and subtitle context extractor.
+ * Full-episode sliding-window AI bilingual subtitle translator and spoiler-safe subtitle context
+ * extractor.
  *
- * <p>Replaces the legacy 40-cue truncation with:
+ * <p>Key guarantees:
  * <ol>
- *   <li>Unlimited full-episode SRT parsing &amp; lossless tail preservation (untranslated cues
- *       always remain intact while background chunks finish).
- *   <li>Playback-position-aware sliding-window scheduling: translates the chunk at the user's
- *       current playback timestamp FIRST, then expands forward before backfilling earlier cues.
- *   <li>Glossary consistency: extracts recurring character names / proper nouns from the first
- *       chunk and injects them into subsequent chunks.
- *   <li>Local context extraction around any playback timestamp for the AI Cinema Copilot Q&amp;A.
+ *   <li>Unlimited full-episode SRT parsing &amp; lossless tail preservation.
+ *   <li>Per-chunk automatic retry (up to {@link #MAX_CHUNK_ATTEMPTS} attempts) on transient model
+ *       or JSON shape errors.
+ *   <li>Strict completion cache gate: writes the full-episode completion disk cache ONLY when 100%
+ *       of cues ({@code translatedCues == totalCues}) succeeded — partial failures never poison the
+ *       cache.
+ *   <li>Zero mid-playback {@code exo.prepare()} interruptions: live progressive translations render
+ *       directly on {@link SubtitleOverlayView} via {@link PlaybackControls#setLiveAiSubtitles}
+ *       while maintaining a single deduplicated subtitle track in {@link MoviePlayer}.
+ *   <li>Strict anti-spoiler context cutoff: {@link #extractContextAround} returns ONLY dialogue
+ *       already reached at or before {@code positionMs}, excluding all future lines.
  * </ol>
  */
 final class AiSubtitleTranslator {
     static final int DEFAULT_CHUNK_SIZE = 25;
+    static final int MAX_CHUNK_ATTEMPTS = 3;
 
     private static final Pattern SRT_BLOCK =
             Pattern.compile(
@@ -76,6 +82,30 @@ final class AiSubtitleTranslator {
         ChunkTranslation(List<String> zhLines, Map<String, String> newGlossary) {
             this.zhLines = zhLines;
             this.newGlossary = newGlossary;
+        }
+    }
+
+    static final class TranslationRunResult {
+        final String renderedSrt;
+        final int translatedCues;
+        final int totalCues;
+        final int retriedChunks;
+        final int failedChunks;
+        final boolean shouldCacheCompletion;
+
+        TranslationRunResult(
+                String renderedSrt,
+                int translatedCues,
+                int totalCues,
+                int retriedChunks,
+                int failedChunks,
+                boolean shouldCacheCompletion) {
+            this.renderedSrt = renderedSrt;
+            this.translatedCues = translatedCues;
+            this.totalCues = totalCues;
+            this.retriedChunks = retriedChunks;
+            this.failedChunks = failedChunks;
+            this.shouldCacheCompletion = shouldCacheCompletion;
         }
     }
 
@@ -131,6 +161,48 @@ final class AiSubtitleTranslator {
     }
 
     /**
+     * Looks up the active subtitle line at {@code positionMs} for live zero-interruption overlay
+     * rendering during progressive full-episode translation.
+     */
+    static String activeCueTextAt(
+            List<SrtCue> cues, String[] translations, long positionMs, boolean bilingual) {
+        if (cues == null || cues.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < cues.size(); i++) {
+            SrtCue c = cues.get(i);
+            if (positionMs < c.startMs) break;
+            if (positionMs >= c.startMs && positionMs <= c.endMs) {
+                if (sb.length() > 0) sb.append('\n');
+                String zh =
+                        translations != null && i < translations.length && translations[i] != null
+                                ? translations[i].trim()
+                                : "";
+                if (!zh.isEmpty()) {
+                    sb.append(zh);
+                    if (bilingual) sb.append('\n').append(c.singleLinePlain());
+                } else {
+                    sb.append(c.singleLinePlain());
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    static int countTranslatedCues(String[] translations) {
+        if (translations == null) return 0;
+        int n = 0;
+        for (String t : translations) {
+            if (t != null && !t.trim().isEmpty()) n++;
+        }
+        return n;
+    }
+
+    /** Only 100% completed episodes may populate the full-episode completion disk cache. */
+    static boolean shouldWriteCompletionCache(int translatedCues, int totalCues) {
+        return totalCues > 0 && translatedCues == totalCues;
+    }
+
+    /**
      * Plans sliding-window chunk order prioritized around {@code focusCueIndex}: current chunk
      * first, then forward chunks ahead of playback, interleaved with backward backfill.
      */
@@ -144,8 +216,6 @@ final class AiSubtitleTranslator {
 
         boolean[] scheduled = new boolean[numChunks];
         addChunkIfNew(plan, scheduled, focusChunk, size, totalCues);
-        // Prioritize two chunks immediately ahead of current playback so viewer never hits
-        // untranslated text
         addChunkIfNew(plan, scheduled, focusChunk + 1, size, totalCues);
         addChunkIfNew(plan, scheduled, focusChunk + 2, size, totalCues);
         int fwd = focusChunk + 3;
@@ -193,6 +263,83 @@ final class AiSubtitleTranslator {
         return sb.toString();
     }
 
+    /**
+     * Pure-JVM full-episode translation runner with per-chunk retry and exact completion accounting.
+     */
+    static TranslationRunResult translateFullEpisodeWithStats(
+            String showTitle,
+            String srtText,
+            long currentPositionMs,
+            int chunkSize,
+            boolean bilingual,
+            ChunkTranslator translator) {
+        List<SrtCue> cues = parseSrt(srtText);
+        if (cues.isEmpty()) {
+            return new TranslationRunResult(srtText == null ? "" : srtText, 0, 0, 0, 0, false);
+        }
+        String[] translations = new String[cues.size()];
+        Map<String, String> glossary = new LinkedHashMap<>();
+        int focusIdx = findCueIndexAt(cues, currentPositionMs);
+        List<int[]> chunks = planSlidingChunks(cues.size(), focusIdx, chunkSize);
+        int retriedChunks = 0;
+        int failedChunks = 0;
+
+        for (int[] range : chunks) {
+            List<String> lines = new ArrayList<>(range[1] - range[0]);
+            for (int i = range[0]; i < range[1]; i++) {
+                lines.add(cues.get(i).singleLinePlain());
+            }
+            ChunkTranslation res = null;
+            for (int attempt = 1; attempt <= MAX_CHUNK_ATTEMPTS; attempt++) {
+                if (attempt > 1) retriedChunks++;
+                try {
+                    ChunkTranslation cand = translator.translate(showTitle, lines, glossary);
+                    if (isCompleteChunkTranslation(cand, lines.size())) {
+                        res = cand;
+                        break;
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            if (res != null) {
+                for (int i = 0; i < lines.size(); i++) {
+                    translations[range[0] + i] = res.zhLines.get(i).trim();
+                }
+                if (res.newGlossary != null) {
+                    for (Map.Entry<String, String> e : res.newGlossary.entrySet()) {
+                        if (glossary.size() >= 24) break;
+                        if (e.getKey() != null
+                                && !e.getKey().trim().isEmpty()
+                                && e.getValue() != null
+                                && !e.getValue().trim().isEmpty()) {
+                            glossary.put(e.getKey().trim(), e.getValue().trim());
+                        }
+                    }
+                }
+            } else {
+                failedChunks++;
+            }
+        }
+        int done = countTranslatedCues(translations);
+        boolean cacheOk = shouldWriteCompletionCache(done, cues.size());
+        return new TranslationRunResult(
+                renderSrt(cues, translations, bilingual),
+                done,
+                cues.size(),
+                retriedChunks,
+                failedChunks,
+                cacheOk);
+    }
+
+    private static boolean isCompleteChunkTranslation(ChunkTranslation res, int expectedSize) {
+        if (res == null || res.zhLines == null || res.zhLines.size() != expectedSize) return false;
+        for (int i = 0; i < expectedSize; i++) {
+            String s = res.zhLines.get(i);
+            if (s == null || s.trim().isEmpty()) return false;
+        }
+        return true;
+    }
+
     /** Pure-JVM full-episode translation runner (testable with mock {@link ChunkTranslator}). */
     static String translateFullEpisodeSync(
             String showTitle,
@@ -200,56 +347,38 @@ final class AiSubtitleTranslator {
             long currentPositionMs,
             int chunkSize,
             boolean bilingual,
-            ChunkTranslator translator)
-            throws Exception {
-        List<SrtCue> cues = parseSrt(srtText);
-        if (cues.isEmpty()) return srtText == null ? "" : srtText;
-        String[] translations = new String[cues.size()];
-        Map<String, String> glossary = new LinkedHashMap<>();
-        int focusIdx = findCueIndexAt(cues, currentPositionMs);
-        List<int[]> chunks = planSlidingChunks(cues.size(), focusIdx, chunkSize);
-        for (int[] range : chunks) {
-            List<String> lines = new ArrayList<>(range[1] - range[0]);
-            for (int i = range[0]; i < range[1]; i++) {
-                lines.add(cues.get(i).singleLinePlain());
-            }
-            ChunkTranslation res = translator.translate(showTitle, lines, glossary);
-            if (res != null && res.zhLines != null && res.zhLines.size() == lines.size()) {
-                for (int i = 0; i < lines.size(); i++) {
-                    translations[range[0] + i] = res.zhLines.get(i);
-                }
-            }
-            if (res != null && res.newGlossary != null) {
-                for (Map.Entry<String, String> e : res.newGlossary.entrySet()) {
-                    if (glossary.size() >= 24) break;
-                    if (e.getKey() != null
-                            && !e.getKey().trim().isEmpty()
-                            && e.getValue() != null
-                            && !e.getValue().trim().isEmpty()) {
-                        glossary.put(e.getKey().trim(), e.getValue().trim());
-                    }
-                }
-            }
-        }
-        return renderSrt(cues, translations, bilingual);
+            ChunkTranslator translator) {
+        return translateFullEpisodeWithStats(
+                        showTitle, srtText, currentPositionMs, chunkSize, bilingual, translator)
+                .renderedSrt;
     }
 
-    /** Extracts dialogue lines around {@code positionMs} ± {@code windowMs} for Copilot Q&amp;A. */
+    /**
+     * Extracts spoiler-free dialogue lines strictly up to {@code positionMs} (window {@code
+     * [max(0, positionMs - windowMs) .. positionMs]}). Any future cue with {@code startMs >
+     * positionMs} is unconditionally excluded so neither UI preview nor LLM prompts ever leak
+     * unplayed dialogue.
+     */
     static String extractContextAround(List<SrtCue> cues, long positionMs, long windowMs) {
         if (cues == null || cues.isEmpty()) return "";
+        long cutoff = Math.max(0L, positionMs);
         long win = Math.max(5000L, windowMs);
-        long from = Math.max(0L, positionMs - win);
-        long to = positionMs + win;
-        StringBuilder sb = new StringBuilder();
-        int count = 0;
+        long from = Math.max(0L, cutoff - win);
+        List<SrtCue> matched = new ArrayList<>();
         for (SrtCue c : cues) {
-            if (c.endMs >= from && c.startMs <= to) {
-                if (count > 0) sb.append('\n');
-                sb.append('[').append(formatShortClock(c.startMs)).append("] ");
-                sb.append(c.singleLinePlain());
-                count++;
-                if (count >= 12) break;
+            if (c.startMs > cutoff) continue;
+            if (c.endMs >= from) {
+                matched.add(c);
             }
+        }
+        if (matched.isEmpty()) return "";
+        int startIdx = Math.max(0, matched.size() - 12);
+        StringBuilder sb = new StringBuilder();
+        for (int i = startIdx; i < matched.size(); i++) {
+            SrtCue c = matched.get(i);
+            if (i > startIdx) sb.append('\n');
+            sb.append('[').append(formatShortClock(c.startMs)).append("] ");
+            sb.append(c.singleLinePlain());
         }
         return sb.toString();
     }
@@ -299,7 +428,10 @@ final class AiSubtitleTranslator {
 
     /**
      * Full-episode background sliding-window AI bilingual subtitle synthesis for Android Mobile.
-     * Writes progressive updates into {@code targetFile} and re-mounts into the active player.
+     * Renders progressive chunks live on {@link SubtitleOverlayView} without interrupting video
+     * playback via repeated {@code exo.prepare()}, deduplicates the single subtitle track in {@link
+     * MoviePlayer}, retries failed chunks, and writes the completion disk cache ONLY on 100%
+     * success.
      */
     static void translateAndMountFullEpisodeAsync(
             final MainActivity a,
@@ -308,7 +440,12 @@ final class AiSubtitleTranslator {
             final File targetFile,
             final long currentPositionMs,
             final ProgressListener listener) {
-        if (a == null || !AiAssistantService.isConfigured(a) || targetFile == null) return;
+        if (a == null
+                || !AiBetaGate.isUnlocked(a)
+                || !AiAssistantService.isConfigured(a)
+                || targetFile == null) {
+            return;
+        }
         final List<SrtCue> cues = parseSrt(rawSrtText);
         if (cues.isEmpty()) return;
 
@@ -323,16 +460,23 @@ final class AiSubtitleTranslator {
                         String cachedSrt = AiAssistantService.readDiskCache(a, fullCacheKey);
                         if (cachedSrt != null && !cachedSrt.trim().isEmpty()) {
                             writeUtf8(targetFile, cachedSrt);
-                            remountSubtitleOnUi(
-                                    a,
-                                    ticket,
-                                    targetFile,
-                                    "已加载缓存的全片 AI 双语字幕（" + cues.size() + " 条）",
-                                    listener,
-                                    cues.size(),
-                                    cues.size(),
-                                    true);
-                            return;
+                            List<SrtCue> cachedCues = parseSrt(cachedSrt);
+                            if (cachedCues.size() == cues.size()) {
+                                updateOverlayAndSingleTrackOnUi(
+                                        a,
+                                        ticket,
+                                        targetFile,
+                                        cachedCues,
+                                        null,
+                                        bilingual,
+                                        true,
+                                        "已加载缓存的全片 AI 双语字幕（" + cues.size() + " 条）",
+                                        listener,
+                                        cues.size(),
+                                        cues.size(),
+                                        true);
+                                return;
+                            }
                         }
 
                         final String[] translations = new String[cues.size()];
@@ -340,24 +484,44 @@ final class AiSubtitleTranslator {
                         int focusIdx = findCueIndexAt(cues, currentPositionMs);
                         List<int[]> chunks =
                                 planSlidingChunks(cues.size(), focusIdx, DEFAULT_CHUNK_SIZE);
-                        int translatedCount = 0;
 
                         for (int cIdx = 0; cIdx < chunks.size(); cIdx++) {
                             if (a.isFinishing() || ticket != a.generation) return;
+                            if (!AiBetaGate.isUnlocked(a)) return;
                             int[] range = chunks.get(cIdx);
                             List<String> lines = new ArrayList<>(range[1] - range[0]);
                             for (int i = range[0]; i < range[1]; i++) {
                                 lines.add(cues.get(i).singleLinePlain());
                             }
-                            ChunkTranslation res =
-                                    requestChunkFromModel(a, showTitle, lines, glossary);
-                            if (res != null
-                                    && res.zhLines != null
-                                    && res.zhLines.size() == lines.size()) {
-                                for (int i = 0; i < lines.size(); i++) {
-                                    translations[range[0] + i] = res.zhLines.get(i);
+                            ChunkTranslation res = null;
+                            for (int attempt = 1; attempt <= MAX_CHUNK_ATTEMPTS; attempt++) {
+                                if (a.isFinishing() || ticket != a.generation) return;
+                                try {
+                                    ChunkTranslation cand =
+                                            requestChunkFromModel(a, showTitle, lines, glossary);
+                                    if (isCompleteChunkTranslation(cand, lines.size())) {
+                                        res = cand;
+                                        break;
+                                    }
+                                } catch (Exception retryErr) {
+                                    AppLog.w(
+                                            "AiSubtitleTranslator",
+                                            "Chunk " + cIdx + " attempt " + attempt + " failed",
+                                            retryErr);
                                 }
-                                translatedCount += lines.size();
+                                if (attempt < MAX_CHUNK_ATTEMPTS) {
+                                    try {
+                                        Thread.sleep(350L * attempt);
+                                    } catch (InterruptedException ie) {
+                                        Thread.currentThread().interrupt();
+                                        return;
+                                    }
+                                }
+                            }
+                            if (res != null) {
+                                for (int i = 0; i < lines.size(); i++) {
+                                    translations[range[0] + i] = res.zhLines.get(i).trim();
+                                }
                                 if (res.newGlossary != null) {
                                     for (Map.Entry<String, String> e : res.newGlossary.entrySet()) {
                                         if (glossary.size() >= 24) break;
@@ -365,36 +529,61 @@ final class AiSubtitleTranslator {
                                     }
                                 }
                             }
+                            int translatedCount = countTranslatedCues(translations);
                             boolean isFirst = (cIdx == 0);
                             boolean isLast = (cIdx == chunks.size() - 1);
                             boolean isMilestone = (cIdx > 0 && cIdx % 4 == 0);
                             if (isFirst || isMilestone || isLast) {
                                 String rendered = renderSrt(cues, translations, bilingual);
                                 writeUtf8(targetFile, rendered);
-                                if (isLast && translatedCount >= cues.size() / 2) {
+                                boolean fullyDone =
+                                        isLast
+                                                && shouldWriteCompletionCache(
+                                                        translatedCount, cues.size());
+                                if (fullyDone) {
                                     AiAssistantService.writeDiskCache(a, fullCacheKey, rendered);
                                 }
                                 String toastMsg =
                                         isLast
-                                                ? ("全片 AI 双语字幕已生成（共 "
-                                                        + translatedCount
-                                                        + "/"
-                                                        + cues.size()
-                                                        + " 条）")
+                                                ? (fullyDone
+                                                        ? ("全片 AI 双语字幕已完整生成（共 "
+                                                                + translatedCount
+                                                                + " 条）")
+                                                        : ("已完成 "
+                                                                + translatedCount
+                                                                + "/"
+                                                                + cues.size()
+                                                                + " 条双语字幕（部分片段失败，未写入完成缓存，下次进入可补译）"))
                                                 : (isFirst
                                                         ? ("当前片段 AI 双语字幕已就绪，其余 "
                                                                 + (cues.size() - translatedCount)
-                                                                + " 条正在后台续译…")
+                                                                + " 条正在后台无打断续译…")
                                                         : "");
-                                remountSubtitleOnUi(
+                                updateOverlayAndSingleTrackOnUi(
                                         a,
                                         ticket,
                                         targetFile,
+                                        cues,
+                                        translations.clone(),
+                                        bilingual,
+                                        false,
                                         toastMsg,
                                         listener,
                                         translatedCount,
                                         cues.size(),
-                                        isLast);
+                                        fullyDone);
+                            } else if (res != null) {
+                                // Still refresh live overlay immediately without disk churn or
+                                // player prepare().
+                                final String[] snap = translations.clone();
+                                a.ui.post(
+                                        () -> {
+                                            if (a.isFinishing() || ticket != a.generation) return;
+                                            if (a.playbackControls != null) {
+                                                a.playbackControls.setLiveAiSubtitles(
+                                                        cues, snap, bilingual);
+                                            }
+                                        });
                             }
                         }
                     } catch (Exception e) {
@@ -426,10 +615,14 @@ final class AiSubtitleTranslator {
         return parseChunkResponse(reply, lines.size());
     }
 
-    private static void remountSubtitleOnUi(
+    private static void updateOverlayAndSingleTrackOnUi(
             final MainActivity a,
             final int ticket,
             final File targetFile,
+            final List<SrtCue> cues,
+            final String[] translations,
+            final boolean bilingual,
+            final boolean reloadPlayerMediaSource,
             final String toastMsg,
             final ProgressListener listener,
             final int done,
@@ -440,13 +633,25 @@ final class AiSubtitleTranslator {
                     if (a.isFinishing() || ticket != a.generation) return;
                     if (a.playbackControls != null) {
                         a.playbackControls.setActiveSubtitleFile(targetFile);
+                        if (reloadPlayerMediaSource) {
+                            a.playbackControls.clearLiveAiSubtitles();
+                        } else {
+                            a.playbackControls.setLiveAiSubtitles(cues, translations, bilingual);
+                        }
                     }
                     if (a.player != null && a.prepared) {
                         try {
-                            a.player.addExternalSubtitle(
-                                    Uri.fromFile(targetFile),
-                                    "AI 全片双语字幕",
-                                    MediaOptions.subtitleMime(targetFile.getName(), ""));
+                            Uri subUri = Uri.fromFile(targetFile);
+                            String mime = MediaOptions.subtitleMime(targetFile.getName(), "");
+                            if (a.player instanceof MoviePlayer) {
+                                // Always deduplicates single AI track; avoids mid-playback
+                                // exo.prepare() unless explicitly reloading from a 100% cache hit.
+                                ((MoviePlayer) a.player)
+                                        .upsertExternalSubtitle(
+                                                subUri, "AI 全片双语字幕", mime, reloadPlayerMediaSource);
+                            } else if (reloadPlayerMediaSource) {
+                                a.player.addExternalSubtitle(subUri, "AI 全片双语字幕", mime);
+                            }
                             if (toastMsg != null && !toastMsg.isEmpty()) {
                                 a.toast(toastMsg);
                             }

@@ -289,7 +289,7 @@ public class MainActivity extends android.app.Activity {
     public TouchPlayerGesture touchPlayerGesture;
     public MobilePlayerOverlay mobilePlayerOverlay;
     public WatchHistory.Entry playingBookmark;
-    public com.pilipala.emby.EmbyLibrary.Reporter embyReporter;
+    public MobileEmbyLibrary.Reporter embyReporter;
     public boolean miniMode;
     public MiniDetails miniDetails;
     public PlaybackControls playbackControls;
@@ -779,7 +779,7 @@ public class MainActivity extends android.app.Activity {
     public TouchPlayerGesture touchPlayerGesture;
     public MobilePlayerOverlay mobilePlayerOverlay;
     public WatchHistory.Entry playingBookmark;
-    public com.pilipala.emby.EmbyLibrary.Reporter embyReporter;
+    public MobileEmbyLibrary.Reporter embyReporter;
     public Cms.Config config;
     public SharedPreferences prefs;
     public Cms.Episode openedEpisode;

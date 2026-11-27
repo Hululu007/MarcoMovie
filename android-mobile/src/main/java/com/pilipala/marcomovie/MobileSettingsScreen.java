@@ -287,7 +287,11 @@ final class MobileSettingsScreen {
                             }
                             return;
                         }
-                        List<MobileSettingsIndex.Entry> hits = MobileSettingsIndex.search(q);
+                        List<MobileSettingsIndex.Entry> hits =
+                                MobileSettingsIndex.search(
+                                        q,
+                                        AiBetaGate.isUnlocked(a),
+                                        MobileRootShell.isTabletOrFoldable(a));
                         if (!inSearchMode[0]) {
                             inSearchMode[0] = true;
                             groupsBox.setVisibility(View.GONE);
@@ -1074,6 +1078,7 @@ final class MobileSettingsScreen {
                         new int[] {0, 1, 2},
                         0,
                         false));
+        boolean aiUnlockedForEp = AiBetaGate.isUnlocked(a);
         startRows.add(
                 mobileIntRow(
                         shell,
@@ -1083,9 +1088,15 @@ final class MobileSettingsScreen {
                         TINT_VIOLET,
                         "自动整理清晰集名",
                         Prefs.EPISODE_CLEAN_MODE,
-                        new String[] {"本地智能净化（毫秒级零流量）", "关闭（显示片源原始集名）", "AI 深度净化（需配置 AI 助手）"},
-                        new String[] {"本地净化", "关闭", "AI 净化"},
-                        new int[] {0, 1, 2},
+                        aiUnlockedForEp
+                                ? new String[] {
+                                    "本地智能净化（毫秒级零流量）", "关闭（显示片源原始集名）", "AI 深度净化（需配置 AI 助手）"
+                                }
+                                : new String[] {"本地智能净化（毫秒级零流量）", "关闭（显示片源原始集名）"},
+                        aiUnlockedForEp
+                                ? new String[] {"本地净化", "关闭", "AI 净化"}
+                                : new String[] {"本地净化", "关闭"},
+                        aiUnlockedForEp ? new int[] {0, 1, 2} : new int[] {0, 1},
                         0,
                         false));
         startRows.add(
@@ -1636,16 +1647,18 @@ final class MobileSettingsScreen {
                                         PlaybackControls.showSubtitleAdjuster(
                                                 a, null, () -> reloadPreservingScroll(shell, sv))),
                         "ms-sub-adjust"));
-        subRows.add(
-                mobileToggleRow(
-                        a,
-                        "ms-sub-bilingual",
-                        MobileIcons.IC_SPARKLE,
-                        TINT_BLUE,
-                        "AI 双语对照同屏字幕",
-                        Prefs.SUBTITLE_BILINGUAL,
-                        true,
-                        null));
+        if (AiBetaGate.isUnlocked(a)) {
+            subRows.add(
+                    mobileToggleRow(
+                            a,
+                            "ms-sub-bilingual",
+                            MobileIcons.IC_SPARKLE,
+                            TINT_BLUE,
+                            "AI 双语对照同屏字幕",
+                            Prefs.SUBTITLE_BILINGUAL,
+                            true,
+                            null));
+        }
         subRows.add(
                 coreIntRow(
                         shell,
@@ -2650,9 +2663,12 @@ final class MobileSettingsScreen {
 
     private static void showAiConfigDialog(final MobileRootShell shell, final ScrollView sv) {
         final MainActivity a = shell.a;
+        if (!AiBetaGate.isUnlocked(a)) {
+            AiBetaGate.showUnlockSheet(a, () -> reloadPreservingScroll(shell, sv));
+            return;
+        }
         final MobileTheme.Palette p = MobileTheme.of(a);
         final SharedPreferences mp = a.mobilePrefs();
-        final SharedPreferences sec = a.secretsPrefs();
 
         LinearLayout form = a.vertical();
         form.setPadding(a.dp(2), a.dp(4), a.dp(2), a.dp(4));
@@ -2679,6 +2695,7 @@ final class MobileSettingsScreen {
         final LinearLayout apiPane = a.vertical();
         final String[] curProv = {mp.getString(Prefs.AI_PROVIDER, "deepseek")};
         final TextView[] provTextHolder = new TextView[1];
+        final EditText[] keyHolder = new EditText[1];
         final EditText[] baseHolder = new EditText[1];
         final EditText[] modelHolder = new EditText[1];
 
@@ -2694,7 +2711,7 @@ final class MobileSettingsScreen {
                             MobileBottomSheet.showPicker(
                                     a,
                                     "选择 AI 大模型服务商",
-                                    "原生支持 OpenAI 兼容、Anthropic Claude 与 Google Gemini 协议",
+                                    "原生支持 OpenAI 兼容、Anthropic Claude 与 Google Gemini 协议；密钥按服务商与来源域严格隔离",
                                     AiAssistantService.PROVIDER_LABELS,
                                     Math.max(0, idx),
                                     sel -> {
@@ -2706,31 +2723,42 @@ final class MobileSettingsScreen {
                                         if (baseHolder[0] != null) {
                                             baseHolder[0].setHint(
                                                     AiAssistantService.defaultBaseUrl(curProv[0]));
+                                            baseHolder[0].setText("");
                                         }
                                         if (modelHolder[0] != null) {
                                             modelHolder[0].setHint(
                                                     AiAssistantService.defaultModel(curProv[0]));
+                                            modelHolder[0].setText("");
+                                        }
+                                        if (keyHolder[0] != null) {
+                                            String effBase =
+                                                    AiAssistantService.defaultBaseUrl(curProv[0]);
+                                            keyHolder[0].setText(
+                                                    AiAuthManager.loadScopedApiKey(
+                                                            a, curProv[0], effBase));
                                         }
                                     });
                         });
         apiPane.addView(provBtn, new LinearLayout.LayoutParams(-1, -2));
         a.gap(apiPane, 12);
 
+        String initCustomBase = mp.getString(Prefs.AI_BASE_URL, "").trim();
+        String initEffBase = AiAssistantService.resolveBaseUrl(curProv[0], initCustomBase);
         final EditText keyInput =
                 formField(
                         a,
                         apiPane,
-                        "API Key（本地 Ollama 可留空；仅存本机私有偏好，不随备份或云同步上传）",
+                        "API Key（按当前服务商与接口域名独立绑定；携带 Key 时强制 HTTPS，无 Key 本地 Ollama 可用 HTTP）",
                         "sk-…",
-                        sec.getString(Prefs.SECRET_AI_API_KEY, ""),
+                        AiAuthManager.loadScopedApiKey(a, curProv[0], initEffBase),
                         true);
         final EditText baseInput =
                 formField(
                         a,
                         apiPane,
-                        "接口地址 Base URL（留空使用官方默认端点，也可填个人中转网关）",
+                        "接口地址 Base URL（留空使用官方默认 HTTPS 端点，切换网关需重新确认对应 Key）",
                         AiAssistantService.defaultBaseUrl(curProv[0]),
-                        mp.getString(Prefs.AI_BASE_URL, ""),
+                        initCustomBase,
                         false);
         final EditText modelInput =
                 formField(
@@ -2740,6 +2768,7 @@ final class MobileSettingsScreen {
                         AiAssistantService.defaultModel(curProv[0]),
                         mp.getString(Prefs.AI_MODEL, ""),
                         false);
+        keyHolder[0] = keyInput;
         baseHolder[0] = baseInput;
         modelHolder[0] = modelInput;
         form.addView(apiPane, new LinearLayout.LayoutParams(-1, -2));
@@ -2748,6 +2777,7 @@ final class MobileSettingsScreen {
         final LinearLayout oauthPane = a.vertical();
         final String[] curOAuthProv = {AiAuthManager.activeOAuthProvider(a)};
         final EditText[] oauthModelHolder = new EditText[1];
+        final EditText[] oauthClientIdHolder = new EditText[1];
         final MobileBottomSheet.SheetHandle[] hRef = new MobileBottomSheet.SheetHandle[1];
 
         final Runnable[] rebuildOAuthCards = new Runnable[1];
@@ -2755,6 +2785,15 @@ final class MobileSettingsScreen {
         oauthPane.addView(oauthCardsBox, new LinearLayout.LayoutParams(-1, -2));
         a.gap(oauthPane, 10);
 
+        final EditText oauthClientIdInput =
+                formField(
+                        a,
+                        oauthPane,
+                        "自备 OAuth Client ID（仅 Kimi Code / 实验性 OpenAI 需要；OpenRouter 官方 PKCE 无需填写）",
+                        "仅在拥有已注册 OAuth Client ID 时填写",
+                        AiAuthManager.oauthClientId(a, curOAuthProv[0]),
+                        false);
+        oauthClientIdHolder[0] = oauthClientIdInput;
         final EditText oauthModelInput =
                 formField(
                         a,
@@ -2811,11 +2850,13 @@ final class MobileSettingsScreen {
                             subStr = bundle.statusSummary();
                             if (bundle.needsReauth) subColor = p.danger;
                         } else if (AiAuthManager.OAUTH_OPENROUTER.equals(provId)) {
-                            subStr = "未登录 · 官方 PKCE 浏览器一键授权，无需手动复制 Key";
+                            subStr = "未登录 · 官方 PKCE 浏览器一键授权，无需 Client ID，推荐首选";
                         } else if (AiAuthManager.OAUTH_KIMI_CODE.equals(provId)) {
-                            subStr = "未登录 · 标准 RFC 8628 设备码登录，自动刷新令牌";
+                            subStr =
+                                    "未登录 · Kimi Code 未公开第三方 Client ID（本应用不冒用 CLI 身份）；推荐改用 Moonshot API Key 或先填入自备 Client ID";
                         } else {
-                            subStr = "未登录 · 官方 OAuth PKCE（需同意实验性风险提示）";
+                            subStr =
+                                    "未登录 · 官方订阅额度推理（Responses API + plan scopes），需填入自备 OAuth Client ID 并确认实验风险";
                         }
                         TextView stTv = a.text(subStr, 12f, subColor);
                         stTv.setLineSpacing(a.dp(2f), 1f);
@@ -2840,6 +2881,21 @@ final class MobileSettingsScreen {
                                     v -> {
                                         curOAuthProv[0] = provId;
                                         AiAuthManager.setActiveOAuthProvider(a, provId);
+                                        if (oauthClientIdHolder[0] != null) {
+                                            String typedCid =
+                                                    oauthClientIdHolder[0]
+                                                            .getText()
+                                                            .toString()
+                                                            .trim();
+                                            if (!typedCid.isEmpty()
+                                                    && !AiAuthManager.OAUTH_OPENROUTER.equals(
+                                                            provId)) {
+                                                AiAuthManager.saveOAuthClientId(
+                                                        a, provId, typedCid);
+                                            }
+                                            oauthClientIdHolder[0].setText(
+                                                    AiAuthManager.oauthClientId(a, provId));
+                                        }
                                         if (oauthModelHolder[0] != null) {
                                             oauthModelHolder[0].setHint(
                                                     AiAuthManager.defaultOAuthModel(provId));
@@ -2921,11 +2977,16 @@ final class MobileSettingsScreen {
                 });
         syncModeUi.run();
 
+        final java.util.concurrent.atomic.AtomicBoolean persistOk =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
         final Runnable persist =
                 () -> {
-                    AiAuthManager.setAuthMode(a, curMode[0]);
+                    persistOk.set(false);
                     if (AiAuthManager.AUTH_MODE_OAUTH.equals(curMode[0])) {
+                        AiAuthManager.setAuthMode(a, AiAuthManager.AUTH_MODE_OAUTH);
                         AiAuthManager.setActiveOAuthProvider(a, curOAuthProv[0]);
+                        AiAuthManager.saveOAuthClientId(
+                                a, curOAuthProv[0], oauthClientIdInput.getText().toString().trim());
                         AiAuthManager.saveOAuthModel(
                                 a, curOAuthProv[0], oauthModelInput.getText().toString().trim());
                         AiAuthManager.OAuthBundle b = AiAuthManager.loadBundle(a, curOAuthProv[0]);
@@ -2934,22 +2995,37 @@ final class MobileSettingsScreen {
                                         Prefs.AI_ENABLED,
                                         b != null && b.hasCredential() && !b.needsReauth)
                                 .apply();
+                        persistOk.set(true);
                     } else {
                         String keyVal = keyInput.getText().toString().trim();
-                        String baseVal = baseInput.getText().toString().trim();
-                        sec.edit().putString(Prefs.SECRET_AI_API_KEY, keyVal).apply();
+                        String rawBase = baseInput.getText().toString().trim();
+                        String safeCustomBase =
+                                rawBase.isEmpty()
+                                        ? ""
+                                        : (Prefs.sanitizeHttpUrl(rawBase) == null ? "" : rawBase);
+                        String effBase =
+                                AiAssistantService.resolveBaseUrl(curProv[0], safeCustomBase);
+                        if (!rawBase.isEmpty() && safeCustomBase.isEmpty()) {
+                            a.toast("接口地址格式无效，请输入规范的 HTTP/HTTPS URL");
+                            return;
+                        }
+                        if (!keyVal.isEmpty() && !AiAuthManager.isHttpsUrl(effBase)) {
+                            a.toast("携带 API Key 时必须使用 HTTPS 安全地址（无 Key 本地 Ollama 可用 HTTP）");
+                            return;
+                        }
+                        AiAuthManager.setAuthMode(a, AiAuthManager.AUTH_MODE_API_KEY);
+                        AiAuthManager.saveScopedApiKey(a, curProv[0], effBase, keyVal);
                         mp.edit()
                                 .putBoolean(
                                         Prefs.AI_ENABLED,
-                                        !keyVal.isEmpty() || "ollama".equals(curProv[0]))
+                                        !keyVal.isEmpty()
+                                                || ("ollama".equals(curProv[0])
+                                                        && !effBase.isEmpty()))
                                 .putString(Prefs.AI_PROVIDER, curProv[0])
-                                .putString(
-                                        Prefs.AI_BASE_URL,
-                                        baseVal.isEmpty() || Prefs.sanitizeHttpUrl(baseVal) == null
-                                                ? ""
-                                                : baseVal)
+                                .putString(Prefs.AI_BASE_URL, safeCustomBase)
                                 .putString(Prefs.AI_MODEL, modelInput.getText().toString().trim())
                                 .apply();
+                        persistOk.set(true);
                     }
                 };
 
@@ -2963,6 +3039,7 @@ final class MobileSettingsScreen {
                         false,
                         () -> {
                             persist.run();
+                            if (!persistOk.get()) return;
                             a.toast("正在测试 AI 模型连通性…");
                             AiAssistantService.testConnectionAsync(a, a::toast);
                         });
@@ -2974,6 +3051,7 @@ final class MobileSettingsScreen {
                         true,
                         () -> {
                             persist.run();
+                            if (!persistOk.get()) return;
                             if (hRef[0] != null) hRef[0].dismiss();
                             a.toast("AI 认证中心配置已保存");
                             reloadPreservingScroll(shell, sv);

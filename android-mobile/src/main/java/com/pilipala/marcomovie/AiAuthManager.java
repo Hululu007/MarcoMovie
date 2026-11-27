@@ -36,30 +36,13 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.regex.Pattern;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
- * Dual-mode AI Authentication &amp; Multi-Protocol Transport Manager inspired by OpenMinis
- * Android auth architecture (strictly clean-room: no CLI spoofing or anti-bot bypass headers).
- *
- * <p>Supports two authentication modes:
- * <ol>
- *   <li><b>API Key (BYOK)</b>: DeepSeek, Qwen (Bailian), SiliconFlow, Moonshot Kimi, Zhipu GLM,
- *       OpenAI, Anthropic Claude (native {@code /v1/messages}), Google Gemini (native {@code
- *       generateContent}), OpenRouter, Ollama (local LAN), and Custom OpenAI-compatible gateway.
- *   <li><b>Subscription / OAuth Sign-In</b>:
- *       <ul>
- *         <li><b>OpenRouter Official OAuth PKCE</b>: loopback {@code 127.0.0.1:3000..3002/callback}
- *             exchanged for a permanent API key.
- *         <li><b>Kimi Code Subscription (RFC 8628 Device Flow)</b>: pure OAuth Device Grant against
- *             {@code auth.kimi.com} + {@code api.kimi.com/coding/v1}, with per-provider refresh
- *             mutex and compare-before-delete protection.
- *         <li><b>OpenAI ChatGPT OAuth (Experimental)</b>: strictly gated behind beta passcode flag
- *             {@link AiBetaGate#FLAG_EXPERIMENTAL_OAUTH} AND explicit user risk consent.
- *       </ul>
- * </ol>
+ * Dual-mode AI Authentication &amp; Multi-Protocol Transport Manager (strictly clean-room: zero
+ * third-party CLI/IDE identity spoofing, strict provider+origin BYOK key scoping, mandatory HTTPS
+ * for credentialed endpoints, atomic session-versioned OAuth commits, and full log redaction).
  */
 final class AiAuthManager {
     static final String PREFS_FILE = "marco_ai_oauth";
@@ -67,12 +50,17 @@ final class AiAuthManager {
     static final String KEY_OAUTH_PROVIDER = "ai_oauth_provider";
     static final String KEY_OAUTH_MODEL_PREFIX = "ai_oauth_model_";
     static final String KEY_OAUTH_BUNDLE_PREFIX = "ai_oauth_bundle_";
+    static final String KEY_OAUTH_SESSION_VER_PREFIX = "ai_oauth_ver_";
+    static final String KEY_OAUTH_CLIENT_ID_PREFIX = "ai_oauth_client_id_";
     static final String KEY_OPENAI_EXPERIMENTAL_CONSENT = "ai_openai_oauth_consent";
+
+    static final String SCOPED_API_KEY_PREFIX = "ai_api_key_v2:";
 
     static final String AUTH_MODE_API_KEY = "api_key";
     static final String AUTH_MODE_OAUTH = "oauth";
 
     static final String WIRE_OPENAI_COMPAT = "openai_compat";
+    static final String WIRE_OPENAI_RESPONSES = "openai_responses";
     static final String WIRE_ANTHROPIC = "anthropic";
     static final String WIRE_GEMINI = "gemini";
 
@@ -85,7 +73,9 @@ final class AiAuthManager {
         OAUTH_OPENROUTER, OAUTH_KIMI_CODE, OAUTH_OPENAI_EXPERIMENTAL
     };
     static final String[] OAUTH_PROVIDER_LABELS = {
-        "OpenRouter 官方账号登录 (PKCE)", "Kimi Code 订阅账号登录 (设备码)", "OpenAI ChatGPT 账号登录 (实验性)"
+        "OpenRouter 官方账号登录 (PKCE)",
+        "Kimi Code 设备码登录 (需自备 Client ID)",
+        "OpenAI 订阅账号登录 (实验性 · 需自备 Client ID)"
     };
 
     // Official OAuth endpoints (all registered in scripts/check_public_content.py ALLOWED_HOSTS)
@@ -96,28 +86,30 @@ final class AiAuthManager {
     static final String KIMI_DEVICE_AUTH_URL =
             "https://auth.kimi.com/api/oauth/device_authorization";
     static final String KIMI_TOKEN_URL = "https://auth.kimi.com/api/oauth/token";
-    static final String KIMI_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
     static final String KIMI_CODE_API_BASE = "https://api.kimi.com/coding/v1";
 
     static final String OPENAI_AUTH_URL = "https://auth.openai.com/oauth/authorize";
     static final String OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token";
-    static final String OPENAI_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
     static final String OPENAI_API_BASE = "https://api.openai.com/v1";
+
+    /**
+     * Official OpenAI delegated subscription/plan-usage OAuth scopes required for direct Responses
+     * API inference against a user's ChatGPT plan quota.
+     */
+    static final String OPENAI_PLAN_USAGE_SCOPES =
+            "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
 
     private static final long REFRESH_BUFFER_MS = 5L * 60_000L;
     private static final Object FOREGROUND_LOCK = new Object();
     private static volatile boolean activityForeground = true;
+
+    /** Serializes network token refresh per provider so concurrent calls do not stampede. */
     private static final ConcurrentHashMap<String, Object> REFRESH_LOCKS =
             new ConcurrentHashMap<>();
 
-    private static final Pattern SECRET_JSON_RE =
-            Pattern.compile(
-                    "(?i)(\"(?:access_token|refresh_token|id_token|api_key|key|device_code|user_code|code_verifier)\"\\s*:\\s*\")([^\"]*)(\")");
-    private static final Pattern SECRET_BEARER_RE =
-            Pattern.compile("(?i)(Bearer\\s+)[A-Za-z0-9._~+/=-]+");
-    private static final Pattern SECRET_FORM_RE =
-            Pattern.compile(
-                    "(?i)((?:access_token|refresh_token|code_verifier|device_code|client_secret)=)([^&\\s]+)");
+    /** Fast non-blocking state lock for atomic session version checks and Store commits. */
+    private static final ConcurrentHashMap<String, Object> SESSION_STATE_LOCKS =
+            new ConcurrentHashMap<>();
 
     private AiAuthManager() {}
 
@@ -134,11 +126,28 @@ final class AiAuthManager {
         void remove(String key);
     }
 
+    /** Gate re-check predicate invoked before starting OAuth and right before committing tokens. */
+    interface GateCheck {
+        boolean isAllowed();
+    }
+
+    /** Pluggable HTTP transport for deterministic pure-JVM testing with strict HTTPS checking. */
+    interface HttpTransport {
+        HttpResult postRaw(String url, String contentType, String body, Map<String, String> headers)
+                throws IOException;
+    }
+
+    static final HttpTransport DEFAULT_TRANSPORT = AiAuthManager::postRawDirect;
+
     static final class SharedPrefsStore implements Store {
         private final SharedPreferences prefs;
 
         SharedPrefsStore(Context ctx) {
             this.prefs = ctx.getApplicationContext().getSharedPreferences(PREFS_FILE, 0);
+        }
+
+        SharedPrefsStore(SharedPreferences prefs) {
+            this.prefs = prefs;
         }
 
         @Override
@@ -287,10 +296,124 @@ final class AiAuthManager {
             this.wireProtocol = wireProtocol;
             this.baseUrl = baseUrl;
             this.model = model;
-            this.credential = credential;
+            this.credential = credential == null ? "" : credential;
             this.oauthProviderId = oauthProviderId == null ? "" : oauthProviderId;
             this.chatGptAccountId = chatGptAccountId == null ? "" : chatGptAccountId;
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // BYOK Credential Origin-Binding & HTTPS Security Gate (P1-2)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Extracts canonical origin {@code scheme://host[:non-default-port]} for credential binding.
+     * Returns empty string for malformed or non-HTTP(S) URLs.
+     */
+    static String canonicalOrigin(String urlStr) {
+        if (urlStr == null || urlStr.trim().isEmpty()) return "";
+        try {
+            URI u = URI.create(urlStr.trim());
+            String scheme = u.getScheme() == null ? "" : u.getScheme().toLowerCase(Locale.ROOT);
+            if (!"http".equals(scheme) && !"https".equals(scheme)) return "";
+            String host = u.getHost();
+            if (host == null || host.trim().isEmpty()) return "";
+            host = host.trim().toLowerCase(Locale.ROOT);
+            int port = u.getPort();
+            boolean defaultPort =
+                    port <= 0
+                            || ("http".equals(scheme) && port == 80)
+                            || ("https".equals(scheme) && port == 443);
+            return defaultPort ? (scheme + "://" + host) : (scheme + "://" + host + ":" + port);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    static boolean isHttpsUrl(String urlStr) {
+        String origin = canonicalOrigin(urlStr);
+        return origin.startsWith("https://");
+    }
+
+    /**
+     * Enforces HTTPS whenever carrying any API key or OAuth bearer credential. Plaintext HTTP is
+     * strictly rejected for credentialed requests and allowed ONLY for keyless local endpoints
+     * (such as keyless local Ollama).
+     */
+    static void validateTransportSecurity(String endpointUrl, String credential)
+            throws IOException {
+        String origin = canonicalOrigin(endpointUrl);
+        if (origin.isEmpty()) {
+            throw new IOException("无效的 AI 接口地址，仅支持 HTTP/HTTPS 规范 URL");
+        }
+        boolean hasCred = credential != null && !credential.trim().isEmpty();
+        if (hasCred && !origin.startsWith("https://")) {
+            throw new IOException("携带 API Key 或 OAuth 凭据时必须使用 HTTPS 安全地址（已拦截明文 HTTP 请求）");
+        }
+    }
+
+    static String scopedApiKeyPrefName(String provider, String effectiveBaseUrl) {
+        String p = provider == null ? "" : provider.trim().toLowerCase(Locale.ROOT);
+        String origin = canonicalOrigin(effectiveBaseUrl);
+        if (p.isEmpty() || origin.isEmpty()) return "";
+        return SCOPED_API_KEY_PREFIX + p + ":" + origin;
+    }
+
+    static void saveScopedApiKey(
+            Store secStore, String provider, String effectiveBaseUrl, String apiKey) {
+        if (secStore == null) return;
+        String prefKey = scopedApiKeyPrefName(provider, effectiveBaseUrl);
+        if (prefKey.isEmpty()) return;
+        String trimmed = apiKey == null ? "" : apiKey.trim();
+        if (trimmed.isEmpty()) {
+            secStore.remove(prefKey);
+        } else {
+            secStore.putString(prefKey, trimmed);
+        }
+        // Always remove legacy global unbound key so switching providers or restoring another
+        // Base URL can never leak an old key to a different host or provider.
+        secStore.remove(Prefs.SECRET_AI_API_KEY);
+    }
+
+    static String loadScopedApiKey(Store secStore, String provider, String effectiveBaseUrl) {
+        if (secStore == null) return "";
+        String prefKey = scopedApiKeyPrefName(provider, effectiveBaseUrl);
+        if (prefKey.isEmpty()) return "";
+        return secStore.getString(prefKey, "").trim();
+    }
+
+    static void saveScopedApiKey(
+            MainActivity a, String provider, String effectiveBaseUrl, String apiKey) {
+        if (a == null) return;
+        saveScopedApiKey(
+                new SharedPrefsStore(a.secretsPrefs()), provider, effectiveBaseUrl, apiKey);
+    }
+
+    static String loadScopedApiKey(MainActivity a, String provider, String effectiveBaseUrl) {
+        if (a == null) return "";
+        return loadScopedApiKey(new SharedPrefsStore(a.secretsPrefs()), provider, effectiveBaseUrl);
+    }
+
+    /** Pure-JVM BYOK request resolver enforcing provider+origin key isolation and HTTPS check. */
+    static ResolvedRequest resolveByokRequest(
+            Store secStore, String provider, String customBaseUrl, String model)
+            throws IOException {
+        String prov =
+                provider == null || provider.trim().isEmpty()
+                        ? "deepseek"
+                        : provider.trim().toLowerCase(Locale.ROOT);
+        String base = AiAssistantService.resolveBaseUrl(prov, customBaseUrl);
+        if (base.isEmpty()) throw new IOException("未配置 AI 接口地址");
+        String key = loadScopedApiKey(secStore, prov, base);
+        if (!"ollama".equals(prov) && key.isEmpty()) {
+            throw new IOException("请先为当前服务商与接口地址填写 API Key");
+        }
+        validateTransportSecurity(base, key);
+        String effModel =
+                model == null || model.trim().isEmpty()
+                        ? AiAssistantService.defaultModel(prov)
+                        : model.trim();
+        return new ResolvedRequest(wireProtocolForApiProvider(prov), base, effModel, key, "", "");
     }
 
     // -------------------------------------------------------------------------
@@ -373,6 +496,28 @@ final class AiAuthManager {
         store(ctx).putString(KEY_OAUTH_PROVIDER, providerId);
     }
 
+    static String oauthClientId(Store store, String providerId) {
+        if (store == null || providerId == null) return "";
+        return store.getString(KEY_OAUTH_CLIENT_ID_PREFIX + providerId, "").trim();
+    }
+
+    static String oauthClientId(Context ctx, String providerId) {
+        if (ctx == null) return "";
+        return oauthClientId(store(ctx), providerId);
+    }
+
+    static void saveOAuthClientId(Store store, String providerId, String clientId) {
+        if (store == null || providerId == null) return;
+        String clean = clientId == null ? "" : clientId.trim();
+        if (clean.isEmpty()) store.remove(KEY_OAUTH_CLIENT_ID_PREFIX + providerId);
+        else store.putString(KEY_OAUTH_CLIENT_ID_PREFIX + providerId, clean);
+    }
+
+    static void saveOAuthClientId(Context ctx, String providerId, String clientId) {
+        if (ctx == null) return;
+        saveOAuthClientId(store(ctx), providerId, clientId);
+    }
+
     static String defaultOAuthModel(String providerId) {
         if (OAUTH_KIMI_CODE.equals(providerId)) return "kimi-for-coding";
         if (OAUTH_OPENAI_EXPERIMENTAL.equals(providerId)) return "gpt-4o-mini";
@@ -383,6 +528,11 @@ final class AiAuthManager {
         if (OAUTH_KIMI_CODE.equals(providerId)) return KIMI_CODE_API_BASE;
         if (OAUTH_OPENAI_EXPERIMENTAL.equals(providerId)) return OPENAI_API_BASE;
         return OPENROUTER_API_BASE;
+    }
+
+    static String oauthWireProtocol(String providerId) {
+        if (OAUTH_OPENAI_EXPERIMENTAL.equals(providerId)) return WIRE_OPENAI_RESPONSES;
+        return WIRE_OPENAI_COMPAT;
     }
 
     static String oauthProviderLabel(String providerId) {
@@ -416,7 +566,10 @@ final class AiAuthManager {
 
     static void saveBundle(Store store, OAuthBundle bundle) {
         if (store == null || bundle == null || bundle.providerId == null) return;
-        store.putString(KEY_OAUTH_BUNDLE_PREFIX + bundle.providerId, bundle.toJson().toString());
+        synchronized (sessionStateLockFor(bundle.providerId)) {
+            store.putString(
+                    KEY_OAUTH_BUNDLE_PREFIX + bundle.providerId, bundle.toJson().toString());
+        }
     }
 
     static void saveBundle(Context ctx, OAuthBundle bundle) {
@@ -424,9 +577,104 @@ final class AiAuthManager {
         saveBundle(store(ctx), bundle);
     }
 
+    // -------------------------------------------------------------------------
+    // Atomic OAuth Session Versioning & Passcode Re-Check (P1-3)
+    // -------------------------------------------------------------------------
+
+    static Object refreshLockFor(String providerId) {
+        String key = providerId == null ? "" : providerId;
+        Object existing = REFRESH_LOCKS.get(key);
+        if (existing != null) return existing;
+        Object created = new Object();
+        Object raced = REFRESH_LOCKS.putIfAbsent(key, created);
+        return raced != null ? raced : created;
+    }
+
+    private static Object sessionStateLockFor(String providerId) {
+        String key = providerId == null ? "" : providerId;
+        Object existing = SESSION_STATE_LOCKS.get(key);
+        if (existing != null) return existing;
+        Object created = new Object();
+        Object raced = SESSION_STATE_LOCKS.putIfAbsent(key, created);
+        return raced != null ? raced : created;
+    }
+
+    static long getSessionVersion(Store store, String providerId) {
+        if (store == null || providerId == null) return 0L;
+        synchronized (sessionStateLockFor(providerId)) {
+            return parseLongSafe(store.getString(KEY_OAUTH_SESSION_VER_PREFIX + providerId, "0"));
+        }
+    }
+
+    private static long parseLongSafe(String raw) {
+        if (raw == null || raw.trim().isEmpty()) return 0L;
+        try {
+            return Long.parseLong(raw.trim());
+        } catch (Exception e) {
+            return 0L;
+        }
+    }
+
+    /**
+     * Atomically advances the per-provider session epoch when initiating a new sign-in or account
+     * switch, invalidating any earlier in-flight sign-in or refresh response.
+     */
+    static long beginOAuthSession(Store store, String providerId) {
+        if (store == null || providerId == null) return 0L;
+        synchronized (sessionStateLockFor(providerId)) {
+            long next =
+                    parseLongSafe(store.getString(KEY_OAUTH_SESSION_VER_PREFIX + providerId, "0"))
+                            + 1L;
+            store.putString(KEY_OAUTH_SESSION_VER_PREFIX + providerId, Long.toString(next));
+            return next;
+        }
+    }
+
+    /**
+     * Atomically removes the stored bundle AND advances the session epoch so any in-flight late
+     * refresh or sign-in callback cannot resurrect the logged-out session.
+     */
+    static long signOutOAuth(Store store, String providerId) {
+        if (store == null || providerId == null) return 0L;
+        synchronized (sessionStateLockFor(providerId)) {
+            long next =
+                    parseLongSafe(store.getString(KEY_OAUTH_SESSION_VER_PREFIX + providerId, "0"))
+                            + 1L;
+            store.putString(KEY_OAUTH_SESSION_VER_PREFIX + providerId, Long.toString(next));
+            store.remove(KEY_OAUTH_BUNDLE_PREFIX + providerId);
+            return next;
+        }
+    }
+
     static void signOutOAuth(Context ctx, String providerId) {
         if (ctx == null || providerId == null) return;
-        store(ctx).remove(KEY_OAUTH_BUNDLE_PREFIX + providerId);
+        signOutOAuth(store(ctx), providerId);
+    }
+
+    /**
+     * Atomically commits a completed OAuth sign-in bundle ONLY if the beta passcode gate is still
+     * valid AND the provider's session epoch still matches {@code expectedVersion}.
+     */
+    static boolean commitOAuthSignInIfCurrent(
+            Store store,
+            String providerId,
+            long expectedVersion,
+            OAuthBundle bundle,
+            GateCheck gateCheck) {
+        if (store == null || providerId == null || bundle == null) return false;
+        synchronized (sessionStateLockFor(providerId)) {
+            if (gateCheck != null && !gateCheck.isAllowed()) {
+                return false;
+            }
+            long curVer =
+                    parseLongSafe(store.getString(KEY_OAUTH_SESSION_VER_PREFIX + providerId, "0"));
+            if (curVer != expectedVersion) {
+                return false;
+            }
+            bundle.providerId = providerId;
+            store.putString(KEY_OAUTH_BUNDLE_PREFIX + providerId, bundle.toJson().toString());
+            return true;
+        }
     }
 
     static boolean hasOpenAiExperimentalConsent(Context ctx) {
@@ -445,7 +693,7 @@ final class AiAuthManager {
     }
 
     static boolean isActiveCredentialReady(MainActivity a) {
-        if (a == null) return false;
+        if (a == null || !AiBetaGate.isUnlocked(a)) return false;
         String mode = authMode(a);
         if (AUTH_MODE_OAUTH.equals(mode)) {
             String prov = activeOAuthProvider(a);
@@ -460,9 +708,11 @@ final class AiAuthManager {
         String provider = a.mobilePrefs().getString(Prefs.AI_PROVIDER, "deepseek");
         String base = AiAssistantService.resolveBaseUrl(a);
         if (base.isEmpty()) return false;
-        if ("ollama".equals(provider)) return true;
-        String key = a.secretsPrefs().getString(Prefs.SECRET_AI_API_KEY, "").trim();
-        return !key.isEmpty();
+        String key = loadScopedApiKey(a, provider, base);
+        if ("ollama".equals(provider)) {
+            return key.isEmpty() ? !canonicalOrigin(base).isEmpty() : isHttpsUrl(base);
+        }
+        return !key.isEmpty() && isHttpsUrl(base);
     }
 
     static String activeSummaryLabel(MainActivity a) {
@@ -482,19 +732,6 @@ final class AiAuthManager {
                 a.mobilePrefs().getString(Prefs.AI_PROVIDER, "deepseek"));
     }
 
-    // -------------------------------------------------------------------------
-    // OpenMinis Compare-Before-Delete & Token Refresh Mutex
-    // -------------------------------------------------------------------------
-
-    static Object refreshLockFor(String providerId) {
-        String key = providerId == null ? "" : providerId;
-        Object existing = REFRESH_LOCKS.get(key);
-        if (existing != null) return existing;
-        Object created = new Object();
-        Object raced = REFRESH_LOCKS.putIfAbsent(key, created);
-        return raced != null ? raced : created;
-    }
-
     /**
      * OpenMinis Compare-Before-Delete rule: only mark {@code needsReauth = true} if the persisted
      * refresh token has not already been rotated by a concurrent winning refresh thread.
@@ -509,7 +746,26 @@ final class AiAuthManager {
     static OAuthBundle ensureFreshOAuthBundle(
             Store store, String providerId, String tokenEndpoint, String clientId, long nowMs)
             throws IOException {
-        OAuthBundle cur = loadBundle(store, providerId);
+        return ensureFreshOAuthBundle(
+                store, providerId, tokenEndpoint, clientId, nowMs, () -> true, DEFAULT_TRANSPORT);
+    }
+
+    static OAuthBundle ensureFreshOAuthBundle(
+            Store store,
+            String providerId,
+            String tokenEndpoint,
+            String clientId,
+            long nowMs,
+            GateCheck gateCheck,
+            HttpTransport transport)
+            throws IOException {
+        if (gateCheck != null && !gateCheck.isAllowed()) {
+            throw new IOException("内测口令已失效，已阻止刷新订阅令牌");
+        }
+        OAuthBundle cur;
+        synchronized (sessionStateLockFor(providerId)) {
+            cur = loadBundle(store, providerId);
+        }
         if (cur == null || !cur.hasCredential()) {
             throw new IOException("请先登录 " + oauthProviderLabel(providerId));
         }
@@ -520,28 +776,67 @@ final class AiAuthManager {
             return cur;
         }
         synchronized (refreshLockFor(providerId)) {
-            OAuthBundle latest = loadBundle(store, providerId);
-            if (latest == null || !latest.hasCredential()) {
-                throw new IOException("登录状态已清除，请重新登录");
-            }
-            if (!latest.isExpiringSoon(nowMs) && !latest.needsReauth) {
-                return latest;
-            }
-            String attemptedRefresh = latest.refreshToken;
-            try {
-                OAuthBundle refreshed =
-                        refreshOAuthToken(providerId, tokenEndpoint, clientId, latest, nowMs);
-                saveBundle(store, refreshed);
-                return refreshed;
-            } catch (OAuthTerminalError e) {
-                OAuthBundle reread = loadBundle(store, providerId);
-                String storedRefresh = reread == null ? "" : reread.refreshToken;
-                if (shouldMarkReauthAfterRefreshFailure(attemptedRefresh, storedRefresh)
-                        && reread != null) {
-                    reread.needsReauth = true;
-                    saveBundle(store, reread);
+            final long startVersion;
+            final OAuthBundle snapshot;
+            synchronized (sessionStateLockFor(providerId)) {
+                if (gateCheck != null && !gateCheck.isAllowed()) {
+                    throw new IOException("内测口令已失效，已阻止刷新订阅令牌");
                 }
-                throw new IOException("订阅授权已过期，请重新登录（" + e.getMessage() + "）", e);
+                startVersion =
+                        parseLongSafe(
+                                store.getString(KEY_OAUTH_SESSION_VER_PREFIX + providerId, "0"));
+                snapshot = loadBundle(store, providerId);
+                if (snapshot == null || !snapshot.hasCredential()) {
+                    throw new IOException("登录状态已清除，请重新登录");
+                }
+                if (snapshot.needsReauth) {
+                    throw new IOException("账号授权已失效，请在 AI 认证中心重新登录");
+                }
+                if (!snapshot.isExpiringSoon(nowMs)) {
+                    return snapshot;
+                }
+            }
+            String attemptedRefresh = snapshot.refreshToken;
+            try {
+                // Network refresh executes outside sessionStateLock so logout / account-switch
+                // never blocks and can immediately bump sessionVersion.
+                OAuthBundle refreshed =
+                        refreshOAuthToken(
+                                providerId, tokenEndpoint, clientId, snapshot, nowMs, transport);
+                synchronized (sessionStateLockFor(providerId)) {
+                    if (gateCheck != null && !gateCheck.isAllowed()) {
+                        throw new IOException("内测口令已失效，已丢弃过期刷新结果");
+                    }
+                    long curVer =
+                            parseLongSafe(
+                                    store.getString(
+                                            KEY_OAUTH_SESSION_VER_PREFIX + providerId, "0"));
+                    OAuthBundle current = loadBundle(store, providerId);
+                    if (curVer != startVersion || current == null || !current.hasCredential()) {
+                        throw new IOException("账号会话已切换或已退出，已忽略过期的刷新响应");
+                    }
+                    store.putString(
+                            KEY_OAUTH_BUNDLE_PREFIX + providerId, refreshed.toJson().toString());
+                    return refreshed;
+                }
+            } catch (OAuthTerminalError e) {
+                synchronized (sessionStateLockFor(providerId)) {
+                    long curVer =
+                            parseLongSafe(
+                                    store.getString(
+                                            KEY_OAUTH_SESSION_VER_PREFIX + providerId, "0"));
+                    OAuthBundle reread = loadBundle(store, providerId);
+                    if (curVer == startVersion && reread != null && reread.hasCredential()) {
+                        String storedRefresh = reread.refreshToken;
+                        if (shouldMarkReauthAfterRefreshFailure(attemptedRefresh, storedRefresh)) {
+                            reread.needsReauth = true;
+                            store.putString(
+                                    KEY_OAUTH_BUNDLE_PREFIX + providerId,
+                                    reread.toJson().toString());
+                        }
+                    }
+                }
+                throw new IOException("订阅授权已过期，请重新登录（" + sanitizeLogBody(e.getMessage()) + "）", e);
             }
         }
     }
@@ -559,6 +854,20 @@ final class AiAuthManager {
             OAuthBundle existing,
             long nowMs)
             throws IOException {
+        return refreshOAuthToken(
+                providerId, tokenEndpoint, clientId, existing, nowMs, DEFAULT_TRANSPORT);
+    }
+
+    static OAuthBundle refreshOAuthToken(
+            String providerId,
+            String tokenEndpoint,
+            String clientId,
+            OAuthBundle existing,
+            long nowMs,
+            HttpTransport transport)
+            throws IOException {
+        validateTransportSecurity(tokenEndpoint, existing.refreshToken);
+        HttpTransport tx = transport == null ? DEFAULT_TRANSPORT : transport;
         HttpResult res;
         if (OAUTH_OPENAI_EXPERIMENTAL.equals(providerId)) {
             JSONObject req = new JSONObject();
@@ -566,16 +875,17 @@ final class AiAuthManager {
                 req.put("grant_type", "refresh_token");
                 req.put("client_id", clientId);
                 req.put("refresh_token", existing.refreshToken);
+                req.put("resource", OPENAI_API_BASE);
             } catch (Exception e) {
                 throw new IOException(e);
             }
-            res = postJson(tokenEndpoint, req.toString(), null);
+            res = postJson(tokenEndpoint, req.toString(), null, tx);
         } else {
             Map<String, String> form = new HashMap<>();
             form.put("grant_type", "refresh_token");
             form.put("client_id", clientId);
             form.put("refresh_token", existing.refreshToken);
-            res = postForm(tokenEndpoint, form, null);
+            res = postForm(tokenEndpoint, form, null, tx);
         }
         if (res.code == 400 || res.code == 401 || res.code == 403) {
             String errCode = extractOAuthErrorCode(res.body);
@@ -586,7 +896,11 @@ final class AiAuthManager {
             }
         }
         if (res.code < 200 || res.code >= 300) {
-            throw new IOException("刷新令牌失败 HTTP " + res.code);
+            throw new IOException(
+                    "刷新令牌失败 HTTP "
+                            + res.code
+                            + ": "
+                            + conciseError(res.body, existing.refreshToken));
         }
         try {
             JSONObject obj = new JSONObject(res.body);
@@ -610,7 +924,7 @@ final class AiAuthManager {
         } catch (OAuthTerminalError e) {
             throw e;
         } catch (Exception e) {
-            throw new IOException("解析刷新响应失败：" + e.getMessage(), e);
+            throw new IOException("解析刷新响应失败：" + sanitizeLogBody(e.getMessage()), e);
         }
     }
 
@@ -645,15 +959,21 @@ final class AiAuthManager {
                 + "&code_challenge_method=S256";
     }
 
-    static String buildOpenAiAuthUrl(String redirectUri, PkcePair pkce) {
+    /**
+     * Builds the official OpenAI "Sign in with ChatGPT" OAuth PKCE URL with delegated plan-usage
+     * scopes and API resource indicator required for Responses API inference.
+     */
+    static String buildOpenAiAuthUrl(String clientId, String redirectUri, PkcePair pkce) {
         return OPENAI_AUTH_URL
                 + "?response_type=code"
                 + "&client_id="
-                + urlEncode(OPENAI_CLIENT_ID)
+                + urlEncode(clientId)
                 + "&redirect_uri="
                 + urlEncode(redirectUri)
                 + "&scope="
-                + urlEncode("openid profile email offline_access")
+                + urlEncode(OPENAI_PLAN_USAGE_SCOPES)
+                + "&resource="
+                + urlEncode(OPENAI_API_BASE)
                 + "&code_challenge="
                 + urlEncode(pkce.challenge)
                 + "&code_challenge_method=S256"
@@ -663,6 +983,13 @@ final class AiAuthManager {
 
     static OAuthBundle exchangeOpenRouterCode(String exchangeUrl, String code, String codeVerifier)
             throws IOException {
+        return exchangeOpenRouterCode(exchangeUrl, code, codeVerifier, DEFAULT_TRANSPORT);
+    }
+
+    static OAuthBundle exchangeOpenRouterCode(
+            String exchangeUrl, String code, String codeVerifier, HttpTransport transport)
+            throws IOException {
+        validateTransportSecurity(exchangeUrl, codeVerifier);
         JSONObject req = new JSONObject();
         try {
             req.put("code", code);
@@ -671,9 +998,18 @@ final class AiAuthManager {
         } catch (Exception e) {
             throw new IOException(e);
         }
-        HttpResult res = postJson(exchangeUrl, req.toString(), null);
+        HttpResult res =
+                postJson(
+                        exchangeUrl,
+                        req.toString(),
+                        null,
+                        transport == null ? DEFAULT_TRANSPORT : transport);
         if (res.code < 200 || res.code >= 300) {
-            throw new IOException("OpenRouter 换取密钥失败 HTTP " + res.code);
+            throw new IOException(
+                    "OpenRouter 换取密钥失败 HTTP "
+                            + res.code
+                            + ": "
+                            + conciseError(res.body, codeVerifier));
         }
         try {
             JSONObject obj = new JSONObject(res.body);
@@ -694,21 +1030,50 @@ final class AiAuthManager {
     }
 
     static OAuthBundle exchangeOpenAiCode(
-            String tokenUrl, String code, String codeVerifier, String redirectUri, long nowMs)
+            String tokenUrl,
+            String clientId,
+            String code,
+            String codeVerifier,
+            String redirectUri,
+            long nowMs)
             throws IOException {
+        return exchangeOpenAiCode(
+                tokenUrl, clientId, code, codeVerifier, redirectUri, nowMs, DEFAULT_TRANSPORT);
+    }
+
+    static OAuthBundle exchangeOpenAiCode(
+            String tokenUrl,
+            String clientId,
+            String code,
+            String codeVerifier,
+            String redirectUri,
+            long nowMs,
+            HttpTransport transport)
+            throws IOException {
+        validateTransportSecurity(tokenUrl, codeVerifier);
+        if (clientId == null || clientId.trim().isEmpty()) {
+            throw new IOException("请先填写已注册的 OpenAI OAuth Client ID");
+        }
         JSONObject req = new JSONObject();
         try {
             req.put("grant_type", "authorization_code");
-            req.put("client_id", OPENAI_CLIENT_ID);
+            req.put("client_id", clientId.trim());
             req.put("code", code);
             req.put("code_verifier", codeVerifier);
             req.put("redirect_uri", redirectUri);
+            req.put("resource", OPENAI_API_BASE);
         } catch (Exception e) {
             throw new IOException(e);
         }
-        HttpResult res = postJson(tokenUrl, req.toString(), null);
+        HttpResult res =
+                postJson(
+                        tokenUrl,
+                        req.toString(),
+                        null,
+                        transport == null ? DEFAULT_TRANSPORT : transport);
         if (res.code < 200 || res.code >= 300) {
-            throw new IOException("OpenAI 令牌交换失败 HTTP " + res.code);
+            throw new IOException(
+                    "OpenAI 令牌交换失败 HTTP " + res.code + ": " + conciseError(res.body, codeVerifier));
         }
         try {
             JSONObject obj = new JSONObject(res.body);
@@ -844,17 +1209,31 @@ final class AiAuthManager {
     }
 
     // -------------------------------------------------------------------------
-    // RFC 8628 Device Flow (Kimi Code Subscription)
+    // RFC 8628 Device Flow (Requires User-Supplied Authorized Client ID)
     // -------------------------------------------------------------------------
 
     static DeviceCodeSession requestDeviceCode(String deviceAuthUrl, String clientId)
             throws IOException {
+        return requestDeviceCode(deviceAuthUrl, clientId, DEFAULT_TRANSPORT);
+    }
+
+    static DeviceCodeSession requestDeviceCode(
+            String deviceAuthUrl, String clientId, HttpTransport transport) throws IOException {
+        validateTransportSecurity(deviceAuthUrl, clientId);
+        if (clientId == null || clientId.trim().isEmpty()) {
+            throw new IOException("请先填写已授权的 OAuth Client ID（本应用不冒用第三方 CLI 身份）");
+        }
         Map<String, String> form = new HashMap<>();
-        form.put("client_id", clientId);
-        // Deliberately omit 'scope' for Kimi Code RFC 8628 compatibility (OpenMinis verified)
-        HttpResult res = postForm(deviceAuthUrl, form, null);
+        form.put("client_id", clientId.trim());
+        HttpResult res =
+                postForm(
+                        deviceAuthUrl,
+                        form,
+                        null,
+                        transport == null ? DEFAULT_TRANSPORT : transport);
         if (res.code < 200 || res.code >= 300) {
-            throw new IOException("获取设备授权码失败 HTTP " + res.code);
+            throw new IOException(
+                    "获取设备授权码失败 HTTP " + res.code + ": " + conciseError(res.body, clientId));
         }
         try {
             JSONObject o = new JSONObject(res.body);
@@ -895,11 +1274,25 @@ final class AiAuthManager {
     static DevicePollOutcome pollDeviceTokenOnce(
             String providerId, String tokenUrl, String clientId, String deviceCode, long nowMs)
             throws IOException {
+        return pollDeviceTokenOnce(
+                providerId, tokenUrl, clientId, deviceCode, nowMs, DEFAULT_TRANSPORT);
+    }
+
+    static DevicePollOutcome pollDeviceTokenOnce(
+            String providerId,
+            String tokenUrl,
+            String clientId,
+            String deviceCode,
+            long nowMs,
+            HttpTransport transport)
+            throws IOException {
+        validateTransportSecurity(tokenUrl, deviceCode);
         Map<String, String> form = new HashMap<>();
         form.put("grant_type", "urn:ietf:params:oauth:grant-type:device_code");
         form.put("device_code", deviceCode);
         form.put("client_id", clientId);
-        HttpResult res = postForm(tokenUrl, form, null);
+        HttpResult res =
+                postForm(tokenUrl, form, null, transport == null ? DEFAULT_TRANSPORT : transport);
         if (res.code >= 200 && res.code < 300) {
             try {
                 JSONObject o = new JSONObject(res.body);
@@ -946,6 +1339,12 @@ final class AiAuthManager {
     static void startOpenRouterSignIn(
             final MainActivity a, final AiAssistantService.ResultCallback<OAuthBundle> onSuccess) {
         if (a == null || a.isFinishing()) return;
+        if (!AiBetaGate.isUnlocked(a)) {
+            a.toast("内测口令未激活或已过期，请先解锁 AI 观影实验室");
+            return;
+        }
+        final Store st = store(a);
+        final long expectedVersion = beginOAuthSession(st, OAUTH_OPENROUTER);
         final AtomicBoolean cancelled = new AtomicBoolean(false);
         final LoopbackCallbackServer[] serverRef = new LoopbackCallbackServer[1];
 
@@ -1000,7 +1399,16 @@ final class AiAuthManager {
                         final OAuthBundle bundle =
                                 exchangeOpenRouterCode(
                                         OPENROUTER_EXCHANGE_URL, code.trim(), pkce.verifier);
-                        saveBundle(a, bundle);
+                        boolean committed =
+                                commitOAuthSignInIfCurrent(
+                                        st,
+                                        OAUTH_OPENROUTER,
+                                        expectedVersion,
+                                        bundle,
+                                        () -> AiBetaGate.isUnlocked(a));
+                        if (!committed) {
+                            throw new IOException("授权期间内测口令已失效或会话已变更，已取消写入");
+                        }
                         setAuthMode(a, AUTH_MODE_OAUTH);
                         setActiveOAuthProvider(a, OAUTH_OPENROUTER);
                         a.mobilePrefs().edit().putBoolean(Prefs.AI_ENABLED, true).apply();
@@ -1012,7 +1420,7 @@ final class AiAuthManager {
                                 });
                     } catch (Exception e) {
                         if (!cancelled.get()) {
-                            final String msg = a.message(e);
+                            final String msg = sanitizeLogBody(a.message(e));
                             a.ui.post(
                                     () -> {
                                         statusTv.setText("登录未完成：" + msg);
@@ -1028,6 +1436,18 @@ final class AiAuthManager {
     static void startKimiCodeDeviceSignIn(
             final MainActivity a, final AiAssistantService.ResultCallback<OAuthBundle> onSuccess) {
         if (a == null || a.isFinishing()) return;
+        if (!AiBetaGate.isUnlocked(a)) {
+            a.toast("内测口令未激活或已过期，请先解锁 AI 观影实验室");
+            return;
+        }
+        final String clientId = oauthClientId(a, OAUTH_KIMI_CODE);
+        if (clientId.isEmpty()) {
+            a.toast(
+                    "Kimi Code 未开放公共第三方 Client ID；请使用 API Key (Moonshot) / OpenRouter，或先填入自备 Client ID");
+            return;
+        }
+        final Store st = store(a);
+        final long expectedVersion = beginOAuthSession(st, OAUTH_KIMI_CODE);
         final MobileTheme.Palette p = MobileTheme.of(a);
         final AtomicBoolean cancelled = new AtomicBoolean(false);
 
@@ -1042,7 +1462,7 @@ final class AiAuthManager {
         a.gap(box, 10);
 
         final TextView statusTv =
-                a.text("采用标准 RFC 8628 设备码授权，请在浏览器中登录 Kimi Code 订阅账号并确认授权。", 12.5f, p.textSecondary);
+                a.text("采用标准 RFC 8628 设备码授权（使用你提供的 Client ID），请在浏览器确认授权。", 12.5f, p.textSecondary);
         statusTv.setLineSpacing(a.dp(3f), 1f);
         box.addView(statusTv);
         a.gap(box, 12);
@@ -1095,7 +1515,7 @@ final class AiAuthManager {
                 () -> {
                     try {
                         final DeviceCodeSession sess =
-                                requestDeviceCode(KIMI_DEVICE_AUTH_URL, KIMI_CLIENT_ID);
+                                requestDeviceCode(KIMI_DEVICE_AUTH_URL, clientId);
                         userCodeRef[0] = sess.userCode;
                         verifyUrlRef[0] = sess.verificationUriComplete;
                         a.ui.post(
@@ -1117,7 +1537,7 @@ final class AiAuthManager {
                                     pollDeviceTokenOnce(
                                             OAUTH_KIMI_CODE,
                                             KIMI_TOKEN_URL,
-                                            KIMI_CLIENT_ID,
+                                            clientId,
                                             sess.deviceCode,
                                             System.currentTimeMillis());
                             if (out.status == DevicePollOutcome.STATUS_PENDING) {
@@ -1129,7 +1549,16 @@ final class AiAuthManager {
                             }
                             if (out.status == DevicePollOutcome.STATUS_SUCCESS
                                     && out.bundle != null) {
-                                saveBundle(a, out.bundle);
+                                boolean committed =
+                                        commitOAuthSignInIfCurrent(
+                                                st,
+                                                OAUTH_KIMI_CODE,
+                                                expectedVersion,
+                                                out.bundle,
+                                                () -> AiBetaGate.isUnlocked(a));
+                                if (!committed) {
+                                    throw new IOException("授权期间内测口令已失效或会话已变更，已取消写入");
+                                }
                                 setAuthMode(a, AUTH_MODE_OAUTH);
                                 setActiveOAuthProvider(a, OAUTH_KIMI_CODE);
                                 a.mobilePrefs().edit().putBoolean(Prefs.AI_ENABLED, true).apply();
@@ -1149,7 +1578,7 @@ final class AiAuthManager {
                         }
                     } catch (Exception e) {
                         if (!cancelled.get()) {
-                            final String msg = a.message(e);
+                            final String msg = sanitizeLogBody(a.message(e));
                             a.ui.post(
                                     () -> {
                                         statusTv.setText("登录未完成：" + msg);
@@ -1163,35 +1592,48 @@ final class AiAuthManager {
     static void startOpenAiExperimentalSignIn(
             final MainActivity a, final AiAssistantService.ResultCallback<OAuthBundle> onSuccess) {
         if (a == null || a.isFinishing()) return;
-        if (!AiBetaGate.isExperimentalOAuthAllowed(a)) {
-            a.toast("当前内测口令未开启实验性 OpenAI OAuth 权限");
+        if (!AiBetaGate.isUnlocked(a) || !AiBetaGate.isExperimentalOAuthAllowed(a)) {
+            a.toast("当前内测口令未开启实验性 OpenAI OAuth 权限或已过期");
+            return;
+        }
+        final String clientId = oauthClientId(a, OAUTH_OPENAI_EXPERIMENTAL);
+        if (clientId.isEmpty()) {
+            a.toast("请先填入已注册的 OpenAI OAuth Client ID（本应用不冒用第三方 CLI 身份）");
             return;
         }
         if (!hasOpenAiExperimentalConsent(a)) {
             MobileBottomSheet.showConfirm(
                     a,
-                    "实验性 OpenAI OAuth 风险提示",
-                    "此方式通过官方 OAuth PKCE 回调获取你的个人账号令牌，仅用于实验性测试，可能受地区网络或上游账号策略限制。建议优先使用官方 API Key 或 OpenRouter / Kimi Code 登录。确认了解并继续吗？",
+                    "实验性 OpenAI 订阅推理风险提示",
+                    "此方式使用你注册的 OpenAI OAuth Client ID 请求官方订阅额度推理权限（resource.invoke / chatgpt.tokens.use.direct）并调用 Responses API（/v1/responses）。建议普通用户优先使用 API Key 或 OpenRouter 官方登录。确认继续吗？",
                     "我已了解，继续登录",
                     false,
                     () -> {
                         setOpenAiExperimentalConsent(a, true);
-                        launchOpenAiPkceFlow(a, onSuccess);
+                        launchOpenAiPkceFlow(a, clientId, onSuccess);
                     });
             return;
         }
-        launchOpenAiPkceFlow(a, onSuccess);
+        launchOpenAiPkceFlow(a, clientId, onSuccess);
     }
 
     private static void launchOpenAiPkceFlow(
-            final MainActivity a, final AiAssistantService.ResultCallback<OAuthBundle> onSuccess) {
+            final MainActivity a,
+            final String clientId,
+            final AiAssistantService.ResultCallback<OAuthBundle> onSuccess) {
+        if (!AiBetaGate.isUnlocked(a) || !AiBetaGate.isExperimentalOAuthAllowed(a)) {
+            a.toast("当前内测口令未开启实验性 OpenAI OAuth 权限");
+            return;
+        }
+        final Store st = store(a);
+        final long expectedVersion = beginOAuthSession(st, OAUTH_OPENAI_EXPERIMENTAL);
         final AtomicBoolean cancelled = new AtomicBoolean(false);
         final LoopbackCallbackServer[] serverRef = new LoopbackCallbackServer[1];
         LinearLayout box = a.vertical();
         box.setPadding(a.dp(4), a.dp(6), a.dp(4), a.dp(6));
         final TextView statusTv =
                 a.text(
-                        "正在监听 localhost:1455/auth/callback 并打开 OpenAI 登录页…",
+                        "正在监听 localhost:1455/auth/callback 并打开 OpenAI 授权页…",
                         13.5f,
                         MobileTheme.of(a).textPrimary);
         statusTv.setLineSpacing(a.dp(3f), 1f);
@@ -1215,7 +1657,7 @@ final class AiAuthManager {
                         srv = LoopbackCallbackServer.bind(new int[] {1455}, "/auth/callback");
                         serverRef[0] = srv;
                         final String redirectUri = srv.callbackUrl();
-                        final String authUrl = buildOpenAiAuthUrl(redirectUri, pkce);
+                        final String authUrl = buildOpenAiAuthUrl(clientId, redirectUri, pkce);
                         a.ui.post(
                                 () -> {
                                     statusTv.setText("请在浏览器中完成 OpenAI 登录授权，回调后将自动切回应用。");
@@ -1242,11 +1684,24 @@ final class AiAuthManager {
                         final OAuthBundle bundle =
                                 exchangeOpenAiCode(
                                         OPENAI_TOKEN_URL,
+                                        clientId,
                                         code.trim(),
                                         pkce.verifier,
                                         redirectUri,
                                         System.currentTimeMillis());
-                        saveBundle(a, bundle);
+                        boolean committed =
+                                commitOAuthSignInIfCurrent(
+                                        st,
+                                        OAUTH_OPENAI_EXPERIMENTAL,
+                                        expectedVersion,
+                                        bundle,
+                                        () ->
+                                                AiBetaGate.isUnlocked(a)
+                                                        && AiBetaGate.isExperimentalOAuthAllowed(a)
+                                                        && hasOpenAiExperimentalConsent(a));
+                        if (!committed) {
+                            throw new IOException("授权期间内测口令已失效或会话已变更，已取消写入");
+                        }
                         setAuthMode(a, AUTH_MODE_OAUTH);
                         setActiveOAuthProvider(a, OAUTH_OPENAI_EXPERIMENTAL);
                         a.mobilePrefs().edit().putBoolean(Prefs.AI_ENABLED, true).apply();
@@ -1258,7 +1713,7 @@ final class AiAuthManager {
                                 });
                     } catch (Exception e) {
                         if (!cancelled.get()) {
-                            final String msg = a.message(e);
+                            final String msg = sanitizeLogBody(a.message(e));
                             a.ui.post(
                                     () -> {
                                         statusTv.setText("登录失败：" + msg);
@@ -1272,7 +1727,8 @@ final class AiAuthManager {
     }
 
     // -------------------------------------------------------------------------
-    // Multi-Protocol Chat Completion Wire Transport (OpenAI / Anthropic / Gemini)
+    // Multi-Protocol Chat Completion Wire Transport (OpenAI Compat / Responses / Anthropic /
+    // Gemini)
     // -------------------------------------------------------------------------
 
     static ResolvedRequest resolveActiveRequest(MainActivity a) throws IOException {
@@ -1291,49 +1747,51 @@ final class AiAuthManager {
             Store st = store(a);
             OAuthBundle bundle;
             if (OAUTH_KIMI_CODE.equals(prov)) {
+                String cid = oauthClientId(st, prov);
                 bundle =
                         ensureFreshOAuthBundle(
                                 st,
                                 prov,
                                 KIMI_TOKEN_URL,
-                                KIMI_CLIENT_ID,
-                                System.currentTimeMillis());
+                                cid,
+                                System.currentTimeMillis(),
+                                () -> AiBetaGate.isUnlocked(a),
+                                DEFAULT_TRANSPORT);
             } else if (OAUTH_OPENAI_EXPERIMENTAL.equals(prov)) {
+                String cid = oauthClientId(st, prov);
                 bundle =
                         ensureFreshOAuthBundle(
                                 st,
                                 prov,
                                 OPENAI_TOKEN_URL,
-                                OPENAI_CLIENT_ID,
-                                System.currentTimeMillis());
+                                cid,
+                                System.currentTimeMillis(),
+                                () ->
+                                        AiBetaGate.isUnlocked(a)
+                                                && AiBetaGate.isExperimentalOAuthAllowed(a)
+                                                && hasOpenAiExperimentalConsent(a),
+                                DEFAULT_TRANSPORT);
             } else {
                 bundle = loadBundle(st, prov);
                 if (bundle == null || !bundle.hasCredential()) {
                     throw new IOException("请先登录 " + oauthProviderLabel(prov));
                 }
             }
+            String base = oauthApiBase(prov);
+            validateTransportSecurity(base, bundle.accessToken);
             return new ResolvedRequest(
-                    WIRE_OPENAI_COMPAT,
-                    oauthApiBase(prov),
+                    oauthWireProtocol(prov),
+                    base,
                     resolveOAuthModel(a, prov),
                     bundle.accessToken,
                     prov,
                     bundle.accountId);
         }
         String provider = a.mobilePrefs().getString(Prefs.AI_PROVIDER, "deepseek");
-        String base = AiAssistantService.resolveBaseUrl(a);
-        if (base.isEmpty()) throw new IOException("未配置 AI 接口地址");
-        String key = a.secretsPrefs().getString(Prefs.SECRET_AI_API_KEY, "").trim();
-        if (!"ollama".equals(provider) && key.isEmpty()) {
-            throw new IOException("请先填写 API Key");
-        }
-        return new ResolvedRequest(
-                wireProtocolForApiProvider(provider),
-                base,
-                AiAssistantService.resolveModel(a),
-                key,
-                "",
-                "");
+        String customBase = a.mobilePrefs().getString(Prefs.AI_BASE_URL, "").trim();
+        String model = a.mobilePrefs().getString(Prefs.AI_MODEL, "").trim();
+        return resolveByokRequest(
+                new SharedPrefsStore(a.secretsPrefs()), provider, customBase, model);
     }
 
     static String executeChatCompletion(
@@ -1343,14 +1801,96 @@ final class AiAuthManager {
             int maxTokens,
             double temperature)
             throws IOException {
+        return executeChatCompletion(
+                req, systemPrompt, userPrompt, maxTokens, temperature, DEFAULT_TRANSPORT);
+    }
+
+    static String executeChatCompletion(
+            ResolvedRequest req,
+            String systemPrompt,
+            String userPrompt,
+            int maxTokens,
+            double temperature,
+            HttpTransport transport)
+            throws IOException {
+        HttpTransport tx = transport == null ? DEFAULT_TRANSPORT : transport;
         if (WIRE_ANTHROPIC.equals(req.wireProtocol)) {
-            return executeAnthropicMessages(req, systemPrompt, userPrompt, maxTokens, temperature);
+            return executeAnthropicMessages(
+                    req, systemPrompt, userPrompt, maxTokens, temperature, tx);
         }
         if (WIRE_GEMINI.equals(req.wireProtocol)) {
             return executeGeminiGenerateContent(
-                    req, systemPrompt, userPrompt, maxTokens, temperature);
+                    req, systemPrompt, userPrompt, maxTokens, temperature, tx);
         }
-        return executeOpenAiCompatChat(req, systemPrompt, userPrompt, maxTokens, temperature);
+        if (WIRE_OPENAI_RESPONSES.equals(req.wireProtocol)) {
+            return executeOpenAiResponses(
+                    req, systemPrompt, userPrompt, maxTokens, temperature, tx);
+        }
+        return executeOpenAiCompatChat(req, systemPrompt, userPrompt, maxTokens, temperature, tx);
+    }
+
+    private static String executeOpenAiResponses(
+            ResolvedRequest req,
+            String systemPrompt,
+            String userPrompt,
+            int maxTokens,
+            double temperature,
+            HttpTransport transport)
+            throws IOException {
+        String base = trimTrailingSlash(req.baseUrl);
+        String endpoint = base.endsWith("/responses") ? base : (base + "/responses");
+        validateTransportSecurity(endpoint, req.credential);
+        JSONObject body = new JSONObject();
+        try {
+            body.put("model", req.model);
+            if (systemPrompt != null && !systemPrompt.isEmpty()) {
+                body.put("instructions", systemPrompt);
+            }
+            body.put("input", userPrompt == null ? "" : userPrompt);
+            body.put("max_output_tokens", maxTokens);
+            body.put("temperature", temperature);
+            body.put("store", false);
+        } catch (Exception e) {
+            throw new IOException(e);
+        }
+        Map<String, String> headers = new HashMap<>();
+        if (req.credential != null && !req.credential.isEmpty()) {
+            headers.put("Authorization", "Bearer " + req.credential);
+        }
+        if (req.chatGptAccountId != null && !req.chatGptAccountId.isEmpty()) {
+            headers.put("ChatGPT-Account-Id", req.chatGptAccountId);
+        }
+        HttpResult res = postJson(endpoint, body.toString(), headers, transport);
+        if (res.code < 200 || res.code >= 300) {
+            throw new IOException(
+                    "OpenAI Responses HTTP "
+                            + res.code
+                            + ": "
+                            + conciseError(res.body, req.credential));
+        }
+        try {
+            JSONObject root = new JSONObject(res.body);
+            String directText = root.optString("output_text", "");
+            if (!directText.isEmpty()) return directText;
+            JSONArray output = root.optJSONArray("output");
+            if (output == null || output.length() == 0) return "";
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < output.length(); i++) {
+                JSONObject item = output.optJSONObject(i);
+                if (item == null) continue;
+                JSONArray content = item.optJSONArray("content");
+                if (content == null) continue;
+                for (int j = 0; j < content.length(); j++) {
+                    JSONObject part = content.optJSONObject(j);
+                    if (part == null) continue;
+                    String text = part.optString("text", "");
+                    if (!text.isEmpty()) sb.append(text);
+                }
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            throw new IOException("解析 OpenAI Responses 响应失败", e);
+        }
     }
 
     private static String executeOpenAiCompatChat(
@@ -1358,10 +1898,12 @@ final class AiAuthManager {
             String systemPrompt,
             String userPrompt,
             int maxTokens,
-            double temperature)
+            double temperature,
+            HttpTransport transport)
             throws IOException {
         String base = trimTrailingSlash(req.baseUrl);
         String endpoint = base.endsWith("/chat/completions") ? base : (base + "/chat/completions");
+        validateTransportSecurity(endpoint, req.credential);
         JSONObject body = new JSONObject();
         try {
             body.put("model", req.model);
@@ -1387,9 +1929,10 @@ final class AiAuthManager {
             headers.put("HTTP-Referer", MobileAuthorNotice.OFFICIAL_SITE_URL);
             headers.put("X-Title", "Marco Movie");
         }
-        HttpResult res = postJson(endpoint, body.toString(), headers);
+        HttpResult res = postJson(endpoint, body.toString(), headers, transport);
         if (res.code < 200 || res.code >= 300) {
-            throw new IOException("HTTP " + res.code + ": " + conciseError(res.body));
+            throw new IOException(
+                    "HTTP " + res.code + ": " + conciseError(res.body, req.credential));
         }
         try {
             JSONObject root = new JSONObject(res.body);
@@ -1407,10 +1950,12 @@ final class AiAuthManager {
             String systemPrompt,
             String userPrompt,
             int maxTokens,
-            double temperature)
+            double temperature,
+            HttpTransport transport)
             throws IOException {
         String base = trimTrailingSlash(req.baseUrl);
         String endpoint = base.endsWith("/v1/messages") ? base : (base + "/v1/messages");
+        validateTransportSecurity(endpoint, req.credential);
         JSONObject body = new JSONObject();
         try {
             body.put("model", req.model);
@@ -1428,9 +1973,10 @@ final class AiAuthManager {
         Map<String, String> headers = new HashMap<>();
         headers.put("x-api-key", req.credential);
         headers.put("anthropic-version", "2023-06-01");
-        HttpResult res = postJson(endpoint, body.toString(), headers);
+        HttpResult res = postJson(endpoint, body.toString(), headers, transport);
         if (res.code < 200 || res.code >= 300) {
-            throw new IOException("Anthropic HTTP " + res.code + ": " + conciseError(res.body));
+            throw new IOException(
+                    "Anthropic HTTP " + res.code + ": " + conciseError(res.body, req.credential));
         }
         try {
             JSONObject root = new JSONObject(res.body);
@@ -1454,13 +2000,15 @@ final class AiAuthManager {
             String systemPrompt,
             String userPrompt,
             int maxTokens,
-            double temperature)
+            double temperature,
+            HttpTransport transport)
             throws IOException {
         String base = trimTrailingSlash(req.baseUrl);
         String endpoint =
                 base.contains(":generateContent")
                         ? base
                         : (base + "/v1beta/models/" + urlEncode(req.model) + ":generateContent");
+        validateTransportSecurity(endpoint, req.credential);
         JSONObject body = new JSONObject();
         try {
             if (systemPrompt != null && !systemPrompt.isEmpty()) {
@@ -1496,9 +2044,10 @@ final class AiAuthManager {
         }
         Map<String, String> headers = new HashMap<>();
         headers.put("x-goog-api-key", req.credential);
-        HttpResult res = postJson(endpoint, body.toString(), headers);
+        HttpResult res = postJson(endpoint, body.toString(), headers, transport);
         if (res.code < 200 || res.code >= 300) {
-            throw new IOException("Gemini HTTP " + res.code + ": " + conciseError(res.body));
+            throw new IOException(
+                    "Gemini HTTP " + res.code + ": " + conciseError(res.body, req.credential));
         }
         try {
             JSONObject root = new JSONObject(res.body);
@@ -1549,12 +2098,14 @@ final class AiAuthManager {
                 (selected == Proxy.NO_PROXY ? url.openConnection() : url.openConnection(selected));
     }
 
-    static HttpResult postJson(String url, String jsonBody, Map<String, String> headers)
+    static HttpResult postJson(
+            String url, String jsonBody, Map<String, String> headers, HttpTransport transport)
             throws IOException {
-        return postRaw(url, "application/json; charset=UTF-8", jsonBody, headers);
+        return transport.postRaw(url, "application/json; charset=UTF-8", jsonBody, headers);
     }
 
-    static HttpResult postForm(String url, Map<String, String> form, Map<String, String> headers)
+    static HttpResult postForm(
+            String url, Map<String, String> form, Map<String, String> headers, HttpTransport tx)
             throws IOException {
         StringBuilder sb = new StringBuilder();
         boolean first = true;
@@ -1563,11 +2114,11 @@ final class AiAuthManager {
             first = false;
             sb.append(urlEncode(e.getKey())).append('=').append(urlEncode(e.getValue()));
         }
-        return postRaw(
+        return tx.postRaw(
                 url, "application/x-www-form-urlencoded; charset=UTF-8", sb.toString(), headers);
     }
 
-    private static HttpResult postRaw(
+    private static HttpResult postRawDirect(
             String url, String contentType, String body, Map<String, String> headers)
             throws IOException {
         HttpURLConnection conn = openProxiedConnection(url);
@@ -1641,12 +2192,16 @@ final class AiAuthManager {
         }
     }
 
-    /** Redacts OAuth tokens, API keys, device codes, and PKCE verifiers before logging. */
+    /** Redacts OAuth tokens, bare API keys, native auth headers, device codes, and passcodes. */
     static String sanitizeLogBody(String raw) {
-        if (raw == null || raw.isEmpty()) return "";
-        String s = SECRET_JSON_RE.matcher(raw).replaceAll("$1[REDACTED]$3");
-        s = SECRET_BEARER_RE.matcher(s).replaceAll("$1[REDACTED]");
-        s = SECRET_FORM_RE.matcher(s).replaceAll("$1[REDACTED]");
+        return AppLog.sanitize(raw);
+    }
+
+    static String sanitizeErrorText(String raw, String knownSecret) {
+        String s = AppLog.sanitize(raw);
+        if (knownSecret != null && knownSecret.trim().length() >= 6) {
+            s = s.replace(knownSecret.trim(), "[REDACTED_KEY]");
+        }
         return s;
     }
 
@@ -1663,16 +2218,16 @@ final class AiAuthManager {
         return "";
     }
 
-    private static String conciseError(String body) {
-        String safe = sanitizeLogBody(body);
+    private static String conciseError(String body, String knownSecret) {
+        String safe = sanitizeErrorText(body, knownSecret);
         try {
             JSONObject o = new JSONObject(safe);
             JSONObject err = o.optJSONObject("error");
             if (err != null) {
-                String msg = err.optString("message", "").trim();
+                String msg = sanitizeErrorText(err.optString("message", "").trim(), knownSecret);
                 if (!msg.isEmpty()) return msg.length() > 140 ? msg.substring(0, 140) : msg;
             }
-            String msg = o.optString("message", "").trim();
+            String msg = sanitizeErrorText(o.optString("message", "").trim(), knownSecret);
             if (!msg.isEmpty()) return msg.length() > 140 ? msg.substring(0, 140) : msg;
         } catch (Exception ignored) {
         }

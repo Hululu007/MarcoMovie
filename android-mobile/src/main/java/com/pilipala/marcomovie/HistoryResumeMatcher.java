@@ -282,7 +282,7 @@ final class HistoryResumeMatcher {
         String api = site.api == null ? "" : site.api;
         return site.supported()
                 || HttpT4Engine.eligible(site)
-                || api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)
+                || api.startsWith(MobileEmbyLibrary.PREFIX)
                 || api.startsWith(AlistEngine.PREFIX);
     }
 

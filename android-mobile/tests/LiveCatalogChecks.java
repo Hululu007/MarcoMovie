@@ -1,4 +1,4 @@
-import com.pilipala.emby.EmbyLibrary;
+import com.pilipala.marcomovie.MobileEmbyLibrary;
 import com.pilipala.marcomovie.LiveCatalog;
 import com.pilipala.marcomovie.LiveEpgService;
 import com.pilipala.marcomovie.LiveQualityPolicy;
@@ -399,11 +399,11 @@ public final class LiveCatalogChecks {
             String base = args[1];
             JSONObject embySess =
                     new JSONObject()
-                            .put("base", base)
+                            .put("base", base + "emby")
                             .put("user", "u1")
                             .put("token", "tok-secret")
                             .put("device", "dev-1");
-            EmbyLibrary embyLib = new EmbyLibrary(embySess);
+            MobileEmbyLibrary embyLib = new MobileEmbyLibrary(embySess);
             JSONArray embyChannels = embyLib.liveChannels();
             check(
                     embyChannels.length() == 2
@@ -412,7 +412,7 @@ public final class LiveCatalogChecks {
                             && embyChannels
                                     .getJSONObject(0)
                                     .getString("url")
-                                    .startsWith(EmbyLibrary.LIVE_PLAY_PREFIX),
+                                    .startsWith(MobileEmbyLibrary.LIVE_PLAY_PREFIX),
                     "Emby Live TV fetches channels with CurrentProgram EPG");
             JSONObject directRes =
                     embyLib.resolveLiveChannel(

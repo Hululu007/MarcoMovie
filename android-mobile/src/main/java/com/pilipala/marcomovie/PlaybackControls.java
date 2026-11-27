@@ -77,6 +77,10 @@ final class PlaybackControls {
     View menuAnchor;
     String lastSubtitle = "";
     private java.io.File activeSubtitleFile;
+    private volatile List<AiSubtitleTranslator.SrtCue> liveAiSubtitleCues;
+    private volatile String[] liveAiSubtitleTranslations;
+    private volatile boolean liveAiSubtitleBilingual = true;
+    private String lastLiveAiSubtitleText;
     boolean dialogOpen, transitioning;
 
     void setActiveSubtitleFile(java.io.File file) {
@@ -85,6 +89,38 @@ final class PlaybackControls {
 
     java.io.File activeSubtitleFile() {
         return activeSubtitleFile;
+    }
+
+    void setLiveAiSubtitles(
+            List<AiSubtitleTranslator.SrtCue> cues, String[] translations, boolean bilingual) {
+        this.liveAiSubtitleCues = cues;
+        this.liveAiSubtitleTranslations = translations;
+        this.liveAiSubtitleBilingual = bilingual;
+        this.lastLiveAiSubtitleText = null;
+        if (a.player != null && a.prepared) {
+            renderLiveAiSubtitleAt(a.player.getCurrentPosition());
+        }
+    }
+
+    void clearLiveAiSubtitles() {
+        this.liveAiSubtitleCues = null;
+        this.liveAiSubtitleTranslations = null;
+        this.lastLiveAiSubtitleText = null;
+        if (subtitle != null) {
+            subtitle.setLiveOverrideText(null);
+        }
+    }
+
+    private void renderLiveAiSubtitleAt(long positionMs) {
+        List<AiSubtitleTranslator.SrtCue> cues = liveAiSubtitleCues;
+        if (cues == null || subtitle == null) return;
+        String text =
+                AiSubtitleTranslator.activeCueTextAt(
+                        cues, liveAiSubtitleTranslations, positionMs, liveAiSubtitleBilingual);
+        if (!text.equals(lastLiveAiSubtitleText)) {
+            lastLiveAiSubtitleText = text;
+            subtitle.setLiveOverrideText(text);
+        }
     }
 
     private TvMarkerHost markerState;
@@ -2627,8 +2663,12 @@ final class PlaybackControls {
         LinearLayout root = a.vertical();
         root.setTag("mobile-unified-subtitle-sheet");
 
-        // 3-tab spring-sliding segmented header
-        final String[] tabLabels = {"内封/外挂轨", "在线字幕", "AI 双语"};
+        // 2-tab when AI Lab locked; 3-tab [内封/外挂轨 | 在线字幕 | AI 双语] ONLY when unlocked.
+        final boolean aiUnlocked = AiBetaGate.isUnlocked(a);
+        final String[] tabLabels =
+                aiUnlocked
+                        ? new String[] {"内封/外挂轨", "在线字幕", "AI 双语"}
+                        : new String[] {"内封/外挂轨", "在线字幕"};
         final int[] activeTab = {0};
 
         final LinearLayout tabBody = a.vertical();
@@ -2642,7 +2682,7 @@ final class PlaybackControls {
                         populateEmbeddedSubtitleTab(tabBody, dlgRef, p);
                     } else if (activeTab[0] == 1) {
                         populateOnlineSubtitleTab(tabBody, dlgRef, p, false);
-                    } else {
+                    } else if (aiUnlocked && AiBetaGate.isUnlocked(a)) {
                         populateAiBilingualSubtitleTab(tabBody, dlgRef, p);
                     }
                 };
@@ -2844,6 +2884,9 @@ final class PlaybackControls {
 
     private void populateAiBilingualSubtitleTab(
             LinearLayout container, Dialog[] dlgRef, MobileTheme.Palette p) {
+        if (!AiBetaGate.isUnlocked(a)) {
+            return;
+        }
         boolean bilingualOn = a.mobilePrefs().getBoolean(Prefs.SUBTITLE_BILINGUAL, true);
         LinearLayout toggleRow = a.row();
         toggleRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -6815,6 +6858,7 @@ final class PlaybackControls {
     }
 
     void selectAndRememberSubtitle(int trackIndex, String rawLabel) {
+        clearLiveAiSubtitles();
         subtitlePrefAppliedForEpisode = true;
         if (a.player != null && a.prepared) {
             a.player.selectTrack(3, trackIndex);
@@ -7149,6 +7193,7 @@ final class PlaybackControls {
             }
         }
         int actualPosition = a.player.getCurrentPosition();
+        renderLiveAiSubtitleAt(actualPosition);
         reconcileDetachedSegmentedDanmuSession();
         if (danmuSegmentCache != null && danmaku.enabled && danmaku.hasSegmentCache()) {
             danmuSegmentCache.onPlaybackTick(actualPosition, a.player.isPlaying());

@@ -1884,7 +1884,7 @@ final class MobileHomePage {
         }
 
         private final MainActivity a;
-        private final int pageWidthPx;
+        private int pageWidthPx;
         private final int touchSlop;
         private final List<View> slides = new ArrayList<>();
         private final PageListener listener;
@@ -1913,6 +1913,29 @@ final class MobileHomePage {
             slides.add(slide);
             slide.setTranslationX(idx * pageWidthPx - scrollOffsetPx);
             addView(slide, new FrameLayout.LayoutParams(pageWidthPx, heightPx));
+        }
+
+        @Override
+        protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+            super.onSizeChanged(w, h, oldw, oldh);
+            updatePageWidth(w);
+        }
+
+        /** Updates carousel width cleanly when a foldable folds/unfolds in the same orientation. */
+        void updatePageWidth(int newWidthPx) {
+            int nextW = Math.max(1, newWidthPx);
+            if (nextW == pageWidthPx) return;
+            pageWidthPx = nextW;
+            stopSnapSpring();
+            for (int i = 0; i < slides.size(); i++) {
+                View slide = slides.get(i);
+                ViewGroup.LayoutParams lp = slide.getLayoutParams();
+                if (lp != null && lp.width != nextW) {
+                    lp.width = nextW;
+                    slide.setLayoutParams(lp);
+                }
+            }
+            applyOffset(currentIndex * (float) pageWidthPx);
         }
 
         int currentPage() {

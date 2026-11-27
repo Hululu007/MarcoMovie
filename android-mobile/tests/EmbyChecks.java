@@ -1,18 +1,18 @@
-import com.pilipala.emby.EmbyLibrary;
+import com.pilipala.marcomovie.MobileEmbyLibrary;
 import java.util.*;
 import org.json.*;
 
 public final class EmbyChecks {
     public static void main(String[] args) throws Exception {
         JSONObject session =
-                EmbyLibrary.login(args[0], "fixture", "fixture-password", "fixture-device");
-        EmbyLibrary client = new EmbyLibrary(session);
+                MobileEmbyLibrary.login(args[0], "fixture", "fixture-password", "fixture-device");
+        MobileEmbyLibrary client = new MobileEmbyLibrary(session);
         if (client.home().getJSONArray("class").length() != 1) throw new AssertionError("library");
         if (client.list("v1", "movie", 2).getInt("page") != 2)
             throw new AssertionError("pagination");
         JSONObject video = client.detail("s1").getJSONArray("list").getJSONObject(0);
         String poster = video.getString("vod_pic");
-        if (!poster.endsWith("#mm-emby=" + EmbyLibrary.accountKey(session)))
+        if (!poster.endsWith("#mm-emby=" + MobileEmbyLibrary.accountKey(session)))
             throw new AssertionError("poster account identity");
         if (!"fixture-token".equals(client.imageHeaders(poster).get("X-Emby-Token")))
             throw new AssertionError("poster auth");
@@ -59,7 +59,7 @@ public final class EmbyChecks {
             } catch (java.io.IOException expected) {
             }
         }
-        EmbyLibrary.Reporter reporter = client.track(transcode.getJSONObject("embySession"));
+        MobileEmbyLibrary.Reporter reporter = client.track(transcode.getJSONObject("embySession"));
         reporter.update(0, false);
         for (int i = 0; i < 200; i++) reporter.update(i * 100, i % 2 == 0);
         reporter.stop(20000);

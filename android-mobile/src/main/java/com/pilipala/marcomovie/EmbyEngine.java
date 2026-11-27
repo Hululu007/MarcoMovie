@@ -1,17 +1,16 @@
 package com.pilipala.marcomovie;
 
-import com.pilipala.emby.*;
 import org.json.*;
 
 final class EmbyEngine implements SourceEngine {
-    private final EmbyLibrary library;
+    private final MobileEmbyLibrary library;
 
     EmbyEngine(MainActivity activity, Cms.Site site) throws Exception {
-        library = EmbyAccounts.open(activity, site.api);
+        library = MobileEmbyAccounts.open(activity, site.api);
     }
 
     static void connect(MainActivity a) {
-        EmbyAccounts.connect(
+        MobileEmbyAccounts.connect(
                 a,
                 site -> {
                     SourceController.mergeOrSaveConfig(
@@ -29,7 +28,7 @@ final class EmbyEngine implements SourceEngine {
 
     static void openManager(final MainActivity a) {
         if (a == null || a.isFinishing()) return;
-        final java.util.List<JSONObject> saved = EmbyAccounts.listSaved(a);
+        final java.util.List<JSONObject> saved = MobileEmbyAccounts.listSaved(a);
         if (saved.isEmpty()) {
             connect(a);
             return;
@@ -66,7 +65,7 @@ final class EmbyEngine implements SourceEngine {
                             if (which == 0) {
                                 openEmbySite(a, siteJson);
                             } else if (which == 1) {
-                                EmbyAccounts.remove(a, api);
+                                MobileEmbyAccounts.remove(a, api);
                                 if (a.config != null && a.config.sites != null) {
                                     for (java.util.Iterator<Cms.Site> it =
                                                     a.config.sites.iterator();
@@ -127,7 +126,7 @@ final class EmbyEngine implements SourceEngine {
             if (s != null && s.api != null) existingApis.add(s.api);
         }
         try {
-            for (JSONObject embySite : EmbyAccounts.listSaved(a)) {
+            for (JSONObject embySite : MobileEmbyAccounts.listSaved(a)) {
                 String api = embySite.optString("api", "");
                 if (api.isEmpty() || existingApis.contains(api)) continue;
                 Cms.Site s = new Cms.Site();

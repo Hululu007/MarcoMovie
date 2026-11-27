@@ -100,9 +100,8 @@ final class LiveController {
             for (Cms.Site site : a.config.sites) {
                 if (site == null
                         || site.api == null
-                        || !site.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)) continue;
-                String acct =
-                        site.api.substring(com.pilipala.emby.EmbyLibrary.PREFIX.length()).trim();
+                        || !site.api.startsWith(MobileEmbyLibrary.PREFIX)) continue;
+                String acct = site.api.substring(MobileEmbyLibrary.PREFIX.length()).trim();
                 if (acct.isEmpty() || !seenEmby.add(acct)) continue;
                 LiveCatalog.Source embyLive = new LiveCatalog.Source();
                 embyLive.name =
@@ -110,7 +109,7 @@ final class LiveController {
                                         ? "Emby"
                                         : site.name.trim())
                                 + " · 直播";
-                embyLive.url = com.pilipala.emby.EmbyLibrary.LIVE_CATALOG_PREFIX + acct;
+                embyLive.url = MobileEmbyLibrary.LIVE_CATALOG_PREFIX + acct;
                 embyLive.origin = embyLive.url;
                 out.add(insertPos++, embyLive);
             }
@@ -244,7 +243,7 @@ final class LiveController {
             throws Exception {
         if (source != null
                 && source.url != null
-                && source.url.startsWith(com.pilipala.emby.EmbyLibrary.LIVE_CATALOG_PREFIX)) {
+                && source.url.startsWith(MobileEmbyLibrary.LIVE_CATALOG_PREFIX)) {
             return loadEmbyLiveCatalog(a, source.url);
         }
         LiveCatalog.Source effective = source.copy();
@@ -259,10 +258,9 @@ final class LiveController {
 
     private static LiveCatalog.Catalog loadEmbyLiveCatalog(MainActivity a, String catalogUrl)
             throws Exception {
-        String acct = com.pilipala.emby.EmbyLibrary.parseLiveAccount(catalogUrl);
+        String acct = MobileEmbyLibrary.parseLiveAccount(catalogUrl);
         if (acct.isEmpty()) throw new IOException("Emby 直播账户标识无效");
-        com.pilipala.emby.EmbyLibrary lib =
-                com.pilipala.emby.EmbyAccounts.open(a, com.pilipala.emby.EmbyLibrary.PREFIX + acct);
+        MobileEmbyLibrary lib = MobileEmbyAccounts.open(a, MobileEmbyLibrary.PREFIX + acct);
         org.json.JSONArray rows = lib.liveChannels();
         if (rows.length() == 0) throw new IOException("该 Emby 服务器未配置电视直播频道");
         LiveCatalog.Catalog cat = new LiveCatalog.Catalog();
@@ -702,7 +700,7 @@ final class LiveController {
 
     static void playEmbyLiveAsync(
             MainActivity a, Cms.Site site, Cms.Video video, Cms.Episode ep, String embyLiveUrl) {
-        final String acct = com.pilipala.emby.EmbyLibrary.parseLiveAccount(embyLiveUrl);
+        final String acct = MobileEmbyLibrary.parseLiveAccount(embyLiveUrl);
         if (acct.isEmpty()) {
             a.toast("Emby 直播频道账户无效");
             return;
@@ -717,9 +715,8 @@ final class LiveController {
         a.worker.execute(
                 () -> {
                     try {
-                        com.pilipala.emby.EmbyLibrary lib =
-                                com.pilipala.emby.EmbyAccounts.open(
-                                        a, com.pilipala.emby.EmbyLibrary.PREFIX + acct);
+                        MobileEmbyLibrary lib =
+                                MobileEmbyAccounts.open(a, MobileEmbyLibrary.PREFIX + acct);
                         org.json.JSONObject resolved = lib.resolveLiveChannel(embyLiveUrl, false);
                         String streamUrl = resolved.optString("url", "").trim();
                         if (streamUrl.isEmpty()) {
@@ -740,7 +737,7 @@ final class LiveController {
                                         }
                                         return;
                                     }
-                                    site.api = com.pilipala.emby.EmbyLibrary.PREFIX + acct;
+                                    site.api = MobileEmbyLibrary.PREFIX + acct;
                                     ep.url = streamUrl;
                                     ep.headers.clear();
                                     if (headerObj != null) {

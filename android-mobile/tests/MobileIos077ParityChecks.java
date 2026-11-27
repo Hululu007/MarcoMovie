@@ -1,6 +1,6 @@
 package com.pilipala.marcomovie;
 
-import com.pilipala.emby.EmbyLibrary;
+import com.pilipala.marcomovie.MobileEmbyLibrary;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -60,6 +60,7 @@ public final class MobileIos077ParityChecks {
         test8HudPrefsAndVideoTrackSwitchState();
         test9And14CspHardeningAndExternalParserChain(workDir);
         test10Round2AdversarialReworkChecks(workDir);
+        p1Item7Api23ContentLengthAndRangeModes();
 
         System.out.println("PASS ALL MobileIos077ParityChecks (" + passedCount + " suites passed)");
     }
@@ -731,7 +732,7 @@ public final class MobileIos077ParityChecks {
             denyEmbyViews.set(true);
             boolean embyRejected = false;
             try {
-                EmbyLibrary.login(hostBase, "alice", "pw", "dev-1");
+                MobileEmbyLibrary.login(hostBase, "alice", "pw", "dev-1");
             } catch (IOException ex) {
                 embyRejected = true;
             }
@@ -739,20 +740,21 @@ public final class MobileIos077ParityChecks {
             denyEmbyViews.set(false);
 
             // Emby 2: Bare root, /emby, and reverse-proxy subpath /proxy/emby all succeed
-            JSONObject bareAcc = EmbyLibrary.login(hostBase, "alice", "pw", "dev-1");
+            JSONObject bareAcc = MobileEmbyLibrary.login(hostBase, "alice", "pw", "dev-1");
             check(bareAcc.optString("user").equals("u_emby_1"), "Emby bare root login + Views");
-            JSONObject withEmbyAcc = EmbyLibrary.login(hostBase + "/emby", "alice", "pw", "dev-1");
+            JSONObject withEmbyAcc =
+                    MobileEmbyLibrary.login(hostBase + "/emby", "alice", "pw", "dev-1");
             check(
                     withEmbyAcc.optString("base").equals(hostBase + "/emby"),
                     "Emby /emby login + Views");
             JSONObject withSubpathAcc =
-                    EmbyLibrary.login(hostBase + "/proxy/emby", "alice", "pw", "dev-1");
+                    MobileEmbyLibrary.login(hostBase + "/proxy/emby", "alice", "pw", "dev-1");
             check(
                     withSubpathAcc.optString("base").equals(hostBase + "/proxy/emby"),
                     "Emby reverse-proxy subpath login + Views");
 
             // Emby 3: Issue #85 transcode URI fix (relative /videos/... keeps /proxy/emby prefix)
-            EmbyLibrary withSubpath = new EmbyLibrary(withSubpathAcc);
+            MobileEmbyLibrary withSubpath = new MobileEmbyLibrary(withSubpathAcc);
             JSONObject resolvedEmby =
                     withSubpath.resolve(
                             withSubpathAcc.getString("base")
@@ -1694,17 +1696,18 @@ public final class MobileIos077ParityChecks {
                     "__pus=TOP_SECRET_COOKIE".equals(sameOriginCookie.get()),
                     "R2-2: Same-origin reverse proxy retains Cookie");
 
-            // 3. EmbyLibrary: cross-port redirect BLOCKED before connecting; same-origin allowed
+            // 3. MobileEmbyLibrary: cross-port redirect BLOCKED before connecting; same-origin
+            // allowed
             check(
-                    EmbyLibrary.isSameOrigin("http://emby.test:80/a", "http://emby.test/b")
-                            && !EmbyLibrary.isSameOrigin(
+                    MobileEmbyLibrary.isSameOrigin("http://emby.test:80/a", "http://emby.test/b")
+                            && !MobileEmbyLibrary.isSameOrigin(
                                     "https://emby.test/a", "http://emby.test/a")
-                            && !EmbyLibrary.isSameOrigin(
+                            && !MobileEmbyLibrary.isSameOrigin(
                                     "http://emby.test:8096/a", "http://emby.test:8097/a"),
                     "R2-2: Emby effective-port + scheme origin check");
             boolean embyBlocked = false;
             try {
-                EmbyLibrary.login(baseA + "/cross-emby/emby", "alice", "secret_pw", "dev1");
+                MobileEmbyLibrary.login(baseA + "/cross-emby/emby", "alice", "secret_pw", "dev1");
             } catch (IOException ex) {
                 embyBlocked = true;
             }
@@ -1712,7 +1715,8 @@ public final class MobileIos077ParityChecks {
                     embyBlocked && evilHits.get() == 0,
                     "R2-2: Emby blocked cross-origin login redirect");
             JSONObject embySame =
-                    EmbyLibrary.login(baseA + "/same-emby/emby", "alice", "secret_pw", "dev1");
+                    MobileEmbyLibrary.login(
+                            baseA + "/same-emby/emby", "alice", "secret_pw", "dev1");
             check(
                     "u1".equals(embySame.optString("user")),
                     "R2-2: Emby allows same-origin redirect");
@@ -2782,5 +2786,116 @@ public final class MobileIos077ParityChecks {
                 "R2-7: TV default remains disabled unless explicitly enabled");
         pass(
                 "R2-P2.12: Slim-bar preference reconciliation & auto->1080p->auto policy vs decoded track");
+    }
+
+    private static void p1Item7Api23ContentLengthAndRangeModes() throws Exception {
+        // 1. 64-bit Content-Length header parsing (> 2 GiB) without API 24 getContentLengthLong()
+        check(
+                CloudMediaProxy.parseContentLengthValue("42949672960") == 42949672960L
+                        && CloudMediaProxy.parseContentLengthValue(" 512 ") == 512L
+                        && CloudMediaProxy.parseContentLengthValue("invalid") == -1L
+                        && CloudMediaProxy.parseContentLengthValue(null) == -1L,
+                "P1-7: API-23-safe parseContentLengthValue handles 40 GiB Content-Length headers");
+
+        final byte[] smallBody = new byte[512];
+        final byte[] bigBody = new byte[8192]; // strictly > min lease.chunkSize (4096)
+        for (int i = 0; i < smallBody.length; i++) smallBody[i] = (byte) (i & 0xFF);
+        for (int i = 0; i < bigBody.length; i++) bigBody[i] = (byte) ((i * 7 + 3) & 0xFF);
+
+        HttpServer origin = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        origin.setExecutor(Executors.newCachedThreadPool());
+        origin.createContext(
+                "/small200",
+                ex -> {
+                    // Always returns HTTP 200 (ignores Range) with small 512B body (<= 1024B chunk)
+                    ex.sendResponseHeaders(200, smallBody.length);
+                    try (OutputStream os = ex.getResponseBody()) {
+                        os.write(smallBody);
+                    }
+                });
+        origin.createContext(
+                "/big200",
+                ex -> {
+                    // Always returns HTTP 200 with 2048B body (> 1024B chunkSize -> MUST reject
+                    // 502)
+                    ex.sendResponseHeaders(200, bigBody.length);
+                    try (OutputStream os = ex.getResponseBody()) {
+                        os.write(bigBody);
+                    }
+                });
+        origin.createContext(
+                "/range206",
+                ex -> {
+                    ex.getResponseHeaders()
+                            .set(
+                                    "Content-Range",
+                                    "bytes 0-" + (smallBody.length - 1) + "/" + smallBody.length);
+                    ex.sendResponseHeaders(206, smallBody.length);
+                    try (OutputStream os = ex.getResponseBody()) {
+                        os.write(smallBody);
+                    }
+                });
+        origin.start();
+        try (CloudMediaProxy proxy = new CloudMediaProxy()) {
+            String host = "http://127.0.0.1:" + origin.getAddress().getPort();
+
+            // Case A: valid 206 partial content
+            CloudMediaProxy.Lease l206 =
+                    proxy.createLease(
+                            host + "/range206", Collections.emptyMap(), null, 1024, 2, 65536);
+            HttpURLConnection c206 =
+                    (HttpURLConnection) new URL(proxy.leaseUrl(l206)).openConnection();
+            c206.setRequestProperty("Range", "bytes=0-511");
+            check(
+                    c206.getResponseCode() == 206
+                            && Arrays.equals(smallBody, readAll(c206.getInputStream())),
+                    "P1-7: API 23 CloudMediaProxy serves valid HTTP 206 cleanly");
+            c206.disconnect();
+
+            // Case B: small-file HTTP 200 at offset 0 (<= chunkSize) -> accepted
+            CloudMediaProxy.Lease lSmall =
+                    proxy.createLease(
+                            host + "/small200", Collections.emptyMap(), null, 1024, 2, 65536);
+            HttpURLConnection cSmall =
+                    (HttpURLConnection) new URL(proxy.leaseUrl(lSmall)).openConnection();
+            cSmall.setRequestProperty("Range", "bytes=0-511");
+            int sCode = cSmall.getResponseCode();
+            byte[] sGot = readAll(cSmall.getInputStream());
+            cSmall.disconnect();
+            check(
+                    (sCode == 200 || sCode == 206) && Arrays.equals(smallBody, sGot),
+                    "P1-7: API 23 CloudMediaProxy serves small HTTP 200 at offset 0");
+
+            // Case C: HTTP 200 at non-zero offset -> MUST reject with 502!
+            HttpURLConnection cNonZero =
+                    (HttpURLConnection) new URL(proxy.leaseUrl(lSmall)).openConnection();
+            cNonZero.setRequestProperty("Range", "bytes=128-511");
+            int nzCode = cNonZero.getResponseCode();
+            cNonZero.disconnect();
+            check(
+                    nzCode == 502,
+                    "P1-7: API 23 CloudMediaProxy rejects HTTP 200 on non-zero offset with 502 (got "
+                            + nzCode
+                            + ")");
+
+            // Case D: oversized HTTP 200 (2048 > chunkSize 1024) -> MUST reject with 502!
+            CloudMediaProxy.Lease lBig =
+                    proxy.createLease(
+                            host + "/big200", Collections.emptyMap(), null, 1024, 2, 65536);
+            HttpURLConnection cBig =
+                    (HttpURLConnection) new URL(proxy.leaseUrl(lBig)).openConnection();
+            cBig.setRequestProperty("Range", "bytes=0-1023");
+            int bigCode = cBig.getResponseCode();
+            cBig.disconnect();
+            check(
+                    bigCode == 502,
+                    "P1-7: API 23 CloudMediaProxy rejects oversized HTTP 200 (> chunkSize) with 502 (got "
+                            + bigCode
+                            + ")");
+        } finally {
+            origin.stop(0);
+        }
+        pass(
+                "P1-7: API-23-safe Content-Length parsing + 206 / small 200 / non-zero 200 / oversize 200 verified");
     }
 }

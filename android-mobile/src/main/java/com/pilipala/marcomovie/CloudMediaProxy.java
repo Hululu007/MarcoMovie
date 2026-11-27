@@ -765,7 +765,7 @@ final class CloudMediaProxy implements Closeable {
                     return new ChunkFetchResult(206, cr[0], cr[1], cr[2], ct, data);
                 }
                 if (code == 200) {
-                    long cl = conn.getContentLengthLong();
+                    long cl = parseContentLengthHeader(conn);
                     // Only allow HTTP 200 when requesting offset 0 AND total length fits in one
                     // chunk.
                     // Never read-and-discard gigabytes when upstream ignores Range on a 40 GiB MKV!
@@ -784,6 +784,31 @@ final class CloudMediaProxy implements Closeable {
             }
         }
         return new ChunkFetchResult(502, start, end, -1L, "", new byte[0]);
+    }
+
+    /**
+     * API 23-safe replacement for {@code HttpURLConnection.getContentLengthLong()} (API 24+).
+     * Parses raw {@code Content-Length} header as a 64-bit long (supporting &gt;2 GiB streams) and
+     * falls back to {@code conn.getContentLength()} only when the header is absent.
+     */
+    static long parseContentLengthHeader(HttpURLConnection conn) {
+        if (conn == null) return -1L;
+        long parsed = parseContentLengthValue(conn.getHeaderField("Content-Length"));
+        if (parsed >= 0L) return parsed;
+        int legacy = conn.getContentLength();
+        return legacy >= 0 ? (long) legacy : -1L;
+    }
+
+    static long parseContentLengthValue(String rawHeader) {
+        if (rawHeader == null) return -1L;
+        String trimmed = rawHeader.trim();
+        if (trimmed.isEmpty()) return -1L;
+        try {
+            long val = Long.parseLong(trimmed);
+            return val >= 0L ? val : -1L;
+        } catch (NumberFormatException e) {
+            return -1L;
+        }
     }
 
     private static byte[] readExactBounded(

@@ -50,7 +50,7 @@ final class SourceController {
     static boolean available(MainActivity a, Cms.Config cfg, Cms.Site s) {
         if (s == null) return false;
         String api = s.api == null ? "" : s.api;
-        return api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)
+        return api.startsWith(MobileEmbyLibrary.PREFIX)
                 || api.startsWith(AlistEngine.PREFIX)
                 || api.startsWith("catpaw://")
                 || HttpT4Engine.eligible(s)
@@ -98,8 +98,7 @@ final class SourceController {
                     }
                     SourceEngine raw;
                     String api = s.api == null ? "" : s.api;
-                    if (api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX))
-                        raw = new EmbyEngine(a, s);
+                    if (api.startsWith(MobileEmbyLibrary.PREFIX)) raw = new EmbyEngine(a, s);
                     else if (api.startsWith(AlistEngine.PREFIX)) raw = new AlistEngine(a, s);
                     else if (api.startsWith("catpaw://")) raw = new CatPawEngine(a, s);
                     else if (HttpT4Engine.eligible(s)) raw = new HttpT4Engine(s);
@@ -1834,20 +1833,31 @@ final class SourceController {
     }
 
     private static android.view.View liveDialogAction(
-            MainActivity a, String label, boolean primary, Runnable onClick) {
+            MainActivity a, int iconId, String label, boolean primary, Runnable onClick) {
         if (a.isTvDevice()) {
             android.widget.Button b = a.navButton(label, null, onClick);
             b.setGravity(android.view.Gravity.CENTER);
             return b;
         }
+        LinearLayout row = a.row();
+        row.setGravity(android.view.Gravity.CENTER);
+        row.setPadding(a.dp(14), a.dp(11), a.dp(14), a.dp(11));
+        row.setBackground(a.bg(primary ? 0xff0a84ff : 0xff1e2623, 999));
+        if (iconId > 0) {
+            MobileIcons.IconView ic =
+                    MobileIcons.create(a, iconId, 16f, android.graphics.Color.WHITE);
+            LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(a.dp(16), a.dp(16));
+            ilp.rightMargin = a.dp(8);
+            row.addView(ic, ilp);
+        }
         TextView btn = a.text(label, 13, android.graphics.Color.WHITE);
         if (primary) btn.setTypeface(null, android.graphics.Typeface.BOLD);
-        btn.setGravity(android.view.Gravity.CENTER);
-        btn.setPadding(a.dp(14), a.dp(11), a.dp(14), a.dp(11));
-        btn.setBackground(a.bg(primary ? 0xff0a84ff : 0xff1e2623, 999));
-        MobileDetailScreen.bindTouchFeedback(btn);
-        btn.setOnClickListener(v -> onClick.run());
-        return btn;
+        btn.setSingleLine(true);
+        btn.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        row.addView(btn, new LinearLayout.LayoutParams(-2, -2));
+        MobileDetailScreen.bindTouchFeedback(row);
+        row.setOnClickListener(v -> onClick.run());
+        return row;
     }
 
     static void showLiveImportDialog(MainActivity a) {
@@ -1908,7 +1918,8 @@ final class SourceController {
             panel.addView(
                     liveDialogAction(
                             a,
-                            "📋 从剪贴板一键粘贴添加直播源",
+                            MobileIcons.IC_CLIPBOARD,
+                            "从剪贴板一键粘贴添加直播源",
                             true,
                             () -> {
                                 if (holder[0] != null) holder[0].dismiss();
@@ -1939,7 +1950,8 @@ final class SourceController {
         panel.addView(
                 liveDialogAction(
                         a,
-                        "📂 选择本地直播源文件 (TXT / M3U / JSON)",
+                        MobileIcons.IC_FOLDER,
+                        "选择本地直播源文件 (TXT / M3U / JSON)",
                         false,
                         () -> {
                             if (holder[0] != null) holder[0].dismiss();
@@ -1952,7 +1964,8 @@ final class SourceController {
         panel.addView(
                 liveDialogAction(
                         a,
-                        udpxyCur.isEmpty() ? "🌐 配置路由器 udpxy 组播转单播网关" : "🌐 udpxy 网关：" + udpxyCur,
+                        MobileIcons.IC_LINK,
+                        udpxyCur.isEmpty() ? "配置路由器 udpxy 组播转单播网关" : "udpxy 网关：" + udpxyCur,
                         false,
                         () -> {
                             if (holder[0] != null) holder[0].dismiss();
@@ -1965,7 +1978,8 @@ final class SourceController {
         panel.addView(
                 liveDialogAction(
                         a,
-                        epgCur.isEmpty() ? "📅 配置自定义 XMLTV 节目单 (EPG)" : "📅 自定义 EPG：已配置",
+                        MobileIcons.IC_TIMER,
+                        epgCur.isEmpty() ? "配置自定义 XMLTV 节目单 (EPG)" : "自定义 EPG：已配置",
                         false,
                         () -> {
                             if (holder[0] != null) holder[0].dismiss();

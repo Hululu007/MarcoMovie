@@ -50,6 +50,7 @@ final class SubtitleOverlayView extends FrameLayout {
 
     final androidx.media3.ui.SubtitleView delegate;
     private List<Cue> currentCues = Collections.emptyList();
+    private List<Cue> liveOverrideCues;
     private boolean previewActive;
     private boolean showAxisGuides;
     private int currentStylePreset = 0;
@@ -233,15 +234,33 @@ final class SubtitleOverlayView extends FrameLayout {
         refreshCues();
     }
 
+    /**
+     * Renders live progressive AI bilingual subtitles directly on the overlay without calling
+     * {@code exo.prepare()} repeatedly mid-playback. Pass {@code null} to clear the override and
+     * resume native player cue rendering.
+     */
+    void setLiveOverrideText(String text) {
+        if (text == null) {
+            this.liveOverrideCues = null;
+        } else if (text.trim().isEmpty()) {
+            this.liveOverrideCues = Collections.emptyList();
+        } else {
+            this.liveOverrideCues =
+                    Collections.singletonList(new Cue.Builder().setText(text).build());
+        }
+        refreshCues();
+    }
+
     private void refreshCues() {
         if (delegate == null) return;
         if (previewActive) {
             delegate.setVisibility(View.INVISIBLE);
             return;
         }
-        if (!currentCues.isEmpty()) {
+        List<Cue> effective = liveOverrideCues != null ? liveOverrideCues : currentCues;
+        if (!effective.isEmpty()) {
             delegate.setVisibility(View.VISIBLE);
-            delegate.setCues(currentCues);
+            delegate.setCues(effective);
         } else {
             delegate.setCues(Collections.emptyList());
             delegate.setVisibility(View.GONE);

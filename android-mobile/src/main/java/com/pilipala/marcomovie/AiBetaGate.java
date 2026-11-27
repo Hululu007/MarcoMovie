@@ -108,6 +108,7 @@ final class AiBetaGate {
 
     static final class VerifyResult {
         final boolean ok;
+        final boolean signatureValid;
         final String errorReason;
         final int version;
         final String tag;
@@ -121,6 +122,7 @@ final class AiBetaGate {
 
         private VerifyResult(
                 boolean ok,
+                boolean signatureValid,
                 String errorReason,
                 int version,
                 String tag,
@@ -132,6 +134,7 @@ final class AiBetaGate {
                 int minVersionCode,
                 String canonicalToken) {
             this.ok = ok;
+            this.signatureValid = signatureValid;
             this.errorReason = errorReason == null ? "" : errorReason;
             this.version = version;
             this.tag = tag == null ? "" : tag;
@@ -148,7 +151,24 @@ final class AiBetaGate {
         }
 
         static VerifyResult fail(String reason) {
-            return new VerifyResult(false, reason, 0, "", 0L, 0L, "all", false, false, 0, "");
+            return new VerifyResult(
+                    false, false, reason, 0, "", 0L, 0L, "all", false, false, 0, "");
+        }
+
+        static VerifyResult failAfterValidSig(
+                String reason,
+                int version,
+                String tag,
+                long iat,
+                long exp,
+                String plat,
+                boolean shared,
+                boolean expOAuth,
+                int minVc,
+                String canonical) {
+            return new VerifyResult(
+                    false, true, reason, version, tag, iat, exp, plat, shared, expOAuth, minVc,
+                    canonical);
         }
 
         static VerifyResult success(
@@ -162,7 +182,8 @@ final class AiBetaGate {
                 int minVc,
                 String canonical) {
             return new VerifyResult(
-                    true, "", version, tag, iat, exp, plat, shared, expOAuth, minVc, canonical);
+                    true, true, "", version, tag, iat, exp, plat, shared, expOAuth, minVc,
+                    canonical);
         }
 
         boolean coreAiEnabled() {
@@ -204,17 +225,98 @@ final class AiBetaGate {
         }
     }
 
-    /** Extracts {@code MMAILAB1.<payload>.<sig>} even when pasted inside prose or line breaks. */
+    private static final int ED25519_SIG_B64URL_LEN = 86;
+
+    /**
+     * Extracts {@code MMAILAB1.<payload>.<sig>} even when pasted inside prose or wrapped across
+     * newlines inside either the payload or the 86-char Base64URL signature segment.
+     */
     static String extractToken(String raw) {
         if (raw == null) return "";
         String trimmed = raw.trim();
         if (trimmed.isEmpty()) return "";
+
+        // 1. Fast path: an unwrapped token whose signature already decodes to a complete 64 bytes.
         Matcher direct = TOKEN_EXTRACT_RE.matcher(trimmed);
-        if (direct.find()) return direct.group(0);
+        while (direct.find()) {
+            byte[] sig = base64UrlDecode(direct.group(2));
+            if (sig != null && sig.length == 64) {
+                return direct.group(0);
+            }
+        }
+
+        // 2. Wrap-aware scan starting at "MMAILAB1." (tolerates spaces/newlines inside payload or
+        //    signature without swallowing trailing ASCII prose after the 86-char Ed25519
+        // signature).
+        int start = trimmed.indexOf(TOKEN_PREFIX + ".");
+        if (start >= 0) {
+            String scanned = scanWrappedToken(trimmed, start);
+            if (!scanned.isEmpty()) return scanned;
+        }
+
+        // 3. Fallback: whitespace-collapsed scan (handles breaks even inside the "MMAILAB1."
+        // prefix).
         String collapsed = stripWhitespace(trimmed);
+        int cStart = collapsed.indexOf(TOKEN_PREFIX + ".");
+        if (cStart >= 0) {
+            String scanned = scanWrappedToken(collapsed, cStart);
+            if (!scanned.isEmpty()) return scanned;
+        }
         Matcher after = TOKEN_EXTRACT_RE.matcher(collapsed);
         if (after.find()) return after.group(0);
         return collapsed;
+    }
+
+    private static boolean isBase64UrlChar(char c) {
+        return (c >= 'A' && c <= 'Z')
+                || (c >= 'a' && c <= 'z')
+                || (c >= '0' && c <= '9')
+                || c == '-'
+                || c == '_';
+    }
+
+    private static String scanWrappedToken(String text, int start) {
+        int pos = start + TOKEN_PREFIX.length() + 1; // right after "MMAILAB1."
+        int len = text.length();
+        StringBuilder payload = new StringBuilder();
+        while (pos < len) {
+            char c = text.charAt(pos);
+            if (Character.isWhitespace(c)) {
+                pos++;
+                continue;
+            }
+            if (c == '.') {
+                pos++;
+                break;
+            }
+            if (isBase64UrlChar(c)) {
+                payload.append(c);
+                pos++;
+                continue;
+            }
+            return "";
+        }
+        if (payload.length() == 0) return "";
+
+        StringBuilder sig = new StringBuilder();
+        while (pos < len) {
+            char c = text.charAt(pos);
+            if (Character.isWhitespace(c)) {
+                // Once we already have the exact 86-char Base64URL Ed25519 signature, whitespace
+                // marks the end of the token so trailing ASCII words are not appended.
+                if (sig.length() >= ED25519_SIG_B64URL_LEN) break;
+                pos++;
+                continue;
+            }
+            if (isBase64UrlChar(c)) {
+                sig.append(c);
+                pos++;
+                continue;
+            }
+            break;
+        }
+        if (sig.length() == 0) return "";
+        return TOKEN_PREFIX + "." + payload + "." + sig;
     }
 
     static boolean matchesPlatform(String platformSpec, String targetPlatform) {
@@ -345,18 +447,48 @@ final class AiBetaGate {
         boolean expOAuth = claims.optBoolean("exp_oauth", false);
         int minVc = Math.max(0, claims.optInt("min_vc", 0));
 
+        String canonical = TOKEN_PREFIX + "." + payloadB64 + "." + sigB64;
         if (!matchesPlatform(plat, targetPlatform)) {
-            return VerifyResult.fail("该内测口令适用范围为「" + platformScopeLabel(plat) + "」，不适用于当前设备平台");
+            return VerifyResult.failAfterValidSig(
+                    "该内测口令适用范围为「" + platformScopeLabel(plat) + "」，不适用于当前设备平台",
+                    version,
+                    tag,
+                    iat,
+                    exp,
+                    plat,
+                    shared,
+                    expOAuth,
+                    minVc,
+                    canonical);
         }
         if (minVc > 0 && currentAppVersionCode > 0 && currentAppVersionCode < minVc) {
-            return VerifyResult.fail("当前版本过低（需版本码 ≥ " + minVc + "），请前往官网更新");
+            return VerifyResult.failAfterValidSig(
+                    "当前版本过低（需版本码 ≥ " + minVc + "），请前往官网更新",
+                    version,
+                    tag,
+                    iat,
+                    exp,
+                    plat,
+                    shared,
+                    expOAuth,
+                    minVc,
+                    canonical);
         }
         long nowSec = nowEpochMillis / 1000L;
         if (exp > 0L && nowSec > exp) {
-            return VerifyResult.fail("该内测口令已过期，请在官方交流频道获取最新口令");
+            return VerifyResult.failAfterValidSig(
+                    "该内测口令已过期，请在官方交流频道获取最新口令",
+                    version,
+                    tag,
+                    iat,
+                    exp,
+                    plat,
+                    shared,
+                    expOAuth,
+                    minVc,
+                    canonical);
         }
 
-        String canonical = TOKEN_PREFIX + "." + payloadB64 + "." + sigB64;
         return VerifyResult.success(
                 version, tag, iat, exp, plat, shared, expOAuth, minVc, canonical);
     }

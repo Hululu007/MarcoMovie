@@ -86,7 +86,7 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 try:
     with tempfile.TemporaryDirectory() as output:
         subprocess.run([jdk/"javac", "-encoding", "UTF-8", "-cp", jar, "-d", output,
-                        root/"shared/java/com/pilipala/emby/EmbyLibrary.java",
+                        root/"android-mobile/src/main/java/com/pilipala/marcomovie/MobileEmbyLibrary.java",
                         root/"android-mobile/tests/EmbyChecks.java"], check=True)
         subprocess.run([jdk/"java", "-cp", output+os.pathsep+str(jar), "EmbyChecks",
                         f"http://127.0.0.1:{server.server_port}/media"], check=True)
