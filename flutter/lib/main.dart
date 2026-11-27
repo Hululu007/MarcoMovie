@@ -15,6 +15,8 @@ import 'core/mdk_platform_player.dart';
 import 'core/ohos_runtime.dart';
 import 'core/storage_service.dart';
 import 'core/video_kernel.dart';
+import 'core/windows_profile_dir.dart';
+import 'core/windows_window_bounds.dart';
 import 'ui/adaptive_shell.dart';
 import 'ui/apple_theme.dart';
 import 'ui/ios_launch_splash.dart';
@@ -22,7 +24,6 @@ import 'ui/ios_liquid_glass.dart';
 import 'ui/tv/tv_living_room_shell.dart';
 import 'ui/windows_title_bar.dart';
 import 'ui/windows_appearance.dart';
-
 typedef MarcoAppBootstrapResult = ({StorageService storage, CmsClient client});
 
 bool _isIosAppPlatform() =>
@@ -60,6 +61,12 @@ Future<MarcoAppBootstrapResult> _defaultBootstrapApp() async {
 void _applyWinningBootstrapSideEffects(MarcoAppBootstrapResult result) {
   final storage = result.storage;
   final client = result.client;
+  if (!kIsWeb &&
+      Platform.isWindows &&
+      defaultTargetPlatform == TargetPlatform.windows) {
+    final boundsController = WindowsWindowBoundsController.installShared(storage);
+    unawaited(boundsController.restoreOnStartup());
+  }
   AppLog.instance.setLogDirectory(
     Directory('${storage.dataDirectory.path}/logs'),
   );
@@ -79,6 +86,9 @@ void _applyWinningBootstrapSideEffects(MarcoAppBootstrapResult result) {
       macBounds.applyAppearanceMode(AppleTheme.mode.value);
     });
   }
+  // Do not block Windows/desktop first frame on DownloadService disk/folder
+  // probing or completed-file checks; restore runs asynchronously in background
+  // while newly clicked downloads merge safely into the queue.
   unawaited(
     DownloadService.instance.init(client).catchError((Object e) {
       debugPrint('DownloadService init warning: $e');
@@ -86,8 +96,9 @@ void _applyWinningBootstrapSideEffects(MarcoAppBootstrapResult result) {
   );
 }
 
-Future<void> main() async {
+Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
+  configureWindowsDataDirOverride(args);
   AppLog.init();
   MarcoLaunchDiagnostics.record('dart_main');
   FlutterError.onError = (FlutterErrorDetails details) {

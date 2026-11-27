@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
@@ -12,6 +11,224 @@ import 'ohos_runtime.dart';
 
 class UpdateCancelled implements Exception {
   const UpdateCancelled();
+}
+
+/// Relationship between a remote release version and the locally running version.
+enum UpdateVersionRelation {
+  remoteNewer,
+  sameVersion,
+  remoteOlder,
+}
+
+/// How the currently running Windows binary was distributed.
+enum WindowsDistributionKind {
+  installer,
+  portable,
+}
+
+/// One verified downloadable package advertised by a release manifest.
+class UpdateAsset {
+  final String fileName;
+  final Uri url;
+  final String checksum;
+  final int size;
+
+  const UpdateAsset({
+    required this.fileName,
+    required this.url,
+    required this.checksum,
+    required this.size,
+  });
+}
+
+/// Resolved runtime installation info for the currently executing Windows app.
+class WindowsInstallInfo {
+  final WindowsDistributionKind distribution;
+  final String executablePath;
+  final String installDirectory;
+  final bool matchedRegisteredInstall;
+  final bool hasLocalUninstaller;
+
+  const WindowsInstallInfo({
+    required this.distribution,
+    required this.executablePath,
+    required this.installDirectory,
+    this.matchedRegisteredInstall = false,
+    this.hasLocalUninstaller = false,
+  });
+
+  bool get isPortable => distribution == WindowsDistributionKind.portable;
+  bool get isInstaller => distribution == WindowsDistributionKind.installer;
+}
+
+/// Determines whether the currently running Windows EXE belongs to an Inno Setup
+/// installation or a portable ZIP extraction based strictly on the running EXE
+/// path (so having both editions installed on the same PC never confuses them).
+class WindowsInstallDetector {
+  static const String innoAppIdUninstallKey =
+      '{8E9A5D2B-4F31-4C19-9A62-7B8D1E3F4A50}_is1';
+
+  static String normalizeWindowsDir(String raw) {
+    var s = raw.trim();
+    while (s.length >= 2 &&
+        ((s.startsWith('"') && s.endsWith('"')) ||
+            (s.startsWith("'") && s.endsWith("'")))) {
+      s = s.substring(1, s.length - 1).trim();
+    }
+    s = s.replaceAll('/', r'\');
+    while (s.length > 3 && s.endsWith(r'\')) {
+      s = s.substring(0, s.length - 1);
+    }
+    if (s.length == 2 && s[1] == ':') {
+      s = '$s\\';
+    }
+    return s.toLowerCase();
+  }
+
+  static bool _containsCaseInsensitiveAsciiOrUtf16Le(
+    Uint8List bytes,
+    String asciiLowerNeedle,
+  ) {
+    final needle = asciiLowerNeedle.codeUnits;
+    if (needle.isEmpty || bytes.length < needle.length) return false;
+    int toLowerAscii(int b) => (b >= 65 && b <= 90) ? (b + 32) : b;
+
+    final asciiLimit = bytes.length - needle.length;
+    for (var i = 0; i <= asciiLimit; i++) {
+      var match = true;
+      for (var j = 0; j < needle.length; j++) {
+        if (toLowerAscii(bytes[i + j]) != needle[j]) {
+          match = false;
+          break;
+        }
+      }
+      if (match) return true;
+    }
+
+    final utf16Len = needle.length * 2;
+    if (bytes.length < utf16Len) return false;
+    final utf16Limit = bytes.length - utf16Len;
+    for (var i = 0; i <= utf16Limit; i++) {
+      var match = true;
+      for (var j = 0; j < needle.length; j++) {
+        if (toLowerAscii(bytes[i + j * 2]) != needle[j] ||
+            bytes[i + j * 2 + 1] != 0) {
+          match = false;
+          break;
+        }
+      }
+      if (match) return true;
+    }
+    return false;
+  }
+
+  static bool _isMarcoMovieUninstallLog(File datFile) {
+    try {
+      final stat = datFile.statSync();
+      if (stat.size <= 0 || stat.size > 4 * 1024 * 1024) return false;
+      final bytes = datFile.readAsBytesSync();
+      const markers = <String>[
+        '{8e9a5d2b-4f31-4c19-9a62-7b8d1e3f4a50}',
+        'marco_movie.exe',
+        'marco movie',
+      ];
+      for (final marker in markers) {
+        if (_containsCaseInsensitiveAsciiOrUtf16Le(bytes, marker)) {
+          return true;
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  static bool hasInnoUninstallerInDirectory(String directoryPath) {
+    if (directoryPath.trim().isEmpty) return false;
+    final dir = Directory(directoryPath);
+    if (!dir.existsSync()) return false;
+    try {
+      final filesByLowerName = <String, File>{};
+      for (final entity in dir.listSync(followLinks: false)) {
+        if (entity is File) {
+          final seg = entity.path
+              .split(RegExp(r'[\\/]'))
+              .where((s) => s.isNotEmpty)
+              .lastOrNull;
+          if (seg != null) filesByLowerName[seg.toLowerCase()] = entity;
+        }
+      }
+      final uninsExeRe = RegExp(r'^unins(\d{3})\.exe$');
+      for (final name in filesByLowerName.keys) {
+        final m = uninsExeRe.firstMatch(name);
+        if (m == null) continue;
+        final datFile = filesByLowerName['unins${m.group(1)}.dat'];
+        if (datFile != null && _isMarcoMovieUninstallLog(datFile)) {
+          return true;
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  static Future<List<String>> queryRegisteredInstallLocations() async {
+    if (kIsWeb || !Platform.isWindows) return const [];
+    final paths = <String>[];
+    const regKeys = <String>[
+      'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\$innoAppIdUninstallKey',
+      'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\$innoAppIdUninstallKey',
+      'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\$innoAppIdUninstallKey',
+    ];
+    for (final key in regKeys) {
+      for (final valueName in const ['InstallLocation', 'Inno Setup: App Path']) {
+        try {
+          final result = await Process.run(
+            'reg.exe',
+            ['query', key, '/v', valueName],
+          ).timeout(const Duration(seconds: 2));
+          if (result.exitCode != 0) continue;
+          final stdoutText = result.stdout?.toString() ?? '';
+          for (final line in stdoutText.split(RegExp(r'\r?\n'))) {
+            final match = RegExp(
+              r'^\s*' + RegExp.escape(valueName) + r'\s+REG_\w+\s+(.+?)\s*$',
+              caseSensitive: false,
+            ).firstMatch(line);
+            if (match != null) {
+              final val = match.group(1)!.trim();
+              if (val.isNotEmpty) paths.add(val);
+            }
+          }
+        } catch (_) {}
+      }
+    }
+    return paths;
+  }
+
+  static Future<WindowsInstallInfo> detect({
+    String? executablePath,
+    List<String>? registeredInstallLocations,
+    bool? hasLocalUninstallerOverride,
+  }) async {
+    final exe = (executablePath ?? Platform.resolvedExecutable).trim();
+    final runningDir = File(exe).parent.path;
+    final normRunningDir = normalizeWindowsDir(runningDir);
+    final registered =
+        registeredInstallLocations ?? await queryRegisteredInstallLocations();
+    final matchedReg = registered.any(
+      (loc) =>
+          loc.trim().isNotEmpty && normalizeWindowsDir(loc) == normRunningDir,
+    );
+    final hasLocalUnins =
+        hasLocalUninstallerOverride ?? hasInnoUninstallerInDirectory(runningDir);
+    final kind = (matchedReg || hasLocalUnins)
+        ? WindowsDistributionKind.installer
+        : WindowsDistributionKind.portable;
+    return WindowsInstallInfo(
+      distribution: kind,
+      executablePath: exe,
+      installDirectory: runningDir,
+      matchedRegisteredInstall: matchedReg,
+      hasLocalUninstaller: hasLocalUnins,
+    );
+  }
 }
 
 /// Cancellation also releases the underlying HTTP request, not just its UI.
@@ -84,7 +301,6 @@ class AppUpdate {
               'MarcoMovie-$version-ios-unsigned.ipa',
               'MarcoMovie-$version-ios-iphone-ipad-unsigned.ipa',
             };
-
   static String _effectivePublicKeyHex([String? publicKeyHex]) =>
       (publicKeyHex ?? debugPublicKeyHexOverride ?? defaultUpdatePublicKeyHex)
           .trim();
@@ -168,6 +384,70 @@ class AppUpdate {
     }
   }
 
+  static const String harmonyosUnsignedInstallGuide =
+      '鸿蒙发布包为未签名通用 HAP（支持 arm64-v8a 手机 / 平板 / 2in1 / 智慧屏）。'
+      '下载后请先核对 SHA-256 摘要，使用 DevEco Studio 自动签名或 hap-sign-tool 签名，'
+      '再通过 hdc install 覆盖安装（使用相同签名覆盖升级将保留本机订阅、收藏、观看进度与安全凭据）。';
+
+  static int compareVersions(String a, String b) {
+    List<int> parseParts(String raw) {
+      final clean = raw.trim().replaceFirst(RegExp(r'^[vV]'), '').split('-').first;
+      return clean
+          .split(RegExp(r'[^0-9]+'))
+          .where((s) => s.isNotEmpty)
+          .map((p) => int.tryParse(p.trim()) ?? 0)
+          .toList(growable: false);
+    }
+
+    final pa = parseParts(a);
+    final pb = parseParts(b);
+    final len = pa.length > pb.length ? pa.length : pb.length;
+    for (var idx = 0; idx < len; idx++) {
+      final va = idx < pa.length ? pa[idx] : 0;
+      final vb = idx < pb.length ? pb[idx] : 0;
+      if (va != vb) return va.compareTo(vb);
+    }
+    return 0;
+  }
+
+  static UpdateVersionRelation compareVersionRelation(
+    String remote,
+    String installed,
+  ) {
+    final cmp = compareVersions(remote, installed);
+    if (cmp > 0) return UpdateVersionRelation.remoteNewer;
+    if (cmp < 0) return UpdateVersionRelation.remoteOlder;
+    return UpdateVersionRelation.sameVersion;
+  }
+
+  static bool isRemoteVersionNewer(String remote, String installed) =>
+      compareVersions(remote, installed) > 0;
+
+  static bool isValidHarmonyosAssetName(String name, String version) =>
+      name == 'MarcoMovie-$version-harmonyos-universal.hap' ||
+      name == 'MarcoMovie-$version-harmonyos.hap';
+
+  static bool isValidHarmonyosAssetPath(Uri uri, String version) =>
+      uri.path.endsWith('/MarcoMovie-$version-harmonyos-universal.hap') ||
+      uri.path.endsWith('/MarcoMovie-$version-harmonyos.hap');
+
+  static Uri? trustedReleasePage(dynamic value) {
+    final uri = Uri.tryParse(value?.toString() ?? '');
+    if (uri == null ||
+        uri.scheme != 'https' ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasFragment ||
+        (uri.hasPort && uri.port != 443)) {
+      return null;
+    }
+    if (uri.host == 'github.com' &&
+            uri.path.startsWith('/Pilipala9919/MarcoMovie/releases/') ||
+        uri.host == 'marcotv.wlj9919.top' && uri.path.startsWith('/movie/')) {
+      return uri;
+    }
+    return null;
+  }
+
   final String version;
   final String notes;
   final Uri? windowsUrl;
@@ -178,6 +458,8 @@ class AppUpdate {
   final Uri? harmonyosUrl;
   final Uri? releaseUrl;
   final String? packageFileName;
+  final UpdateAsset? windowsSetupAsset;
+  final UpdateAsset? windowsPortableAsset;
   const AppUpdate(
     this.version,
     this.notes,
@@ -189,37 +471,9 @@ class AppUpdate {
     this.harmonyosUrl,
     this.releaseUrl,
     this.packageFileName,
+    this.windowsSetupAsset,
+    this.windowsPortableAsset,
   ]);
-
-  static const String harmonyosUnsignedInstallGuide =
-      '当前 HarmonyOS NEXT 发行包为未签名 HAP（仅支持 arm64-v8a），下载后需使用个人华为开发者调试证书签名再覆盖安装（覆盖安装需保持同一签名证书以保留订阅与凭据）：\n'
-      '1. 在 DevEco Studio 登录华为账号自动签名，或使用 Command Line Tools 的 hap-sign-tool 对 HAP 重新签名；\n'
-      '2. 通过 hdc install -r <已签名.hap> 或 DevEco Studio 安装到手机、平板或智慧屏；\n'
-      '3. 安装前请核对上方包大小与 SHA-256 摘要，避免安装损坏或来源不明的安装包。';
-
-  /// Compares two semantic-ish version strings.
-  /// Returns `> 0` when [remote] is newer than [current], `0` when equal,
-  /// and `< 0` when [remote] is older than [current].
-  static int compareVersions(String remote, String current) {
-    List<int> parseParts(String v) => v
-        .replaceAll(RegExp(r'^[vV]'), '')
-        .split(RegExp(r'[^0-9]+'))
-        .where((s) => s.isNotEmpty)
-        .map((s) => int.tryParse(s) ?? 0)
-        .toList();
-    final r = parseParts(remote);
-    final c = parseParts(current);
-    final len = math.max(r.length, c.length);
-    for (var i = 0; i < len; i++) {
-      final rv = i < r.length ? r[i] : 0;
-      final cv = i < c.length ? c[i] : 0;
-      if (rv != cv) return rv > cv ? 1 : -1;
-    }
-    return 0;
-  }
-
-  static bool isRemoteVersionNewer(String remote, String current) =>
-      compareVersions(remote, current) > 0;
 
   static List<String> macosAssetNames(String version) => <String>[
         'MarcoMovie-$version-macos-desktop.zip',
@@ -230,33 +484,67 @@ class AppUpdate {
       path.endsWith('/MarcoMovie-$version-macos-desktop.zip') ||
       path.endsWith('/MarcoMovie-$version-macos.zip');
 
-  static bool isValidHarmonyosAssetName(String name, String version) {
-    final trimmed = name.trim();
-    if (!trimmed.endsWith('.hap')) return false;
-    return trimmed == 'MarcoMovie-$version-harmonyos-universal.hap' ||
-        trimmed == 'MarcoMovie-$version-harmonyos-arm64.hap' ||
-        trimmed == 'MarcoMovie-$version-harmonyos.hap';
+  /// Selects the verified Windows package matching [distribution].
+  UpdateAsset? windowsAssetFor(WindowsDistributionKind distribution) {
+    if (distribution == WindowsDistributionKind.portable) {
+      return windowsPortableAsset;
+    }
+    if (windowsSetupAsset != null) return windowsSetupAsset;
+    final url = windowsUrl;
+    final sha = checksum;
+    final len = size;
+    if (url != null && sha != null && len != null && len > 0) {
+      final name = url.pathSegments.isNotEmpty
+          ? url.pathSegments.last
+          : 'MarcoMovie-$version-windows-setup.exe';
+      return UpdateAsset(
+        fileName: name,
+        url: url,
+        checksum: sha,
+        size: len,
+      );
+    }
+    return null;
   }
 
-  static bool isValidHarmonyosAssetPath(String path, String version) {
-    final segments = path.split('/').where((s) => s.isNotEmpty).toList();
-    if (segments.isEmpty) return false;
-    return isValidHarmonyosAssetName(segments.last, version);
-  }
+  static bool isValidWindowsSetupAssetName(String name, String version) =>
+      name == 'MarcoMovie-$version-windows-x64-setup.exe' ||
+      name == 'MarcoMovie-$version-windows-setup.exe';
 
-  static Uri? trustedReleasePage(dynamic value) {
-    final uri = Uri.tryParse(value?.toString() ?? '');
+  static bool isValidWindowsPortableAssetName(String name, String version) =>
+      name == 'MarcoMovie-$version-windows-x64-portable.zip' ||
+      name == 'MarcoMovie-$version-windows-x64.zip';
+
+  static UpdateAsset? _parseVerifiedAsset(
+    Map? data, {
+    required bool github,
+    required List<String> allowedFileNames,
+  }) {
+    if (data == null) return null;
+    final digest = (github ? data['digest'] : data['sha256'])
+        ?.toString()
+        .replaceFirst('sha256:', '')
+        .trim();
+    final rawSize = data['size'];
+    final sizeVal = rawSize is int ? rawSize : null;
+    final uri =
+        trustedAsset(github ? data['browser_download_url'] : data['url']);
     if (uri == null ||
-        uri.scheme != 'https' ||
-        uri.userInfo.isNotEmpty ||
-        uri.hasFragment ||
-        (uri.hasPort && uri.port != 443)) {
+        digest == null ||
+        !RegExp(r'^[a-fA-F0-9]{64}$').hasMatch(digest) ||
+        sizeVal == null ||
+        sizeVal <= 0) {
       return null;
     }
-    if ((uri.host == 'github.com' &&
-            uri.path.startsWith('/Pilipala9919/MarcoMovie/releases/')) ||
-        (uri.host == 'marcotv.wlj9919.top' && uri.path.startsWith('/movie/'))) {
-      return uri;
+    for (final fileName in allowedFileNames) {
+      if (uri.path.endsWith('/$fileName')) {
+        return UpdateAsset(
+          fileName: fileName,
+          url: uri,
+          checksum: digest.toLowerCase(),
+          size: sizeVal,
+        );
+      }
     }
     return null;
   }
@@ -320,11 +608,22 @@ class AppUpdate {
     String platform = 'windows',
     bool? preferIos14,
   }) {
-    if (!github && json['platform'] != null && json['platform'] != platform) {
-      throw const FormatException('更新包平台不匹配');
+    if (!github) {
+      final declaredPlatform = json['platform']?.toString().trim();
+      if (platform == 'harmonyos' && declaredPlatform != 'harmonyos') {
+        throw const FormatException('更新包平台不匹配');
+      }
+      if (declaredPlatform != null &&
+          declaredPlatform.isNotEmpty &&
+          declaredPlatform != platform) {
+        throw const FormatException('更新包平台不匹配');
+      }
     }
     final raw =
         (github ? json['tag_name'] : json['versionName'])?.toString() ?? '';
+    if (github && platform == 'harmonyos' && !raw.startsWith('harmonyos-')) {
+      throw const FormatException('非鸿蒙正式发布标签');
+    }
     final normalized =
         raw.startsWith('$platform-') ? raw.substring(platform.length + 1) : raw;
     final match = RegExp(r'^[vV]?(\d+\.\d+\.\d+)(?:-preview)?$')
@@ -334,24 +633,35 @@ class AppUpdate {
     final useIos14 =
         platform == 'ios' && (preferIos14 ?? prefersIos14CompatPackage);
     final iosNames = _iosAssetNames(version, ios14: useIos14);
+    final winSetupNames = <String>[
+      'MarcoMovie-$version-windows-x64-setup.exe',
+      'MarcoMovie-$version-windows-setup.exe',
+    ];
+    final winPortableNames = <String>[
+      'MarcoMovie-$version-windows-x64-portable.zip',
+      'MarcoMovie-$version-windows-x64.zip',
+    ];
+    UpdateAsset? winSetup;
+    UpdateAsset? winPortable;
     Map? asset;
     String? matchedFileName;
     if (github) {
       final assets = json['assets'];
       if (assets is List) {
+        final byName = <String, Map>{};
         for (final item in assets.whereType<Map>()) {
           final itemName = (item['name'] ?? '').toString().trim();
-          if (platform == 'windows' &&
-              itemName == 'MarcoMovie-$version-windows-setup.exe') {
-            asset = item;
-            matchedFileName = itemName;
-          } else if (platform == 'ios' && iosNames.contains(itemName)) {
+          if (itemName.isNotEmpty) byName[itemName] = item;
+          if (platform == 'ios' && iosNames.contains(itemName)) {
             asset ??= item;
             matchedFileName ??= itemName;
           } else if (platform == 'harmonyos' &&
               isValidHarmonyosAssetName(itemName, version)) {
-            asset ??= item;
-            matchedFileName ??= itemName;
+            if (asset == null ||
+                itemName == 'MarcoMovie-$version-harmonyos-universal.hap') {
+              asset = item;
+              matchedFileName = itemName;
+            }
           } else if (platform == 'macos') {
             if (itemName == 'MarcoMovie-$version-macos-desktop.zip') {
               asset = item;
@@ -362,10 +672,64 @@ class AppUpdate {
             }
           }
         }
+        if (platform == 'windows') {
+          for (final name in winSetupNames) {
+            winSetup ??= _parseVerifiedAsset(
+              byName[name],
+              github: true,
+              allowedFileNames: winSetupNames,
+            );
+          }
+          for (final name in winPortableNames) {
+            winPortable ??= _parseVerifiedAsset(
+              byName[name],
+              github: true,
+              allowedFileNames: winPortableNames,
+            );
+          }
+        }
       }
-    } else if (platform == 'windows' && json['windows'] is Map) {
-      asset = json['windows'] as Map;
-      matchedFileName = 'MarcoMovie-$version-windows-setup.exe';
+    } else if (platform == 'windows') {
+      final pkgs = json['packages'] is Map ? json['packages'] as Map : null;
+      if (pkgs != null) {
+        for (final name in winSetupNames) {
+          final cand = pkgs[name];
+          if (cand is Map) {
+            winSetup ??= _parseVerifiedAsset(
+              cand,
+              github: false,
+              allowedFileNames: winSetupNames,
+            );
+          }
+        }
+        for (final name in winPortableNames) {
+          final cand = pkgs[name];
+          if (cand is Map) {
+            winPortable ??= _parseVerifiedAsset(
+              cand,
+              github: false,
+              allowedFileNames: winPortableNames,
+            );
+          }
+        }
+      }
+      if (winSetup == null && json['windows'] is Map) {
+        winSetup = _parseVerifiedAsset(
+          json['windows'] as Map,
+          github: false,
+          allowedFileNames: winSetupNames,
+        );
+      }
+      if (winPortable == null) {
+        final rawPortable = json['windowsPortable'] ?? json['portable'];
+        if (rawPortable is Map) {
+          winPortable = _parseVerifiedAsset(
+            rawPortable,
+            github: false,
+            allowedFileNames: winPortableNames,
+          );
+        }
+      }
     } else if (platform == 'ios') {
       if (useIos14) {
         final ios14Name = 'MarcoMovie-$version-ios14-unsigned.ipa';
@@ -451,6 +815,37 @@ class AppUpdate {
       if (asset == null && json['macos'] is Map) {
         asset = json['macos'] as Map;
       }
+    } else if (platform == 'harmonyos') {
+      if (json['packages'] is Map) {
+        final pkgs = json['packages'] as Map;
+        final cand = pkgs['MarcoMovie-$version-harmonyos-universal.hap'] ??
+            pkgs['MarcoMovie-$version-harmonyos.hap'];
+        if (cand is Map) asset = cand;
+      } else if (json['package'] is Map) {
+        asset = json['package'] as Map;
+      } else if (json['harmonyos'] is Map) {
+        asset = json['harmonyos'] as Map;
+      }
+    }
+    final releasePage = trustedReleasePage(
+      github ? json['html_url'] : (json['release_url'] ?? json['releaseUrl']),
+    );
+    if (platform == 'windows') {
+      final primary = winSetup ?? winPortable;
+      return AppUpdate(
+        version,
+        (json[github ? 'body' : 'notes'] ?? '').toString(),
+        winSetup?.url,
+        winSetup?.checksum,
+        winSetup?.size,
+        null,
+        null,
+        null,
+        releasePage,
+        primary?.fileName,
+        winSetup,
+        winPortable,
+      );
     }
     final data = asset ?? const <String, dynamic>{};
     final digest = (github ? data['digest'] : data['sha256'])
@@ -463,10 +858,6 @@ class AppUpdate {
         RegExp(r'^[a-fA-F0-9]{64}$').hasMatch(digest) &&
         size is int &&
         size > 0;
-    final verifiedWin = platform == 'windows' &&
-        uri != null &&
-        uri.path.endsWith('/MarcoMovie-$version-windows-setup.exe') &&
-        validDigest;
     final verifiedIos = platform == 'ios' &&
         uri != null &&
         iosNames.any((name) => uri.path.endsWith('/$name')) &&
@@ -477,13 +868,9 @@ class AppUpdate {
         validDigest;
     final verifiedHarmonyos = platform == 'harmonyos' &&
         uri != null &&
-        isValidHarmonyosAssetPath(uri.path, version) &&
+        isValidHarmonyosAssetPath(uri, version) &&
         validDigest;
-    final verified =
-        verifiedWin || verifiedIos || verifiedMacos || verifiedHarmonyos;
-    final releasePage = trustedReleasePage(
-      github ? json['html_url'] : (json['release_url'] ?? json['releaseUrl']),
-    );
+    final verified = verifiedIos || verifiedMacos || verifiedHarmonyos;
     final resolvedFileName = matchedFileName ??
         (uri != null && uri.pathSegments.isNotEmpty
             ? uri.pathSegments.last
@@ -491,7 +878,7 @@ class AppUpdate {
     return AppUpdate(
       version,
       (json[github ? 'body' : 'notes'] ?? '').toString(),
-      verifiedWin ? uri : null,
+      null,
       verified ? digest.toLowerCase() : null,
       verified ? size : null,
       verifiedIos ? uri : null,
@@ -515,8 +902,8 @@ class AppUpdate {
   static String _suffix(String platform) => switch (platform) {
         'windows' => 'windows-setup.exe',
         'ios' => 'ios-unsigned.ipa',
-        'harmonyos' => 'harmonyos-universal.hap',
         'macos' => 'macos.zip',
+        'harmonyos' => 'harmonyos-universal.hap',
         'android' => 'mobile.apk',
         _ => throw const FormatException('不支持的更新平台'),
       };
@@ -552,6 +939,15 @@ class AppUpdate {
                   (asset) {
                     final assetName = (asset['name'] ?? '').toString().trim();
                     final matchesName = expectedNames.contains(assetName) ||
+                        (platform == 'windows' &&
+                            (isValidWindowsSetupAssetName(
+                                  assetName,
+                                  release.version,
+                                ) ||
+                                isValidWindowsPortableAssetName(
+                                  assetName,
+                                  release.version,
+                                ))) ||
                         (platform == 'macos' && assetName == altMacosName) ||
                         (platform == 'harmonyos' &&
                             isValidHarmonyosAssetName(
@@ -564,7 +960,10 @@ class AppUpdate {
                 )) {
           continue;
         }
-        if (platform == 'windows' && release.windowsUrl == null ||
+        if (platform == 'windows' &&
+                release.windowsSetupAsset == null &&
+                release.windowsPortableAsset == null &&
+                release.windowsUrl == null ||
             platform == 'ios' && release.iosUrl == null ||
             platform == 'macos' && release.macosUrl == null ||
             platform == 'harmonyos' && release.harmonyosUrl == null) {
@@ -679,7 +1078,10 @@ class AppUpdate {
             platform: platform,
             preferIos14: useIos14,
           );
-          if (platform == 'windows' && release.windowsUrl == null ||
+          if (platform == 'windows' &&
+                  release.windowsSetupAsset == null &&
+                  release.windowsPortableAsset == null &&
+                  release.windowsUrl == null ||
               platform == 'ios' && release.iosUrl == null ||
               platform == 'macos' && release.macosUrl == null ||
               platform == 'harmonyos' && release.harmonyosUrl == null) {
@@ -945,6 +1347,136 @@ class AppUpdate {
     }
   }
 
+  /// Downloads the published Windows package matching [distribution]
+  /// (setup installer `.exe` or portable `.zip`) into an isolated staging
+  /// directory. Only a complete, SHA-256 verified file is exposed under its
+  /// published versioned filename.
+  Future<File> downloadWindows({
+    required WindowsDistributionKind distribution,
+    required Directory directory,
+    required UpdateCancellation cancellation,
+    http.Client? client,
+    bool cleanupOldPackages = true,
+    Duration connectionTimeout = const Duration(seconds: 15),
+    Duration stallTimeout = const Duration(seconds: 30),
+    Duration totalTimeout = const Duration(minutes: 10),
+    void Function(int received, int total)? onProgress,
+  }) async {
+    final asset = windowsAssetFor(distribution);
+    if (asset == null || trustedAsset(asset.url.toString()) == null) {
+      throw FormatException(
+        distribution == WindowsDistributionKind.portable
+            ? '缺少可信的 Windows 便携版更新包信息'
+            : '缺少可信的 Windows 安装版更新包信息',
+      );
+    }
+    final targetFile =
+        File('${directory.path}${Platform.pathSeparator}${asset.fileName}');
+    cancellation.check();
+    if (await targetFile.exists()) {
+      try {
+        await verifyAssetFile(targetFile, asset);
+        cancellation.check();
+        onProgress?.call(asset.size, asset.size);
+        return targetFile;
+      } on FormatException {
+        try {
+          await targetFile.delete();
+        } catch (_) {}
+      }
+    }
+    final effectiveClient = client ?? debugHttpClientOverride;
+    final transport = effectiveClient ?? http.Client();
+    final abort = Completer<void>();
+    final deadline = Timer(totalTimeout, () {
+      if (!abort.isCompleted) abort.complete();
+    });
+    cancellation.whenCancelled.then((_) {
+      if (!abort.isCompleted) abort.complete();
+    });
+    Directory? staging;
+    IOSink? sink;
+    try {
+      cancellation.check();
+      await directory.create(recursive: true);
+      staging = await directory.createTemp('.marco-win-update-');
+      final partial =
+          File('${staging.path}${Platform.pathSeparator}package.part');
+      final request =
+          http.AbortableRequest('GET', asset.url, abortTrigger: abort.future);
+      final response = await cancellation
+          .bind(transport.send(request).timeout(connectionTimeout));
+      if (response.statusCode != 200) {
+        throw HttpException('HTTP ${response.statusCode}');
+      }
+      if (response.contentLength != null &&
+          response.contentLength != asset.size) {
+        throw const FormatException('更新包大小与发布清单不一致');
+      }
+      var received = 0;
+      sink = partial.openWrite();
+      Future<void> receive() async {
+        await for (final chunk in response.stream.timeout(stallTimeout)) {
+          cancellation.check();
+          if (abort.isCompleted) throw TimeoutException('更新包下载超时');
+          received += chunk.length;
+          if (received > asset.size) {
+            throw const FormatException('更新包超过发布大小');
+          }
+          sink!.add(chunk);
+          onProgress?.call(received, asset.size);
+        }
+      }
+
+      await cancellation.bind(Future.any([
+        receive(),
+        abort.future.then<void>((_) => throw TimeoutException('更新包下载超时')),
+      ]));
+      await sink.flush();
+      await sink.close();
+      sink = null;
+      cancellation.check();
+      await verifyAssetFile(partial, asset);
+      cancellation.check();
+      if (await targetFile.exists()) {
+        try {
+          await targetFile.delete();
+        } catch (_) {}
+      }
+      final savedFile = await partial.rename(targetFile.path);
+      if (cleanupOldPackages) {
+        try {
+          await for (final entity in directory.list(followLinks: false)) {
+            if (entity is File && entity.uri != savedFile.uri) {
+              final name = entity.uri.pathSegments.isEmpty
+                  ? ''
+                  : entity.uri.pathSegments.last;
+              if (name != asset.fileName &&
+                  RegExp(
+                    r'^MarcoMovie-.*-windows-(?:x64-)?(?:setup\.exe|portable\.zip|x64\.zip)$',
+                  ).hasMatch(name)) {
+                try {
+                  await entity.delete();
+                } catch (_) {}
+              }
+            }
+          }
+        } catch (_) {}
+      }
+      return savedFile;
+    } finally {
+      deadline.cancel();
+      if (!abort.isCompleted) abort.complete();
+      if (effectiveClient == null) transport.close();
+      await sink?.close();
+      if (staging != null && await staging.exists()) {
+        try {
+          await staging.delete(recursive: true);
+        } catch (_) {}
+      }
+    }
+  }
+
   Future<File> _resolveUniqueMacosDestination(
     Directory directory,
     String expectedFileName,
@@ -981,6 +1513,18 @@ class AppUpdate {
 
   static Future<bool> revealMacosPackageInFinder(File file) =>
       const DefaultMacosWindowPlatformAdapter().revealInFinder(file.path);
+
+  static Future<void> verifyAssetFile(File file, UpdateAsset asset) async {
+    if (asset.size <= 0 ||
+        !RegExp(r'^[a-fA-F0-9]{64}$').hasMatch(asset.checksum) ||
+        await file.length() != asset.size) {
+      throw const FormatException('更新包大小不符或缺少校验信息');
+    }
+    final digest = await sha256.bind(file.openRead()).first;
+    if (digest.toString().toLowerCase() != asset.checksum.toLowerCase()) {
+      throw const FormatException('更新包校验失败，请重新下载');
+    }
+  }
 
   Future<void> verifyFile(File file) async {
     if ((windowsUrl == null &&

@@ -9,11 +9,12 @@ import 'package:fvp/mdk.dart' as mdk;
 import 'package:media_kit/media_kit.dart';
 
 import 'ohos_runtime.dart';
+import 'windows_tray_service.dart';
 
 /// User-selectable Windows desktop playback engine.
 ///
 /// - [mpv]: `media_kit` (`libmpv`) pipeline with Anime4K real-time shaders,
-///   custom HDR tone-mapping, and `dynaudnorm` vocal loudness filters.
+///   custom HDR tone-mapping, and parametric EQ vocal enhancement filters.
 /// - [mdk]: `libmdk` (`fvp`) native Direct3D 11 / MFT / DXVA zero-copy hardware
 ///   decoder & renderer, specifically tuned for Intel/AMD integrated GPUs (`核显`)
 ///   and thin-and-light Windows laptops.
@@ -23,7 +24,7 @@ enum WindowsPlaybackEngine {
     labelZh: 'MPV 旗舰画质（libmpv）',
     shortLabel: 'MPV',
     descriptionZh:
-        '支持 Anime4K 实时超分、自定义 HDR 色调映射与人声响度增强，适合独立显卡与进阶画质调校',
+        '支持 Anime4K 实时超分、自定义 HDR 色调映射与人声均衡增强，适合独立显卡与进阶画质调校',
   ),
   mdk(
     id: 'mdk',
@@ -332,8 +333,50 @@ class _RealMdkNativeBackend implements MdkNativeBackend {
 
   @override
   Future<int> updateTexture({int? width, int? height}) {
-    if (_disposed) return Future<int>.value(-1);
+    return updateTextureCancellable(width: width, height: height);
+  }
+
+  /// Splits `ReleaseRT` and `CreateRT` across an explicit cancellation / native
+  /// teardown checkpoint so a delayed `ReleaseRT` reply during episode switch
+  /// or window close can NEVER invoke a new `CreateRT` after disposal or native
+  /// window destruction has begun.
+  Future<int> updateTextureCancellable({
+    int? width,
+    int? height,
+    bool Function()? shouldCancel,
+  }) async {
+    bool cancelled() =>
+        _disposed ||
+        WindowsTrayService.isNativeDestroyStarted ||
+        (shouldCancel?.call() ?? false);
+    if ((_inner.textureId.value ?? -1) >= 0) {
+      await _inner.updateTexture(width: -1);
+    }
+    if ((width != null && width <= 0) || (height != null && height <= 0)) {
+      return -1;
+    }
+    if (cancelled()) {
+      return -1;
+    }
+    final size = await _inner.textureSize;
+    if (size == null || cancelled()) {
+      return -1;
+    }
     return _inner.updateTexture(width: width, height: height);
+  }
+
+  /// Safely unblocks a pre-first-frame `updateTexture()` that is still awaiting
+  /// `_videoSize.future` without freeing the native `mdkPlayerAPI*` handle. If
+  /// `CreateRT` IPC is already in flight, setting `media = ''` does not delete
+  /// the handle so the in-flight texture completes safely before disposal.
+  void cancelPendingTextureWait() {
+    if (_disposed) return;
+    try {
+      _inner.state = mdk.PlaybackState.stopped;
+      if (_inner.textureId.value == null) {
+        _inner.media = '';
+      }
+    } catch (_) {}
   }
 
   @override
@@ -346,6 +389,18 @@ class _RealMdkNativeBackend implements MdkNativeBackend {
     await _statusCtl.close();
     await _stateCtl.close();
     await _eventCtl.close();
+    // If native window destruction has already started (e.g. bounded exit timed
+    // out while a slow texture callback was still in flight), do NOT issue new
+    // Flutter MethodChannel IPC (`ReleaseRT`) against a tearing-down messenger
+    // or delete `mdkPlayerAPI*` ahead of `~FvpPlugin()`; `~FvpPlugin()` safely
+    // destroys remaining TexturePlayer wrappers on the still-live handle before
+    // FlutterEngineShutdown terminates the isolate.
+    if (WindowsTrayService.isNativeDestroyStarted) {
+      try {
+        _inner.state = mdk.PlaybackState.stopped;
+      } catch (_) {}
+      return;
+    }
     await _inner.disposeAsync();
   }
 }
@@ -444,7 +499,13 @@ class MdkPlatformPlayer extends PlatformPlayer {
   StreamSubscription<({int error, String category, String detail})>? _eventSub;
   Timer? _positionTimer;
   int _openGeneration = 0;
+  int _texturePreparedGeneration = -1;
+  Future<void>? _textureUpdateFuture;
+  Completer<void>? _pendingPrepareCancel;
   bool _disposed = false;
+  bool _acceptingBackendEvents = true;
+  bool _userRequestedStop = false;
+  bool _demuxerReachedEnd = false;
   bool _isLiveHint = false;
   String _activeVideoDecoderName = '';
 
@@ -516,14 +577,14 @@ class MdkPlatformPlayer extends PlatformPlayer {
 
   void _attachBackendListeners() {
     _statusSub = _backend.onStatusChanged.listen((ev) {
-      if (_disposed) return;
+      if (_disposed || !_acceptingBackendEvents) return;
       final oldS = mdk.MediaStatus(ev.oldStatus);
       final newS = mdk.MediaStatus(ev.newStatus);
 
       if (!oldS.test(mdk.MediaStatus.loaded) &&
           newS.test(mdk.MediaStatus.loaded)) {
         _syncMediaSnapshot();
-        unawaited(_refreshTextureSafely());
+        unawaited(_refreshTextureSafely(generation: _openGeneration));
       }
 
       final nowBuffering = newS.test(mdk.MediaStatus.buffering) ||
@@ -538,18 +599,27 @@ class MdkPlatformPlayer extends PlatformPlayer {
         bufferingController.add(false);
       }
 
-      if (!oldS.test(mdk.MediaStatus.end) &&
-          newS.test(mdk.MediaStatus.end) &&
+      if (!newS.test(mdk.MediaStatus.end)) {
+        _demuxerReachedEnd = false;
+      } else if (!oldS.test(mdk.MediaStatus.end) &&
           !newS.test(mdk.MediaStatus.seeking)) {
-        _stopPositionTimer();
-        state = state.copyWith(
-          playing: false,
-          buffering: false,
-          completed: true,
-        );
-        playingController.add(false);
-        bufferingController.add(false);
-        completedController.add(true);
+        _demuxerReachedEnd = true;
+        final posMs = math.max(0, _backend.positionMs);
+        final bufMs = math.max(0, _backend.bufferedMs);
+        final durMs = state.duration.inMilliseconds;
+        // In libmdk, MediaStatus.end is set as soon as the demuxer reaches EOF
+        // (e.g. after seeking into the last 16-32s buffer window), while frames
+        // are still buffered and playing. Only mark completed immediately when
+        // no buffered tail remains to be played; otherwise _emitPositionAndBuffer
+        // completes playback once the clock reaches the end of the media.
+        final stillHasBufferedPlayback =
+            bufMs > 500 ||
+            (newS.test(mdk.MediaStatus.buffered) &&
+                durMs > 2000 &&
+                posMs < durMs - 1500);
+        if (!stillHasBufferedPlayback) {
+          _markPlaybackCompleted();
+        }
       }
 
       if (!oldS.test(mdk.MediaStatus.invalid) &&
@@ -570,6 +640,25 @@ class MdkPlatformPlayer extends PlatformPlayer {
       } else {
         _stopPositionTimer();
       }
+      if (nextState == mdk.PlaybackState.stopped &&
+          _acceptingBackendEvents &&
+          !_userRequestedStop &&
+          !state.completed &&
+          _demuxerReachedEnd) {
+        final posMs = math.max(0, _backend.positionMs);
+        final bufDeltaMs = math.max(0, _backend.bufferedMs);
+        final durMs = state.duration.inMilliseconds;
+        if (bufDeltaMs <= 500 &&
+            (durMs <= 0 || posMs >= durMs - 1500)) {
+          final pos = Duration(milliseconds: posMs);
+          final buf = Duration(milliseconds: posMs + bufDeltaMs);
+          state = state.copyWith(position: pos, buffer: buf);
+          positionController.add(pos);
+          bufferController.add(buf);
+          _markPlaybackCompleted();
+          return;
+        }
+      }
       if (state.playing != playing) {
         state = state.copyWith(
           playing: playing,
@@ -580,32 +669,81 @@ class MdkPlatformPlayer extends PlatformPlayer {
     });
 
     _eventSub = _backend.onEvent.listen((ev) {
-      if (_disposed) return;
-      if (ev.category == 'decoder.video' && ev.detail.isNotEmpty) {
+      if (_disposed || !_acceptingBackendEvents) return;
+      if (ev.error < 0) {
+        if (ev.category == 'reader.open' ||
+            ev.category == 'decoder.video' ||
+            ev.category == 'reader.read') {
+          final detail = ev.detail.trim();
+          errorController.add(
+            detail.isNotEmpty
+                ? 'MDK ${ev.category}: $detail (${ev.error})'
+                : 'MDK failed to open stream (${ev.category}: ${ev.error})',
+          );
+        }
+      } else if (ev.category == 'decoder.video' && ev.detail.isNotEmpty) {
         _activeVideoDecoderName = ev.detail;
         _syncMediaSnapshot();
       } else if (ev.category == 'reader.buffering') {
         _emitPositionAndBuffer();
-      } else if (ev.error < 0 &&
-          (ev.category == 'reader.open' ||
-              ev.category == 'decoder.video' ||
-              ev.category == 'reader.read')) {
-        final detail = ev.detail.trim();
-        errorController.add(
-          detail.isNotEmpty
-              ? 'MDK ${ev.category}: $detail (${ev.error})'
-              : 'MDK failed to open stream (${ev.category}: ${ev.error})',
-        );
       }
     });
   }
 
-  Future<void> _refreshTextureSafely() async {
-    if (_disposed) return;
+  Future<void> _refreshTextureSafely({int? generation}) async {
+    final targetGen = generation ?? _openGeneration;
+    if (_disposed ||
+        targetGen != _openGeneration ||
+        WindowsTrayService.isNativeDestroyStarted) {
+      return;
+    }
+    final previous = _textureUpdateFuture;
+    if (_texturePreparedGeneration == targetGen) {
+      if (previous != null) {
+        try {
+          await previous;
+        } catch (_) {}
+      }
+      return;
+    }
+    if (previous != null) {
+      try {
+        await previous;
+      } catch (_) {}
+      if (_disposed ||
+          targetGen != _openGeneration ||
+          _texturePreparedGeneration == targetGen ||
+          WindowsTrayService.isNativeDestroyStarted) {
+        return;
+      }
+    }
+    _texturePreparedGeneration = targetGen;
+    final op = () async {
+      try {
+        if (_backend is _RealMdkNativeBackend) {
+          await (_backend as _RealMdkNativeBackend).updateTextureCancellable(
+            shouldCancel: () =>
+                _disposed ||
+                targetGen != _openGeneration ||
+                WindowsTrayService.isNativeDestroyStarted,
+          );
+        } else {
+          await _backend.updateTexture();
+        }
+      } catch (e) {
+        if (_texturePreparedGeneration == targetGen) {
+          _texturePreparedGeneration = -1;
+        }
+        debugPrint('MdkPlatformPlayer updateTexture warning: $e');
+      }
+    }();
+    _textureUpdateFuture = op;
     try {
-      await _backend.updateTexture();
-    } catch (e) {
-      debugPrint('MdkPlatformPlayer updateTexture warning: $e');
+      await op;
+    } finally {
+      if (identical(_textureUpdateFuture, op)) {
+        _textureUpdateFuture = null;
+      }
     }
   }
 
@@ -677,6 +815,20 @@ class MdkPlatformPlayer extends PlatformPlayer {
     _positionTimer = null;
   }
 
+  void _markPlaybackCompleted() {
+    if (_disposed || state.completed) return;
+    _demuxerReachedEnd = false;
+    _stopPositionTimer();
+    state = state.copyWith(
+      playing: false,
+      buffering: false,
+      completed: true,
+    );
+    playingController.add(false);
+    bufferingController.add(false);
+    completedController.add(true);
+  }
+
   void _emitPositionAndBuffer() {
     if (_disposed) return;
     final posMs = math.max(0, _backend.positionMs);
@@ -693,6 +845,14 @@ class MdkPlatformPlayer extends PlatformPlayer {
         state = state.copyWith(duration: dur);
         durationController.add(dur);
       }
+    }
+    if (_demuxerReachedEnd &&
+        state.playing &&
+        !state.completed &&
+        state.duration > Duration.zero &&
+        bufDeltaMs <= 250 &&
+        posMs >= state.duration.inMilliseconds - 300) {
+      _markPlaybackCompleted();
     }
   }
 
@@ -736,6 +896,19 @@ class MdkPlatformPlayer extends PlatformPlayer {
     _applyBufferPolicy(kernelStrategy: kernelStrategy, isLive: isLive);
   }
 
+  /// Cancels any in-flight `prepare()` call so superseding opens (e.g. episode
+  /// switch while a hanging stream is still preparing) or teardown are never
+  /// head-of-line blocked.
+  void cancelPendingOpen() {
+    _openGeneration++;
+    _acceptingBackendEvents = false;
+    final pending = _pendingPrepareCancel;
+    _pendingPrepareCancel = null;
+    if (pending != null && !pending.isCompleted) {
+      pending.complete();
+    }
+  }
+
   @override
   Future<void> open(Playable playable, {bool play = true}) async {
     if (_disposed) return;
@@ -752,8 +925,16 @@ class MdkPlatformPlayer extends PlatformPlayer {
       return;
     }
 
+    final prevCancel = _pendingPrepareCancel;
+    if (prevCancel != null && !prevCancel.isCompleted) {
+      prevCancel.complete();
+    }
+    final cancel = Completer<void>();
+    _pendingPrepareCancel = cancel;
     final gen = ++_openGeneration;
     _stopPositionTimer();
+    _userRequestedStop = false;
+    _demuxerReachedEnd = false;
     _activeVideoDecoderName = '';
 
     final mergedHeaders = <String, String>{};
@@ -808,10 +989,20 @@ class MdkPlatformPlayer extends PlatformPlayer {
     completedController.add(false);
     positionController.add(Duration(milliseconds: startMs));
 
+    _acceptingBackendEvents = false;
     _backend.state = mdk.PlaybackState.stopped;
     _backend.media = media.uri;
-    final ret = await _backend.prepare(position: startMs);
-    if (_disposed || gen != _openGeneration) return;
+    _acceptingBackendEvents = true;
+    final prepareFuture = _backend.prepare(position: startMs);
+    unawaited(prepareFuture.then<void>((_) {}, onError: (_) {}));
+    final ret = await Future.any<int?>([
+      prepareFuture,
+      cancel.future.then<int?>((_) => null),
+    ]);
+    if (identical(_pendingPrepareCancel, cancel)) {
+      _pendingPrepareCancel = null;
+    }
+    if (_disposed || gen != _openGeneration || ret == null) return;
     if (ret < 0) {
       state = state.copyWith(playing: false, buffering: false);
       bufferingController.add(false);
@@ -820,7 +1011,7 @@ class MdkPlatformPlayer extends PlatformPlayer {
     }
 
     _syncMediaSnapshot();
-    await _refreshTextureSafely();
+    await _refreshTextureSafely(generation: gen);
     if (_disposed || gen != _openGeneration) return;
 
     _backend.playbackRate = state.rate.clamp(0.25, 4.0);
@@ -842,7 +1033,9 @@ class MdkPlatformPlayer extends PlatformPlayer {
   @override
   Future<void> stop() async {
     if (_disposed) return;
-    _openGeneration++;
+    _userRequestedStop = true;
+    cancelPendingOpen();
+    _demuxerReachedEnd = false;
     _stopPositionTimer();
     _backend.state = mdk.PlaybackState.stopped;
     state = state.copyWith(
@@ -858,6 +1051,7 @@ class MdkPlatformPlayer extends PlatformPlayer {
   @override
   Future<void> play() async {
     if (_disposed) return;
+    _userRequestedStop = false;
     _backend.state = mdk.PlaybackState.playing;
     state = state.copyWith(playing: true, completed: false);
     playingController.add(true);
@@ -885,6 +1079,7 @@ class MdkPlatformPlayer extends PlatformPlayer {
   @override
   Future<void> seek(Duration duration) async {
     if (_disposed) return;
+    _demuxerReachedEnd = false;
     final targetMs = math.max(0, duration.inMilliseconds);
     final clamped = Duration(milliseconds: targetMs);
     state = state.copyWith(position: clamped, completed: false);
@@ -989,7 +1184,8 @@ class MdkPlatformPlayer extends PlatformPlayer {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
-    _openGeneration++;
+    _userRequestedStop = true;
+    cancelPendingOpen();
     _stopPositionTimer();
     await _statusSub?.cancel();
     await _stateSub?.cancel();
@@ -997,6 +1193,21 @@ class MdkPlatformPlayer extends PlatformPlayer {
     _statusSub = null;
     _stateSub = null;
     _eventSub = null;
+    try {
+      _backend.state = mdk.PlaybackState.stopped;
+    } catch (_) {}
+    final inFlightTexture = _textureUpdateFuture;
+    if (inFlightTexture != null) {
+      if (_backend is _RealMdkNativeBackend) {
+        (_backend as _RealMdkNativeBackend).cancelPendingTextureWait();
+      }
+      // Never delete the native `mdkPlayerAPI*` handle while an outstanding
+      // `updateTexture()` still owns it; wait unconditionally for the texture
+      // future to settle before invoking `_backend.disposeAsync()`.
+      try {
+        await inFlightTexture;
+      } catch (_) {}
+    }
     try {
       await _backend.disposeAsync();
     } catch (e) {

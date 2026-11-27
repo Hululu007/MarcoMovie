@@ -1,4 +1,6 @@
 // Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -78,14 +80,19 @@ enum WindowsQualityPreset {
   }
 }
 
-/// 4-tier dynamic loudness normalization & vocal dialogue boost presets for
-/// multi-channel (5.1/7.1) movie tracks on stereo desktop speakers/headphones.
+/// 4-tier parametric EQ vocal dialogue enhancement presets for stereo and
+/// multi-channel (5.1/7.1) movie tracks on desktop speakers/headphones.
+///
+/// Uses mpv's built-in `format=format=floatp` bridge (backed by `libswresample`)
+/// ahead of `lavfi=[equalizer=...]` so it runs cleanly on shipped LGPL
+/// `libmpv-2.dll` builds that omit `dynaudnorm` and `lavfi`'s `aresample`.
+/// Keeps `volume-max` at `100` (never fakes enhancement by raising volume).
 enum AudioLoudnessPreset {
   off(
     id: 'off',
     labelZh: '关闭',
     shortLabelZh: '关闭',
-    descriptionZh: '原声动态范围，不启用响度增强',
+    descriptionZh: '原声输出，不启用人声均衡增强',
     volumeMax: '100',
     audioFilter: '',
   ),
@@ -93,25 +100,28 @@ enum AudioLoudnessPreset {
     id: 'light',
     labelZh: '轻度',
     shortLabelZh: '轻度',
-    descriptionZh: '温和动态响度压缩，保留较多电影动态起伏',
-    volumeMax: '200',
-    audioFilter: 'lavfi=[dynaudnorm=f=250:g=21:p=0.90:m=4.0]',
+    descriptionZh: '轻度人声频段清晰化，温和收敛低频轰鸣并预留防削顶余量',
+    volumeMax: '100',
+    audioFilter:
+        'format=format=floatp,lavfi=[equalizer=f=90:t=q:w=0.85:g=-3.0,equalizer=f=1400:t=q:w=0.85:g=0.35,equalizer=f=3200:t=q:w=1.1:g=0.35]',
   ),
   standard(
     id: 'standard',
     labelZh: '标准',
     shortLabelZh: '标准',
-    descriptionZh: '均衡提升对白清晰度与低声部细节（推荐）',
-    volumeMax: '200',
-    audioFilter: 'lavfi=[dynaudnorm=f=150:g=15:p=0.95]',
+    descriptionZh: '均衡突出人声对白、抑制低频浑浊与刺耳高频，兼顾高电平防削顶（推荐）',
+    volumeMax: '100',
+    audioFilter:
+        'format=format=floatp,lavfi=[equalizer=f=90:t=q:w=0.85:g=-5.5,equalizer=f=180:t=q:w=1.5:g=-0.8,equalizer=f=1400:t=q:w=0.85:g=0.65,equalizer=f=3200:t=q:w=1.1:g=0.6,equalizer=f=9000:t=q:w=1.0:g=-1.2]',
   ),
   cinemaVocal(
     id: 'cinemaVocal',
     labelZh: '影院人声',
     shortLabelZh: '影院人声',
-    descriptionZh: '强效人声对白增强与夜间峰值控制，抑制爆炸声突刺',
-    volumeMax: '200',
-    audioFilter: 'lavfi=[dynaudnorm=f=100:g=9:p=0.95:m=12.0]',
+    descriptionZh: '强力抑制电影低频轰鸣与刺耳高频以凸显中置人声穿透力，预留防削顶余量',
+    volumeMax: '100',
+    audioFilter:
+        'format=format=floatp,lavfi=[equalizer=f=85:t=q:w=0.85:g=-8.5,equalizer=f=180:t=q:w=1.5:g=-1.2,equalizer=f=1400:t=q:w=0.85:g=0.9,equalizer=f=3200:t=q:w=1.1:g=0.85,equalizer=f=9000:t=q:w=1.0:g=-2.5]',
   );
 
   final String id;
@@ -157,7 +167,7 @@ typedef WindowsMpvPropertySetter = Future<void> Function(
 /// Manages Windows `libmpv` video quality presets, HDR tone-mapping fallback
 /// chain, smart `hwdec` linkage (zero-copy `d3d11va`/`auto-safe` vs
 /// `d3d11va-copy` for Anime4K / compat kernel / software filters), and 4-tier
-/// `dynaudnorm` vocal loudness boosting.
+/// parametric EQ vocal enhancement with runtime audio-filter failure recovery.
 class WindowsVideoQualityController extends ChangeNotifier {
   static const String prefKeyQualityPreset = 'windows_video_quality_preset';
   static const String prefKeyLoudnessPreset = 'windows_audio_loudness_preset';
@@ -171,7 +181,10 @@ class WindowsVideoQualityController extends ChangeNotifier {
   ];
 
   static const String fallbackAudioFilter =
-      'lavfi=[dynaudnorm=f=150:g=15:p=0.95]';
+      'format=format=floatp,lavfi=[equalizer=f=90:t=q:w=0.85:g=-4.5,equalizer=f=1400:t=q:w=0.9:g=0.75]';
+
+  static const String audioFallbackWarningZh =
+      '当前播放器不支持人声增强滤镜，已自动恢复原声';
 
   final TargetPlatform? platformOverride;
   final bool? isOhosOverride;
@@ -179,7 +192,14 @@ class WindowsVideoQualityController extends ChangeNotifier {
   final bool? isNativePlayerOverride;
   final WindowsMpvPropertySetter? propertySetterOverride;
   final bool persistLocally;
+  final Duration? recoverySettleDelayOverride;
   SharedPreferences? _prefs;
+
+  /// Optional test hook to inject a custom `af` graph (e.g., an unavailable
+  /// filter like `lavfi=[dynaudnorm=f=150:g=15:p=0.95]`) when testing runtime
+  /// recovery against real `libmpv-2.dll`.
+  @visibleForTesting
+  String? debugAudioFilterOverride;
 
   WindowsQualityPreset _qualityPreset;
   AudioLoudnessPreset _loudnessPreset;
@@ -187,9 +207,23 @@ class WindowsVideoQualityController extends ChangeNotifier {
   String? _effectiveToneMapping;
   String _effectiveHwdec = 'auto-safe';
   String? _lastWarning;
+  String _activeAppliedAudioFilter = '';
   bool _disposed = false;
   int _qualityOpGen = 0;
   int _loudnessOpGen = 0;
+  int _recoverySessionGen = 0;
+  int _recoveryTaskSeq = 0;
+  int? _activeRecoveryTaskId;
+  int? _activeRecoverySessionGen;
+  Player? _activeRecoveryPlayer;
+  bool _wasAttached = false;
+  bool _audioFilterRecoverySuspended = false;
+  Player? _attachedPlayer;
+  VoidCallback? _onLoudnessFallbackToOff;
+  StreamSubscription<Track>? _trackSub;
+  StreamSubscription<PlayerLog>? _logSub;
+  Timer? _pendingAudioRecoveryTimer;
+  String? _lastActiveAudioTrackId;
 
   WindowsVideoQualityController({
     this.platformOverride,
@@ -197,6 +231,7 @@ class WindowsVideoQualityController extends ChangeNotifier {
     this.isWebOverride,
     this.isNativePlayerOverride,
     this.propertySetterOverride,
+    this.recoverySettleDelayOverride,
     SharedPreferences? prefs,
     this.persistLocally = true,
     WindowsQualityPreset initialQualityPreset = WindowsQualityPreset.balancedHq,
@@ -212,6 +247,8 @@ class WindowsVideoQualityController extends ChangeNotifier {
   String? get effectiveToneMapping => _effectiveToneMapping;
   String get effectiveHwdec => _effectiveHwdec;
   String? get lastWarning => _lastWarning;
+  String get activeAppliedAudioFilter => _activeAppliedAudioFilter;
+  String? get lastActiveAudioTrackId => _lastActiveAudioTrackId;
 
   /// Base `(scale, cscale)` corresponding to the active Windows quality preset,
   /// suitable for injecting into `Anime4kController.windowsBaseScalerResolver`.
@@ -534,7 +571,316 @@ class WindowsVideoQualityController extends ChangeNotifier {
     return true;
   }
 
-  /// Applies [next] audio loudness & vocal dialogue preset to [player].
+  /// Returns true when an mpv log entry specifically indicates an audio-chain
+  /// filter failure (never matching video-filter `vf` failures or shared
+  /// generic `lavfi` / `ffmpeg` / `user_filter_wrapper` lines).
+  static bool isAudioFilterFailureLog(PlayerLog entry) {
+    return isAudioFilterFailureMessage(entry.text, prefix: entry.prefix);
+  }
+
+  /// Returns true when an mpv log or error line explicitly indicates an audio
+  /// filter initialization/runtime failure (excluding video-only filter errors
+  /// such as `vf: Disabling filter ...` or generic `lavfi` graph errors).
+  static bool isAudioFilterFailureMessage(String text, {String? prefix}) {
+    final normalizedPrefix = (prefix ?? '').trim().toLowerCase();
+    final lower = text.toLowerCase();
+    if (normalizedPrefix == 'vf' ||
+        normalizedPrefix == 'vo' ||
+        normalizedPrefix == 'vd' ||
+        normalizedPrefix == 'sub') {
+      return false;
+    }
+    if (lower.startsWith('vf:') ||
+        lower.startsWith('[vf/') ||
+        lower.startsWith('vo:') ||
+        lower.startsWith('[vo/')) {
+      return false;
+    }
+    if (lower.contains('audio filter initialized failed') ||
+        lower.contains('failed to initialize audio filter') ||
+        lower.contains('creating audio filter')) {
+      return true;
+    }
+    if (lower.contains('disabling filter')) {
+      return normalizedPrefix == 'af' ||
+          normalizedPrefix == 'ao' ||
+          normalizedPrefix == 'ad' ||
+          lower.startsWith('af:') ||
+          lower.startsWith('[af/') ||
+          lower.contains('audio filter');
+    }
+    return false;
+  }
+
+  void _cancelTrackSubscription() {
+    final prev = _trackSub;
+    _trackSub = null;
+    if (prev != null) {
+      unawaited(prev.cancel());
+    }
+  }
+
+  void _subscribePlayerTrack(Player player) {
+    _cancelTrackSubscription();
+    if (_disposed ||
+        _audioFilterRecoverySuspended ||
+        !identical(_attachedPlayer, player)) {
+      return;
+    }
+    final subscribedSessionGen = _recoverySessionGen;
+    try {
+      _trackSub = player.stream.track.listen((track) {
+        if (_disposed ||
+            _audioFilterRecoverySuspended ||
+            subscribedSessionGen != _recoverySessionGen ||
+            !identical(_attachedPlayer, player)) {
+          return;
+        }
+        final id = track.audio.id.trim();
+        if (id.isNotEmpty && id != 'no' && id != 'auto') {
+          _lastActiveAudioTrackId = id;
+        }
+      });
+    } catch (_) {}
+  }
+
+  void _cancelLogSubscription() {
+    final prev = _logSub;
+    _logSub = null;
+    if (prev != null) {
+      unawaited(prev.cancel());
+    }
+  }
+
+  void _subscribePlayerLog(Player player) {
+    _cancelLogSubscription();
+    if (_disposed ||
+        _audioFilterRecoverySuspended ||
+        !identical(_attachedPlayer, player)) {
+      return;
+    }
+    final subscribedSessionGen = _recoverySessionGen;
+    try {
+      _logSub = player.stream.log.listen((entry) {
+        if (_disposed ||
+            _audioFilterRecoverySuspended ||
+            subscribedSessionGen != _recoverySessionGen ||
+            !identical(_attachedPlayer, player)) {
+          return;
+        }
+        if (_loudnessPreset == AudioLoudnessPreset.off &&
+            _activeAppliedAudioFilter.isEmpty) {
+          return;
+        }
+        if (!isAudioFilterFailureLog(entry)) return;
+        final combined = '${entry.prefix}: ${entry.text}';
+        _pendingAudioRecoveryTimer?.cancel();
+        _pendingAudioRecoveryTimer = null;
+        unawaited(
+          handleRuntimeAudioFilterFailure(
+            player,
+            reason: combined,
+            immediate: true,
+            expectedRecoveryGen: subscribedSessionGen,
+          ),
+        );
+      });
+    } catch (_) {}
+  }
+
+  /// Attaches runtime listeners to [player] so active audio track selection is
+  /// tracked and any asynchronous mpv audio-filter initialization failure
+  /// immediately clears `af`, restores original sound on the active movie, and
+  /// synchronizes UI state back to [AudioLoudnessPreset.off].
+  void attachPlayer(
+    Player player, {
+    VoidCallback? onLoudnessFallbackToOff,
+  }) {
+    if (_disposed) return;
+    detachPlayer();
+    if (!isAvailableForPlayer(player)) return;
+    _wasAttached = true;
+    _attachedPlayer = player;
+    _audioFilterRecoverySuspended = false;
+    _onLoudnessFallbackToOff = onLoudnessFallbackToOff;
+    try {
+      final currentId = player.state.track.audio.id.trim();
+      if (currentId.isNotEmpty && currentId != 'no' && currentId != 'auto') {
+        _lastActiveAudioTrackId = currentId;
+      }
+    } catch (_) {}
+    _subscribePlayerTrack(player);
+    _subscribePlayerLog(player);
+  }
+
+  /// Detaches any runtime audio-filter monitoring subscriptions and invalidates
+  /// any in-flight or debounced failure recovery from the prior player/engine.
+  void detachPlayer() {
+    _recoverySessionGen++;
+    _activeRecoveryTaskId = null;
+    _activeRecoverySessionGen = null;
+    _activeRecoveryPlayer = null;
+    _audioFilterRecoverySuspended = false;
+    _pendingAudioRecoveryTimer?.cancel();
+    _pendingAudioRecoveryTimer = null;
+    _cancelTrackSubscription();
+    _cancelLogSubscription();
+    _attachedPlayer = null;
+    _onLoudnessFallbackToOff = null;
+  }
+
+  /// Clears per-media remembered audio track ID, drops already-queued logs and
+  /// track-selection events from the outgoing media session, and invalidates
+  /// any pending or in-flight failure recovery from the previous episode/media
+  /// so delayed events never overwrite or block the newly opened session.
+  void onMediaChanged({bool suspendRecoveryUntilOpen = false}) {
+    _recoverySessionGen++;
+    _activeRecoveryTaskId = null;
+    _activeRecoverySessionGen = null;
+    _activeRecoveryPlayer = null;
+    _pendingAudioRecoveryTimer?.cancel();
+    _pendingAudioRecoveryTimer = null;
+    _lastActiveAudioTrackId = null;
+    _cancelTrackSubscription();
+    _cancelLogSubscription();
+    if (suspendRecoveryUntilOpen) {
+      _audioFilterRecoverySuspended = true;
+    } else if (!_audioFilterRecoverySuspended && _attachedPlayer != null) {
+      _subscribePlayerTrack(_attachedPlayer!);
+      _subscribePlayerLog(_attachedPlayer!);
+    }
+  }
+
+  /// Re-enables runtime audio-filter failure recovery right before opening the
+  /// next media item after [onMediaChanged] suspended it during teardown,
+  /// starting fresh log and track subscriptions so queued events from the
+  /// outgoing media cannot leak into the new session.
+  void resumeAudioFilterRecovery() {
+    if (_disposed) return;
+    _audioFilterRecoverySuspended = false;
+    if (_attachedPlayer != null) {
+      _subscribePlayerTrack(_attachedPlayer!);
+      _subscribePlayerLog(_attachedPlayer!);
+    }
+  }
+
+  String _resolveRestoreAudioTrackId(Player player) {
+    String? candidate;
+    try {
+      final currentId = player.state.track.audio.id.trim();
+      if (currentId.isNotEmpty && currentId != 'no' && currentId != 'auto') {
+        candidate = currentId;
+      }
+    } catch (_) {}
+    candidate ??= _lastActiveAudioTrackId;
+    if (candidate == null || candidate.isEmpty) {
+      return 'auto';
+    }
+    try {
+      final audioTracks = player.state.tracks.audio;
+      if (audioTracks.isNotEmpty) {
+        final exists = audioTracks.any((t) => t.id == candidate);
+        if (!exists) {
+          return 'auto';
+        }
+      }
+    } catch (_) {}
+    return candidate;
+  }
+
+  /// Recovers active audio playback when `libmpv` reports an asynchronous
+  /// audio-filter initialization failure: strips `af`, re-selects the active
+  /// audio track (`aid=no` -> `aid=<track|auto>`), updates preset state to
+  /// [AudioLoudnessPreset.off], persists `off`, and notifies listeners/UI.
+  Future<bool> handleRuntimeAudioFilterFailure(
+    Player player, {
+    String reason = '',
+    bool immediate = true,
+    int? expectedRecoveryGen,
+  }) async {
+    if (_disposed ||
+        _audioFilterRecoverySuspended ||
+        !isAvailableForPlayer(player)) {
+      return false;
+    }
+    if (_wasAttached && !identical(_attachedPlayer, player)) {
+      return false;
+    }
+    final recoveryGen = expectedRecoveryGen ?? _recoverySessionGen;
+    if (recoveryGen != _recoverySessionGen) {
+      return false;
+    }
+    if (_loudnessPreset == AudioLoudnessPreset.off &&
+        _activeAppliedAudioFilter.isEmpty) {
+      return false;
+    }
+    if (_activeRecoveryTaskId != null &&
+        _activeRecoverySessionGen == recoveryGen &&
+        identical(_activeRecoveryPlayer, player)) {
+      return false;
+    }
+    final setProp = _resolveSetter(player);
+    if (setProp == null) return false;
+
+    _pendingAudioRecoveryTimer?.cancel();
+    _pendingAudioRecoveryTimer = null;
+    final taskId = ++_recoveryTaskSeq;
+    _activeRecoveryTaskId = taskId;
+    _activeRecoverySessionGen = recoveryGen;
+    _activeRecoveryPlayer = player;
+    final gen = ++_loudnessOpGen;
+    bool isStale() =>
+        _disposed ||
+        _audioFilterRecoverySuspended ||
+        _activeRecoveryTaskId != taskId ||
+        gen != _loudnessOpGen ||
+        recoveryGen != _recoverySessionGen ||
+        (_wasAttached && !identical(_attachedPlayer, player));
+    try {
+      final settleDelay = recoverySettleDelayOverride ??
+          (propertySetterOverride != null
+              ? Duration.zero
+              : (immediate
+                  ? const Duration(milliseconds: 60)
+                  : Duration.zero));
+      if (settleDelay > Duration.zero) {
+        await Future<void>.delayed(settleDelay);
+        if (isStale()) return false;
+      }
+
+      final restoreTrackId = _resolveRestoreAudioTrackId(player);
+      await _trySet(setProp, 'af', '');
+      if (isStale()) return false;
+      await _trySet(setProp, 'volume-max', AudioLoudnessPreset.off.volumeMax);
+      if (isStale()) return false;
+      // Force mpv to re-open the audio output chain after `deselect track`.
+      await _trySet(setProp, 'aid', 'no');
+      if (isStale()) return false;
+      await _trySet(setProp, 'aid', restoreTrackId);
+      if (isStale()) return false;
+
+      _activeAppliedAudioFilter = '';
+      _loudnessPreset = AudioLoudnessPreset.off;
+      _lastWarning = reason.trim().isEmpty
+          ? audioFallbackWarningZh
+          : audioFallbackWarningZh;
+      if (persistLocally) {
+        await _saveLoudnessPreset(AudioLoudnessPreset.off);
+        if (isStale()) return false;
+      }
+      notifyListeners();
+      _onLoudnessFallbackToOff?.call();
+      return true;
+    } finally {
+      if (_activeRecoveryTaskId == taskId) {
+        _activeRecoveryTaskId = null;
+        _activeRecoverySessionGen = null;
+        _activeRecoveryPlayer = null;
+      }
+    }
+  }
+
+  /// Applies [next] audio vocal enhancement preset to [player].
   Future<bool> applyLoudnessPreset(
     Player player,
     AudioLoudnessPreset next, {
@@ -543,33 +889,62 @@ class WindowsVideoQualityController extends ChangeNotifier {
     if (_disposed || !isAvailableForPlayer(player)) return false;
     final setProp = _resolveSetter(player);
     if (setProp == null) return false;
+    _pendingAudioRecoveryTimer?.cancel();
+    _pendingAudioRecoveryTimer = null;
+    _activeRecoveryTaskId = null;
+    _activeRecoverySessionGen = null;
+    _activeRecoveryPlayer = null;
     final gen = ++_loudnessOpGen;
 
     await _trySet(setProp, 'volume-max', next.volumeMax);
     if (_disposed || gen != _loudnessOpGen) return false;
 
+    var appliedFilter = '';
+    var effectivePreset = next;
+    var succeeded = true;
+
     if (next == AudioLoudnessPreset.off) {
       await _trySet(setProp, 'af', '');
-    } else {
-      final ok = await _trySet(setProp, 'af', next.audioFilter);
       if (_disposed || gen != _loudnessOpGen) return false;
-      if (!ok && next.audioFilter != fallbackAudioFilter) {
-        final fallbackOk = await _trySet(setProp, 'af', fallbackAudioFilter);
-        if (_disposed || gen != _loudnessOpGen) return false;
-        if (!fallbackOk) {
+      _lastWarning = null;
+    } else {
+      final primaryFilter = debugAudioFilterOverride ?? next.audioFilter;
+      final ok = await _trySet(setProp, 'af', primaryFilter);
+      if (_disposed || gen != _loudnessOpGen) return false;
+      if (ok) {
+        appliedFilter = primaryFilter;
+        _lastWarning = null;
+      } else {
+        var fallbackOk = false;
+        if (primaryFilter != fallbackAudioFilter) {
+          fallbackOk = await _trySet(setProp, 'af', fallbackAudioFilter);
+          if (_disposed || gen != _loudnessOpGen) return false;
+        }
+        if (fallbackOk) {
+          appliedFilter = fallbackAudioFilter;
+        } else {
           await _trySet(setProp, 'af', '');
+          if (_disposed || gen != _loudnessOpGen) return false;
+          appliedFilter = '';
+          effectivePreset = AudioLoudnessPreset.off;
+          succeeded = false;
+          _lastWarning = audioFallbackWarningZh;
         }
       }
     }
 
     if (_disposed || gen != _loudnessOpGen) return false;
-    _loudnessPreset = next;
-    if (persist) {
-      await _saveLoudnessPreset(next);
+    _activeAppliedAudioFilter = appliedFilter;
+    _loudnessPreset = effectivePreset;
+    if (persist || !succeeded) {
+      await _saveLoudnessPreset(effectivePreset);
       if (_disposed || gen != _loudnessOpGen) return false;
     }
     notifyListeners();
-    return true;
+    if (!succeeded) {
+      _onLoudnessFallbackToOff?.call();
+    }
+    return succeeded;
   }
 
   Future<String?> _applyToneMappingFallback(
@@ -602,6 +977,7 @@ class WindowsVideoQualityController extends ChangeNotifier {
     _qualityOpGen++;
     _loudnessOpGen++;
     _disposed = true;
+    detachPlayer();
     super.dispose();
   }
 }

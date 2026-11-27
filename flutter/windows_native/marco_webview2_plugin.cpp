@@ -3805,8 +3805,14 @@ class MarcoWebview2Plugin::Impl {
       js_host_->Shutdown();
       js_host_.reset();
     }
-    sniffer_channel_.reset();
-    js_channel_.reset();
+    if (sniffer_channel_) {
+      sniffer_channel_->SetMethodCallHandler(nullptr);
+      sniffer_channel_.reset();
+    }
+    if (js_channel_) {
+      js_channel_->SetMethodCallHandler(nullptr);
+      js_channel_.reset();
+    }
   }
 
  private:

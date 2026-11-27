@@ -35,6 +35,7 @@ class PlaybackStartup {
   Duration _lastPosition = Duration.zero;
 
   bool get isPastStartupWindow => _pastStartupWindow;
+  bool get hasProgressed => _progressed;
   bool get isUserPaused => _userPaused;
 
   void waitForProgress(
@@ -200,6 +201,7 @@ class PlaybackStartup {
   }
 
   void reset() {
+    _progressed = false;
     _pastStartupWindow = false;
     _userPaused = false;
     cancel();

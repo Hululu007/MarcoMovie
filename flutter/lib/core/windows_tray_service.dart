@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -18,12 +19,84 @@ class WindowsTrayService {
   /// playback routes (e.g. [PlayerScreen]) can pause audio immediately.
   static final ValueNotifier<int> hideToTrayRevision = ValueNotifier<int>(0);
 
+  static final List<Future<void> Function()> _beforeExitHooks =
+      <Future<void> Function()>[];
+
   static VoidCallback? _onRestore;
   static VoidCallback? _onQuit;
   static bool _handlerRegistered = false;
   static bool _inTray = false;
+  static bool _nativeDestroyStarted = false;
+  static int _exitSessionGen = 0;
 
   static bool get isInTray => _inTray;
+
+  /// True once native window destruction has begun (or a bounded exit budget
+  /// has transitioned into teardown). Late/timed-out async callbacks MUST check
+  /// this flag before touching players, window handles, or Flutter channels.
+  static bool get isNativeDestroyStarted => _nativeDestroyStarted;
+
+  static int get exitSessionGen => _exitSessionGen;
+
+  static void markNativeWindowDestroying() {
+    _nativeDestroyStarted = true;
+    _exitSessionGen++;
+  }
+
+  static void registerBeforeExitHook(Future<void> Function() hook) {
+    if (!_beforeExitHooks.contains(hook)) {
+      _beforeExitHooks.add(hook);
+    }
+  }
+
+  static void unregisterBeforeExitHook(Future<void> Function() hook) {
+    _beforeExitHooks.remove(hook);
+  }
+
+  /// Runs registered pre-exit hooks (e.g. saving active player watch progress
+  /// and disposing MPV/MDK cleanly before native window teardown), bounded by
+  /// [timeout].
+  static Future<void> runBeforeExitHooks({
+    Duration timeout = const Duration(seconds: 4),
+  }) async {
+    if (_beforeExitHooks.isEmpty) return;
+    final snapshot = List<Future<void> Function()>.of(_beforeExitHooks);
+    try {
+      await Future.wait(
+        snapshot.map((hook) async {
+          try {
+            await hook();
+          } catch (e) {
+            debugPrint('WindowsTrayService: beforeExitHook skipped: $e');
+          }
+        }),
+      ).timeout(timeout);
+    } catch (e) {
+      debugPrint('WindowsTrayService: beforeExitHooks timed out: $e');
+    }
+  }
+
+  /// Requests the native Windows runner to destroy the top-level window and
+  /// `FlutterViewController` in explicit order on the UI thread before
+  /// `CoUninitialize()`. Returns `true` if handled by the native runner.
+  static Future<bool> destroyWindow() async {
+    _inTray = false;
+    if (kIsWeb) return false;
+    if (!Platform.isWindows && defaultTargetPlatform != TargetPlatform.windows) {
+      return false;
+    }
+    markNativeWindowDestroying();
+    try {
+      final result = await _channel.invokeMethod<bool>('destroyWindow');
+      return result == true;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
 
   static void attach({
     required VoidCallback onRestore,
@@ -96,7 +169,10 @@ class WindowsTrayService {
   @visibleForTesting
   static void resetForTesting() {
     _inTray = false;
+    _nativeDestroyStarted = false;
+    _exitSessionGen = 0;
     _onRestore = null;
     _onQuit = null;
+    _beforeExitHooks.clear();
   }
 }

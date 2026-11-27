@@ -350,7 +350,7 @@ void main() {
           ),
         );
 
-        final models = await ai.fetchAvailableModels();
+        final models = await ai.fetchAvailableModelOptions();
         expect(
           models.map((m) => m.id),
           containsAll(['gpt-5.3-codex', 'gpt-5.4-mini']),

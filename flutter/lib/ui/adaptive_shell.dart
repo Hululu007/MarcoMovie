@@ -13,12 +13,14 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:media_kit/media_kit.dart' show Player;
 import '../core/cms_client.dart';
 import '../core/catpaw_host.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'add_resource_library_sheet.dart';
 import '../core/cms_parser.dart';
 import '../core/config_center_bridge.dart';
+import '../core/ai_lab_passcode.dart';
 import '../core/ai_service.dart';
 import '../core/app_update.dart';
 import '../core/csp_bridge.dart';
@@ -41,7 +43,9 @@ import '../core/app_log.dart';
 import '../core/search_source_notice.dart';
 import '../core/windows_tray_service.dart';
 import '../core/windows_video_quality.dart';
+import '../core/windows_window_bounds.dart';
 import '../core/wogg_source.dart';
+import '../core/work_aggregation.dart';
 import 'apple_theme.dart';
 import 'ios_ai_lab_sheets.dart';
 import 'cloud_sync_panel.dart';
@@ -57,6 +61,9 @@ import 'ios_press_slide_menu.dart';
 import 'ios_search_page.dart';
 import 'ios_settings.dart';
 import 'ios_update_sheet.dart';
+import 'windows_ai_lab_panel.dart';
+import 'windows_update_notice.dart';
+import 'windows_update_sheet.dart';
 import 'live_station_badge.dart';
 import 'macos_update_sheet.dart';
 import 'media_folder_browser_page.dart';
@@ -99,6 +106,10 @@ class AdaptiveShell extends StatefulWidget {
   final Future<bool> Function(Uri uri)? onOpenExternalUrlForTest;
   @visibleForTesting
   final Future<void> Function(String text)? onCopyTextForTest;
+  @visibleForTesting
+  final Player Function({required bool embedded})? debugPlayerFactoryForTest;
+  @visibleForTesting
+  final Widget? debugVideoSurfaceForTest;
 
   const AdaptiveShell({
     super.key,
@@ -113,6 +124,8 @@ class AdaptiveShell extends StatefulWidget {
     this.windowCloseTotalBudgetForTest,
     this.onOpenExternalUrlForTest,
     this.onCopyTextForTest,
+    this.debugPlayerFactoryForTest,
+    this.debugVideoSurfaceForTest,
   });
 
   static const Duration defaultWindowCloseBudget =
@@ -127,6 +140,8 @@ class AdaptiveShell extends StatefulWidget {
     required Future<void> Function() closeScripts,
     required Future<void> Function() destroyWindow,
     Future<void> Function()? hideWindow,
+    Future<void> Function()? prepareExit,
+    VoidCallback? onBeforeDestroyWindow,
     Duration totalBudget = defaultWindowCloseBudget,
   }) async {
     final sw = Stopwatch()..start();
@@ -167,6 +182,13 @@ class AdaptiveShell extends StatefulWidget {
             (_) => hideWindow(),
           );
         }
+        if (prepareExit != null) {
+          await runBounded(
+            'prepareExit',
+            const Duration(milliseconds: 900),
+            (_) => prepareExit(),
+          );
+        }
         await runBounded(
           'flushPendingHistory',
           const Duration(milliseconds: 300),
@@ -193,6 +215,11 @@ class AdaptiveShell extends StatefulWidget {
     } on Object catch (e) {
       debugPrint('AdaptiveShell: onWindowClose total budget reached: $e');
     } finally {
+      if (onBeforeDestroyWindow != null) {
+        onBeforeDestroyWindow();
+      } else if (prepareExit != null) {
+        WindowsTrayService.markNativeWindowDestroying();
+      }
       try {
         await setPreventClose(false)
             .timeout(const Duration(milliseconds: 150));
@@ -214,6 +241,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     with WindowListener, WidgetsBindingObserver, TickerProviderStateMixin {
   bool _windowListenerAttached = false;
   bool _isClosingWindow = false;
+  bool _isHidingToTray = false;
   Future<void>? _closingHistoryFlush;
   int _tabIndex = 0;
   String _windowsPage = 'home';
@@ -746,7 +774,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   BuildContext? _officialCommunityOriginContext;
   ModalRoute<dynamic>? _officialCommunityOriginRoute;
   int? _officialCommunityOriginTabIndex;
+  bool _openingOfficialDonateLink = false;
+  int _officialDonateActionToken = 0;
+  BuildContext? _officialDonateOriginContext;
+  ModalRoute<dynamic>? _officialDonateOriginRoute;
+  int? _officialDonateOriginTabIndex;
   bool _startupOnboardingChecked = false;
+  bool _windowsPostUpdateChecked = false;
+  bool get _isWindowsPostUpdateNoticeHost =>
+      !kIsWeb &&
+      !OhosRuntime.isOhos &&
+      defaultTargetPlatform == TargetPlatform.windows;
   bool get _isMacOS =>
       !kIsWeb &&
       defaultTargetPlatform == TargetPlatform.macOS &&
@@ -854,6 +892,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
     activeAppleModalSheetCount.addListener(_onRootOverlayVisibilityChanged);
     activeIosGlassPopoverCount.addListener(_onRootOverlayVisibilityChanged);
+    if (_isWindowsPostUpdateNoticeHost) {
+      AiLabPasscodeStore.instance.addListener(_onWindowsAiLabStateChanged);
+      AiService.instance.addListener(_onWindowsAiLabStateChanged);
+      unawaited(AiLabPasscodeStore.instance.ensureLoaded());
+      unawaited(AiService.instance.ensureLoaded());
+    }
     if (!kIsWeb &&
         defaultTargetPlatform == TargetPlatform.iOS &&
         !OhosRuntime.isOhos) {
@@ -1149,9 +1193,106 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
   }
 
+  void _onWindowsAiLabStateChanged() {
+    if (mounted) setState(() {});
+  }
+
+  Future<String> _resolveInstalledAppVersionTag() async {
+    if (OhosRuntime.isOhos) return '';
+    try {
+      final info = await PackageInfo.fromPlatform();
+      return WindowsPostUpdateNoticePrefs.normalizeVersionTag(
+        info.version,
+        info.buildNumber,
+      );
+    } catch (_) {
+      return '';
+    }
+  }
+
   Future<void> _runStartupPrompts() async {
     if (!mounted) return;
+    if (_isWindowsPostUpdateNoticeHost) {
+      await _runWindowsPostUpdateNoticePrompt();
+      if (!mounted) return;
+    }
     await _runFirstLaunchPrompts();
+  }
+
+  Future<void> _runWindowsPostUpdateNoticePrompt() async {
+    if (_windowsPostUpdateChecked || !mounted) return;
+    _windowsPostUpdateChecked = true;
+    if (_privateSessionUnlocked ||
+        widget.storage.isSubscriptionsCorrupted ||
+        widget.storage.isHistoryCorrupted) {
+      return;
+    }
+    final currentTag = await _resolveInstalledAppVersionTag();
+    if (currentTag.isEmpty || !mounted) return;
+    final WindowsPostUpdateNoticePrefs postUpdatePrefs;
+    OnboardingPrefs? onboardingPrefs;
+    try {
+      postUpdatePrefs = await WindowsPostUpdateNoticePrefs.load()
+          .timeout(const Duration(seconds: 3));
+      onboardingPrefs = await OnboardingPrefs.load()
+          .timeout(const Duration(seconds: 3));
+    } catch (e) {
+      debugPrint('WindowsPostUpdateNoticePrefs load skipped on launch: $e');
+      return;
+    }
+    if (!mounted ||
+        _officialNoticeOpen ||
+        _privateSessionUnlocked ||
+        widget.storage.isSubscriptionsCorrupted ||
+        widget.storage.isHistoryCorrupted) {
+      return;
+    }
+    if (!postUpdatePrefs.shouldShowForVersion(currentTag)) {
+      return;
+    }
+    final frameReady = Completer<void>();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!frameReady.isCompleted) frameReady.complete();
+    });
+    await frameReady.future;
+    if (!mounted ||
+        _officialNoticeOpen ||
+        _privateSessionUnlocked ||
+        widget.storage.isSubscriptionsCorrupted ||
+        widget.storage.isHistoryCorrupted) {
+      return;
+    }
+    final isUpgrade = postUpdatePrefs.lastSeenVersion.isNotEmpty ||
+        _config != null ||
+        widget.storage.getSubscriptions().isNotEmpty ||
+        (onboardingPrefs.doneVersion >= OnboardingPrefs.currentVersion);
+    final displayVersion =
+        WindowsPostUpdateNoticePrefs.displayVersionFromTag(currentTag);
+    _officialNoticeOpen = true;
+    var persisted = false;
+    try {
+      await showWindowsPostUpdateNoticeDialog(
+        context,
+        isUpgrade: isUpgrade,
+        versionLabel: displayVersion,
+        urlOpener: widget.onOpenExternalUrlForTest,
+        onConfirm: () async {
+          persisted = await postUpdatePrefs.markVersionSeen(currentTag);
+          if (onboardingPrefs != null &&
+              onboardingPrefs.shouldShowOfficialChannelNotice()) {
+            await onboardingPrefs.markOfficialChannelNoticeSeen();
+          }
+          return persisted;
+        },
+      );
+    } finally {
+      _officialNoticeOpen = false;
+    }
+    if (!persisted) {
+      debugPrint(
+        'WindowsPostUpdateNotice: acknowledged for current session; preference write did not persist.',
+      );
+    }
   }
 
   Future<void> _runFirstLaunchPrompts() async {
@@ -1388,18 +1529,274 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
   }
 
+  Future<void> _openOfficialDonateLink({BuildContext? originContext}) async {
+    final targetContext = originContext ?? context;
+    if (_openingOfficialDonateLink &&
+        _officialDonateOriginContext != null &&
+        _officialDonateOriginTabIndex != null &&
+        _isSettingsOriginActive(
+          _officialDonateOriginContext!,
+          _officialDonateOriginRoute,
+          _officialDonateOriginTabIndex!,
+        )) {
+      return;
+    }
+    final token = ++_officialDonateActionToken;
+    final originRoute = ModalRoute.of(targetContext);
+    final originTabIndex = _tabIndex;
+    final startClipboardEpoch = officialExplicitClipboardEpoch;
+    _openingOfficialDonateLink = true;
+    _officialDonateOriginContext = targetContext;
+    _officialDonateOriginRoute = originRoute;
+    _officialDonateOriginTabIndex = originTabIndex;
+    try {
+      final opened = await launchExternalOfficialUrl(
+        OfficialChannelInfo.officialDonateUri,
+        urlOpener: widget.onOpenExternalUrlForTest,
+      );
+      if (opened) {
+        return;
+      }
+      if (token != _officialDonateActionToken ||
+          officialExplicitClipboardEpoch != startClipboardEpoch ||
+          !_isSettingsOriginActive(
+            targetContext,
+            originRoute,
+            originTabIndex,
+          ) ||
+          !targetContext.mounted) {
+        return;
+      }
+      final copied = await copyOfficialChannelText(
+        OfficialChannelInfo.officialDonateUrl,
+      );
+      if (token != _officialDonateActionToken ||
+          officialExplicitClipboardEpoch != startClipboardEpoch ||
+          !_isSettingsOriginActive(
+            targetContext,
+            originRoute,
+            originTabIndex,
+          ) ||
+          !targetContext.mounted) {
+        return;
+      }
+      if (copied) {
+        await showAppleNativeAlert(
+          targetContext,
+          title: '已复制官网捐赠区链接',
+          message: '请在浏览器中打开：${OfficialChannelInfo.officialDonateUrl}',
+          actions: const [
+            AppleNativeAlertAction(id: 'ok', title: '好', isDefault: true),
+          ],
+        );
+        return;
+      }
+      await showOfficialChannelManualCopyDialog(
+        targetContext,
+        title: '无法自动打开或复制链接',
+        message: '请手动选取以下官网捐赠区地址，并在浏览器中打开：',
+        selectableValue: OfficialChannelInfo.officialDonateUrl,
+      );
+    } finally {
+      if (token == _officialDonateActionToken) {
+        _openingOfficialDonateLink = false;
+        _officialDonateOriginContext = null;
+        _officialDonateOriginRoute = null;
+        _officialDonateOriginTabIndex = null;
+      }
+    }
+  }
+
   Future<void> _openOfficialNoticeDialogFromSettings() async {
     if (!mounted || _officialNoticeOpen) return;
     _officialNoticeOpen = true;
     try {
-      await showOfficialChannelNoticeDialog(
-        context,
-        urlOpener: widget.onOpenExternalUrlForTest,
-        barrierDismissible: true,
-      );
+      if (_isWindowsPostUpdateNoticeHost) {
+        final displayVer =
+            (_currentAppVersion == '读取中' || _currentAppVersion == '未知')
+                ? ''
+                : _currentAppVersion;
+        await showWindowsPostUpdateNoticeDialog(
+          context,
+          isUpgrade: false,
+          versionLabel: displayVer,
+          urlOpener: widget.onOpenExternalUrlForTest,
+          barrierDismissible: true,
+        );
+      } else {
+        await showOfficialChannelNoticeDialog(
+          context,
+          urlOpener: widget.onOpenExternalUrlForTest,
+          barrierDismissible: true,
+        );
+      }
     } finally {
       _officialNoticeOpen = false;
     }
+  }
+
+  Future<void> _deleteWindowsHistoryEntryWithUndo(
+    WatchHistoryEntry entry,
+  ) async {
+    await widget.storage.removeWatchHistoryItem(entry.site, entry.id);
+    if (!mounted) return;
+    _cachedWatchHistory = widget.storage.getWatchHistory();
+    setState(() {});
+    _showWindowsUndoHistoryBanner(entry);
+  }
+
+  void _showWindowsUndoHistoryBanner(WatchHistoryEntry entry) {
+    if (!mounted) return;
+    _dismissUndoHistoryBanner();
+    final overlay = Overlay.maybeOf(context, rootOverlay: true);
+    if (overlay == null) return;
+    late OverlayEntry bannerEntry;
+    bannerEntry = OverlayEntry(
+      builder: (_) => Positioned(
+        left: 24,
+        right: 24,
+        bottom: 24,
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 440),
+            child: Material(
+              type: MaterialType.transparency,
+              child: Container(
+                key: const ValueKey('windows-undo-history-banner'),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 11,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xF21A202C),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.14),
+                  ),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x44000000),
+                      blurRadius: 18,
+                      offset: Offset(0, 6),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '已删除「${entry.title}」的观看记录',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13.2,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    TextButton(
+                      key: const ValueKey('windows-undo-history-action'),
+                      onPressed: () async {
+                        _dismissUndoHistoryBanner();
+                        await widget.storage.restoreWatchHistoryEntry(entry);
+                        if (!mounted) return;
+                        _cachedWatchHistory = widget.storage.getWatchHistory();
+                        setState(() {});
+                      },
+                      style: TextButton.styleFrom(
+                        foregroundColor: const Color(0xFF6FA8FF),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
+                      ),
+                      child: const Text(
+                        '撤销',
+                        style: TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    _undoHistoryOverlayEntry = bannerEntry;
+    overlay.insert(bannerEntry);
+    _undoHistoryTimer = Timer(const Duration(seconds: 3), () {
+      if (_undoHistoryOverlayEntry == bannerEntry) {
+        _dismissUndoHistoryBanner();
+      }
+    });
+  }
+
+  Future<void> _openWindowsAiSearchDialog() async {
+    if (!mounted ||
+        _privateSessionUnlocked ||
+        !AiLabPasscodeStore.instance.isUnlocked) {
+      return;
+    }
+    await showWindowsAiSearchDialog(
+      context,
+      isPrivateSession: _privateSessionUnlocked,
+      onOpenSettings: () {
+        if (!mounted) return;
+        setState(() {
+          _windowsSettings = 'AI 实验室';
+          _windowsPage = 'settings';
+        });
+      },
+      onPickTitle: (title) {
+        if (!mounted) return;
+        setState(() {
+          _windowsPage = 'search';
+          _searchController.text = title;
+        });
+        _runGlobalSearch(title);
+      },
+    );
+  }
+
+  Future<void> _openWindowsAiPicksDialog() async {
+    if (!mounted ||
+        _privateSessionUnlocked ||
+        !AiLabPasscodeStore.instance.isUnlocked) {
+      return;
+    }
+    final recentTitles = _cachedWatchHistory
+        .map((e) => e.title)
+        .where((t) => t.trim().isNotEmpty)
+        .toList(growable: false);
+    final favoriteTitles = widget.storage
+        .getFavorites()
+        .map((f) => f.title)
+        .where((t) => t.trim().isNotEmpty)
+        .toList(growable: false);
+    await showWindowsAiPicksDialog(
+      context,
+      recentTitles: recentTitles,
+      favoriteTitles: favoriteTitles,
+      isPrivateSession: _privateSessionUnlocked,
+      onOpenSettings: () {
+        if (!mounted) return;
+        setState(() {
+          _windowsSettings = 'AI 实验室';
+          _windowsPage = 'settings';
+        });
+      },
+      onPickTitle: (title) {
+        if (!mounted) return;
+        setState(() {
+          _windowsPage = 'search';
+          _searchController.text = title;
+        });
+        _runGlobalSearch(title);
+      },
+    );
   }
 
   Future<void> _openOnboardingRoute({
@@ -1615,29 +2012,95 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }
 
   @override
+  void onWindowMoved() {
+    if (!kIsWeb && Platform.isWindows) {
+      WindowsWindowBoundsController.shared?.scheduleCapture();
+    }
+  }
+
+  @override
+  void onWindowResized() {
+    if (!kIsWeb && Platform.isWindows) {
+      WindowsWindowBoundsController.shared?.scheduleCapture();
+    }
+  }
+
+  @override
+  void onWindowMaximize() {
+    if (!kIsWeb && Platform.isWindows) {
+      unawaited(WindowsWindowBoundsController.shared?.captureAndPersist());
+    }
+  }
+
+  @override
+  void onWindowUnmaximize() {
+    if (!kIsWeb && Platform.isWindows) {
+      WindowsWindowBoundsController.shared?.scheduleCapture(
+        debounce: const Duration(milliseconds: 120),
+      );
+    }
+  }
+
+  Future<void> _captureWindowsBoundsBeforeHideOrExit() async {
+    if (kIsWeb || !Platform.isWindows) return;
+    final ctrl = WindowsWindowBoundsController.shared;
+    if (ctrl == null) return;
+    try {
+      await ctrl
+          .captureAndPersist(immediate: true)
+          .timeout(const Duration(milliseconds: 200));
+    } catch (_) {}
+  }
+
+  bool get _isWindowsDesktopHost =>
+      !kIsWeb &&
+      !OhosRuntime.isOhos &&
+      (Platform.environment.containsKey('FLUTTER_TEST')
+          ? defaultTargetPlatform == TargetPlatform.windows
+          : Platform.isWindows);
+
+  @override
   Future<void> onWindowClose() async {
-    if (!kIsWeb &&
-        (Platform.isWindows || defaultTargetPlatform == TargetPlatform.windows) &&
+    if (_isClosingWindow || _isHidingToTray) return;
+    if (_isWindowsDesktopHost &&
         widget.storage.windowsCloseAction == 'tray') {
-      unawaited(widget.storage.flushPendingHistory());
-      final hidden = await WindowsTrayService.hideToTray(tooltip: 'Marco Movie');
-      if (hidden) {
-        return;
-      }
+      _isHidingToTray = true;
       try {
-        await windowManager.minimize();
-        return;
-      } catch (_) {}
+        await _captureWindowsBoundsBeforeHideOrExit();
+        unawaited(widget.storage.flushPendingHistory());
+        final hidden =
+            await WindowsTrayService.hideToTray(tooltip: 'Marco Movie');
+        if (hidden) {
+          return;
+        }
+        try {
+          await windowManager.minimize();
+          return;
+        } catch (_) {}
+      } finally {
+        _isHidingToTray = false;
+      }
     }
     await _executeWindowExit();
+  }
+
+  Future<void> _destroyDesktopWindow() async {
+    if (_isWindowsDesktopHost) {
+      final destroyed = await WindowsTrayService.destroyWindow();
+      if (destroyed) return;
+    }
+    await windowManager.destroy();
   }
 
   Future<void> _executeWindowExit() async {
     if (_isClosingWindow) return;
     _isClosingWindow = true;
-    if (!kIsWeb &&
-        (Platform.isWindows || defaultTargetPlatform == TargetPlatform.windows)) {
-      unawaited(WindowsTrayService.removeTray());
+    final isWindowsDesktop = _isWindowsDesktopHost;
+    if (isWindowsDesktop) {
+      await _captureWindowsBoundsBeforeHideOrExit();
+      if (widget.onDestroyWindowForTest == null) {
+        unawaited(WindowsTrayService.removeTray());
+      }
     }
     await AdaptiveShell.runWindowCloseSequence(
       setPreventClose: (prevent) => widget.onSetPreventCloseForTest != null
@@ -1646,6 +2109,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       hideWindow: widget.onDestroyWindowForTest != null
           ? null
           : () => windowManager.hide(),
+      prepareExit: !isWindowsDesktop
+          ? null
+          : () => WindowsTrayService.runBeforeExitHooks(
+                timeout: const Duration(milliseconds: 900),
+              ),
+      onBeforeDestroyWindow:
+          isWindowsDesktop ? WindowsTrayService.markNativeWindowDestroying : null,
       flushHistory: _flushPendingHistoryForCloseOrDispose,
       flushSync: (timeout) => widget.onFlushSyncForTest != null
           ? widget.onFlushSyncForTest!(timeout)
@@ -1658,7 +2128,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           : CmsClient.closeScriptSessions(),
       destroyWindow: () => widget.onDestroyWindowForTest != null
           ? widget.onDestroyWindowForTest!()
-          : windowManager.destroy(),
+          : _destroyDesktopWindow(),
       totalBudget: widget.windowCloseTotalBudgetForTest ??
           AdaptiveShell.defaultWindowCloseBudget,
     );
@@ -1799,6 +2269,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
     activeAppleModalSheetCount.removeListener(_onRootOverlayVisibilityChanged);
     activeIosGlassPopoverCount.removeListener(_onRootOverlayVisibilityChanged);
+    AiLabPasscodeStore.instance.removeListener(_onWindowsAiLabStateChanged);
+    AiService.instance.removeListener(_onWindowsAiLabStateChanged);
     if (_useRootNativeTabChrome) {
       unawaited(IosLiquidGlassBridge.setRootTabVisible(false, animated: false));
     }
@@ -1818,14 +2290,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _windowListenerAttached = false;
       if (!kIsWeb && Platform.isWindows) {
         WindowsTrayService.detach();
-        unawaited(WindowsTrayService.removeTray());
+        if (!_isClosingWindow) {
+          unawaited(WindowsTrayService.removeTray());
+        }
       }
     }
     if (!kIsWeb &&
-        (Platform.isWindows ||
-            Platform.isMacOS ||
-            Platform.isLinux ||
-            widget.onSetPreventCloseForTest != null)) {
+        (widget.onSetPreventCloseForTest != null ||
+            (!_isClosingWindow &&
+                (Platform.isWindows ||
+                    Platform.isMacOS ||
+                    Platform.isLinux)))) {
       unawaited(
         (widget.onSetPreventCloseForTest != null
                 ? widget.onSetPreventCloseForTest!(false)
@@ -1842,8 +2317,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _liveProbeAbort!.complete();
     }
     _searchSubscription?.cancel();
-    unawaited(CatPawHost.instance.close());
-    unawaited(CmsClient.closeScriptSessions());
+    if (!_isClosingWindow) {
+      unawaited(CatPawHost.instance.close());
+      unawaited(CmsClient.closeScriptSessions());
+    }
     _searchController.dispose();
     _searchStateRevision.dispose();
     _liveSearchController.dispose();
@@ -3132,6 +3609,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     String? sourcePosterUrl,
     bool isFullBleedHero = false,
     Color? ambientColor,
+    List<WorkSourceRef> initialSources = const [],
   }) {
     if (!CuratedDiscoveryService.isCuratedSite(site) && !site.supported) {
       _showAppleNotice(site.name, site.unsupportedReason);
@@ -3202,6 +3680,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           initialVideo: video,
           client: widget.client,
           storage: widget.storage,
+          initialSources: initialSources,
         );
     final usePosterExpand =
         (defaultTargetPlatform == TargetPlatform.iOS ||
@@ -9957,6 +10436,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               isLive: true,
               liveGroups: catalogGroups,
               initialLiveChannel: ch,
+              debugPlayer:
+                  widget.debugPlayerFactoryForTest?.call(embedded: false),
+              debugVideoSurface: widget.debugVideoSurfaceForTest,
             ),
           ),
         ),
@@ -11630,6 +12112,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     return AnimatedBuilder(
       animation: service,
       builder: (context, _) {
+        if (service.isInitializing) {
+          return const Center(child: CupertinoActivityIndicator(radius: 12));
+        }
         if (!service.isReady) {
           return Center(
             child: Text(
@@ -14852,24 +15337,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   static String _formatCleanReleaseNotes(String raw) =>
       ReleaseNotesSummary.formatPlainText(raw);
 
-  static bool _isRemoteVersionNewer(String remote, String current) {
-    List<int> parseParts(String v) => v
-        .replaceAll(RegExp(r'^[vV]'), '')
-        .split(RegExp(r'[^0-9]+'))
-        .where((s) => s.isNotEmpty)
-        .map((s) => int.tryParse(s) ?? 0)
-        .toList();
-    final r = parseParts(remote);
-    final c = parseParts(current);
-    final len = math.max(r.length, c.length);
-    for (var i = 0; i < len; i++) {
-      final rv = i < r.length ? r[i] : 0;
-      final cv = i < c.length ? c[i] : 0;
-      if (rv != cv) return rv > cv;
-    }
-    return false;
-  }
-
   Future<T?> _openIosOrModalPage<T>({
     required String title,
     BuildContext? hostContext,
@@ -14924,6 +15391,19 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         context: context,
         title: '检查版本更新',
         builder: (_) => MacosUpdateSheet(installedVersion: _currentAppVersion),
+      );
+      return;
+    }
+    if (!kIsWeb &&
+        !OhosRuntime.isOhos &&
+        defaultTargetPlatform == TargetPlatform.windows) {
+      showAppleModalSheet<void>(
+        context: context,
+        title: '检查版本更新',
+        builder: (_) => WindowsUpdateSheet(
+          installedVersion: _currentAppVersion,
+          readVersion: _resolveInstalledAppVersion,
+        ),
       );
       return;
     }

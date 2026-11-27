@@ -121,6 +121,7 @@ class _FakePlayer extends Fake implements Player {
   int playOrPauseCalls = 0;
   int playCalls = 0;
   int pauseCalls = 0;
+  int get playToggleCalls => playOrPauseCalls + playCalls + pauseCalls;
   final List<Duration> seeks = <Duration>[];
   final List<double> rates = <double>[];
   final List<double> volumes = <double>[];
@@ -524,11 +525,13 @@ void main() {
       expect(find.byKey(const Key('player-progress-bar')), findsOneWidget);
 
       // Double tap now toggles play/pause again
+      final wasPlayingBeforeDoubleTap = player.state.playing;
       await tester.tapAt(const Offset(420, 60), kind: PointerDeviceKind.touch);
       await tester.pump(const Duration(milliseconds: 50));
       await tester.tapAt(const Offset(420, 60), kind: PointerDeviceKind.touch);
       await tester.pump(const Duration(milliseconds: 350));
-      expect(player.playOrPauseCalls, 1);
+      expect(player.playToggleCalls, 1);
+      expect(player.state.playing, !wasPlayingBeforeDoubleTap);
 
       final poppedAfterUnlock = await navKey.currentState!.maybePop();
       await tester.pump();
@@ -655,7 +658,7 @@ void main() {
       await sendMacCmdW(tester);
       await tester.pump(const Duration(milliseconds: 200));
 
-      expect(player.playOrPauseCalls, 0);
+      expect(player.playToggleCalls, 0);
       expect(player.seeks, isEmpty);
       expect(player.rates, isEmpty);
       expect(player.volumes, isEmpty);
@@ -677,9 +680,11 @@ void main() {
       );
       await tester.pump(const Duration(milliseconds: 250));
 
+      final wasPlayingBeforeSpace = player.state.playing;
       await sendMacKey(LogicalKeyboardKey.space);
       await tester.pump(const Duration(milliseconds: 50));
-      expect(player.playOrPauseCalls, 1);
+      expect(player.playToggleCalls, 1);
+      expect(player.state.playing, !wasPlayingBeforeSpace);
 
       await sendMacKey(LogicalKeyboardKey.arrowRight);
       await tester.pump(const Duration(milliseconds: 50));
@@ -741,7 +746,7 @@ void main() {
         await tester.sendKeyEvent(LogicalKeyboardKey.space);
         await tester.pump(const Duration(milliseconds: 250));
 
-        expect(player.playOrPauseCalls, 0);
+        expect(player.playToggleCalls, 0);
         expect(find.byType(PlayerScreen), findsOneWidget);
 
         // Unlock restores WindowsTitleBar interactivity

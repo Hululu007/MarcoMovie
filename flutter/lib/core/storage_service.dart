@@ -29,6 +29,7 @@ import 'secure_credential_store.dart';
 import 'series_scraper.dart';
 import 'spider_plugin_registry.dart';
 import 'storage_file_store.dart';
+import 'windows_window_bounds.dart';
 
 export 'storage_file_store.dart';
 
@@ -256,6 +257,7 @@ class StorageService {
   static const String keySpiderAdapterPacks = 'spider_adapter_packs_v1';
   static const String keyWindowsCloseAction = 'windows_close_action';
   static const String keyWindowsSearchLayout = 'windows_search_layout';
+  static const String keyWindowsWindowBounds = WindowsWindowBounds.prefKey;
   static const String keySpiderGatewayEnabled = 'spider_gateway_enabled';
   static const String keySpiderGatewayUrl = 'spider_gateway_url';
   static const String keySpiderGatewayDeviceName = 'spider_gateway_device_name';
@@ -1105,6 +1107,8 @@ class StorageService {
         .toLowerCase();
     return saved == 'list' ? 'list' : 'grid';
   }
+  WindowsWindowBounds? get windowsWindowBounds =>
+      WindowsWindowBounds.tryParseJson(_prefs.getString(keyWindowsWindowBounds));
   bool get hlsAdStripEnabled =>
       _prefs.getBool(keyHlsAdStripEnabled) ??
       _prefs.getBool(keyHlsAdRemovalEnabled) ??
@@ -2987,6 +2991,14 @@ class StorageService {
   Future<void> setWindowsSearchLayout(String layout) async {
     final normalized = layout.trim().toLowerCase() == 'list' ? 'list' : 'grid';
     await _prefs.setString(keyWindowsSearchLayout, normalized);
+  }
+
+  Future<void> setWindowsWindowBounds(WindowsWindowBounds? bounds) async {
+    if (bounds == null || !bounds.isValid) {
+      await _prefs.remove(keyWindowsWindowBounds);
+      return;
+    }
+    await _prefs.setString(keyWindowsWindowBounds, bounds.toJsonString());
   }
 
   Future<void> setTvAmbientTheme(String themeId) async {

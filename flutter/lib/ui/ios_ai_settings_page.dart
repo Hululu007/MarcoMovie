@@ -608,7 +608,7 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
 
     List<AiModelOption> models = const <AiModelOption>[];
     try {
-      models = await _service.fetchAvailableModels(
+      models = await _service.fetchAvailableModelOptions(
         configOverride: _config,
         apiKeyOverride: _apiKeyCtrl.text.trim(),
       );

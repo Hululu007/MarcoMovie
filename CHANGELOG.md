@@ -1,3 +1,23 @@
+## 2026-11-27 Windows x64 0.7.4 AI 实验室跨端统一 Ed25519 口令协议对齐升级（Windows 0.7.4）
+
+- [Windows 0.7.4](docs/releases/windows-v0.7.4.md)
+- **三端统一 `MMAILAB1` Ed25519 离线口令协议对齐**：与 Android 移动端、iOS 完全对齐同一套公钥与跨端载荷规范，补齐 `shared`、`exp_oauth`、`min_vc` 与随机 `n` nonce 字段解析（并在 Windows AI 实验室状态条展示），升级 `matchesPlatform` 支持多平台逗号/分号组合列表（如 `windows,ios`、`android,windows`）及跨端别名归一化（`android-mobile`/`mobile`、`win`/`pc`、`iphone`/`ipad`），将 `AiLabPasscodeStore` 改为动态识别运行平台并保留既有解锁记录无缝兼容；同步升级 `scripts/sign_manifest.py` 支持 `--plat` / `--shared` / `--exp-oauth` / `--min-vc`。
+
+## 2026-11-26 Windows x64 0.7.3 更新后捐赠与防骗提示、「继续观看」竖屏海报墙及 Ed25519 离线口令门禁「AI 实验室」（Windows 0.7.3）
+
+- [Windows 0.7.3](docs/releases/windows-v0.7.3.md)
+- **每次更新后启动的官方渠道、防骗与捐赠支持弹窗**：每次覆盖升级至新版本（按 `version+build` 本机记录）后温和展示一次感谢说明、永久免费防售卖/「激活码」防骗提醒及唯一官方更新渠道（`marcotv.wlj9919.top`），提供直达官网捐赠区（`https://marcotv.wlj9919.top/movie/#donate`）按钮与无倒计时「进入应用」按钮，含打开/复制/手动选取三重兜底；隐私空间与异常恢复期静默，新装与首次声明自动去重；设置页「联系反馈与官方交流」同步新增「捐赠支持作者」入口。
+- **「我的 → 继续观看」升级为 2:3 竖屏影院海报墙**：采用 3–6 列响应式 `2:3` 竖屏海报卡片与虚拟滚动，叠加底部渐变蒙层、剧集胶囊、播放进度条、精确 `mm:ss` / `h:mm:ss` 进度副标题，支持快捷删除、右键菜单（「继续播放」/「删除记录」）与 3 秒撤销恢复。
+- **Windows 设置新增 Ed25519 离线口令门禁「AI 实验室」（一期四项能力与 OpenMinis 风格合规多服务商接入）**：默认锁定，通过全平台统一 `MMAILAB1` Ed25519 离线签名口令纯本机验签解锁（`scripts/sign_manifest.py issue-ai-lab-token`，每次冷启动重新验签防篡改，支持随时重新锁定）；支持 OpenRouter 官方 PKCE 浏览器回环一键授权、GitHub Copilot 官方 RFC 8628 设备码登录与短期会话令牌续期、本机 Ollama / LM Studio 免 Key 自动发现、多服务商 BYOK 实例热切与 `/v1/models` 自动拉取、双档模型路由、Windows 加密凭据存储与日志脱敏、隐私空间硬性阻断及严格防 URL 输出校验，上线搜索「AI 找片」、「我的」页「AI 为你挑片」与详情页「AI 净化选集」。
+
+## 2026-11-26 Windows x64 0.7.2 专项稳定性与体验升级：根治正常关闭崩溃（`0xc0000005`）、修复 MPV 人声增强无声与快速换集恢复/选轨竞态、补齐 MDK 销毁纹理门禁及应用内更新/窗口记忆/跨线保进度（Windows 0.7.2）
+
+- [Windows 0.7.2](docs/releases/windows-v0.7.2.md)
+- **根治 Windows 正常关闭时进程崩溃（`0xc0000005`）与退出生命周期收敛**：统一直接退出与托盘退出的单次幂等入口，在原生窗口拆除前阻断 Flutter 消息转发与销毁子窗口同步重入（含 `WM_DESTROY` / `WM_FONTCHANGE`），确保 `flutter_controller_`、通道与 `window` 在 `CoUninitialize()` 前于 UI 线程按序释放；限定 Windows 预退出钩子与原生销毁标记不污染 macOS / Linux 关闭路径；完整保留「直接退出」与「关闭到托盘 → 恢复 → 退出」两种关闭语义。
+- **修复 MPV 人声增强无声及快速换集滤镜恢复/音轨竞态**：将轻度 / 标准 / 影院人声三档切换为内置 `libmpv-2.dll` 原生支持的 `lavfi=[equalizer=...]` 参数均衡链（旧 `cinemaVocal` 配置冷启动直接有声，立体声与 5.1 声道均稳定输出）；滤镜故障自动恢复原声按播放器实例、媒体会话与任务身份隔离，并绑定音轨事件订阅到当前媒体会话以丢弃旧集迟到选轨事件、保留当前集手选评论轨。
+- **消除 MDK 换集延迟释放纹理跨过窗口销毁的竞态与启动回退加固**：在同一次 `updateTexture` 的 `ReleaseRT` 与 `CreateRT` 之间加入取消与原生销毁门禁（销毁后新增 `CreateRT = 0`，正常换集仍可创建新纹理），完善 MDK 错误流监听与保留断点自动回退 MPV（不覆写用户默认 MDK 设置）。
+- **桌面端官方声明、应用内双形态更新、多屏窗口记忆与性能体验优化**：上线首次启动官方防伪声明与设置页联系反馈入口、`WindowsUpdateSheet`（自动区分 Inno Setup 安装版 / 便携版并校对 SHA-256、防降级）、多屏安全窗口位置/尺寸记忆、跨线路同集识别保进度、直播小窗展开继承频道与备用路线、多源聚合与播中换源，以及 `DownloadService` 异步非阻塞冷启动与「我的」页虚拟滚动优化。
+
 ## 2026-11-26 iOS / iPadOS 0.7.9 体验重塑、AI 助手一期与 iOS 27 发热深度治理：无框四列资源库与 Apple 风格图标、Dock 原位弹泡与切页同步、历史海报墙、剧集收纳与多连接高速下载、设置零重复重构、自备 API 的 AI 找片/文件名净化、iPhone 17 Pro Max（iOS 27.0）发热根治及 5 屏功能引导（iOS / iPadOS 0.7.9）
 
 - [iOS / iPadOS 0.7.9](docs/releases/ios-v0.7.9.md)
