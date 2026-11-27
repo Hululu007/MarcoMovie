@@ -5350,8 +5350,58 @@ public final class MobileIos077ParityChecks {
                         && moviePresentQuarkAct.resumePositionMs == 42_000,
                 "R11 P2-1B: MobileDetailScreen.resolvePrimaryPlayAction prompts re-selection when original drive vanished (series & movie), plays Baidu at 0ms only after explicit user selection, and recovers Quark at 42000ms when present");
 
+        // 31. Round-12 P2: Primary button tracks latest explicit manual line/episode selection
+        //     (including direct episode card tap on Quark Ep1 -> 0ms or Baidu Ep1 -> 0ms),
+        //     preserves live line/page across related-seasons refresh, and resets on video switch.
+        MobileDetailScreen.resetDetailSelectionState();
+        MobileDetailScreen.PrimaryPlayAction cardTapQuarkEp1 =
+                MobileDetailScreen.resolvePrimaryPlayAction(
+                        r11SeriesHasQuark, 1, bmR11SeriesQuark, true, r11QuarkS2, 0, false, 0);
+        MobileDetailScreen.PrimaryPlayAction cardTapBaiduEp1 =
+                MobileDetailScreen.resolvePrimaryPlayAction(
+                        r11SeriesOnlyBaidu, 0, bmR11SeriesQuark, true, r11BaiduS2, 0, false, 0);
+        Cms.Line r12AliS2 = new Cms.Line();
+        r12AliS2.lineId = "阿里云·第二季";
+        r12AliS2.name = "阿里云·第二季";
+        r12AliS2.rawName = "阿里云·第二季";
+        for (int epN = 1; epN <= 60; epN++) {
+            Cms.Episode aep = new Cms.Episode();
+            aep.name = "第" + epN + "集";
+            aep.url = "https://www.alipan.com/s/r12_ali_s2_e" + epN;
+            r12AliS2.episodes.add(aep);
+        }
+        Cms.Video r12ThreeLine = new Cms.Video();
+        r12ThreeLine.id = "vod_r12_s2";
+        r12ThreeLine.title = "星途 第二季";
+        r12ThreeLine.lines.addAll(Arrays.asList(r11QuarkS2, r11BaiduS2, r12AliS2));
+        MobileDetailScreen.PrimaryPlayAction aliEp2Act =
+                MobileDetailScreen.resolvePrimaryPlayAction(
+                        r12ThreeLine, 2, bmR11SeriesQuark, true, r12AliS2, 1, false, 0);
+        check(
+                !cardTapQuarkEp1.requiresReselection
+                        && "第 1 集".equals(cardTapQuarkEp1.buttonLabel)
+                        && cardTapQuarkEp1.line == r11QuarkS2
+                        && cardTapQuarkEp1.episode == r11QkE1
+                        && cardTapQuarkEp1.resumePositionMs == 0
+                        && !cardTapBaiduEp1.requiresReselection
+                        && "第 1 集".equals(cardTapBaiduEp1.buttonLabel)
+                        && cardTapBaiduEp1.line == r11BaiduS2
+                        && cardTapBaiduEp1.episode == r11BdE1
+                        && cardTapBaiduEp1.resumePositionMs == 0
+                        && !aliEp2Act.requiresReselection
+                        && "第 2 集".equals(aliEp2Act.buttonLabel)
+                        && aliEp2Act.line == r12AliS2
+                        && aliEp2Act.episode == r12AliS2.episodes.get(1)
+                        && aliEp2Act.resumePositionMs == 0
+                        && MobileDetailScreen.resolveCurrentDetailLineIndex(null, r12ThreeLine, 2)
+                                == 2
+                        && MobileDetailScreen.resolveCurrentDetailPageIndex(
+                                        null, r12ThreeLine, 2, 1)
+                                == 1,
+                "R12 P2: direct card tap on Quark Ep1/Baidu Ep1 syncs primary button to Ep1 @ 0ms, Ali S02E02 resolves @ 0ms, and live line/page fallback clamps safely");
+
         pass(
-                "DriveOrder + R4..R11 P1-1..P2-1: line-season failover, Dart-aligned episodeMediaId, same-site drive conflict (series+movie+detail-play), re-index resume, and O(N) 250/500/800-ep perf verified");
+                "DriveOrder + R4..R12 P1-1..P2: line-season failover, Dart-aligned episodeMediaId, same-site drive conflict, direct-card primary button sync, related-seasons state preservation, and O(N) perf verified");
     }
 
     private static String computeWindowsV073MediaId(String canonicalUrl) throws Exception {

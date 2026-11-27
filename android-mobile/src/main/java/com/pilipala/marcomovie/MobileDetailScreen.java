@@ -56,9 +56,68 @@ final class MobileDetailScreen {
             new HashMap<>();
     private static final Map<String, String> activeAiEpisodeTitles = new HashMap<>();
     private static String selectedEpisodeLine = "";
+    private static int selectedEpisodeLineIndex = -1;
     private static int selectedEpisodeIndex = -1;
     private static boolean userSelectedDetailTarget = false;
+    private static int activeDetailLineIndex = -1;
+    private static int activeDetailPage = 0;
     private static boolean activeVideoDescending = false;
+
+    static void resetDetailSelectionState() {
+        selectedEpisodeLine = "";
+        selectedEpisodeLineIndex = -1;
+        selectedEpisodeIndex = -1;
+        userSelectedDetailTarget = false;
+        activeDetailLineIndex = -1;
+        activeDetailPage = 0;
+    }
+
+    private static boolean matchesSelectedEpisodeLine(int lineIndex, Cms.Line line) {
+        if (line == null) return false;
+        if (selectedEpisodeLineIndex >= 0) {
+            return selectedEpisodeLineIndex == lineIndex;
+        }
+        return Objects.equals(line.name, selectedEpisodeLine);
+    }
+
+    static int resolveCurrentDetailLineIndex(MainActivity a, Cms.Video video, int fallbackLineIdx) {
+        if (video == null || video.lines == null || video.lines.isEmpty()) return 0;
+        int n = video.lines.size();
+        if (activeDetailLineIndex >= 0 && activeDetailLineIndex < n) {
+            return activeDetailLineIndex;
+        }
+        if (a != null
+                && a.current != null
+                && a.current.selection != null
+                && a.current.selection.selected
+                && a.current.selection.line != null) {
+            for (int i = 0; i < n; i++) {
+                Cms.Line cand = video.lines.get(i);
+                if (cand != null && Objects.equals(cand.name, a.current.selection.line)) {
+                    return i;
+                }
+            }
+        }
+        return Math.max(0, Math.min(fallbackLineIdx, n - 1));
+    }
+
+    static int resolveCurrentDetailPageIndex(
+            MainActivity a, Cms.Video video, int lineIndex, int fallbackPageIdx) {
+        if (video == null || video.lines == null || video.lines.isEmpty()) return 0;
+        int safeLine = Math.max(0, Math.min(lineIndex, video.lines.size() - 1));
+        Cms.Line line = video.lines.get(safeLine);
+        int epCount = line != null && line.episodes != null ? line.episodes.size() : 0;
+        int candidatePage = activeDetailLineIndex >= 0 ? activeDetailPage : fallbackPageIdx;
+        if (activeDetailLineIndex < 0
+                && a != null
+                && a.current != null
+                && a.current.selection != null
+                && a.current.selection.selected) {
+            candidatePage = a.current.selection.page;
+        }
+        return EpisodeSelection.boundPage(candidatePage, epCount);
+    }
+
     private static final WeakHashMap<View, EpisodeSelectionState> SELECTION_STATES =
             new WeakHashMap<>();
 
@@ -373,15 +432,20 @@ final class MobileDetailScreen {
         if (!forcePlay && tapMode == 2) {
             userSelectedDetailTarget = true;
             selectedEpisodeLine = line.name == null ? "" : line.name;
+            selectedEpisodeLineIndex =
+                    video != null && video.lines != null ? video.lines.indexOf(line) : -1;
             selectedEpisodeIndex = Math.max(0, epNumber - 1);
+            if (selectedEpisodeLineIndex >= 0) {
+                activeDetailLineIndex = selectedEpisodeLineIndex;
+            }
             refreshSelectedEpisodeHighlight(a, selectedEpisodeLine, selectedEpisodeIndex);
             View playBtnView = a.root == null ? null : a.root.findViewWithTag("detail-play");
             if (playBtnView instanceof Button) {
                 Button playBtn = (Button) playBtnView;
                 MobileTheme.Palette p = MobileTheme.of(a);
-                EpisodeDisplay d = parseEpisodeDisplay(ep.name, epNumber);
+                String playLbl = formatPlayEpisodeLabel(ep.name, epNumber);
                 final int savedResume = a.resumeAt;
-                playBtn.setText(buildPlayButtonLabel(a, p.accentOnFill, d.cleanTitle));
+                playBtn.setText(buildPlayButtonLabel(a, p.accentOnFill, playLbl));
                 playBtn.setOnClickListener(
                         v -> {
                             a.resumeAt = savedResume;
@@ -977,9 +1041,7 @@ final class MobileDetailScreen {
         activeTmdbIsTv = true;
         activeTmdbEpisodes.clear();
         activeAiEpisodeTitles.clear();
-        selectedEpisodeLine = "";
-        selectedEpisodeIndex = -1;
-        userSelectedDetailTarget = false;
+        resetDetailSelectionState();
         activeVideoDescending = defaultEpisodeDescending();
         if (a.inlinePlayer != null) {
             a.inlinePlayer.detach();
@@ -1438,9 +1500,7 @@ final class MobileDetailScreen {
 
                     // Reset per-presentation user-selection state so a vanished original drive
                     // prompts re-selection until the user explicitly chooses another line/episode.
-                    selectedEpisodeLine = "";
-                    selectedEpisodeIndex = -1;
-                    userSelectedDetailTarget = false;
+                    resetDetailSelectionState();
 
                     // Full-Width Accent Stadium Play Button
                     final boolean presentAiUnlocked = !a.isTvDevice() && AiBetaGate.isUnlocked(a);
@@ -1803,12 +1863,17 @@ final class MobileDetailScreen {
             WatchHistory.Entry remembered,
             Map<Integer, Cms.Video> discoveredSeasons,
             Map<Integer, String> discoveredLabels) {
+        if (video == null || video.lines == null || video.lines.isEmpty()) return;
+        final int safeLineIdx = Math.max(0, Math.min(lineIndex, video.lines.size() - 1));
+        final Cms.Line line = video.lines.get(safeLineIdx);
+        final int total = line.episodes.size();
+        final int safePage = EpisodeSelection.boundPage(page, total);
+        activeDetailLineIndex = safeLineIdx;
+        activeDetailPage = safePage;
+
         final int savedScrollY = a.scroll != null ? a.scroll.getScrollY() : 0;
         if (a.current != null) {
-            a.current.selection.select(
-                    video.lines.get(lineIndex).name,
-                    page,
-                    video.lines.get(lineIndex).episodes.size());
+            a.current.selection.select(line.name, safePage, total);
         }
 
         // Preserve horizontal line strip scroll & update active line pills in place when available
@@ -1826,10 +1891,8 @@ final class MobileDetailScreen {
         }
 
         final MobileTheme.Palette p = MobileTheme.of(a);
-        final Cms.Line line = video.lines.get(lineIndex);
         final boolean descending = activeVideoDescending;
         final SeasonMeta curSeason = parseSeasonMeta(video.title);
-        final int total = line.episodes.size();
         final boolean multiEpisode = shouldShowMultiEpisodeTools(total);
         // Snapshot AI gate state & clean mode ONCE per episode-list render (P1-7: avoid O(N)
         // Ed25519
@@ -1839,16 +1902,18 @@ final class MobileDetailScreen {
                 !a.isTvDevice() ? a.mobilePrefs().getInt(Prefs.EPISODE_CLEAN_MODE, 0) : 0;
         final boolean lineMatchesBookmark =
                 remembered != null && HistoryResumeMatcher.isSameBookmarkLine(line, remembered);
+        final boolean hasExplicitEpisodeOnLine =
+                selectedEpisodeIndex >= 0
+                        && selectedEpisodeIndex < total
+                        && matchesSelectedEpisodeLine(safeLineIdx, line);
         final PrimaryPlayAction renderPlayAction =
                 resolvePrimaryPlayAction(
                         video,
-                        lineIndex,
+                        safeLineIdx,
                         remembered,
                         userSelectedDetailTarget,
                         line,
-                        (selectedEpisodeIndex >= 0
-                                        && selectedEpisodeIndex < total
-                                        && line.name.equals(selectedEpisodeLine))
+                        hasExplicitEpisodeOnLine
                                 ? selectedEpisodeIndex
                                 : (lineMatchesBookmark
                                         ? HistoryResumeMatcher.findMatchedEpisodeIndex(
@@ -1858,9 +1923,7 @@ final class MobileDetailScreen {
                         renderStoredCleanMode);
 
         int activeEpIdx = renderPlayAction.requiresReselection ? -1 : 0;
-        if (selectedEpisodeIndex >= 0
-                && selectedEpisodeIndex < total
-                && line.name.equals(selectedEpisodeLine)) {
+        if (hasExplicitEpisodeOnLine) {
             activeEpIdx = selectedEpisodeIndex;
         } else if (lineMatchesBookmark && !renderPlayAction.requiresReselection) {
             activeEpIdx = HistoryResumeMatcher.findMatchedEpisodeIndex(line, remembered);
@@ -1891,7 +1954,7 @@ final class MobileDetailScreen {
                                             a,
                                             site,
                                             video,
-                                            lineIndex,
+                                            safeLineIdx,
                                             panel,
                                             remembered,
                                             discoveredSeasons,
@@ -1931,7 +1994,7 @@ final class MobileDetailScreen {
                     View child = existingLineRow.getChildAt(i);
                     if (child instanceof TextView) {
                         TextView lPill = (TextView) child;
-                        boolean activeLine = (i == lineIndex);
+                        boolean activeLine = (i == safeLineIdx);
                         lPill.setTextColor(activeLine ? p.accent : p.textSecondary);
                         lPill.setTypeface(null, activeLine ? Typeface.BOLD : Typeface.NORMAL);
                         lPill.setBackground(MobileTheme.pillBg(a, activeLine, 999));
@@ -1955,7 +2018,7 @@ final class MobileDetailScreen {
                 for (int i = 0; i < video.lines.size(); i++) {
                     final int targetLineIdx = i;
                     Cms.Line candLine = video.lines.get(i);
-                    boolean activeLine = (i == lineIndex);
+                    boolean activeLine = (i == safeLineIdx);
                     TextView lPill =
                             a.text(
                                     candLine.name + " · " + candLine.episodes.size(),
@@ -1968,7 +2031,8 @@ final class MobileDetailScreen {
                     lPill.setOnClickListener(
                             v -> {
                                 userSelectedDetailTarget = true;
-                                selectedEpisodeLine = "";
+                                selectedEpisodeLine = candLine.name == null ? "" : candLine.name;
+                                selectedEpisodeLineIndex = targetLineIdx;
                                 selectedEpisodeIndex = -1;
                                 a.prefs
                                         .edit()
@@ -2122,18 +2186,29 @@ final class MobileDetailScreen {
                     a.mobilePrefs().edit().putInt(Prefs.EPISODE_CLEAN_MODE, nextMode).apply();
                     if (nextMode == 2 && nowUnlocked) {
                         a.toast("正在调用 AI 智能净化集名…");
+                        final int cleanTicket = a.generation;
                         AiAssistantService.cleanEpisodesAsync(
                                 a,
                                 video.title,
                                 line.episodes,
                                 map -> {
+                                    if (a.isFinishing()
+                                            || a.isDestroyed()
+                                            || cleanTicket != a.generation) {
+                                        return;
+                                    }
                                     activeAiEpisodeTitles.putAll(map);
+                                    int liveLineIdx =
+                                            resolveCurrentDetailLineIndex(a, video, safeLineIdx);
+                                    int livePageIdx =
+                                            resolveCurrentDetailPageIndex(
+                                                    a, video, liveLineIdx, safePage);
                                     renderMobileEpisodes(
                                             a,
                                             site,
                                             video,
-                                            lineIndex,
-                                            page,
+                                            liveLineIdx,
+                                            livePageIdx,
                                             panel,
                                             remembered,
                                             discoveredSeasons,
@@ -2144,8 +2219,8 @@ final class MobileDetailScreen {
                             a,
                             site,
                             video,
-                            lineIndex,
-                            page,
+                            safeLineIdx,
+                            safePage,
                             panel,
                             remembered,
                             discoveredSeasons,
@@ -2174,13 +2249,15 @@ final class MobileDetailScreen {
                 v -> {
                     activeVideoDescending = !descending;
                     int nextPage = 0;
-                    if (selectedEpisodeIndex >= 0 && selectedEpisodeIndex < total) {
+                    if (selectedEpisodeIndex >= 0
+                            && selectedEpisodeIndex < total
+                            && matchesSelectedEpisodeLine(safeLineIdx, line)) {
                         int visIdx =
                                 activeVideoDescending
                                         ? (total - 1 - selectedEpisodeIndex)
                                         : selectedEpisodeIndex;
                         nextPage = visIdx / 50;
-                    } else if (lineMatchesBookmark) {
+                    } else if (lineMatchesBookmark && !renderPlayAction.requiresReselection) {
                         int remIdx = HistoryResumeMatcher.findMatchedEpisodeIndex(line, remembered);
                         int visIdx = activeVideoDescending ? (total - 1 - remIdx) : remIdx;
                         nextPage = visIdx / 50;
@@ -2189,7 +2266,7 @@ final class MobileDetailScreen {
                             a,
                             site,
                             video,
-                            lineIndex,
+                            safeLineIdx,
                             nextPage,
                             panel,
                             remembered,
@@ -2222,7 +2299,7 @@ final class MobileDetailScreen {
                                 a,
                                 site,
                                 video,
-                                lineIndex,
+                                safeLineIdx,
                                 line,
                                 descending,
                                 panel,
@@ -2247,7 +2324,7 @@ final class MobileDetailScreen {
                     discoveredLabels);
         }
 
-        int start = page * 50;
+        int start = safePage * 50;
         int end = Math.min(start + 50, total);
         final EpisodeSelectionState selectionState = new EpisodeSelectionState(line.name);
         SELECTION_STATES.put(bodyHost, selectionState);
@@ -2286,7 +2363,10 @@ final class MobileDetailScreen {
                         v -> {
                             userSelectedDetailTarget = true;
                             selectedEpisodeLine = line.name == null ? "" : line.name;
+                            selectedEpisodeLineIndex = safeLineIdx;
                             selectedEpisodeIndex = posIdx;
+                            activeDetailLineIndex = safeLineIdx;
+                            activeDetailPage = safePage;
                             selectionState.applySelection(a, posIdx);
                             selectionState.scrollToEpisode(posIdx, true);
                             View playBtnView =
@@ -2295,7 +2375,7 @@ final class MobileDetailScreen {
                                 PrimaryPlayAction pickedAction =
                                         resolvePrimaryPlayAction(
                                                 video,
-                                                lineIndex,
+                                                safeLineIdx,
                                                 remembered,
                                                 true,
                                                 line,
@@ -2340,12 +2420,27 @@ final class MobileDetailScreen {
                     v -> {
                         userSelectedDetailTarget = true;
                         selectedEpisodeLine = line.name == null ? "" : line.name;
+                        selectedEpisodeLineIndex = safeLineIdx;
                         selectedEpisodeIndex = posIdx;
-                        a.resumeAt =
-                                remembered != null
-                                        ? HistoryResumeMatcher.resolveResumePositionMs(
-                                                line, ep, posIdx, remembered)
-                                        : 0;
+                        activeDetailLineIndex = safeLineIdx;
+                        activeDetailPage = safePage;
+                        selectionState.applySelection(a, posIdx);
+                        PrimaryPlayAction cardAction =
+                                resolvePrimaryPlayAction(
+                                        video,
+                                        safeLineIdx,
+                                        remembered,
+                                        true,
+                                        line,
+                                        posIdx,
+                                        renderAiUnlocked,
+                                        renderStoredCleanMode);
+                        View playBtnView =
+                                a.root == null ? null : a.root.findViewWithTag("detail-play");
+                        if (playBtnView instanceof Button) {
+                            bindPrimaryPlayButton(a, site, video, (Button) playBtnView, cardAction);
+                        }
+                        a.resumeAt = cardAction.resumePositionMs;
                         handleDetailEpisodeTap(a, site, video, line, ep, posIdx + 1, false);
                     });
             cardWrap.setOnLongClickListener(
@@ -2482,7 +2577,7 @@ final class MobileDetailScreen {
             groupScroll.addView(groupRow);
             for (int g = 0; g < groupCount; g++) {
                 final int targetGroup = g;
-                boolean selectedGroup = g == page;
+                boolean selectedGroup = g == safePage;
                 int gStart = g * 50 + 1;
                 int gEnd = Math.min(total, (g + 1) * 50);
                 String label =
@@ -2503,7 +2598,7 @@ final class MobileDetailScreen {
                                         a,
                                         site,
                                         video,
-                                        lineIndex,
+                                        safeLineIdx,
                                         targetGroup,
                                         panel,
                                         remembered,
@@ -2617,7 +2712,8 @@ final class MobileDetailScreen {
                     v -> {
                         if (handleRef[0] != null) handleRef[0].dismiss();
                         userSelectedDetailTarget = true;
-                        selectedEpisodeLine = "";
+                        selectedEpisodeLine = cand.name == null ? "" : cand.name;
+                        selectedEpisodeLineIndex = idx;
                         selectedEpisodeIndex = -1;
                         a.prefs.edit().putString(Prefs.PREFERRED_LINE, cand.rawName()).apply();
                         renderMobileEpisodes(
@@ -2736,7 +2832,7 @@ final class MobileDetailScreen {
         }
         int cols = hasLongTitles ? 1 : 3;
         final int precomputedGridMatchedIdx;
-        if (selectedEpisodeIndex >= 0 && line.name.equals(selectedEpisodeLine)) {
+        if (selectedEpisodeIndex >= 0 && matchesSelectedEpisodeLine(lineIndex, line)) {
             precomputedGridMatchedIdx = selectedEpisodeIndex;
         } else if (remembered != null
                 && HistoryResumeMatcher.isSameBookmarkLine(line, remembered)) {
@@ -2777,6 +2873,7 @@ final class MobileDetailScreen {
                         if (dlgRef[0] != null) dlgRef[0].dismiss();
                         userSelectedDetailTarget = true;
                         selectedEpisodeLine = line.name == null ? "" : line.name;
+                        selectedEpisodeLineIndex = lineIndex;
                         selectedEpisodeIndex = posIdx;
                         int targetPage = visualIdx / 50;
                         renderMobileEpisodes(
@@ -3069,12 +3166,18 @@ final class MobileDetailScreen {
                                     if (a.isFinishing()
                                             || a.isDestroyed()
                                             || ticket != a.generation) return;
+                                    int liveLineIdx =
+                                            resolveCurrentDetailLineIndex(
+                                                    a, currentVideo, currentLineIdx);
+                                    int livePageIdx =
+                                            resolveCurrentDetailPageIndex(
+                                                    a, currentVideo, liveLineIdx, currentPageIdx);
                                     renderMobileEpisodes(
                                             a,
                                             site,
                                             currentVideo,
-                                            currentLineIdx,
-                                            currentPageIdx,
+                                            liveLineIdx,
+                                            livePageIdx,
                                             episodePanel,
                                             remembered,
                                             bySeason,
