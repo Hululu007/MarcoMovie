@@ -126,8 +126,13 @@ final class TvV17DetailScreen {
                         () -> cover.backdrop.setScrollOffset(scroll.getScrollY()));
         view.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
 
+        float density = Math.max(1f, a.getResources().getDisplayMetrics().density);
+        float screenHeightDp = a.windowHeight() / density;
+        float screenWidthDp = a.windowWidth() / density;
+        int sidePadDp =
+                screenWidthDp < 640f ? Math.max(20, Math.round(screenWidthDp * 0.048f)) : 56;
         content = a.vertical();
-        content.setPadding(a.dp(56), a.dp(26), a.dp(56), a.dp(64));
+        content.setPadding(a.dp(sidePadDp), a.dp(26), a.dp(sidePadDp), a.dp(64));
         content.setClipChildren(false);
         content.setClipToPadding(false);
         scroll.addView(content, new ScrollView.LayoutParams(-1, -2));
@@ -139,15 +144,17 @@ final class TvV17DetailScreen {
 
         // Balanced upper artwork breathing window (~38-42% viewport) so title, nameplate badges,
         // synopsis, play/episodes buttons and last-played caption all sit cleanly above the fold.
-        float density = Math.max(1f, a.getResources().getDisplayMetrics().density);
-        float screenHeightDp = a.windowHeight() / density;
-        float screenWidthDp = a.windowWidth() / density;
         int targetTitleTopDp = Math.round(screenHeightDp * 0.36f);
-        int breathingDp = Math.max(96, Math.min(220, targetTitleTopDp - 58));
+        int breathingDp = Math.max(72, Math.min(220, targetTitleTopDp - 58));
         View breathingRoom = new View(a);
         content.addView(breathingRoom, new LinearLayout.LayoutParams(1, a.dp(breathingDp)));
 
-        int heroWidthPx = a.dp(Math.max(480, Math.min(760, Math.round(screenWidthDp * 0.66f))));
+        int maxHeroWidthDp = Math.max(220, Math.round(screenWidthDp) - sidePadDp * 2);
+        int desiredHeroDp =
+                Math.max(
+                        Math.min(480, maxHeroWidthDp),
+                        Math.min(760, Math.round(screenWidthDp * 0.66f)));
+        int heroWidthPx = a.dp(Math.min(maxHeroWidthDp, desiredHeroDp));
         LinearLayout heroColumn = a.vertical();
         heroColumn.setTag("detail-hero");
         heroColumn.setClipChildren(false);

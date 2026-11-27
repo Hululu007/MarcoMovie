@@ -175,6 +175,11 @@ final class ImmersivePoster extends FrameLayout {
         return sdkInt <= 23 || reducedMotion;
     }
 
+    static boolean useLightweightBackdropDraw(
+            int sdkInt, boolean reducedMotion, boolean tvOrLowRam) {
+        return useLightweightBackdropDraw(sdkInt, reducedMotion) || tvOrLowRam;
+    }
+
     static void applyMemoryBudget(int memoryClassMb) {
         if (memoryClassMb <= 0 || memoryClassMb > 192) return;
         lowRamBudget = true;
@@ -226,22 +231,39 @@ final class ImmersivePoster extends FrameLayout {
             INFLIGHT_SUBJECT_DETAILS = new java.util.concurrent.ConcurrentHashMap<>();
     private static final String SESSION_DOUBAN_BID = generateDoubanBid();
     private static final Pattern YEAR_PATTERN = Pattern.compile("((?:19|20)\\d{2})");
+    private static java.util.concurrent.ThreadPoolExecutor newBoundedBackgroundPool(
+            int maxThreads, final String name) {
+        java.util.concurrent.ThreadPoolExecutor pool =
+                new java.util.concurrent.ThreadPoolExecutor(
+                        maxThreads,
+                        maxThreads,
+                        20L,
+                        java.util.concurrent.TimeUnit.SECONDS,
+                        new java.util.concurrent.LinkedBlockingQueue<Runnable>(),
+                        r -> {
+                            Thread t =
+                                    new Thread(
+                                            () -> {
+                                                try {
+                                                    android.os.Process.setThreadPriority(
+                                                            android.os.Process
+                                                                    .THREAD_PRIORITY_BACKGROUND);
+                                                } catch (Throwable ignored) {
+                                                }
+                                                r.run();
+                                            },
+                                            name);
+                            t.setDaemon(true);
+                            return t;
+                        });
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
+    }
+
     private static final java.util.concurrent.ExecutorService HD_POOL =
-            java.util.concurrent.Executors.newFixedThreadPool(
-                    4,
-                    r -> {
-                        Thread t = new Thread(r, "immersive-hd-backdrop");
-                        t.setDaemon(true);
-                        return t;
-                    });
+            newBoundedBackgroundPool(2, "immersive-hd-backdrop");
     private static final java.util.concurrent.ExecutorService RATING_POOL =
-            java.util.concurrent.Executors.newFixedThreadPool(
-                    4,
-                    r -> {
-                        Thread t = new Thread(r, "media-ratings-resolver");
-                        t.setDaemon(true);
-                        return t;
-                    });
+            newBoundedBackgroundPool(2, "media-ratings-resolver");
     private static volatile boolean legacyCachePurged = false;
 
     private static String generateDoubanBid() {
@@ -620,6 +642,17 @@ final class ImmersivePoster extends FrameLayout {
                         Shader.TileMode.CLAMP));
         c.drawRect(0f, 0f, outW, outH, maskPaint);
         return out;
+    }
+
+    static boolean hasFeatheredHeroInCache(Cms.Video item, int viewWidthPx, int viewHeightPx) {
+        if (item == null || item.title == null) return false;
+        String cleanTitle = normalizeTitleForBackdrop(item.title);
+        if (cleanTitle.isEmpty()) return false;
+        String cleanYear = extractFourDigitYear(item.year);
+        String cacheKey = (cleanTitle + "#" + cleanYear).toLowerCase(Locale.ROOT);
+        String featheredKey = cacheKey + "@" + viewWidthPx + "x" + viewHeightPx;
+        Bitmap cached = HERO_FEATHERED_CACHE.get(featheredKey);
+        return cached != null && !cached.isRecycled();
     }
 
     static void prewarmOfficialLandscape(MainActivity a, Cms.Video item) {
@@ -2896,12 +2929,78 @@ final class ImmersivePoster extends FrameLayout {
         final Paint veilPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         final RectF dstRect = new RectF();
         final RectF wingRect = new RectF();
+        private int cachedShaderW = -1;
+        private int cachedShaderH = -1;
+        private int cachedShaderBg = 0;
+        private boolean cachedShaderLeftAligned = false;
+        private LinearGradient cachedLeftVignette;
+        private LinearGradient cachedTopScrim;
+        private LinearGradient cachedBottomLock;
 
         Backdrop() {
             super(a);
             setTag("detail-backdrop");
             setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             maskPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_IN));
+        }
+
+        private void ensureCachedShaders(int w, int h, float winH, int bg) {
+            if (cachedShaderW == w
+                    && cachedShaderH == h
+                    && cachedShaderBg == bg
+                    && cachedShaderLeftAligned == leftAlignedHero
+                    && cachedTopScrim != null
+                    && cachedBottomLock != null) {
+                return;
+            }
+            cachedShaderW = w;
+            cachedShaderH = h;
+            cachedShaderBg = bg;
+            cachedShaderLeftAligned = leftAlignedHero;
+            int r = Color.red(bg);
+            int g = Color.green(bg);
+            int b = Color.blue(bg);
+            cachedLeftVignette =
+                    leftAlignedHero
+                            ? new LinearGradient(
+                                    0,
+                                    0,
+                                    w * 0.74f,
+                                    0,
+                                    new int[] {
+                                        Color.argb(236, r, g, b),
+                                        Color.argb(204, r, g, b),
+                                        Color.argb(122, r, g, b),
+                                        Color.argb(28, r, g, b),
+                                        Color.argb(0, r, g, b)
+                                    },
+                                    new float[] {0f, 0.30f, 0.56f, 0.82f, 1f},
+                                    Shader.TileMode.CLAMP)
+                            : null;
+            cachedTopScrim =
+                    new LinearGradient(
+                            0,
+                            0,
+                            0,
+                            h * 0.16f,
+                            new int[] {0x70000000, 0x24000000, 0x00000000},
+                            new float[] {0f, 0.55f, 1f},
+                            Shader.TileMode.CLAMP);
+            float fadeStart = leftAlignedHero ? winH * 0.42f : winH * 0.46f;
+            cachedBottomLock =
+                    new LinearGradient(
+                            0,
+                            fadeStart,
+                            0,
+                            winH,
+                            new int[] {
+                                Color.argb(0, r, g, b),
+                                Color.argb(104, r, g, b),
+                                Color.argb(220, r, g, b),
+                                Color.argb(255, r, g, b)
+                            },
+                            new float[] {0f, 0.44f, 0.80f, 1f},
+                            Shader.TileMode.CLAMP);
         }
 
         void setScrollOffset(int scrollY) {
@@ -2956,57 +3055,23 @@ final class ImmersivePoster extends FrameLayout {
             int r = Color.red(bg);
             int g = Color.green(bg);
             int b = Color.blue(bg);
+            ensureCachedShaders(w, h, winH, bg);
 
             // Apple TV+ cinema directional left vignette for left-aligned hero typography
-            if (leftAlignedHero) {
-                veilPaint.setShader(
-                        new LinearGradient(
-                                0,
-                                0,
-                                w * 0.74f,
-                                0,
-                                new int[] {
-                                    Color.argb(236, r, g, b),
-                                    Color.argb(204, r, g, b),
-                                    Color.argb(122, r, g, b),
-                                    Color.argb(28, r, g, b),
-                                    Color.argb(0, r, g, b)
-                                },
-                                new float[] {0f, 0.30f, 0.56f, 0.82f, 1f},
-                                Shader.TileMode.CLAMP));
+            if (leftAlignedHero && cachedLeftVignette != null) {
+                veilPaint.setShader(cachedLeftVignette);
                 c.drawRect(0, 0, w * 0.75f, h, veilPaint);
                 veilPaint.setShader(null);
             }
 
             // Top floating navigation bar subtle legibility scrim
-            veilPaint.setShader(
-                    new LinearGradient(
-                            0,
-                            0,
-                            0,
-                            h * 0.16f,
-                            new int[] {0x70000000, 0x24000000, 0x00000000},
-                            new float[] {0f, 0.55f, 1f},
-                            Shader.TileMode.CLAMP));
+            veilPaint.setShader(cachedTopScrim);
             c.drawRect(0, 0, w, h * 0.16f, veilPaint);
             veilPaint.setShader(null);
 
             // Bottom lock-in gradient into ambientColor so the episode shelf sits on a pure surface
             float fadeStart = leftAlignedHero ? winH * 0.42f : winH * 0.46f;
-            veilPaint.setShader(
-                    new LinearGradient(
-                            0,
-                            fadeStart,
-                            0,
-                            winH,
-                            new int[] {
-                                Color.argb(0, r, g, b),
-                                Color.argb(104, r, g, b),
-                                Color.argb(220, r, g, b),
-                                Color.argb(255, r, g, b)
-                            },
-                            new float[] {0f, 0.44f, 0.80f, 1f},
-                            Shader.TileMode.CLAMP));
+            veilPaint.setShader(cachedBottomLock);
             c.drawRect(0, fadeStart, w, winH + 2f, veilPaint);
             veilPaint.setShader(null);
 
@@ -3031,7 +3096,8 @@ final class ImmersivePoster extends FrameLayout {
             float dy = (winH - dh) * 0.22f;
             dstRect.set(dx, dy, dx + dw, dy + dh);
 
-            if (useLightweightBackdropDraw(android.os.Build.VERSION.SDK_INT, a.reduced)) {
+            if (useLightweightBackdropDraw(
+                    android.os.Build.VERSION.SDK_INT, a.reduced, lowRamBudget || a.isTvDevice())) {
                 int clip = c.save();
                 c.clipRect(0, 0, w, winH);
                 paint.setAlpha(255);
@@ -3107,7 +3173,8 @@ final class ImmersivePoster extends FrameLayout {
             int bh = raw.getHeight();
             if (bw <= 0 || bh <= 0) return;
 
-            if (useLightweightBackdropDraw(android.os.Build.VERSION.SDK_INT, a.reduced)) {
+            if (useLightweightBackdropDraw(
+                    android.os.Build.VERSION.SDK_INT, a.reduced, lowRamBudget || a.isTvDevice())) {
                 int clip = c.save();
                 c.clipRect(0, 0, w, winH);
                 if (bitmap != null && !bitmap.isRecycled()) {

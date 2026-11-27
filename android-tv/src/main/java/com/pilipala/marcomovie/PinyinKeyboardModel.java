@@ -20,19 +20,59 @@ public final class PinyinKeyboardModel {
         }
     }
 
-    final Map<String, String> dictionary = new HashMap<>();
+    private static volatile Map<String, String> sharedDictionary;
+
+    final Map<String, String> dictionary;
     String committed = "", composition = "";
     Mode mode = Mode.PINYIN;
 
     public PinyinKeyboardModel(InputStream in) throws IOException {
+        this.dictionary = loadDictionary(in);
+    }
+
+    private PinyinKeyboardModel(Map<String, String> shared) {
+        this.dictionary = shared;
+    }
+
+    public static Map<String, String> loadDictionary(InputStream in) throws IOException {
+        Map<String, String> map = new HashMap<>(512);
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(in, "UTF-8"))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (line.startsWith("#")) continue;
                 int at = line.indexOf('\t');
-                if (at > 0) dictionary.put(line.substring(0, at), line.substring(at + 1));
+                if (at > 0) map.put(line.substring(0, at), line.substring(at + 1));
             }
         }
+        return Collections.unmodifiableMap(map);
+    }
+
+    public static boolean hasWarmSharedDictionary() {
+        return sharedDictionary != null;
+    }
+
+    public static void warmSharedDictionary(InputStream in) throws IOException {
+        if (sharedDictionary != null) {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (IOException ignored) {
+                }
+            }
+            return;
+        }
+        Map<String, String> loaded = loadDictionary(in);
+        if (sharedDictionary == null) {
+            sharedDictionary = loaded;
+        }
+    }
+
+    public static PinyinKeyboardModel fromWarmSharedDictionary() {
+        Map<String, String> dict = sharedDictionary;
+        if (dict == null) {
+            throw new IllegalStateException("Pinyin dictionary not warmed");
+        }
+        return new PinyinKeyboardModel(dict);
     }
 
     public Mode mode() {

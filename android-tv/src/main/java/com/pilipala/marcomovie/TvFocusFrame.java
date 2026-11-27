@@ -86,7 +86,7 @@ final class TvFocusFrame {
                     if (!scroller.isAttachedToWindow()) return;
                     if (newFocus != null && isDescendant(newFocus)) {
                         follow(newFocus);
-                    } else {
+                    } else if (hasVisibleOrActiveRing()) {
                         clear();
                     }
                 };
@@ -196,7 +196,14 @@ final class TvFocusFrame {
         applyTargetBounds(liveBounds, liveRadius[0], !glide);
     }
 
+    private boolean hasVisibleOrActiveRing() {
+        return animator != null || target != null || currentGroup != null || positioned;
+    }
+
     void clear() {
+        if (!hasVisibleOrActiveRing()) {
+            return;
+        }
         stop();
         target = null;
         currentGroup = null;

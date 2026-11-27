@@ -280,22 +280,48 @@ final class CloudSync {
                     ExecutorService prev = ACTIVE_SERIAL_EXECUTOR.get();
                     ACTIVE_SERIAL_EXECUTOR.set(serialExecutor);
                     try {
-                        String localHist = store.readHistoryJson();
-                        String localFav = store.readFavoritesJson();
-                        String localTomb = store.readTombstonesJson();
-                        MergeResult res =
-                                merge(
-                                        localHist,
-                                        localFav,
-                                        localTomb,
-                                        localSubscriptions,
-                                        syncSubscriptions,
-                                        syncHistory,
-                                        remotePayloadJson,
-                                        now);
-                        store.writeMerged(
-                                res.historyJson, res.favoritesJson, res.tombstonesJson, res);
-                        return res;
+                        final int maxEpochRetries = 4;
+                        for (int attempt = 0; attempt <= maxEpochRetries; attempt++) {
+                            long epochBeforeRead = WatchHistory.restoreEpoch();
+                            String localHist = store.readHistoryJson();
+                            String localFav = store.readFavoritesJson();
+                            String localTomb = store.readTombstonesJson();
+                            if (epochBeforeRead != WatchHistory.restoreEpoch()) {
+                                if (attempt < maxEpochRetries) {
+                                    continue;
+                                }
+                                throw new IOException("本地数据刚被备份还原更新，已取消过期云同步合并");
+                            }
+                            MergeResult res =
+                                    merge(
+                                            localHist,
+                                            localFav,
+                                            localTomb,
+                                            localSubscriptions,
+                                            syncSubscriptions,
+                                            syncHistory,
+                                            remotePayloadJson,
+                                            now);
+                            synchronized (WatchHistory.PERSISTENCE_LOCK) {
+                                if (epochBeforeRead != WatchHistory.restoreEpoch()) {
+                                    // A manual backup restore committed while this merge was
+                                    // reading or computing; discard the stale merge result so it is
+                                    // neither written locally nor uploaded remotely, and recompute
+                                    // from the post-restore local state.
+                                    if (attempt < maxEpochRetries) {
+                                        continue;
+                                    }
+                                    throw new IOException("本地数据刚被备份还原更新，已取消过期云同步合并");
+                                }
+                                store.writeMerged(
+                                        res.historyJson,
+                                        res.favoritesJson,
+                                        res.tombstonesJson,
+                                        res);
+                                return res;
+                            }
+                        }
+                        throw new IOException("本地数据刚被备份还原更新，已取消过期云同步合并");
                     } finally {
                         ACTIVE_SERIAL_EXECUTOR.set(prev);
                     }

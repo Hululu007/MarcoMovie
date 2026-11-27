@@ -793,6 +793,12 @@ final class UpdateScreen {
 
         a.body.addView(bottomStrip, new LinearLayout.LayoutParams(-1, -2));
 
+        a.gap(a.body, 14);
+        LinearLayout donateCard =
+                TvOfficialNotice.buildInlineDonateCard(
+                        a, "update-donate-card", "update-donate-qr");
+        a.body.addView(donateCard, new LinearLayout.LayoutParams(-1, -2));
+
         // Explicit D-pad focus choreography & guaranteed initial focus on primary CTA ("立即下载")
         primaryBtn.setNextFocusRightId(viewAllNotesBtn.getId());
         secondaryActionBtn.setNextFocusRightId(viewAllNotesBtn.getId());
@@ -801,8 +807,11 @@ final class UpdateScreen {
         viewAllNotesBtn.setNextFocusLeftId(primaryBtn.getId());
         viewAllNotesBtn.setNextFocusDownId(installRow.getId());
         modeRow.setNextFocusRightId(installRow.getId());
+        modeRow.setNextFocusDownId(donateCard.getId());
         installRow.setNextFocusLeftId(modeRow.getId());
         installRow.setNextFocusUpId(viewAllNotesBtn.getId());
+        installRow.setNextFocusDownId(donateCard.getId());
+        donateCard.setNextFocusUpId(modeRow.getId());
 
         a.tvInitialFocus = primaryBtn;
         refresh();

@@ -59,6 +59,12 @@ final class DetailCache {
         }
     }
 
+    synchronized void remove(String key) {
+        if (key == null) return;
+        Entry removed = entries.remove(key);
+        if (removed != null) chars -= removed.size;
+    }
+
     synchronized void clear() {
         entries.clear();
         chars = 0;

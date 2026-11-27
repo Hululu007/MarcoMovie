@@ -94,6 +94,68 @@ public interface DanmuProvider {
         }
     }
 
+    enum FailureKind {
+        NONE,
+        NO_DATA,
+        AUTH,
+        RATE_LIMIT,
+        SERVICE_ERROR,
+        NETWORK_ERROR
+    }
+
+    final class FailureInfo {
+        public final FailureKind kind;
+        public final int httpStatus;
+        public final long retryAfterMs;
+        public final String shortReason;
+
+        public FailureInfo(
+                FailureKind kind, int httpStatus, long retryAfterMs, String shortReason) {
+            this.kind = kind == null ? FailureKind.NONE : kind;
+            this.httpStatus = httpStatus;
+            this.retryAfterMs = Math.max(0L, retryAfterMs);
+            this.shortReason = shortReason == null ? "" : shortReason;
+        }
+
+        public static FailureInfo classify(Throwable error) {
+            if (error == null) {
+                return new FailureInfo(FailureKind.NO_DATA, 0, 0L, "未匹配到本集弹幕");
+            }
+            if (error instanceof HttpStatusException) {
+                HttpStatusException h = (HttpStatusException) error;
+                int code = h.statusCode;
+                if (code == 401 || code == 403) {
+                    return new FailureInfo(FailureKind.AUTH, code, 0L, "鉴权失败 (HTTP " + code + ")");
+                }
+                if (code == 429) {
+                    long sec = Math.max(1L, (h.retryAfterMs + 999L) / 1000L);
+                    String detail =
+                            h.retryAfterMs > 0L
+                                    ? ("请求限流 (HTTP 429)，约 " + sec + " 秒后重试")
+                                    : "请求限流 (HTTP 429)，请稍后重试";
+                    return new FailureInfo(FailureKind.RATE_LIMIT, 429, h.retryAfterMs, detail);
+                }
+                return new FailureInfo(
+                        FailureKind.SERVICE_ERROR, code, 0L, "服务异常 (HTTP " + code + ")");
+            }
+            return new FailureInfo(FailureKind.NETWORK_ERROR, 0, 0L, "网络连接失败");
+        }
+
+        public static String sanitizedDiagnostic(
+                String stage, int httpStatus, String anonRequestId, int count) {
+            String safeStage = stage == null ? "unknown" : stage;
+            String safeReq = anonRequestId == null ? "-" : anonRequestId;
+            return "stage="
+                    + safeStage
+                    + " http="
+                    + httpStatus
+                    + " req="
+                    + safeReq
+                    + " count="
+                    + count;
+        }
+    }
+
     final class MatchQuery {
         public final String title;
         public final String episodeTitle;

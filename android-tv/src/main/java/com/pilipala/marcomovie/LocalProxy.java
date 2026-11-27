@@ -23,7 +23,19 @@ public final class LocalProxy implements Closeable {
     private static ThreadPoolExecutor createRequestExecutor() {
         ThreadPoolExecutor pool =
                 new ThreadPoolExecutor(
-                        16, 64, 45, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(64));
+                        4,
+                        20,
+                        20,
+                        TimeUnit.SECONDS,
+                        new LinkedBlockingQueue<Runnable>(64),
+                        new ThreadFactory() {
+                            @Override
+                            public Thread newThread(Runnable r) {
+                                Thread t = new Thread(r, "local-proxy-req");
+                                t.setDaemon(true);
+                                return t;
+                            }
+                        });
         pool.allowCoreThreadTimeOut(true);
         return pool;
     }

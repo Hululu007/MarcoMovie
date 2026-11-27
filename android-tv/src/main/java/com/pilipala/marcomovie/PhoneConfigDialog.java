@@ -53,6 +53,35 @@ final class PhoneConfigDialog {
         throw new java.io.IOException("No LAN address");
     }
 
+    private void acquireKeepScreenOn() {
+        if (!a.isTvDevice()) return;
+        try {
+            if (dialog != null && dialog.getWindow() != null) {
+                dialog.getWindow()
+                        .addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            }
+            if (a.getWindow() != null) {
+                a.getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void releaseKeepScreenOn() {
+        if (!a.isTvDevice()) return;
+        try {
+            if (dialog != null && dialog.getWindow() != null) {
+                dialog.getWindow()
+                        .clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            }
+            if (a.player == null && a.getWindow() != null) {
+                a.getWindow()
+                        .clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     void show() {
         if (!a.isTvDevice()) {
             MobileShell.showMobileImportDialog(a);
@@ -65,7 +94,12 @@ final class PhoneConfigDialog {
                             (address, appendMerge) -> {
                                 List<SubscriptionManager.ImportSpec> specs =
                                         SubscriptionManager.parseImportSpecsStrict(address);
-                                if (specs.size() == 1 && !appendMerge) {
+                                boolean useTvMultiSource =
+                                        a.isTvDevice()
+                                                && !a.privateMode
+                                                && a.multiSourceStore != null
+                                                && a.multiSourceStore.readState().initialized;
+                                if (specs.size() == 1 && !appendMerge && !useTvMultiSource) {
                                     String onlyUrl = specs.get(0).url;
                                     Cms.Config config =
                                             Cms.parseConfig(
@@ -111,11 +145,15 @@ final class PhoneConfigDialog {
                                                     throw new java.io.IOException("Session closed");
                                                 a.saveConfig(merged.config, merged.origin);
                                                 a.toast(
-                                                        "已导入 "
-                                                                + merged.sourceCount
-                                                                + " 个源并自动分组（共 "
-                                                                + merged.config.sites.size()
-                                                                + " 条线路）");
+                                                        appendMerge
+                                                                ? ("已导入 "
+                                                                        + merged.sourceCount
+                                                                        + " 个源并自动分组（共 "
+                                                                        + merged.config.sites.size()
+                                                                        + " 条线路）")
+                                                                : ("已切换为新片源（共 "
+                                                                        + merged.config.sites.size()
+                                                                        + " 条线路，旧源已保留在管理订阅源）"));
                                                 finished = true;
                                                 if (dialog != null) dialog.dismiss();
                                             } catch (Exception e) {
@@ -201,6 +239,7 @@ final class PhoneConfigDialog {
                         else close();
                     });
             dialog.show();
+            acquireKeepScreenOn();
             dialog.getButton(-2).requestFocus();
             a.ui.postDelayed(expiry, TimeUnit.MINUTES.toMillis(5));
         } catch (Exception error) {
@@ -302,6 +341,7 @@ final class PhoneConfigDialog {
                         close();
                     });
             dialog.show();
+            acquireKeepScreenOn();
             if (a.isTvDevice() && dialog.getButton(-2) != null) {
                 dialog.getButton(-2).requestFocus();
             }
@@ -314,6 +354,7 @@ final class PhoneConfigDialog {
 
     void close() {
         a.ui.removeCallbacks(expiry);
+        releaseKeepScreenOn();
         if (server != null) server.close();
         if (a.phoneConfig == this) a.phoneConfig = null;
     }

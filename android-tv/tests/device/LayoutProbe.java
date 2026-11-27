@@ -55,6 +55,78 @@ public final class LayoutProbe extends Instrumentation {
                 && pos[1] + v.getHeight() <= a.root.getHeight() + 1;
     }
 
+    /**
+     * Recursively verifies visible children stay within clipped ancestor viewport bounds and action
+     * or compound text labels are not ellipsized when visible.
+     */
+    boolean verifySubtreeChildrenAndLabels(View node, int maxRight, int maxBottom) {
+        return verifySubtreeClipped(node, 0, 0, maxRight, maxBottom);
+    }
+
+    private boolean verifySubtreeClipped(
+            View node, int clipLeft, int clipTop, int clipRight, int clipBottom) {
+        if (node == null || !node.isShown() || node.getWidth() <= 0 || node.getHeight() <= 0) {
+            return true;
+        }
+        int[] pos = new int[2];
+        node.getLocationOnScreen(pos);
+        int l = pos[0];
+        int t = pos[1];
+        int r = l + node.getWidth();
+        int b = t + node.getHeight();
+        // Skip items that are completely scrolled outside the clipped ancestor viewport.
+        if (r <= clipLeft || b <= clipTop || l >= clipRight || t >= clipBottom) {
+            return true;
+        }
+        boolean insideScrollParent =
+                node.getParent() instanceof ScrollView
+                        || node.getParent() instanceof HorizontalScrollView
+                        || (node.getParent() != null
+                                && node.getParent().getClass().getName().contains("RecyclerView"));
+        if (!insideScrollParent) {
+            if (l < clipLeft - 2 || t < clipTop - 2 || r > clipRight + 2 || b > clipBottom + 2) {
+                return false;
+            }
+        }
+        if (node instanceof Button && node.isFocusable()) {
+            Button btn = (Button) node;
+            android.text.Layout layout = btn.getLayout();
+            if (layout != null && layout.getLineCount() > 0) {
+                CharSequence txt = btn.getText();
+                if (txt != null && txt.length() > 0) {
+                    for (int i = 0; i < layout.getLineCount(); i++) {
+                        if (layout.getEllipsisCount(i) != 0) return false;
+                    }
+                }
+            }
+        }
+        if (node instanceof ViewGroup) {
+            ViewGroup vg = (ViewGroup) node;
+            int childClipL = clipLeft;
+            int childClipT = clipTop;
+            int childClipR = clipRight;
+            int childClipB = clipBottom;
+            boolean clips =
+                    vg instanceof ScrollView
+                            || vg instanceof HorizontalScrollView
+                            || vg.getClass().getName().contains("RecyclerView")
+                            || "scroll-viewport-clip".equals(vg.getTag());
+            if (clips) {
+                childClipL = Math.max(clipLeft, l);
+                childClipT = Math.max(clipTop, t);
+                childClipR = Math.min(clipRight, r);
+                childClipB = Math.min(clipBottom, b);
+            }
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                if (!verifySubtreeClipped(
+                        vg.getChildAt(i), childClipL, childClipT, childClipR, childClipB)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     void ready() throws Exception {
         if (!launch.await(15, TimeUnit.SECONDS)) throw new AssertionError("recreate timeout");
         waitForIdleSync();
@@ -122,7 +194,14 @@ public final class LayoutProbe extends Instrumentation {
                                         .show());
                 waitForIdleSync();
                 SystemClock.sleep(250);
-                runOnMainSync(() -> fits[0] = inside(a.appDialog.getWindow().getDecorView()));
+                runOnMainSync(
+                        () -> {
+                            View decor = a.appDialog.getWindow().getDecorView();
+                            fits[0] =
+                                    inside(decor)
+                                            && verifySubtreeChildrenAndLabels(
+                                                    decor, a.root.getWidth(), a.root.getHeight());
+                        });
                 check("dialog_inside_screen_" + scale, fits[0]);
                 runOnMainSync(() -> a.appDialog.dismiss());
                 runOnMainSync(

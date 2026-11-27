@@ -28,9 +28,11 @@ def main() -> int:
 
     src_dir = ROOT / "android-tv/src/main/java/com/pilipala/marcomovie"
     sources = [
+        src_dir / "DanmakuData.java",
         src_dir / "DanmuProvider.java",
         src_dir / "DandanplayProvider.java",
         src_dir / "DanmuSegmentCache.java",
+        src_dir / "DanmuOwnership.java",
         ROOT / "android-tv/tests/DanmuEngineChecks.java",
     ]
     subprocess.run(

@@ -5,6 +5,7 @@ import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Surface;
+
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MimeTypes;
@@ -17,10 +18,10 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+
 import okhttp3.ConnectionPool;
 import okhttp3.OkHttpClient;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
+
 import java.net.URL;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -31,8 +32,10 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 
-/** Small Media3 adapter for the app's existing TV controls. All player access is
- * marshalled to the main looper, including reads made by device instrumentation. */
+/**
+ * Small Media3 adapter for the app's existing TV controls. All player access is marshalled to the
+ * main looper, including reads made by device instrumentation.
+ */
 public class MoviePlayer {
     public interface OnPreparedListener {
         void onPrepared(MoviePlayer player);
@@ -48,6 +51,13 @@ public class MoviePlayer {
     }
 
     private OnSeekPositionListener seekPositionListener;
+    private final Object seekClockLock = new Object();
+    private volatile long seekGeneration;
+    private volatile long completedSeekGeneration;
+    private volatile int lastSeekTargetMs = -1;
+    private volatile int lastSeekPrePosMs = -1;
+    private volatile long exoPendingSeekGen;
+    private volatile boolean exoSeekDiscontinuitySeen;
 
     void setOnSeekPositionListener(OnSeekPositionListener listener) {
         onMain(
@@ -59,6 +69,58 @@ public class MoviePlayer {
 
     protected final void observeSeekPosition(long actualPosition) {
         if (seekPositionListener != null) seekPositionListener.position(this, actualPosition);
+    }
+
+    protected final long beginSeek(int targetMs, int prePosMs) {
+        synchronized (seekClockLock) {
+            lastSeekTargetMs = Math.max(0, targetMs);
+            lastSeekPrePosMs = prePosMs;
+            seekGeneration++;
+            return seekGeneration;
+        }
+    }
+
+    protected final void confirmSeekCompleted(long targetGen) {
+        synchronized (seekClockLock) {
+            if (targetGen <= 0L) return;
+            long bounded = Math.min(targetGen, seekGeneration);
+            if (bounded > completedSeekGeneration) {
+                completedSeekGeneration = bounded;
+            }
+        }
+    }
+
+    protected final void resetSeekClockState() {
+        synchronized (seekClockLock) {
+            seekGeneration = 0L;
+            completedSeekGeneration = 0L;
+            lastSeekTargetMs = -1;
+            lastSeekPrePosMs = -1;
+        }
+    }
+
+    boolean supportsSeekConfirmation() {
+        return true;
+    }
+
+    boolean isSeekInFlight() {
+        return supportsSeekConfirmation() && seekGeneration > completedSeekGeneration;
+    }
+
+    long seekGeneration() {
+        return seekGeneration;
+    }
+
+    long completedSeekGeneration() {
+        return completedSeekGeneration;
+    }
+
+    int lastSeekTargetMs() {
+        return lastSeekTargetMs;
+    }
+
+    int lastSeekPrePosMs() {
+        return lastSeekPrePosMs;
     }
 
     public interface OnVideoSizeChangedListener {
@@ -168,6 +230,7 @@ public class MoviePlayer {
     private volatile boolean bufferingActive;
     private final java.util.concurrent.atomic.AtomicLong transferredBytesTotal =
             new java.util.concurrent.atomic.AtomicLong(0L);
+    private volatile boolean transferCounterInstalled;
     private long lastRateBytesSample;
     private long lastRateTimeMs;
     private volatile long lastMeasuredBytesPerSec = -1L;
@@ -180,6 +243,11 @@ public class MoviePlayer {
     private String lastError = "";
     private String videoDecoder = "", audioDecoder = "";
     private int lastHttpStatus, lastErrorTrack;
+    private volatile boolean lastTlsError;
+    private volatile Surface currentSurface;
+    private volatile boolean firstFrameRenderedOnCurrentSurface;
+    private volatile Boolean hasVideoTrack;
+    private volatile OnVideoOutputListener videoOutputListener;
     private org.json.JSONObject options = new org.json.JSONObject();
     private DefaultMediaSourceFactory mediaSourceFactory;
     private androidx.media3.datasource.DataSource.Factory subtitleDataSourceFactory;
@@ -187,6 +255,106 @@ public class MoviePlayer {
     private String mediaMime;
     private boolean hlsFallbackAttempted;
     private final boolean ijkMode;
+
+    public interface OnVideoOutputListener {
+        void onFileOpened(MoviePlayer player);
+
+        void onVideoTrackPresence(MoviePlayer player, boolean hasVideoTrack);
+
+        void onFirstFrameRendered(MoviePlayer player, Surface surface, long firstFrameMs);
+
+        void onVideoOutputUnconfirmed(MoviePlayer player, String reason);
+
+        default void onVideoOutputConfigured(
+                MoviePlayer player, Surface surface, boolean configured) {}
+    }
+
+    public void setOnVideoOutputListener(OnVideoOutputListener listener) {
+        this.videoOutputListener = listener;
+    }
+
+    static boolean matchesRenderedOutput(Object output, Object expectedSurface) {
+        return expectedSurface != null && output == expectedSurface;
+    }
+
+    protected final void notifyFileOpened() {
+        if (released) return;
+        final OnVideoOutputListener listener = videoOutputListener;
+        if (listener != null) {
+            main.post(
+                    () -> {
+                        if (!released) listener.onFileOpened(MoviePlayer.this);
+                    });
+        }
+    }
+
+    protected final void notifyVideoTrackPresence(final boolean hasVideo) {
+        if (released) return;
+        final OnVideoOutputListener listener = videoOutputListener;
+        if (listener != null) {
+            main.post(
+                    () -> {
+                        if (!released) listener.onVideoTrackPresence(MoviePlayer.this, hasVideo);
+                    });
+        }
+    }
+
+    protected final void notifyFirstFrameRendered(final Surface surface, final long elapsedMs) {
+        if (released) return;
+        final OnVideoOutputListener listener = videoOutputListener;
+        if (listener != null) {
+            main.post(
+                    () -> {
+                        if (!released) {
+                            listener.onFirstFrameRendered(MoviePlayer.this, surface, elapsedMs);
+                        }
+                    });
+        }
+    }
+
+    protected final void notifyVideoOutputUnconfirmed(final String reason) {
+        if (released) return;
+        final OnVideoOutputListener listener = videoOutputListener;
+        if (listener != null) {
+            main.post(
+                    () -> {
+                        if (!released) listener.onVideoOutputUnconfirmed(MoviePlayer.this, reason);
+                    });
+        }
+    }
+
+    protected final void notifyVideoOutputConfigured(
+            final Surface surface, final boolean configured) {
+        if (released) return;
+        final OnVideoOutputListener listener = videoOutputListener;
+        if (listener != null) {
+            main.post(
+                    () -> {
+                        if (!released) {
+                            listener.onVideoOutputConfigured(MoviePlayer.this, surface, configured);
+                        }
+                    });
+        }
+    }
+
+    public boolean isLastErrorTls() {
+        return lastTlsError;
+    }
+
+    public Boolean hasConfirmedVideoTrack() {
+        return hasVideoTrack;
+    }
+
+    public boolean hasRenderedFirstFrameOnCurrentSurface() {
+        return firstFrameRenderedOnCurrentSurface;
+    }
+
+    public String videoOutputStateName() {
+        if (Boolean.FALSE.equals(hasVideoTrack)) return "AUDIO_ONLY";
+        if (firstFrameRenderedOnCurrentSurface) return "FIRST_FRAME_RENDERED";
+        if (readySent) return "DECODER_PREPARED";
+        return "NONE";
+    }
 
     public interface OnHdrChangedListener {
         void onHdrChanged(boolean hdr);
@@ -217,6 +385,9 @@ public class MoviePlayer {
     }
 
     public long networkSpeedBytesPerSec() {
+        if (!transferCounterInstalled) {
+            return -1L;
+        }
         long now = android.os.SystemClock.elapsedRealtime();
         long total = transferredBytesTotal.get();
         if (lastRateTimeMs <= 0L) {
@@ -314,6 +485,9 @@ public class MoviePlayer {
                                         if (!exists) raw.add(eac3);
                                     }
                                 }
+                                // Audio FFmpeg fallback filtering runs inside
+                                // DecoderRenderersFactory.buildAudioRenderers where full Format
+                                // (cryptoType/drmInitData) and AudioSink PCM support are known.
                                 if (mime.startsWith("video/") && decoderMode != 2) {
                                     raw = DecoderRenderersFactory.prioritizeHardwareDecoders(raw);
                                 }
@@ -416,9 +590,21 @@ public class MoviePlayer {
                                 @Override
                                 public void onRenderedFirstFrame(
                                         EventTime time, Object output, long renderTimeMs) {
-                                    firstFrameMs =
-                                            android.os.SystemClock.elapsedRealtime()
-                                                    - prepareStarted;
+                                    if (released) return;
+                                    Surface expected = currentSurface;
+                                    if (!matchesRenderedOutput(output, expected)) return;
+                                    long elapsed =
+                                            prepareStarted > 0L
+                                                    ? Math.max(
+                                                            0L,
+                                                            android.os.SystemClock.elapsedRealtime()
+                                                                    - prepareStarted)
+                                                    : 0L;
+                                    if (firstFrameMs < 0L) {
+                                        firstFrameMs = elapsed;
+                                    }
+                                    firstFrameRenderedOnCurrentSurface = true;
+                                    notifyFirstFrameRendered(expected, firstFrameMs);
                                 }
                             });
                     exo.addListener(
@@ -432,8 +618,14 @@ public class MoviePlayer {
                                             && (reason == Player.DISCONTINUITY_REASON_SEEK
                                                     || reason
                                                             == Player
-                                                                    .DISCONTINUITY_REASON_SEEK_ADJUSTMENT))
+                                                                    .DISCONTINUITY_REASON_SEEK_ADJUSTMENT)) {
+                                        exoSeekDiscontinuitySeen = true;
+                                        if (exo != null
+                                                && exo.getPlaybackState() == Player.STATE_READY) {
+                                            confirmSeekCompleted(exoPendingSeekGen);
+                                        }
                                         observeSeekPosition(newPosition.positionMs);
+                                    }
                                 }
 
                                 @Override
@@ -442,11 +634,16 @@ public class MoviePlayer {
                                     if (state == Player.STATE_BUFFERING && readySent) {
                                         notifyBufferingChanged(true, -1);
                                     } else if (state == Player.STATE_READY) {
+                                        if (exoSeekDiscontinuitySeen
+                                                && exoPendingSeekGen > completedSeekGeneration()) {
+                                            confirmSeekCompleted(exoPendingSeekGen);
+                                        }
                                         if (bufferingActive) {
                                             notifyBufferingChanged(false, 100);
                                         }
                                         if (!readySent && !unsupportedVideo) {
                                             readySent = true;
+                                            notifyFileOpened();
                                             if (preparedListener != null)
                                                 preparedListener.onPrepared(MoviePlayer.this);
                                         }
@@ -495,6 +692,10 @@ public class MoviePlayer {
                                                 }
                                             }
                                         }
+                                    if (!tracks.getGroups().isEmpty()) {
+                                        hasVideoTrack = Boolean.valueOf(video);
+                                        notifyVideoTrackPresence(video);
+                                    }
                                     if (hasText && textTracksChangedListener != null) {
                                         textTracksChangedListener.onTextTracksChanged();
                                     }
@@ -601,6 +802,7 @@ public class MoviePlayer {
                                                                             .sampleMimeType))
                                                     : C.TRACK_TYPE_UNKNOWN;
                                     lastHttpStatus = 0;
+                                    lastTlsError = PlaybackFailure.isTlsError(error);
                                     for (Throwable cause = error;
                                             cause != null;
                                             cause = cause.getCause())
@@ -693,7 +895,18 @@ public class MoviePlayer {
     public void setSurface(Surface surface) {
         onMain(
                 () -> {
-                    check();
+                    if (released || exo == null) {
+                        if (surface == null) {
+                            currentSurface = null;
+                            firstFrameRenderedOnCurrentSurface = false;
+                            return null;
+                        }
+                        check();
+                    }
+                    if (surface != currentSurface) {
+                        currentSurface = surface;
+                        firstFrameRenderedOnCurrentSurface = false;
+                    }
                     exo.setVideoSurface(surface);
                     return null;
                 });
@@ -872,10 +1085,16 @@ public class MoviePlayer {
                             options.optString("_episodeName", "").toLowerCase(Locale.ROOT);
                     final boolean isLive = options.optBoolean("live", false);
                     readySent = false;
+                    resetSeekClockState();
+                    exoPendingSeekGen = 0L;
+                    exoSeekDiscontinuitySeen = false;
                     hlsFallbackAttempted = false;
                     maxKnownDurationMs = 0;
                     prepareStarted = android.os.SystemClock.elapsedRealtime();
                     firstFrameMs = -1;
+                    firstFrameRenderedOnCurrentSurface = false;
+                    hasVideoTrack = null;
+                    lastTlsError = false;
 
                     String declared = MediaOptions.mime(options);
                     String fullLower = address.toString().toLowerCase(Locale.ROOT);
@@ -1000,6 +1219,58 @@ public class MoviePlayer {
                                 androidx.media3.datasource.DataSpec dataSpec,
                                 boolean isNetwork) {}
                     };
+            transferredBytesTotal.set(0L);
+            lastRateBytesSample = 0L;
+            lastRateTimeMs = 0L;
+            lastMeasuredBytesPerSec = -1L;
+            String addrStr = address != null ? address.toString() : "";
+            boolean inProcessProxy = false;
+            try {
+                java.net.URI parsedAddr = new java.net.URI(addrStr.trim());
+                String scheme = parsedAddr.getScheme();
+                String host = parsedAddr.getHost();
+                int uriPort = parsedAddr.getPort();
+                int activeProxyPort = 9978;
+                try {
+                    activeProxyPort =
+                            Class.forName("com.pilipala.marcomovie.ProxyAddress")
+                                    .getDeclaredField("port")
+                                    .getInt(null);
+                } catch (Throwable ignored) {
+                }
+                boolean loopbackHost =
+                        "127.0.0.1".equals(host)
+                                || "localhost".equalsIgnoreCase(host)
+                                || "::1".equals(host)
+                                || "[::1]".equals(host);
+                if ("http".equalsIgnoreCase(scheme)
+                        && loopbackHost
+                        && activeProxyPort > 0
+                        && uriPort == activeProxyPort) {
+                    String parsedPath = parsedAddr.getPath();
+                    if (parsedPath != null
+                            && parsedPath.startsWith("/kcache/")
+                            && parsedPath.length() > "/kcache/".length()) {
+                        inProcessProxy = true;
+                    } else if ("/hls".equals(parsedPath)) {
+                        String rawQuery = parsedAddr.getRawQuery();
+                        if (rawQuery != null && !rawQuery.isEmpty()) {
+                            for (String pair : rawQuery.split("&")) {
+                                int eq = pair.indexOf('=');
+                                if (eq > 0
+                                        && "sid".equals(pair.substring(0, eq))
+                                        && eq + 1 < pair.length()) {
+                                    inProcessProxy = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+            transferCounterInstalled =
+                    !inProcessProxy && !NetworkSpeedMonitor.isLocalMediaUrl(addrStr);
             OkHttpDataSource.Factory http =
                     new OkHttpDataSource.Factory(client)
                             .setUserAgent(userAgent)
@@ -1203,7 +1474,11 @@ public class MoviePlayer {
         onMain(
                 () -> {
                     check();
-                    exo.seekTo(Math.max(0, ms));
+                    int clamped = Math.max(0, ms);
+                    int prePos = milliseconds(exo.getCurrentPosition());
+                    exoPendingSeekGen = beginSeek(clamped, prePos);
+                    exoSeekDiscontinuitySeen = false;
+                    exo.seekTo(clamped);
                     return null;
                 });
     }
@@ -1485,7 +1760,7 @@ public class MoviePlayer {
     }
 
     public String getFailureMessage(int code) {
-        return onMain(() -> PlaybackFailure.message(code, lastHttpStatus));
+        return onMain(() -> PlaybackFailure.message(code, lastHttpStatus, lastTlsError));
     }
 
     public org.json.JSONObject decoderDiagnostics() {
@@ -1494,7 +1769,12 @@ public class MoviePlayer {
                     org.json.JSONObject info =
                             new org.json.JSONObject()
                                     .put("video_decoder", videoDecoder)
-                                    .put("audio_decoder", audioDecoder);
+                                    .put("audio_decoder", audioDecoder)
+                                    .put("output_state", videoOutputStateName())
+                                    .put("tls_error", lastTlsError);
+                    if (hasVideoTrack != null) {
+                        info.put("has_video_track", hasVideoTrack.booleanValue());
+                    }
                     if (released || exo == null) return info;
                     androidx.media3.common.Format vf = exo.getVideoFormat(),
                             af = exo.getAudioFormat();
@@ -1910,9 +2190,9 @@ public class MoviePlayer {
     }
 
     /**
-     * Scales Media3 buffer ceilings to device heap limits so 1GB-RAM Android 6.0.1 TVs (e.g.,
-     * MiTV OS 1.3.130 with 96–128MB heap) and 2GB TV boxes streaming multi-GB 4K MKVs never OOM
-     * from unbounded time-prioritized allocations.
+     * Scales Media3 buffer ceilings to device heap limits so 1GB-RAM Android 6.0.1 TVs (e.g., MiTV
+     * OS 1.3.130 with 96–128MB heap) and 2GB TV boxes streaming multi-GB 4K MKVs never OOM from
+     * unbounded time-prioritized allocations.
      */
     static LoadControlProfile resolveLoadControlProfile(
             int memoryClassMb, boolean lowRamDevice, int userBufferSeconds, boolean ijkMode) {

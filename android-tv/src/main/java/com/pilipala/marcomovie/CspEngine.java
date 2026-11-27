@@ -29,8 +29,6 @@ public final class CspEngine implements SourceEngine {
             Collections.synchronizedSet(new LinkedHashSet<>());
     static volatile String activeJarDeclaration = "";
     static volatile DexClassLoader activeProxyLoader;
-    static volatile String pendingPluginDanmaku = "";
-    static volatile long pendingPluginDanmakuAtMs = 0L;
     static volatile PluginApplication pluginAppWrapper;
 
     static boolean hasGrantedAllFilesAccess() {
@@ -124,17 +122,34 @@ public final class CspEngine implements SourceEngine {
     }
 
     public static void onPluginDanmaku(String path) {
+        onPluginDanmaku(path, null);
+    }
+
+    static void onPluginDanmaku(String path, DanmuOwnership.RequestContext explicitOwner) {
         if (path == null || path.trim().isEmpty()) return;
-        final String trimmed = path.trim();
-        pendingPluginDanmaku = trimmed;
-        pendingPluginDanmakuAtMs = System.currentTimeMillis();
+        final DanmuOwnership.PushResolution resolution =
+                DanmuOwnership.GLOBAL.onPluginPush(path, explicitOwner);
+        if (!resolution.accepted || resolution.owner == null) {
+            AppLog.w(
+                    "CspEngine",
+                    "Rejected plugin danmaku push ("
+                            + resolution.rejectReason
+                            + ") "
+                            + DanmuProvider.FailureInfo.sanitizedDiagnostic(
+                                    "plugin_push_reject", 0, "plugin", 0),
+                    null);
+            return;
+        }
+        final String trimmed = resolution.url;
+        final DanmuOwnership.RequestContext boundOwner = resolution.owner;
         final MainActivity activity = MainActivity.activeActivity;
         if (activity != null && !activity.isFinishing()) {
             activity.ui.post(
                     () -> {
                         if (activity.isFinishing()) return;
+                        if (!DanmuOwnership.GLOBAL.isCurrentOwner(boundOwner)) return;
                         if (activity.playbackControls != null) {
-                            activity.playbackControls.applyExternalDanmaku(trimmed);
+                            activity.playbackControls.applyExternalDanmaku(trimmed, boundOwner);
                         }
                     });
         }
@@ -149,17 +164,13 @@ public final class CspEngine implements SourceEngine {
     }
 
     static String consumeRecentPluginDanmaku(long maxAgeMs) {
-        String url = pendingPluginDanmaku;
-        long at = pendingPluginDanmakuAtMs;
-        if (url != null
-                && !url.isEmpty()
-                && at > 0L
-                && (System.currentTimeMillis() - at) <= maxAgeMs) {
-            pendingPluginDanmaku = "";
-            pendingPluginDanmakuAtMs = 0L;
-            return url;
-        }
-        return "";
+        return DanmuOwnership.GLOBAL.consumePending(
+                DanmuOwnership.GLOBAL.activeContext(), maxAgeMs);
+    }
+
+    static String consumeRecentPluginDanmaku(
+            DanmuOwnership.RequestContext expectedOwner, long maxAgeMs) {
+        return DanmuOwnership.GLOBAL.consumePending(expectedOwner, maxAgeMs);
     }
 
     final Application app;

@@ -25,9 +25,34 @@ final class SearchVariants {
                     "^([\\u4e00-\\u9fa5A-Za-z]{2,16})\\s*第\\s*([二三四五六七八九2-9])\\s*[季部]\\s*$");
     private static final Pattern COMIC_OR_DERIVATIVE_PATTERN =
             Pattern.compile("(短漫|漫剧|动态漫|漫画|有声漫|爽文短剧|女频短剧|男频短剧|解说|速看|一口气看完)");
+    private static final Pattern[] ROMAN_CANON_PATTERNS = new Pattern[ROMAN.length];
+    private static final Pattern[] CN_NUM_CANON_PATTERNS = new Pattern[CN_NUM.length];
+    private static final Pattern ARABIC_SEASON_CANON = Pattern.compile("第\\s*([2-9])\\s*[季部]");
+    private static final Pattern EN_SEASON_N_CANON =
+            Pattern.compile(
+                    "(?i)(?<=[\\u4e00-\\u9fa5])\\s*(?:season\\s*0*|s0*)([2-9])(?![0-9A-Za-z])");
+    private static final Pattern CN_SEASON_1_CANON = Pattern.compile("第\\s*[一1]\\s*[季部]");
+    private static final Pattern EN_SEASON_1_CANON =
+            Pattern.compile("(?i)(?<=[\\u4e00-\\u9fa5])\\s*(?:season\\s*0*1|s0*1)(?![0-9A-Za-z])");
+    private static final Pattern PUNCT_CANON =
+            Pattern.compile("[\\s·:：\\-—_（）()【】\\[\\]《》〈〉\"“”'’!！?？,，.。/\\\\]");
+
+    static {
+        for (int i = 2; i < ROMAN.length; i++) {
+            ROMAN_CANON_PATTERNS[i] =
+                    Pattern.compile("([\\u4e00-\\u9fa5])\\s*" + ROMAN[i] + "(?![A-Za-z])");
+        }
+        for (int i = 2; i < CN_NUM.length; i++) {
+            CN_NUM_CANON_PATTERNS[i] = Pattern.compile("第\\s*" + CN_NUM[i] + "\\s*[季部]");
+        }
+    }
 
     interface Match {
         boolean test(String title);
+    }
+
+    interface VideoMatch {
+        boolean test(Cms.Video video);
     }
 
     interface Fetch {
@@ -172,38 +197,67 @@ final class SearchVariants {
         String s = normalizeUnicodeRoman(text.trim());
         // Canonicalize Roman sequel numerals after CJK into Arabic digits for fair comparison
         for (int i = ROMAN.length - 1; i >= 2; i--) {
-            s = s.replaceAll("([\\u4e00-\\u9fa5])\\s*" + ROMAN[i] + "(?![A-Za-z])", "$1" + i);
+            if (s.indexOf(ROMAN[i]) >= 0) {
+                s = ROMAN_CANON_PATTERNS[i].matcher(s).replaceAll("$1" + i);
+            }
         }
-        for (int i = 2; i < CN_NUM.length; i++) {
-            s = s.replaceAll("第\\s*" + CN_NUM[i] + "\\s*[季部]", String.valueOf(i));
+        if (s.indexOf('第') >= 0) {
+            for (int i = 2; i < CN_NUM.length; i++) {
+                if (s.indexOf(CN_NUM[i]) >= 0) {
+                    s = CN_NUM_CANON_PATTERNS[i].matcher(s).replaceAll(String.valueOf(i));
+                }
+            }
+            s = ARABIC_SEASON_CANON.matcher(s).replaceAll("$1");
+            s = CN_SEASON_1_CANON.matcher(s).replaceAll("");
         }
-        s = s.replaceAll("第\\s*([2-9])\\s*[季部]", "$1");
-        s =
-                s.replaceAll(
-                        "(?i)(?<=[\\u4e00-\\u9fa5])\\s*(?:season\\s*0*|s0*)([2-9])(?![0-9A-Za-z])",
-                        "$1");
-        s = s.replaceAll("第\\s*[一1]\\s*[季部]", "");
-        s = s.replaceAll("(?i)(?<=[\\u4e00-\\u9fa5])\\s*(?:season\\s*0*1|s0*1)(?![0-9A-Za-z])", "");
-        return s.toLowerCase(Locale.ROOT)
-                .replaceAll("[\\s·:：\\-—_（）()【】\\[\\]《》〈〉\"“”'’!！?？,，.。/\\\\]", "");
+        if (s.indexOf('s') >= 0 || s.indexOf('S') >= 0) {
+            s = EN_SEASON_N_CANON.matcher(s).replaceAll("$1");
+            s = EN_SEASON_1_CANON.matcher(s).replaceAll("");
+        }
+        return PUNCT_CANON.matcher(s.toLowerCase(Locale.ROOT)).replaceAll("");
     }
 
     static int scoreVideo(String query, Cms.Video v, String siteName, boolean preferredSite) {
+        return scoreVideoPrecomputed(
+                canonicalSearchKey(query),
+                wantsComicOrShortDrama(query),
+                v,
+                siteName,
+                preferredSite);
+    }
+
+    private static int scoreVideoPrecomputed(
+            String qKey, boolean allowComic, Cms.Video v, String siteName, boolean preferredSite) {
         if (v == null) return Integer.MIN_VALUE / 2;
         int score = 0;
         if (preferredSite) score += 180;
-        String qKey = canonicalSearchKey(query);
         String tKey = canonicalSearchKey(v.title);
+        int titleScore = 0;
         if (!qKey.isEmpty() && !tKey.isEmpty()) {
-            if (tKey.equals(qKey)) score += 320;
-            else if (tKey.startsWith(qKey)) score += 240;
-            else if (tKey.contains(qKey)) score += 140;
+            if (tKey.equals(qKey)) titleScore = 320;
+            else if (tKey.startsWith(qKey)) titleScore = 240;
+            else if (tKey.contains(qKey)) titleScore = 140;
         }
+        if (!qKey.isEmpty() && v.aliases != null && !v.aliases.isEmpty()) {
+            for (int i = 0, n = v.aliases.size(); i < n; i++) {
+                String aKey = canonicalSearchKey(v.aliases.get(i));
+                if (aKey.isEmpty()) continue;
+                if (aKey.equals(qKey)) {
+                    titleScore = Math.max(titleScore, 320);
+                    break;
+                } else if (aKey.startsWith(qKey)) {
+                    titleScore = Math.max(titleScore, 240);
+                } else if (aKey.contains(qKey)) {
+                    titleScore = Math.max(titleScore, 140);
+                }
+            }
+        }
+        score += titleScore;
         String tag = v.tag == null ? "" : v.tag;
         if (tag.contains("动漫") || tag.contains("番") || tag.contains("剧") || tag.contains("影")) {
             if (!isComicOrShortDrama(v, siteName)) score += 45;
         }
-        if (!wantsComicOrShortDrama(query) && isComicOrShortDrama(v, siteName)) {
+        if (!allowComic && isComicOrShortDrama(v, siteName)) {
             score -= 600;
         }
         return score;
@@ -211,16 +265,49 @@ final class SearchVariants {
 
     static void rankVideos(final String query, List<Cms.Video> videos, final String siteName) {
         if (videos == null || videos.size() <= 1) return;
-        Collections.sort(
-                videos,
-                (a, b) ->
-                        Integer.compare(
-                                scoreVideo(query, b, siteName, false),
-                                scoreVideo(query, a, siteName, false)));
+        final String qKey = canonicalSearchKey(query);
+        final boolean allowComic = wantsComicOrShortDrama(query);
+        final int n = videos.size();
+        final List<Cms.Video> copy = new ArrayList<>(videos);
+        final int[] scores = new int[n];
+        final Integer[] indices = new Integer[n];
+        for (int i = 0; i < n; i++) {
+            scores[i] = scoreVideoPrecomputed(qKey, allowComic, copy.get(i), siteName, false);
+            indices[i] = Integer.valueOf(i);
+        }
+        Arrays.sort(
+                indices, (ia, ib) -> Integer.compare(scores[ib.intValue()], scores[ia.intValue()]));
+        for (int i = 0; i < n; i++) {
+            videos.set(i, copy.get(indices[i].intValue()));
+        }
+    }
+
+    interface VideoRanker {
+        void rank(List<Cms.Video> videos, String siteName);
+    }
+
+    private static void applyVideoRanking(
+            String query, VideoMatch matches, List<Cms.Video> videos) {
+        if (videos == null || videos.size() <= 1) return;
+        if (matches instanceof VideoRanker) {
+            ((VideoRanker) matches).rank(videos, "");
+        } else {
+            rankVideos(query, videos, "");
+        }
     }
 
     static List<Cms.Video> run(String query, List<String> variants, Match matches, Fetch fetch)
             throws Exception {
+        final Match pred = matches;
+        return runVideos(query, variants, v -> v != null && (pred == null || pred.test(v.title)), fetch);
+    }
+
+    static List<Cms.Video> runVideos(
+            String query, List<String> variants, VideoMatch matches, Fetch fetch)
+            throws Exception {
+        if (variants == null || variants.isEmpty()) {
+            return Collections.emptyList();
+        }
         Exception failure = null;
         int attempts = 0;
         Set<String> sequelSet = new LinkedHashSet<>(sequelVariants(query));
@@ -230,23 +317,19 @@ final class SearchVariants {
         List<Cms.Video> merged = new ArrayList<>();
         Set<String> ids = new LinkedHashSet<>();
         boolean foundPrimaryMedia = false;
-        int sequelQueriesDone = 0;
 
         for (String term : variants) {
             if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
             if (++attempts > 3) break;
-            boolean isSequelTerm = sequelSet.contains(term);
             try {
                 List<Cms.Video> batch = fetch.get(term);
-                if (isSequelTerm) sequelQueriesDone++;
                 if (batch != null) {
                     for (Cms.Video v : batch) {
                         if (v != null
                                 && v.id != null
                                 && !v.id.isEmpty()
-                                && (term.equalsIgnoreCase(query)
-                                        || isSequelTerm
-                                        || matches.test(v.title))
+                                && !v.id.startsWith("msearch:")
+                                && (matches == null || matches.test(v))
                                 && ids.add(v.id)) {
                             merged.add(v);
                             if (allowComic || !isComicOrShortDrama(v)) {
@@ -256,11 +339,11 @@ final class SearchVariants {
                     }
                 }
                 if (!merged.isEmpty() && foundPrimaryMedia) {
-                    rankVideos(query, merged, "");
+                    applyVideoRanking(query, matches, merged);
                     return merged;
                 }
                 if (!merged.isEmpty() && !hasSequelForms) {
-                    rankVideos(query, merged, "");
+                    applyVideoRanking(query, matches, merged);
                     return merged;
                 }
             } catch (SearchCoordinator.VerificationRequiredException e) {
@@ -274,7 +357,7 @@ final class SearchVariants {
             }
         }
         if (!merged.isEmpty()) {
-            rankVideos(query, merged, "");
+            applyVideoRanking(query, matches, merged);
             return merged;
         }
         if (failure != null) throw failure;

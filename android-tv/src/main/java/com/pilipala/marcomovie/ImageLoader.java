@@ -14,36 +14,275 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.ref.WeakReference;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Bounded asynchronous poster/artwork loader, memory cache trimming, and background atmosphere
  * rendering extracted from {@link MainActivity}.
  */
 final class ImageLoader {
-    private static final java.util.Map<String, java.util.List<ImageView>> IN_FLIGHT =
-            new java.util.HashMap<>();
+    private static final int TAG_BIND_TOKEN = 0x5f494d42; // "IMB"
+    private static final int TAG_SCOPE_TOKEN = 0x5f494d53; // "IMS"
+    private static final int TAG_INFLIGHT_KEY = 0x5f494d4b; // "IMK"
+
+    private static final AtomicInteger NEXT_BIND_TOKEN = new AtomicInteger(1);
+    private static final AtomicInteger NEXT_SCOPE_TOKEN = new AtomicInteger(1);
+    private static final Set<Integer> CANCELLED_SCOPES =
+            java.util.Collections.newSetFromMap(new ConcurrentHashMap<Integer, Boolean>());
+
+    private static final class Waiter {
+        final WeakReference<ImageView> viewRef;
+        final Object ownerToken;
+        final BitmapCallback callback;
+        final int bindToken;
+        final int scopeToken;
+        final int ticket;
+
+        Waiter(ImageView view, int bindToken, int scopeToken) {
+            this.viewRef = new WeakReference<>(view);
+            this.ownerToken = null;
+            this.callback = null;
+            this.bindToken = bindToken;
+            this.scopeToken = scopeToken;
+            this.ticket = 0;
+        }
+
+        Waiter(Object ownerToken, BitmapCallback callback, int bindToken, int scopeToken, int ticket) {
+            this.viewRef = null;
+            this.ownerToken = ownerToken;
+            this.callback = callback;
+            this.bindToken = bindToken;
+            this.scopeToken = scopeToken;
+            this.ticket = ticket;
+        }
+
+        boolean isDead() {
+            return callback == null && (viewRef == null || viewRef.get() == null);
+        }
+    }
+
+    private static final class InFlightEntry {
+        final java.util.List<Waiter> waiters = new java.util.ArrayList<>(2);
+        volatile Future<?> future;
+    }
+
+    private static final java.util.Map<String, InFlightEntry> IN_FLIGHT = new java.util.HashMap<>();
+    private static final java.util.WeakHashMap<Object, Integer> OWNER_BIND_TOKENS =
+            new java.util.WeakHashMap<>();
+    private static final ConcurrentHashMap<String, String> LAST_CACHE_KEY_BY_URL =
+            new ConcurrentHashMap<>();
+
+    private static void putCachedBitmap(
+            MainActivity a, String normalizedUrl, String key, Bitmap bitmap) {
+        if (a == null || a.images == null || key == null || bitmap == null) return;
+        a.images.put(key, bitmap);
+        if (normalizedUrl != null && !normalizedUrl.isEmpty()) {
+            if (LAST_CACHE_KEY_BY_URL.size() > 512) {
+                LAST_CACHE_KEY_BY_URL.clear();
+            }
+            LAST_CACHE_KEY_BY_URL.put(normalizedUrl, key);
+        }
+    }
 
     private ImageLoader() {}
+
+    static int newScope() {
+        int token = NEXT_SCOPE_TOKEN.incrementAndGet();
+        if (token <= 0) {
+            NEXT_SCOPE_TOKEN.set(1);
+            token = NEXT_SCOPE_TOKEN.incrementAndGet();
+        }
+        return token;
+    }
+
+    static boolean isScopeCancelled(int scopeToken) {
+        return scopeToken != 0 && CANCELLED_SCOPES.contains(Integer.valueOf(scopeToken));
+    }
+
+    static int inFlightCount() {
+        synchronized (IN_FLIGHT) {
+            return IN_FLIGHT.size();
+        }
+    }
+
+    static void unbind(ImageView image) {
+        if (image == null) return;
+        Object keyObj = image.getTag(TAG_INFLIGHT_KEY);
+        image.setTag(null);
+        image.setTag(TAG_BIND_TOKEN, null);
+        image.setTag(TAG_SCOPE_TOKEN, null);
+        image.setTag(TAG_INFLIGHT_KEY, null);
+        try {
+            image.setImageDrawable(null);
+        } catch (Throwable ignored) {
+        }
+        if (keyObj instanceof String) {
+            Future<?> cancelFuture = null;
+            synchronized (IN_FLIGHT) {
+                InFlightEntry entry = IN_FLIGHT.get(keyObj);
+                if (entry != null) {
+                    for (Iterator<Waiter> it = entry.waiters.iterator(); it.hasNext(); ) {
+                        Waiter w = it.next();
+                        if (w.isDead() || (w.viewRef != null && w.viewRef.get() == image)) {
+                            it.remove();
+                        }
+                    }
+                    if (entry.waiters.isEmpty()) {
+                        IN_FLIGHT.remove(keyObj);
+                        cancelFuture = entry.future;
+                    }
+                }
+            }
+            if (cancelFuture != null) cancelFuture.cancel(true);
+        }
+    }
+
+    /**
+     * Unsubscribes a reusable Canvas/callback target (such as a recycled search poster card) from
+     * any queued or in-flight {@link #loadPosterBitmap} request, cancelling the underlying task if
+     * it was the last active subscriber.
+     */
+    static void unbindBitmapTarget(Object ownerToken) {
+        unbindBitmapTarget(null, ownerToken);
+    }
+
+    static void unbindBitmapTarget(MainActivity a, Object ownerToken) {
+        if (ownerToken == null) return;
+        java.util.List<Future<?>> toCancel = new java.util.ArrayList<>();
+        synchronized (IN_FLIGHT) {
+            OWNER_BIND_TOKENS.remove(ownerToken);
+            for (Iterator<Map.Entry<String, InFlightEntry>> it = IN_FLIGHT.entrySet().iterator();
+                    it.hasNext(); ) {
+                InFlightEntry entry = it.next().getValue();
+                for (Iterator<Waiter> wit = entry.waiters.iterator(); wit.hasNext(); ) {
+                    Waiter w = wit.next();
+                    if (w.isDead() || w.ownerToken == ownerToken) {
+                        wit.remove();
+                    }
+                }
+                if (entry.waiters.isEmpty()) {
+                    if (entry.future != null) toCancel.add(entry.future);
+                    it.remove();
+                }
+            }
+        }
+        for (Future<?> f : toCancel) f.cancel(true);
+        if (a != null && !toCancel.isEmpty()) {
+            for (Iterator<Future<?>> it = a.artworkRequests.iterator(); it.hasNext(); ) {
+                Future<?> f = it.next();
+                if (f.isDone() || f.isCancelled()) it.remove();
+            }
+            if (a.artwork instanceof ThreadPoolExecutor) {
+                ((ThreadPoolExecutor) a.artwork).purge();
+            }
+        }
+    }
+
+    private static boolean hasActiveWaiters(String key, InFlightEntry owned, int currentGeneration) {
+        synchronized (IN_FLIGHT) {
+            if (IN_FLIGHT.get(key) != owned) return false;
+            for (Iterator<Waiter> it = owned.waiters.iterator(); it.hasNext(); ) {
+                Waiter w = it.next();
+                if (w.isDead()
+                        || isScopeCancelled(w.scopeToken)
+                        || (w.ticket != 0 && w.ticket != currentGeneration)) {
+                    it.remove();
+                    continue;
+                }
+                if (w.callback != null && w.ownerToken != null) {
+                    Integer curBind = OWNER_BIND_TOKENS.get(w.ownerToken);
+                    if (curBind == null || curBind.intValue() != w.bindToken) {
+                        it.remove();
+                    }
+                }
+            }
+            if (owned.waiters.isEmpty()) {
+                IN_FLIGHT.remove(key);
+                return false;
+            }
+            return true;
+        }
+    }
+
+    private static boolean isBitmapWaiterStillValid(Waiter waiter, int currentGeneration) {
+        if (waiter == null || waiter.callback == null) return false;
+        if (isScopeCancelled(waiter.scopeToken)) return false;
+        if (waiter.ticket != 0 && waiter.ticket != currentGeneration) return false;
+        if (waiter.ownerToken != null) {
+            synchronized (IN_FLIGHT) {
+                Integer curBind = OWNER_BIND_TOKENS.get(waiter.ownerToken);
+                if (curBind == null || curBind.intValue() != waiter.bindToken) return false;
+            }
+        }
+        return true;
+    }
+
+    static void cancelScope(MainActivity a, int scopeToken) {
+        if (scopeToken == 0) return;
+        if (CANCELLED_SCOPES.size() > 128) CANCELLED_SCOPES.clear();
+        CANCELLED_SCOPES.add(Integer.valueOf(scopeToken));
+        java.util.List<Future<?>> toCancel = new java.util.ArrayList<>();
+        synchronized (IN_FLIGHT) {
+            for (Iterator<Map.Entry<String, InFlightEntry>> it = IN_FLIGHT.entrySet().iterator();
+                    it.hasNext(); ) {
+                InFlightEntry entry = it.next().getValue();
+                for (Iterator<Waiter> wit = entry.waiters.iterator(); wit.hasNext(); ) {
+                    Waiter w = wit.next();
+                    if (w.isDead() || w.scopeToken == scopeToken) {
+                        if (w.ownerToken != null) {
+                            Integer curBind = OWNER_BIND_TOKENS.get(w.ownerToken);
+                            if (curBind != null && curBind.intValue() == w.bindToken) {
+                                OWNER_BIND_TOKENS.remove(w.ownerToken);
+                            }
+                        }
+                        wit.remove();
+                    }
+                }
+                if (entry.waiters.isEmpty()) {
+                    if (entry.future != null) toCancel.add(entry.future);
+                    it.remove();
+                }
+            }
+        }
+        for (Future<?> f : toCancel) f.cancel(true);
+        if (a != null) {
+            for (Iterator<Future<?>> it = a.artworkRequests.iterator(); it.hasNext(); ) {
+                Future<?> f = it.next();
+                if (f.isDone() || f.isCancelled()) it.remove();
+            }
+            if (a.artwork instanceof ThreadPoolExecutor) {
+                ((ThreadPoolExecutor) a.artwork).purge();
+            }
+        }
+    }
 
     static void cancel(MainActivity a) {
         synchronized (IN_FLIGHT) {
             IN_FLIGHT.clear();
+            OWNER_BIND_TOKENS.clear();
         }
         for (Future<?> request : a.artworkRequests) request.cancel(true);
         a.artworkRequests.clear();
-        ((ThreadPoolExecutor) a.artwork).purge();
+        if (a.artwork instanceof ThreadPoolExecutor) {
+            ((ThreadPoolExecutor) a.artwork).purge();
+        }
     }
 
     static void trimMemory(MainActivity a, int level) {
         if (a.images == null) return;
         if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND || level >= 15) {
             a.images.evictAll();
+            LAST_CACHE_KEY_BY_URL.clear();
         } else if (level >= 10) {
             UiCompat.trimCache(a.images, a.images.maxSize() / 2);
         }
@@ -55,12 +294,382 @@ final class ImageLoader {
         return lower.startsWith("file://") || lower.startsWith("content://");
     }
 
-    static void poster(MainActivity a, String address, ImageView image, boolean detail) {
+    private static boolean isReasonablePosterReuse(
+            MainActivity a, Bitmap bmp, int targetW, int targetH) {
+        if (bmp == null || bmp.isRecycled()) return false;
+        if (targetW <= 0 || targetH <= 0) return true;
+        int bw = bmp.getWidth();
+        int bh = bmp.getHeight();
+        if (bw > targetW * 2 || bh > targetH * 2) return false;
+        if (a != null
+                && a.isTvDevice()
+                && bmp.getConfig() == Bitmap.Config.ARGB_8888
+                && (long) bw * (long) bh * 4L > (long) targetW * (long) targetH * 3L) {
+            return false;
+        }
+        return true;
+    }
+
+    private static Bitmap downscaleTvCardPosterIfOversized(
+            MainActivity a, Bitmap decoded, int targetW, int targetH) {
+        if (a == null || !a.isTvDevice() || decoded == null || decoded.isRecycled()) return decoded;
+        if (targetW <= 0 || targetH <= 0) return decoded;
+        int bw = decoded.getWidth();
+        int bh = decoded.getHeight();
+        if (bw <= Math.round(targetW * 1.15f) && bh <= Math.round(targetH * 1.15f)) {
+            return decoded;
+        }
+        float scale = Math.max((float) targetW / bw, (float) targetH / bh);
+        if (scale >= 0.95f || scale <= 0f) return decoded;
+        int outW = Math.max(1, Math.round(bw * scale));
+        int outH = Math.max(1, Math.round(bh * scale));
+        try {
+            Bitmap scaled = Bitmap.createBitmap(outW, outH, Bitmap.Config.RGB_565);
+            Canvas c = new Canvas(scaled);
+            Paint p = new Paint(Paint.FILTER_BITMAP_FLAG);
+            c.drawBitmap(decoded, null, new RectF(0f, 0f, outW, outH), p);
+            decoded.recycle();
+            return scaled;
+        } catch (Throwable ignored) {
+            return decoded;
+        }
+    }
+
+    static Bitmap cachedPosterBitmap(
+            MainActivity a, String address, int targetWidth, int targetHeight) {
+        if (a == null || a.images == null || address == null || address.isEmpty()) return null;
         String normalized = normalizeArtworkAddress(address);
-        image.setTag(normalized);
         if (!Cms.isHttp(normalized)
                 && !normalized.startsWith("catpaw://")
-                && !isLocalArtworkAddress(normalized)) return;
+                && !isLocalArtworkAddress(normalized)) {
+            return null;
+        }
+        int w = ImageDecodePolicy.targetWidth(targetWidth, false);
+        int h = ImageDecodePolicy.targetHeight(targetHeight, false);
+        String key = ImageDecodePolicy.cacheKey(normalized, w, h, true, false);
+        Bitmap bmp = a.images.get(key);
+        if (bmp != null && !bmp.isRecycled()) return bmp;
+        Bitmap fallback = a.images.get(normalized);
+        if (isReasonablePosterReuse(a, fallback, w, h)) return fallback;
+        int defW = ImageDecodePolicy.targetWidth(0, false);
+        int defH = ImageDecodePolicy.targetHeight(0, false);
+        if (defW != w || defH != h) {
+            String defKey = ImageDecodePolicy.cacheKey(normalized, defW, defH, true, false);
+            Bitmap defBmp = a.images.get(defKey);
+            if (isReasonablePosterReuse(a, defBmp, w, h)) return defBmp;
+        }
+        String lastKey = LAST_CACHE_KEY_BY_URL.get(normalized);
+        if (lastKey != null && !lastKey.equals(key)) {
+            Bitmap reuse = a.images.get(lastKey);
+            if (isReasonablePosterReuse(a, reuse, w, h)) return reuse;
+        }
+        return null;
+    }
+
+    /**
+     * Decodes an already disk-cached or local poster into the in-memory {@link LruCache} on the
+     * background artwork pool without initiating any network I/O, so opening History after
+     * idle/cold start hits RAM immediately with zero layout or network wait.
+     */
+    static void preloadDiskCachedPoster(
+            final MainActivity a, String address, int targetWidth, int targetHeight) {
+        if (a == null || a.images == null || a.artwork == null || address == null) return;
+        final String normalized = normalizeArtworkAddress(address);
+        final boolean isLocal = isLocalArtworkAddress(normalized);
+        if (!Cms.isHttp(normalized) && !isLocal) return;
+        if (cachedPosterBitmap(a, normalized, targetWidth, targetHeight) != null) return;
+        final int width = ImageDecodePolicy.targetWidth(targetWidth, false);
+        final int height = ImageDecodePolicy.targetHeight(targetHeight, false);
+        final String key = ImageDecodePolicy.cacheKey(normalized, width, height, true, false);
+        final int expectedGen = a.generation;
+        try {
+            Future<?> req =
+                    RequestScope.submit(
+                            a.artwork,
+                            () -> {
+                                if (a.isFinishing()
+                                        || a.images == null
+                                        || a.generation != expectedGen) {
+                                    return;
+                                }
+                                if (a.images.get(key) != null) return;
+                                try {
+                                    byte[] bytes;
+                                    if (isLocal) {
+                                        bytes = readLocalArtworkBytes(a, normalized);
+                                    } else {
+                                        Cms.ImageRequest source = Cms.imageRequest(normalized);
+                                        String resolvedUrl = Cms.normalizeHttp(source.url);
+                                        String targetUrl = upgradePosterUrl(resolvedUrl, false);
+                                        bytes = readDiskCachedPoster(a, targetUrl);
+                                        if (bytes == null && !resolvedUrl.equals(targetUrl)) {
+                                            bytes = readDiskCachedPoster(a, resolvedUrl);
+                                        }
+                                    }
+                                    if (bytes == null
+                                            || bytes.length == 0
+                                            || a.generation != expectedGen) {
+                                        return;
+                                    }
+                                    BitmapFactory.Options options = new BitmapFactory.Options();
+                                    options.inJustDecodeBounds = true;
+                                    BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
+                                    if (options.outWidth <= 0 || options.outHeight <= 0) return;
+                                    options.inSampleSize =
+                                            ImageDecodePolicy.sample(
+                                                    options.outWidth,
+                                                    options.outHeight,
+                                                    width,
+                                                    height,
+                                                    true,
+                                                    false);
+                                    if (a.isTvDevice()) {
+                                        options.inPreferredConfig = Bitmap.Config.RGB_565;
+                                    }
+                                    options.inJustDecodeBounds = false;
+                                    RequestScope.current().check();
+                                    Bitmap bitmap =
+                                            BitmapFactory.decodeByteArray(
+                                                    bytes, 0, bytes.length, options);
+                                    bitmap =
+                                            downscaleTvCardPosterIfOversized(
+                                                    a, bitmap, width, height);
+                                    if (bitmap != null) {
+                                        if (a.generation != expectedGen
+                                                || Thread.currentThread().isInterrupted()) {
+                                            bitmap.recycle();
+                                            return;
+                                        }
+                                        putCachedBitmap(a, normalized, key, bitmap);
+                                    }
+                                } catch (Throwable ignored) {
+                                }
+                            });
+            a.artworkRequests.add(req);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    interface BitmapCallback {
+        void onBitmap(Bitmap bitmap);
+    }
+
+    /**
+     * Lightweight off-thread poster loader for custom Canvas views (such as {@code
+     * CatalogScreen.TvHistoryCardView} and {@code GlobalSearchScreen.TvSearchPosterArtView}) using
+     * exact pixel target dimensions, shared {@code IN_FLIGHT} same-URL/same-spec coalescing, and
+     * search-scope + target-owner cancellation.
+     */
+    static void loadPosterBitmap(
+            final MainActivity a,
+            String address,
+            int targetWidth,
+            int targetHeight,
+            final int ticket,
+            final BitmapCallback callback) {
+        loadPosterBitmap(a, address, targetWidth, targetHeight, ticket, 0, null, callback);
+    }
+
+    static void loadPosterBitmap(
+            final MainActivity a,
+            String address,
+            int targetWidth,
+            int targetHeight,
+            final int ticket,
+            final int scopeToken,
+            final BitmapCallback callback) {
+        loadPosterBitmap(a, address, targetWidth, targetHeight, ticket, scopeToken, null, callback);
+    }
+
+    static void loadPosterBitmap(
+            final MainActivity a,
+            String address,
+            int targetWidth,
+            int targetHeight,
+            final int ticket,
+            final int scopeToken,
+            final Object ownerToken,
+            final BitmapCallback callback) {
+        if (ownerToken != null) {
+            unbindBitmapTarget(a, ownerToken);
+        }
+        if (a == null || callback == null || address == null || address.isEmpty()) return;
+        if (isScopeCancelled(scopeToken) || (ticket != 0 && ticket != a.generation)) return;
+        final String normalized = normalizeArtworkAddress(address);
+        if (!Cms.isHttp(normalized)
+                && !normalized.startsWith("catpaw://")
+                && !isLocalArtworkAddress(normalized)) {
+            return;
+        }
+        Bitmap immediate = cachedPosterBitmap(a, normalized, targetWidth, targetHeight);
+        if (immediate != null) {
+            callback.onBitmap(immediate);
+            return;
+        }
+        final int width = ImageDecodePolicy.targetWidth(targetWidth, false);
+        final int height = ImageDecodePolicy.targetHeight(targetHeight, false);
+        final String key = ImageDecodePolicy.cacheKey(normalized, width, height, true, false);
+        final int bindToken = NEXT_BIND_TOKEN.incrementAndGet();
+        final Waiter selfWaiter = new Waiter(ownerToken, callback, bindToken, scopeToken, ticket);
+        final InFlightEntry owned = new InFlightEntry();
+        synchronized (IN_FLIGHT) {
+            if (isScopeCancelled(scopeToken)) return;
+            if (ownerToken != null) {
+                OWNER_BIND_TOKENS.put(ownerToken, Integer.valueOf(bindToken));
+            }
+            InFlightEntry existing = IN_FLIGHT.get(key);
+            if (existing != null) {
+                for (Iterator<Waiter> it = existing.waiters.iterator(); it.hasNext(); ) {
+                    Waiter w = it.next();
+                    if (w.isDead()
+                            || isScopeCancelled(w.scopeToken)
+                            || (ownerToken != null && w.ownerToken == ownerToken)) {
+                        it.remove();
+                    }
+                }
+                if (!existing.waiters.isEmpty()) {
+                    existing.waiters.add(selfWaiter);
+                    return;
+                }
+                if (existing.future != null) existing.future.cancel(true);
+                IN_FLIGHT.remove(key);
+            }
+            owned.waiters.add(selfWaiter);
+            IN_FLIGHT.put(key, owned);
+        }
+        Future<?> request =
+                RequestScope.submit(
+                        a.artwork,
+                        () -> {
+                            if (!hasActiveWaiters(key, owned, a.generation)) return;
+                            try {
+                                byte[] bytes;
+                                if (isLocalArtworkAddress(normalized)) {
+                                    bytes = readLocalArtworkBytes(a, normalized);
+                                } else {
+                                    Cms.ImageRequest source = Cms.imageRequest(normalized);
+                                    String resolvedUrl = Cms.normalizeHttp(source.url);
+                                    if (resolvedUrl.startsWith("catpaw://")) {
+                                        resolvedUrl =
+                                                new com.pilipala.catpaw.CatPawHost(a)
+                                                        .resolve(resolvedUrl);
+                                    }
+                                    String targetUrl = upgradePosterUrl(resolvedUrl, false);
+                                    bytes =
+                                            fetchPosterBytesWithFallback(
+                                                    a, source, resolvedUrl, targetUrl, false);
+                                }
+                                if (bytes == null || bytes.length == 0) return;
+                                if (!hasActiveWaiters(key, owned, a.generation)) return;
+                                BitmapFactory.Options options = new BitmapFactory.Options();
+                                options.inJustDecodeBounds = true;
+                                BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
+                                if (options.outWidth <= 0 || options.outHeight <= 0) return;
+                                options.inSampleSize =
+                                        ImageDecodePolicy.sample(
+                                                options.outWidth,
+                                                options.outHeight,
+                                                width,
+                                                height,
+                                                true,
+                                                false);
+                                if (a.isTvDevice()) {
+                                    options.inPreferredConfig = Bitmap.Config.RGB_565;
+                                }
+                                options.inJustDecodeBounds = false;
+                                RequestScope.current().check();
+                                Bitmap decoded =
+                                        BitmapFactory.decodeByteArray(
+                                                bytes, 0, bytes.length, options);
+                                final Bitmap bitmap =
+                                        downscaleTvCardPosterIfOversized(a, decoded, width, height);
+                                if (bitmap == null) return;
+                                if (Thread.currentThread().isInterrupted()
+                                        || !hasActiveWaiters(key, owned, a.generation)) {
+                                    bitmap.recycle();
+                                    return;
+                                }
+                                putCachedBitmap(a, normalized, key, bitmap);
+                                final java.util.List<Waiter> targets;
+                                synchronized (IN_FLIGHT) {
+                                    InFlightEntry removed =
+                                            IN_FLIGHT.get(key) == owned
+                                                    ? IN_FLIGHT.remove(key)
+                                                    : null;
+                                    targets =
+                                            removed == null
+                                                    ? java.util.Collections.<Waiter>emptyList()
+                                                    : new java.util.ArrayList<>(removed.waiters);
+                                }
+                                if (targets.isEmpty()) return;
+                                a.ui.post(
+                                        () -> {
+                                            if (a.isFinishing() || bitmap.isRecycled()) return;
+                                            boolean tv = a.isTvDevice();
+                                            for (Waiter waiter : targets) {
+                                                if (waiter.callback != null) {
+                                                    if (isBitmapWaiterStillValid(
+                                                            waiter, a.generation)) {
+                                                        waiter.callback.onBitmap(bitmap);
+                                                    }
+                                                } else if (waiter.viewRef != null) {
+                                                    ImageView target = waiter.viewRef.get();
+                                                    if (isTargetStillBound(
+                                                            target, normalized, waiter)) {
+                                                        target.setImageBitmap(bitmap);
+                                                        if (!tv) {
+                                                            com.pilipala.glass.GlassworkSurface
+                                                                    .invalidateBackdrop(target);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        });
+                            } catch (Throwable ignored) {
+                            } finally {
+                                synchronized (IN_FLIGHT) {
+                                    if (IN_FLIGHT.get(key) == owned) IN_FLIGHT.remove(key);
+                                }
+                            }
+                        });
+        boolean cancelImmediately = false;
+        synchronized (IN_FLIGHT) {
+            owned.future = request;
+            if (IN_FLIGHT.get(key) != owned || owned.waiters.isEmpty()) {
+                cancelImmediately = true;
+            }
+        }
+        if (cancelImmediately) {
+            request.cancel(true);
+            return;
+        }
+        for (Iterator<Future<?>> it = a.artworkRequests.iterator(); it.hasNext(); ) {
+            Future<?> f = it.next();
+            if (f.isDone() || f.isCancelled()) it.remove();
+        }
+        a.artworkRequests.add(request);
+    }
+
+    static void poster(MainActivity a, String address, ImageView image, boolean detail) {
+        poster(a, address, image, detail, 0);
+    }
+
+    static void poster(
+            MainActivity a, String address, ImageView image, boolean detail, int scopeToken) {
+        if (a == null || image == null) return;
+        String normalized = normalizeArtworkAddress(address);
+        final int bindToken = NEXT_BIND_TOKEN.incrementAndGet();
+        image.setTag(normalized);
+        image.setTag(TAG_BIND_TOKEN, Integer.valueOf(bindToken));
+        image.setTag(TAG_SCOPE_TOKEN, Integer.valueOf(scopeToken));
+        image.setTag(TAG_INFLIGHT_KEY, null);
+        if (isScopeCancelled(scopeToken)) return;
+        if (!Cms.isHttp(normalized)
+                && !normalized.startsWith("catpaw://")
+                && !isLocalArtworkAddress(normalized)) {
+            image.setImageDrawable(null);
+            return;
+        }
         address = normalized;
         final int ticket = a.generation;
         int initialW = ImageDecodePolicy.targetWidth(image.getWidth(), detail);
@@ -92,7 +701,7 @@ final class ImageLoader {
                 return;
             }
         }
-        startPosterLoad(a, address, image, detail, ticket);
+        startPosterLoad(a, address, image, detail, ticket, bindToken, scopeToken);
     }
 
     private static byte[] readLocalArtworkBytes(Context context, String uriStr) {
@@ -130,9 +739,28 @@ final class ImageLoader {
         }
     }
 
+    private static boolean isTargetStillBound(ImageView target, String address, Waiter waiter) {
+        if (target == null || waiter == null) return false;
+        if (isScopeCancelled(waiter.scopeToken)) return false;
+        if (!address.equals(target.getTag())) return false;
+        if (!Integer.valueOf(waiter.bindToken).equals(target.getTag(TAG_BIND_TOKEN))) return false;
+        return target.isAttachedToWindow() || target.getParent() != null;
+    }
+
     private static void startPosterLoad(
-            MainActivity a, String address, ImageView image, boolean detail, final int ticket) {
-        if (ticket != a.generation || !address.equals(image.getTag())) return;
+            MainActivity a,
+            String address,
+            ImageView image,
+            boolean detail,
+            final int ticket,
+            final int bindToken,
+            final int scopeToken) {
+        if (ticket != a.generation
+                || isScopeCancelled(scopeToken)
+                || !address.equals(image.getTag())
+                || !Integer.valueOf(bindToken).equals(image.getTag(TAG_BIND_TOKEN))) {
+            return;
+        }
         final int width = ImageDecodePolicy.targetWidth(image.getWidth(), detail);
         final int height = ImageDecodePolicy.targetHeight(image.getHeight(), detail);
         final boolean crop = image.getScaleType() == ImageView.ScaleType.CENTER_CROP;
@@ -143,21 +771,35 @@ final class ImageLoader {
             if (!a.isTvDevice()) com.pilipala.glass.GlassworkSurface.invalidateBackdrop(image);
             return;
         }
-        final java.util.List<ImageView> owned = new java.util.ArrayList<>(2);
+        image.setTag(TAG_INFLIGHT_KEY, key);
+        final Waiter selfWaiter = new Waiter(image, bindToken, scopeToken);
+        final InFlightEntry owned = new InFlightEntry();
         synchronized (IN_FLIGHT) {
-            java.util.List<ImageView> waiters = IN_FLIGHT.get(key);
-            if (waiters != null) {
-                if (!waiters.contains(image)) waiters.add(image);
-                return;
+            InFlightEntry existing = IN_FLIGHT.get(key);
+            if (existing != null) {
+                for (Iterator<Waiter> it = existing.waiters.iterator(); it.hasNext(); ) {
+                    Waiter w = it.next();
+                    if (w.isDead()
+                            || isScopeCancelled(w.scopeToken)
+                            || (w.viewRef != null && w.viewRef.get() == image)) {
+                        it.remove();
+                    }
+                }
+                if (!existing.waiters.isEmpty()) {
+                    existing.waiters.add(selfWaiter);
+                    return;
+                }
+                if (existing.future != null) existing.future.cancel(true);
+                IN_FLIGHT.remove(key);
             }
-            owned.add(image);
+            owned.waiters.add(selfWaiter);
             IN_FLIGHT.put(key, owned);
         }
         Future<?> request =
                 RequestScope.submit(
                         a.artwork,
                         () -> {
-                            if (ticket != a.generation) {
+                            if (ticket != a.generation || !hasActiveWaiters(key, owned, a.generation)) {
                                 synchronized (IN_FLIGHT) {
                                     if (IN_FLIGHT.get(key) == owned) IN_FLIGHT.remove(key);
                                 }
@@ -182,6 +824,7 @@ final class ImageLoader {
                                                     a, source, resolvedUrl, targetUrl, detail);
                                 }
                                 if (bytes == null || bytes.length == 0) return;
+                                if (ticket != a.generation || !hasActiveWaiters(key, owned, a.generation)) return;
                                 BitmapFactory.Options options = new BitmapFactory.Options();
                                 options.inJustDecodeBounds = true;
                                 BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
@@ -204,34 +847,47 @@ final class ImageLoader {
                                                 bytes, 0, bytes.length, options);
                                 if (bitmap != null) {
                                     if (ticket != a.generation
-                                            || Thread.currentThread().isInterrupted()) {
+                                            || Thread.currentThread().isInterrupted()
+                                            || !hasActiveWaiters(key, owned, a.generation)) {
                                         bitmap.recycle();
                                         return;
                                     }
-                                    a.images.put(key, bitmap);
-                                    final java.util.List<ImageView> targets;
+                                    putCachedBitmap(a, address, key, bitmap);
+                                    final java.util.List<Waiter> targets;
                                     synchronized (IN_FLIGHT) {
-                                        java.util.List<ImageView> removed =
+                                        InFlightEntry removed =
                                                 IN_FLIGHT.get(key) == owned
                                                         ? IN_FLIGHT.remove(key)
                                                         : null;
                                         targets =
                                                 removed == null
-                                                        ? java.util.Collections.singletonList(image)
-                                                        : new java.util.ArrayList<>(removed);
+                                                        ? java.util.Collections.singletonList(
+                                                                selfWaiter)
+                                                        : new java.util.ArrayList<>(
+                                                                removed.waiters);
                                     }
+                                    if (targets.isEmpty()) return;
                                     a.ui.post(
                                             () -> {
                                                 if (ticket != a.generation || a.isFinishing())
                                                     return;
+                                                if (bitmap.isRecycled()) return;
                                                 boolean tv = a.isTvDevice();
-                                                for (ImageView target : targets) {
-                                                    if (target != null
-                                                            && address.equals(target.getTag())) {
-                                                        target.setImageBitmap(bitmap);
-                                                        if (!tv) {
-                                                            com.pilipala.glass.GlassworkSurface
-                                                                    .invalidateBackdrop(target);
+                                                for (Waiter waiter : targets) {
+                                                    if (waiter.callback != null) {
+                                                        if (isBitmapWaiterStillValid(
+                                                                waiter, a.generation)) {
+                                                            waiter.callback.onBitmap(bitmap);
+                                                        }
+                                                    } else if (waiter.viewRef != null) {
+                                                        ImageView target = waiter.viewRef.get();
+                                                        if (isTargetStillBound(
+                                                                target, address, waiter)) {
+                                                            target.setImageBitmap(bitmap);
+                                                            if (!tv) {
+                                                                com.pilipala.glass.GlassworkSurface
+                                                                        .invalidateBackdrop(target);
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -248,7 +904,8 @@ final class ImageLoader {
                                 }
                             }
                         });
-        for (java.util.Iterator<Future<?>> it = a.artworkRequests.iterator(); it.hasNext(); ) {
+        owned.future = request;
+        for (Iterator<Future<?>> it = a.artworkRequests.iterator(); it.hasNext(); ) {
             if (it.next().isDone()) it.remove();
         }
         a.artworkRequests.add(request);
@@ -497,10 +1154,27 @@ final class ImageLoader {
         return new Atmosphere(a);
     }
 
+    static void clearWallpaperCache() {
+        Atmosphere.clearCache();
+    }
+
     static final class Atmosphere extends View {
+        private static final Object WALLPAPER_LOCK = new Object();
+        private static String cachedWallpaperKey = "";
+        private static Bitmap cachedWallpaperBitmap;
+
+        static void clearCache() {
+            synchronized (WALLPAPER_LOCK) {
+                cachedWallpaperKey = "";
+                cachedWallpaperBitmap = null;
+            }
+        }
+
         final MainActivity a;
         final Paint paint = new Paint(3);
         Bitmap wallpaper;
+        int decodeSerial;
+        boolean detached;
 
         Atmosphere(Context c) {
             super(c);
@@ -508,36 +1182,99 @@ final class ImageLoader {
             reloadWallpaper();
         }
 
+        private static Bitmap lookupCachedWallpaper(String key) {
+            synchronized (WALLPAPER_LOCK) {
+                if (key.equals(cachedWallpaperKey)
+                        && cachedWallpaperBitmap != null
+                        && !cachedWallpaperBitmap.isRecycled()) {
+                    return cachedWallpaperBitmap;
+                }
+                return null;
+            }
+        }
+
+        private static void storeCachedWallpaper(String key, Bitmap bmp) {
+            synchronized (WALLPAPER_LOCK) {
+                cachedWallpaperKey = key;
+                cachedWallpaperBitmap = bmp;
+            }
+        }
+
         void reloadWallpaper() {
-            wallpaper = null;
+            final int serial = ++decodeSerial;
             boolean showWallpaper =
                     a.isTvDevice()
                             ? HomeAmbient.effectiveBgMode(a) == Prefs.BG_MODE_WALLPAPER
                             : a.prefs.getBoolean(Prefs.WALLPAPER_ENABLED, false);
-            if (showWallpaper) {
-                File f = new File(a.getFilesDir(), "wallpaper.jpg");
-                if (f.exists()) {
-                    try {
-                        BitmapFactory.Options bounds = new BitmapFactory.Options();
-                        bounds.inJustDecodeBounds = true;
-                        BitmapFactory.decodeFile(f.getAbsolutePath(), bounds);
-                        if (bounds.outWidth > 0 && bounds.outHeight > 0) {
-                            BitmapFactory.Options opts = new BitmapFactory.Options();
-                            int sample = 1;
-                            while ((bounds.outWidth / (sample * 2)) >= 1280
-                                    && (bounds.outHeight / (sample * 2)) >= 720) {
-                                sample *= 2;
-                            }
-                            opts.inSampleSize = sample;
-                            opts.inPreferredConfig = Bitmap.Config.RGB_565;
-                            wallpaper = BitmapFactory.decodeFile(f.getAbsolutePath(), opts);
-                        }
-                    } catch (Throwable ignored) {
-                        wallpaper = null;
-                    }
-                }
+            if (!showWallpaper) {
+                wallpaper = null;
+                invalidate();
+                return;
             }
+            final File f = new File(a.getFilesDir(), "wallpaper.jpg");
+            if (!f.exists()) {
+                wallpaper = null;
+                clearCache();
+                invalidate();
+                return;
+            }
+            final int targetW = Math.max(640, Math.min(1920, a.windowWidth()));
+            final int targetH = Math.max(360, Math.min(1080, a.windowHeight()));
+            final String revKey =
+                    f.getAbsolutePath()
+                            + "|"
+                            + f.lastModified()
+                            + "|"
+                            + f.length()
+                            + "|"
+                            + targetW
+                            + "x"
+                            + targetH;
+            Bitmap cached = lookupCachedWallpaper(revKey);
+            if (cached != null) {
+                wallpaper = cached;
+                invalidate();
+                return;
+            }
+            wallpaper = null;
             invalidate();
+            a.worker.execute(
+                    () -> {
+                        Bitmap decoded = null;
+                        try {
+                            BitmapFactory.Options bounds = new BitmapFactory.Options();
+                            bounds.inJustDecodeBounds = true;
+                            BitmapFactory.decodeFile(f.getAbsolutePath(), bounds);
+                            if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+                                BitmapFactory.Options opts = new BitmapFactory.Options();
+                                int sample = 1;
+                                while ((bounds.outWidth / (sample * 2)) >= targetW
+                                        && (bounds.outHeight / (sample * 2)) >= targetH) {
+                                    sample *= 2;
+                                }
+                                opts.inSampleSize = sample;
+                                opts.inPreferredConfig = Bitmap.Config.RGB_565;
+                                decoded = BitmapFactory.decodeFile(f.getAbsolutePath(), opts);
+                            }
+                        } catch (Throwable ignored) {
+                            decoded = null;
+                        }
+                        if (decoded != null && !decoded.isRecycled()) {
+                            storeCachedWallpaper(revKey, decoded);
+                        }
+                        final Bitmap ready = decoded;
+                        a.ui.post(
+                                () -> {
+                                    if (detached
+                                            || serial != decodeSerial
+                                            || a.isFinishing()
+                                            || (ready != null && ready.isRecycled())) {
+                                        return;
+                                    }
+                                    wallpaper = ready;
+                                    invalidate();
+                                });
+                    });
         }
 
         @Override
@@ -566,6 +1303,8 @@ final class ImageLoader {
         @Override
         protected void onDetachedFromWindow() {
             super.onDetachedFromWindow();
+            detached = true;
+            decodeSerial++;
             wallpaper = null;
         }
     }

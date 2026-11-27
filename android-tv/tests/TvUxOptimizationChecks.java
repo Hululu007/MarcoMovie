@@ -54,6 +54,7 @@ public final class TvUxOptimizationChecks {
         testDanmuSettingsRedesign();
         testAutoAudioSubtitleSelectionHistoryFailoverAndAlistMount();
         testTvPlaybackTooltipAndCustomToolbarOrder();
+        testR7NavSwitchSourcePickerAndBoundsFixes();
         System.out.println("ALL PASS (" + checks + " TV UX optimization checks)");
     }
 
@@ -79,8 +80,8 @@ public final class TvUxOptimizationChecks {
                 maxContent == 336,
                 "AppDialog computes exact available content height from window minus chrome");
         check(
-                AppDialog.computeMaxContentHeight(260, 200, 56, 120) == 120,
-                "AppDialog enforces minimum scroll body height on ultra-short windows");
+                AppDialog.computeMaxContentHeight(260, 200, 56, 120) == 4,
+                "AppDialog never exceeds real available window budget on ultra-short windows");
     }
 
     private static void testStoragePermissionFallbacks() {
@@ -112,13 +113,47 @@ public final class TvUxOptimizationChecks {
 
     private static void testSettingsCategoryAndTopDockShrink() {
         check(
-                SettingsScreen.resolveTvCategoryIndex("外观与壁纸") == 0
+                TvSettingsRegistry.CATEGORY_COUNT == 6
+                        && SettingsScreen.resolveTvCategoryIndex("片源与直播") == 0
+                        && SettingsScreen.resolveTvCategoryIndex("内容与连接") == 0
+                        && SettingsScreen.resolveTvCategoryIndex("播放") == 1
                         && SettingsScreen.resolveTvCategoryIndex("播放与字幕") == 1
-                        && SettingsScreen.resolveTvCategoryIndex("片源与直播") == 2
-                        && SettingsScreen.resolveTvCategoryIndex("数据与备份") == 3
-                        && SettingsScreen.resolveTvCategoryIndex("软件更新") == 4
+                        && SettingsScreen.resolveTvCategoryIndex("解码组件") == 1
+                        && SettingsScreen.resolveTvCategoryIndex("字幕与弹幕") == 2
+                        && SettingsScreen.resolveTvCategoryIndex("外观与遥控") == 3
+                        && SettingsScreen.resolveTvCategoryIndex("外观与壁纸") == 3
+                        && SettingsScreen.resolveTvCategoryIndex("数据与同步") == 4
+                        && SettingsScreen.resolveTvCategoryIndex("数据与备份") == 4
+                        && SettingsScreen.resolveTvCategoryIndex("更新与诊断") == 5
+                        && SettingsScreen.resolveTvCategoryIndex("软件更新") == 5
+                        && SettingsScreen.resolveTvCategoryIndex("运行日志") == 5
                         && SettingsScreen.resolveTvCategoryIndex("未知分类") == 0,
-                "SettingsScreen resolves all 5 TV left-sidebar categories accurately");
+                "SettingsScreen resolves all 6 stable TV categories plus legacy Chinese titles");
+
+        check(
+                TvSettingsRegistry.CAT_SOURCES.equals(
+                                TvSettingsRegistry.resolveInitialHomeEntryCategory(""))
+                        && TvSettingsRegistry.CAT_PLAYBACK.equals(
+                                TvSettingsRegistry.resolveInitialHomeEntryCategory("playback"))
+                        && TvSettingsRegistry.CAT_SUBTITLE_DANMU.equals(
+                                TvSettingsRegistry.resolveInitialHomeEntryCategory("字幕与弹幕"))
+                        && "settings-import".equals(TvSettingsRegistry.firstRowTagForSources(false))
+                        && "settings-source-manager"
+                                .equals(TvSettingsRegistry.firstRowTagForSources(true)),
+                "TvSettingsRegistry enforces first-entry Sources, return memory, and empty/configured Row-1 policy");
+
+        List<String> visibleTags =
+                Arrays.asList("settings-history", "settings-backup", "settings-restore");
+        check(
+                TvSettingsRegistry.resolveNearestVisibleRowIndex(visibleTags, "settings-backup", 2)
+                                == 1
+                        && TvSettingsRegistry.resolveNearestVisibleRowIndex(
+                                        visibleTags, "settings-cloud-sync", 1)
+                                == 1
+                        && TvSettingsRegistry.resolveNearestVisibleRowIndex(
+                                        visibleTags, "settings-reset", 9)
+                                == 2,
+                "TvSettingsRegistry falls back to nearest visible row when a hidden/conditional row disappears");
 
         check(
                 HomeDock.computeTopShrinkProgress(0, 180) == 0f
@@ -2711,22 +2746,94 @@ public final class TvUxOptimizationChecks {
     }
 
     private static void testTvPlaybackTooltipAndCustomToolbarOrder() throws Exception {
-        // 1. Default orders preserve existing Modern TV (10) & Classic TV (9) button layouts
+        // 1. Default orders match new Modern TV (8) & Classic TV (7) VOD defaults, single-episode
+        // collapse, and Live TV priority
         List<String> defModern = TvPlayerToolbarOrder.resolveOrder("", true);
         List<String> defClassic = TvPlayerToolbarOrder.resolveOrder(null, false);
         check(
-                defModern.size() == 10
-                        && TvPlayerToolbarOrder.KEY_PLAY_PAUSE.equals(defModern.get(0))
-                        && TvPlayerToolbarOrder.KEY_MORE.equals(defModern.get(9)),
-                "TvPlayerToolbarOrder preserves 10-button Modern TV default order");
+                defModern.equals(
+                        Arrays.asList(
+                                TvPlayerToolbarOrder.KEY_PLAY_PAUSE,
+                                TvPlayerToolbarOrder.KEY_NEXT_EPISODE,
+                                TvPlayerToolbarOrder.KEY_EPISODES,
+                                TvPlayerToolbarOrder.KEY_LINES,
+                                TvPlayerToolbarOrder.KEY_DANMAKU,
+                                TvPlayerToolbarOrder.KEY_SPEED,
+                                TvPlayerToolbarOrder.KEY_TRACKS,
+                                TvPlayerToolbarOrder.KEY_MORE)),
+                "TvPlayerToolbarOrder provides 8-button Modern TV VOD default order");
         check(
-                defClassic.size() == 9
-                        && TvPlayerToolbarOrder.KEY_NEXT_EPISODE.equals(defClassic.get(0))
-                        && TvPlayerToolbarOrder.KEY_DECODER.equals(defClassic.get(5))
-                        && TvPlayerToolbarOrder.KEY_MORE.equals(defClassic.get(8)),
-                "TvPlayerToolbarOrder preserves 9-button Classic TV default order");
+                defClassic.equals(
+                        Arrays.asList(
+                                TvPlayerToolbarOrder.KEY_EPISODES,
+                                TvPlayerToolbarOrder.KEY_NEXT_EPISODE,
+                                TvPlayerToolbarOrder.KEY_LINES,
+                                TvPlayerToolbarOrder.KEY_DANMAKU,
+                                TvPlayerToolbarOrder.KEY_TRACKS,
+                                TvPlayerToolbarOrder.KEY_SPEED,
+                                TvPlayerToolbarOrder.KEY_MORE)),
+                "TvPlayerToolbarOrder provides 7-button Classic TV VOD default order");
+        List<String> singleModern =
+                TvPlayerToolbarOrder.visibleOrderForSession("", true, false, false);
+        List<String> singleClassic =
+                TvPlayerToolbarOrder.visibleOrderForSession("", false, false, false);
+        check(
+                singleModern.equals(
+                                Arrays.asList(
+                                        TvPlayerToolbarOrder.KEY_PLAY_PAUSE,
+                                        TvPlayerToolbarOrder.KEY_LINES,
+                                        TvPlayerToolbarOrder.KEY_DANMAKU,
+                                        TvPlayerToolbarOrder.KEY_SPEED,
+                                        TvPlayerToolbarOrder.KEY_TRACKS,
+                                        TvPlayerToolbarOrder.KEY_MORE))
+                        && singleClassic.equals(
+                                Arrays.asList(
+                                        TvPlayerToolbarOrder.KEY_LINES,
+                                        TvPlayerToolbarOrder.KEY_DANMAKU,
+                                        TvPlayerToolbarOrder.KEY_TRACKS,
+                                        TvPlayerToolbarOrder.KEY_SPEED,
+                                        TvPlayerToolbarOrder.KEY_MORE)),
+                "Single-episode VOD collapses next-episode/episodes while keeping remaining order stable");
+        List<String> liveModern = TvPlayerToolbarOrder.resolveOrder("", true, true);
+        List<String> liveClassic = TvPlayerToolbarOrder.resolveOrder("", false, true);
+        check(
+                liveModern.equals(
+                                Arrays.asList(
+                                        TvPlayerToolbarOrder.KEY_PLAY_PAUSE,
+                                        TvPlayerToolbarOrder.KEY_EPISODES,
+                                        TvPlayerToolbarOrder.KEY_LINES,
+                                        TvPlayerToolbarOrder.KEY_EPG,
+                                        TvPlayerToolbarOrder.KEY_NEXT_EPISODE,
+                                        TvPlayerToolbarOrder.KEY_MORE))
+                        && liveClassic.equals(
+                                Arrays.asList(
+                                        TvPlayerToolbarOrder.KEY_EPISODES,
+                                        TvPlayerToolbarOrder.KEY_NEXT_EPISODE,
+                                        TvPlayerToolbarOrder.KEY_LINES,
+                                        TvPlayerToolbarOrder.KEY_EPG,
+                                        TvPlayerToolbarOrder.KEY_MORE)),
+                "Live TV toolbar defaults prioritize Channels · Next · Lines · EPG · More");
 
-        // 2. Move + merge + cross-style preservation + restore to default
+        // 2. Legacy saved v0.6.3 custom toolbar order stays intact across Modern/Classic + backup
+        String legacySaved =
+                "episodes,play-pause,next-episode,subtitles,audio-tracks,lines,speed,decoder,skip-intro-tool,skip-outro-tool,more";
+        List<String> legacyModern = TvPlayerToolbarOrder.resolveOrder(legacySaved, true);
+        List<String> legacyClassic = TvPlayerToolbarOrder.resolveOrder(legacySaved, false);
+        check(
+                !TvPlayerToolbarOrder.isDefaultOrder(legacySaved, true)
+                        && legacyModern.contains(TvPlayerToolbarOrder.KEY_SUBTITLES)
+                        && legacyModern.contains(TvPlayerToolbarOrder.KEY_AUDIO_TRACKS)
+                        && legacyModern.contains(TvPlayerToolbarOrder.KEY_SKIP_INTRO)
+                        && legacyModern.contains(TvPlayerToolbarOrder.KEY_SKIP_OUTRO)
+                        && TvPlayerToolbarOrder.KEY_EPISODES.equals(legacyModern.get(0))
+                        && !legacyClassic.contains(TvPlayerToolbarOrder.KEY_PLAY_PAUSE)
+                        && legacyClassic.contains(TvPlayerToolbarOrder.KEY_DECODER)
+                        && legacyClassic.contains(TvPlayerToolbarOrder.KEY_SKIP_INTRO)
+                        && legacyClassic.contains(TvPlayerToolbarOrder.KEY_SKIP_OUTRO)
+                        && legacySaved.equals(Prefs.sanitizeTvToolbarOrder(legacySaved)),
+                "Legacy custom tv_player_toolbar_order preserves saved legacy actions in Modern, Classic, and backup sanitization");
+
+        // 3. Move + merge + cross-style preservation + restore to default
         List<String> edited = TvPlayerToolbarOrder.defaultOrder(true);
         check(
                 !TvPlayerToolbarOrder.moveItem(edited, 0, -1)
@@ -2744,13 +2851,12 @@ public final class TvUxOptimizationChecks {
                 resolvedModern.equals(edited) && !TvPlayerToolbarOrder.isDefaultOrder(merged, true),
                 "Modern TV toolbar resolves exact custom order after merge");
         check(
-                resolvedClassic.size() == 9
+                resolvedClassic.size() == 7
                         && TvPlayerToolbarOrder.KEY_EPISODES.equals(resolvedClassic.get(0))
-                        && resolvedClassic.indexOf(TvPlayerToolbarOrder.KEY_DECODER)
-                                == resolvedClassic.indexOf(TvPlayerToolbarOrder.KEY_AUDIO_TRACKS)
-                                        + 1
-                        && TvPlayerToolbarOrder.KEY_MORE.equals(resolvedClassic.get(8)),
-                "Classic TV toolbar inherits shared custom order and keeps decoder beside audio-tracks");
+                        && resolvedClassic.contains(TvPlayerToolbarOrder.KEY_DANMAKU)
+                        && resolvedClassic.contains(TvPlayerToolbarOrder.KEY_TRACKS)
+                        && TvPlayerToolbarOrder.KEY_MORE.equals(resolvedClassic.get(6)),
+                "Classic TV toolbar inherits shared custom order without play-pause");
         String resetMerged =
                 TvPlayerToolbarOrder.mergeEditedOrder(
                         "", TvPlayerToolbarOrder.defaultOrder(true), true);
@@ -2758,19 +2864,19 @@ public final class TvUxOptimizationChecks {
                 "".equals(resetMerged) && TvPlayerToolbarOrder.isDefaultOrder(resetMerged, true),
                 "Restoring default order serializes back to canonical empty preference");
 
-        // 3. Sanitization for backup/restore
-        String dirty = "episodes, unknown-btn, lines, episodes, <script>, speed";
+        // 4. Sanitization for backup/restore (supports both legacy & new keys)
+        String dirty = "episodes, unknown-btn, danmaku, tracks, lines, episodes, <script>, speed";
         check(
-                "episodes,lines,speed".equals(Prefs.sanitizeTvToolbarOrder(dirty))
-                        && "episodes,lines,speed"
+                "episodes,danmaku,tracks,lines,speed".equals(Prefs.sanitizeTvToolbarOrder(dirty))
+                        && "episodes,danmaku,tracks,lines,speed"
                                 .equals(
                                         Prefs.sanitizeUserData(
                                                 Prefs.TV_PLAYER_TOOLBAR_ORDER, dirty))
                         && Prefs.sanitizeTvToolbarOrder(12345) == null
                         && "".equals(Prefs.sanitizeTvToolbarOrder("   ")),
-                "Prefs.sanitizeTvToolbarOrder deduplicates, strips unknown tokens, and rejects non-strings");
+                "Prefs.sanitizeTvToolbarOrder preserves new/legacy keys, deduplicates, strips unknown tokens, and rejects non-strings");
 
-        // 4. Dynamic tooltip names for all TV playback buttons (VOD + Live + states)
+        // 5. Dynamic tooltip names for all TV playback buttons (VOD + Live + states)
         check(
                 "暂停"
                                 .equals(
@@ -2804,7 +2910,19 @@ public final class TvUxOptimizationChecks {
                                 .equals(
                                         TvPlayerToolbarOrder.tooltipLabel(
                                                 "audio-tracks", false, true, 1f, 0, 0, 0))
-                        && "换源"
+                        && "字幕 / 音轨"
+                                .equals(
+                                        TvPlayerToolbarOrder.tooltipLabel(
+                                                "tracks", false, true, 1f, 0, 0, 0))
+                        && "弹幕"
+                                .equals(
+                                        TvPlayerToolbarOrder.tooltipLabel(
+                                                "danmaku", false, true, 1f, 0, 0, 0))
+                        && "节目单"
+                                .equals(
+                                        TvPlayerToolbarOrder.tooltipLabel(
+                                                "epg", true, true, 1f, 0, 0, 0))
+                        && "线路 / 画质"
                                 .equals(
                                         TvPlayerToolbarOrder.tooltipLabel(
                                                 "lines", false, true, 1f, 0, 0, 0))
@@ -2845,12 +2963,12 @@ public final class TvUxOptimizationChecks {
                                                 "more", false, true, 1f, 0, 0, 0)),
                 "TvPlayerToolbarOrder.tooltipLabel formats dynamic speed, skip timestamps, and decoder engine");
         check(
-                "默认顺序".equals(TvPlayerToolbarOrder.settingsSummary("", true))
+                TvPlayerToolbarOrder.settingsSummary("", true).startsWith("默认顺序")
                         && TvPlayerToolbarOrder.settingsSummary(merged, true)
                                 .startsWith("已自定义 · 选集"),
                 "TvPlayerToolbarOrder.settingsSummary distinguishes default vs custom order");
 
-        // 5. Tooltip bubble placement geometry clamps cleanly at screen edges while keeping pointer
+        // 6. Tooltip bubble placement geometry clamps cleanly at screen edges while keeping pointer
         // aligned to anchor
         TvPlayerToolbarOrder.TooltipPlacement centered =
                 TvPlayerToolbarOrder.computeTooltipPlacement(
@@ -2869,8 +2987,10 @@ public final class TvUxOptimizationChecks {
                         && Math.abs(rightEdge.arrowCenterX - 134f) < 0.01f,
                 "TooltipPlacement clamps right-edge bubble inside safe bounds and bounds arrow inside rounded corners");
 
-        // 6. Source wiring invariants for PlaybackControls, SettingsScreen, and MobileShell
+        // 7. Source wiring invariants for PlaybackControls, PlayerChrome, SettingsScreen, and
+        // MobileShell
         String playbackSrc = readJavaSource("PlaybackControls.java");
+        String chromeSrc = readJavaSource("PlayerChrome.java");
         String settingsSrc = readJavaSource("SettingsScreen.java");
         String mobileSrc = readJavaSource("MobileShell.java");
         check(
@@ -2878,15 +2998,158 @@ public final class TvUxOptimizationChecks {
                         && playbackSrc.contains("player-button-tooltip")
                         && playbackSrc.contains("showButtonTooltip(")
                         && playbackSrc.contains("hideButtonTooltip(")
-                        && playbackSrc.contains("TooltipBubbleDrawable"),
-                "PlaybackControls wires TV button focus tooltip bubble and custom toolbar order");
+                        && playbackSrc.contains("TooltipBubbleDrawable")
+                        && playbackSrc.contains("tracksCombinedMenu(")
+                        && playbackSrc.contains("openMergedSkipPanel(")
+                        && playbackSrc.contains("TvSeriesScraper.findMatchingEpisodeAcrossLines(")
+                        && playbackSrc.contains("danmuStatus.statusHeadline()"),
+                "PlaybackControls wires TV button focus tooltip, combined tracks, merged skip, danmu status panel, and episode-preserving line switch");
+        check(
+                chromeSrc.contains("player-error-panel")
+                        && chromeSrc.contains("error-retry")
+                        && chromeSrc.contains("error-switch-line")
+                        && chromeSrc.contains("hasAlternativeLines()")
+                        && chromeSrc.contains("isErrorCardFocused(")
+                        && readJavaSource("PlaybackController.java")
+                                .contains("isErrorCardFocused("),
+                "PlayerChrome wires in-place error action panel with retry, conditional switch-line, and DPAD non-interception");
+        check(
+                playbackSrc.contains("int rawIdx = episodeIndex();")
+                        && !playbackSrc.contains("int idx = Math.max(0, episodeIndex());"),
+                "PlaybackControls.buildDanmuMatchQuery never clamps unindexed episodeIndex (-1) to episode 1 (index 0)");
         check(
                 settingsSrc.contains("播放工具条按钮顺序")
                         && settingsSrc.contains("showTvToolbarOrderDialog")
-                        && settingsSrc.contains("Prefs.TV_PLAYER_TOOLBAR_ORDER"),
-                "SettingsScreen wires TV toolbar button reorder dialog, reset, and backup/restore");
+                        && settingsSrc.contains("showTvToolbarOrderDialogForPlayer")
+                        && settingsSrc.contains("Prefs.TV_PLAYER_TOOLBAR_ORDER")
+                        && settingsSrc.contains("TvSettingsRegistry.CATEGORIES")
+                        && settingsSrc.contains("自动加载片源弹幕")
+                        && settingsSrc.contains("默认倍速"),
+                "SettingsScreen wires 6-category TV settings, Row-1 placement, and toolbar reorder/add-remove dialog");
         check(
-                mobileSrc.contains("Prefs.TV_PLAYER_TOOLBAR_ORDER"),
-                "MobileShell.SettingIconView assigns dedicated swap-arrow icon for toolbar order setting");
+                mobileSrc.contains("Prefs.TV_PLAYER_TOOLBAR_ORDER")
+                        && mobileSrc.indexOf("settings-data-sync")
+                                < mobileSrc.indexOf("settings-data\")")
+                        && mobileSrc.contains("return ICON_SUBTITLE;"),
+                "MobileShell.SettingIconView assigns distinct icons for toolbar order, subtitle/danmu, and data/sync categories");
+    }
+
+    private static void testR7NavSwitchSourcePickerAndBoundsFixes() throws Exception {
+        // 1. HomeDock two-state hysteresis & bidirectional linear transition math
+        check(
+                !HomeDock.resolveTopCompactTarget(false, 100, 144, 72, false)
+                        && HomeDock.resolveTopCompactTarget(false, 144, 144, 72, false)
+                        && HomeDock.resolveTopCompactTarget(true, 100, 144, 72, false)
+                        && !HomeDock.resolveTopCompactTarget(true, 72, 144, 72, false)
+                        && !HomeDock.resolveTopCompactTarget(true, 520, 144, 72, true),
+                "HomeDock top-nav hysteresis collapses at >=72dp, holds deadband, expands at <=36dp or when focused");
+        check(
+                Math.abs(HomeDock.computeTopScale(0f, 1f) - 1.0f) < 0.0001f
+                        && Math.abs(HomeDock.computeTopScale(0.5f, 1f) - 0.94f) < 0.0001f
+                        && Math.abs(HomeDock.computeTopScale(1f, 1f) - 0.88f) < 0.0001f
+                        && Math.abs(HomeDock.computeTopScale(1f, 0.9f) - 0.792f) < 0.0001f,
+                "HomeDock top-nav scale is strictly linear from 100% to 88% multiplied by overflowScale");
+        check(
+                HomeDock.computeLinearTransitionDurationMs(0f, 1f, 180L, false) == 180L
+                        && HomeDock.computeLinearTransitionDurationMs(1f, 0f, 180L, false) == 180L
+                        && HomeDock.computeLinearTransitionDurationMs(0.5f, 0f, 180L, false) == 90L
+                        && HomeDock.computeLinearTransitionDurationMs(0f, 1f, 180L, true) == 0L,
+                "HomeDock linear transition duration is symmetric (180ms), proportional on mid-flight reversal, and 0ms when reduced");
+
+        // 2. HomeSourceSwitchAnchor A->B->C async race rejection, user focus guard, and clamping
+        check(
+                HomeSourceSwitchAnchor.decideSiteSelectionAction("a", "a", true, true)
+                                == HomeSourceSwitchAnchor.ACTION_DISMISS_ONLY
+                        && HomeSourceSwitchAnchor.decideSiteSelectionAction("a", "b", true, true)
+                                == HomeSourceSwitchAnchor.ACTION_IN_PLACE_HOME_SWITCH
+                        && HomeSourceSwitchAnchor.decideSiteSelectionAction("a", "b", false, false)
+                                == HomeSourceSwitchAnchor.ACTION_SETTINGS_COMMIT_STAY
+                        && HomeSourceSwitchAnchor.decideSiteSelectionAction("a", "b", false, true)
+                                == HomeSourceSwitchAnchor.ACTION_REBUILD_HOME_TOP,
+                "HomeSourceSwitchAnchor routes same-site, home in-place, settings stay, and welcome rebuild cleanly");
+        HomeSourceSwitchAnchor anchorC =
+                new HomeSourceSwitchAnchor(7, 3L, "site_c", "source-switcher", 420, 960);
+        check(
+                anchorC.canApplyFocus(7, 3L, "site_c", false)
+                        && !anchorC.canApplyFocus(7, 2L, "site_b", false)
+                        && !anchorC.canApplyFocus(8, 3L, "site_c", false)
+                        && !anchorC.canApplyFocus(7, 3L, "site_c", true),
+                "HomeSourceSwitchAnchor rejects stale A->B->C callbacks, expired home generations, and open modals");
+        anchorC.markUserMovedFocus();
+        check(
+                !anchorC.canApplyFocus(7, 3L, "site_c", false),
+                "HomeSourceSwitchAnchor never steals focus once the user moves away");
+        HomeSourceSwitchAnchor oneShot =
+                new HomeSourceSwitchAnchor(7, 4L, "site_b", "source-switcher", 300, 900);
+        oneShot.consume();
+        check(
+                !oneShot.canApplyFocus(7, 4L, "site_b", false),
+                "HomeSourceSwitchAnchor releases itself after one-shot consumption");
+        check(
+                HomeSourceSwitchAnchor.computeAlignedScrollY(1380, 420, 3200, 1080) == 960
+                        && HomeSourceSwitchAnchor.computeAlignedScrollY(1380, 420, 1500, 1080)
+                                == 420
+                        && HomeSourceSwitchAnchor.computeAlignedScrollY(300, 420, 1500, 1080) == 0,
+                "HomeSourceSwitchAnchor aligns relative viewport height and clamps short/empty lists safely");
+
+        // 3. SourcePicker dynamic columns, footer reflow, and trustworthy subtitle formatting
+        check(
+                SourcePicker.computePickerColumns(1432, 2.0f, 1.0f, true) == 2
+                        && SourcePicker.computePickerColumns(1432, 2.0f, 1.35f, true) == 1
+                        && SourcePicker.computePickerColumns(1000, 2.0f, 1.0f, true) == 1,
+                "SourcePicker starts at 2 columns on 1080p TV and drops to 1 column on narrow width or large font");
+        check(
+                SourcePicker.computeFooterColumns(1432, 220, 16, 4) == 4
+                        && SourcePicker.computeFooterColumns(600, 220, 16, 4) == 2
+                        && SourcePicker.computeFooterColumns(300, 220, 16, 4) == 1,
+                "SourcePicker footer reflows cleanly from 4x1 to 2x2 to 1x4 without truncating labels");
+        check(
+                "电信高清组  ·  ✓ 当前"
+                                .equals(
+                                        SourcePicker.formatSiteSubtitle(
+                                                "电信高清组", true, true, false, true))
+                        && "✓ 当前"
+                                .equals(
+                                        SourcePicker.formatSiteSubtitle(
+                                                "电信高清组", false, true, false, true))
+                        && "备用片库  ·  不可用"
+                                .equals(
+                                        SourcePicker.formatSiteSubtitle(
+                                                "备用片库", true, false, false, false)),
+                "SourcePicker subtitle omits redundant group in single-group view and labels current/unavailable clearly");
+
+        // 4. AppDialog & TvQrInputHelper strict window bounds (closing both R7 counterexamples)
+        check(
+                AppDialog.computeMaxContentHeight(260, 200, 56, 120) == 4
+                        && AppDialog.computeMaxContentHeight(200, 240, 56, 120) == 0
+                        && AppDialog.computeFooterColumns(500, 200, 16, 3) == 2
+                        && AppDialog.computeFooterColumns(700, 200, 16, 3) == 3,
+                "AppDialog strictly respects available window height and reflows wide footer actions");
+        TvQrInputHelper.BubblePlacement tightQr =
+                TvQrInputHelper.computeBubblePlacement(
+                        60, 95, 40, 40, 240, 260, 320, 200, 12, 6, 12, false);
+        check(
+                tightQr.y >= 0
+                        && tightQr.y + tightQr.resolvedHeight <= 200
+                        && tightQr.x >= 0
+                        && tightQr.x + tightQr.resolvedWidth <= 320
+                        && tightQr.needsScroll,
+                "TvQrInputHelper.computeBubblePlacement never overflows short windows and flags scroll fallback");
+
+        // 5. Source wiring checks across HomeScreen, HomeDock, SourcePicker, DanmuSettingsPanel,
+        // DetailScreen
+        String homeSrc = readJavaSource("HomeScreen.java");
+        String dockSrc = readJavaSource("HomeDock.java");
+        String pickerSrc = readJavaSource("SourcePicker.java");
+        String detailSrc = readJavaSource("TvV17DetailScreen.java");
+        check(
+                homeSrc.contains("void switchSiteInPlace(")
+                        && dockSrc.contains("LinearInterpolator")
+                        && dockSrc.contains("resolveTopCompactTarget(")
+                        && pickerSrc.contains("source-focus-preview")
+                        && pickerSrc.contains("computePickerColumns(")
+                        && pickerSrc.contains("computeFooterColumns(")
+                        && detailSrc.contains("maxHeroWidthDp"),
+                "HomeScreen, HomeDock, SourcePicker, and TvV17DetailScreen wire R7 fixes cleanly");
     }
 }

@@ -19,9 +19,11 @@ import org.json.JSONObject;
 final class HomeScreen {
     static final int MAX_RETAINED_CARDS = 360;
     final MainActivity a;
-    final Cms.Site site;
+    Cms.Site site;
     final int COLUMNS;
     final float navScale;
+    long sourceSwitchSerial;
+    HomeSourceSwitchAnchor pendingSwitchAnchor;
     final Map<View, String> tabIds = new HashMap<>();
     final List<View> historyCards = new ArrayList<>(), tabs = new ArrayList<>();
     final List<List<View>> rows = new ArrayList<>();
@@ -157,44 +159,96 @@ final class HomeScreen {
             a.body.addView(homeTitle);
             a.gap(a.body, 18);
         }
+        TvScrollView tvScroller =
+                (a.isTvDevice() && a.scroll instanceof TvScrollView)
+                        ? (TvScrollView) a.scroll
+                        : null;
         if (a.isTvDevice() && !a.privateMode) {
-            curatedHost = a.vertical();
+            curatedHost =
+                    tvScroller != null
+                            ? new TvScrollView.ViewportLinearLayout(a, tvScroller)
+                            : a.vertical();
             curatedHost.setTag("home-curated-host");
             curatedHost.setClipChildren(false);
             curatedHost.setClipToPadding(false);
             a.body.addView(curatedHost, new LinearLayout.LayoutParams(-1, -2));
-            curatedCatalog = TvCuratedHome.peekOrSeed();
+            curatedCatalog = TvCuratedHome.peekOrSeed(a);
             renderCuratedSection(curatedCatalog);
-            TvCuratedHome.loadAsync(
-                    a,
-                    fresh -> {
-                        if (!active() || fresh == null) return;
-                        if (curatedCatalog != null
-                                && curatedCatalog.live
-                                && fresh == curatedCatalog) {
-                            return;
-                        }
-                        View curF = a.getCurrentFocus();
-                        String restoreCuratedTag =
-                                (curF != null
-                                                && curF.getTag() instanceof String
-                                                && ((String) curF.getTag())
-                                                        .startsWith("home-curated-"))
-                                        ? (String) curF.getTag()
-                                        : null;
-                        curatedCatalog = fresh;
-                        renderCuratedSection(fresh);
-                        wireNavigation();
-                        if (restoreCuratedTag != null && curatedHost != null) {
-                            View match = curatedHost.findViewWithTag(restoreCuratedTag);
-                            if (match != null && match.isShown()) match.requestFocus();
-                            else if (curatedHeroBtn != null) curatedHeroBtn.requestFocus();
-                        }
-                    });
+            final int curatedTicket = ticket;
+            if (!curatedCatalog.live) {
+                a.ui.postDelayed(
+                        () -> {
+                            if (!active()
+                                    || curatedTicket != ticket
+                                    || a.current == null
+                                    || !a.current.home
+                                    || hasModalDialogOpen()) {
+                                return;
+                            }
+                            TvCuratedHome.loadAsync(
+                                    a,
+                                    fresh -> {
+                                        if (!active()
+                                                || curatedTicket != ticket
+                                                || fresh == null
+                                                || a.current == null
+                                                || !a.current.home
+                                                || hasModalDialogOpen()) {
+                                            return;
+                                        }
+                                        if (!fresh.live
+                                                && curatedCatalog != null
+                                                && !curatedCatalog.live) {
+                                            return;
+                                        }
+                                        if (curatedCatalog != null
+                                                && curatedCatalog.live
+                                                && fresh == curatedCatalog) {
+                                            return;
+                                        }
+                                        View curF = a.getCurrentFocus();
+                                        String restoreCuratedTag =
+                                                (curF != null
+                                                                && curF.getTag() instanceof String
+                                                                && ((String) curF.getTag())
+                                                                        .startsWith("home-curated-"))
+                                                        ? (String) curF.getTag()
+                                                        : null;
+                                        curatedCatalog = fresh;
+                                        renderCuratedSection(fresh);
+                                        wireNavigation();
+                                        if (restoreCuratedTag != null && curatedHost != null) {
+                                            if (pendingSwitchAnchor == null
+                                                    || pendingSwitchAnchor.consumed
+                                                    || pendingSwitchAnchor.userMovedFocus) {
+                                                View match =
+                                                        curatedHost.findViewWithTag(
+                                                                restoreCuratedTag);
+                                                if (match != null && match.isShown()) {
+                                                    match.requestFocus();
+                                                } else if (curatedHeroBtn != null) {
+                                                    curatedHeroBtn.requestFocus();
+                                                }
+                                            }
+                                        } else if (pendingSwitchAnchor != null
+                                                && pendingSwitchAnchor.canApplyFocus(
+                                                        ticket,
+                                                        sourceSwitchSerial,
+                                                        site == null ? "" : site.key,
+                                                        hasModalDialogOpen())) {
+                                            alignSwitchAnchorIfActive(false);
+                                        }
+                                    });
+                        },
+                        6000L);
+            }
         }
         LinearLayout belowHeroWrap;
         if (fullBleedTvHero) {
-            belowHeroWrap = a.vertical();
+            belowHeroWrap =
+                    tvScroller != null
+                            ? new TvScrollView.ViewportLinearLayout(a, tvScroller)
+                            : a.vertical();
             belowHeroWrap.setClipChildren(false);
             belowHeroWrap.setClipToPadding(false);
             belowHeroWrap.setPadding(tvContentLeftPadPx, 0, tvContentRightPadPx, 0);
@@ -228,13 +282,15 @@ final class HomeScreen {
                 new LinearLayout.LayoutParams(-2, a.dp(Math.round(34 * navScale)));
         sourceSize.leftMargin = a.dp(14);
         heading.addView(source, sourceSize);
-        if (a.isTvDevice() && !SourceController.isConfigOrNetdiskSite(site)) {
+        if (a.isTvDevice()) {
             filterToggle = pill("筛选  ⌄", "home-filters", this::showFilters);
             filterToggle.setPadding(
                     a.dp(Math.round(14 * navScale)), 0, a.dp(Math.round(14 * navScale)), 0);
             UiCompat.setDefaultFocusHighlightEnabled(filterToggle, false);
             filterToggle.setOnFocusChangeListener((v, f) -> styleFilterToggle(f));
             styleFilterToggle(false);
+            filterToggle.setVisibility(
+                    SourceController.isConfigOrNetdiskSite(site) ? View.GONE : View.VISIBLE);
             LinearLayout.LayoutParams filterSize =
                     new LinearLayout.LayoutParams(-2, a.dp(Math.round(34 * navScale)));
             filterSize.leftMargin = a.dp(10);
@@ -271,7 +327,10 @@ final class HomeScreen {
                         () -> showWindow(Math.max(0, state.windowStart - windowSize())));
         earlier.setVisibility(View.GONE);
         libraryParent.addView(earlier, new LinearLayout.LayoutParams(a.dp(180), a.dp(40)));
-        content = a.vertical();
+        content =
+                tvScroller != null
+                        ? new TvScrollView.ViewportLinearLayout(a, tvScroller)
+                        : a.vertical();
         content.setClipChildren(false);
         content.setClipToPadding(false);
         if (a.isTvDevice()) {
@@ -315,6 +374,9 @@ final class HomeScreen {
                                         HomeAmbient.computeScrollReveal(sy, curatedHeroHeightPx));
                             }
                             if (sy <= 0) return;
+                            if (curatedHost != null) {
+                                resumeVisibleMissingPosters(curatedHost);
+                            }
                             View child = a.scroll.getChildAt(0);
                             if (child == null) return;
                             int diff = child.getBottom() - (a.scroll.getHeight() + sy);
@@ -323,6 +385,21 @@ final class HomeScreen {
                             }
                         });
         wireNavigation();
+        if (a.root != null) {
+            a.root.getViewTreeObserver()
+                    .addOnGlobalFocusChangeListener(
+                            (oldFocus, newFocus) -> {
+                                if (!active()
+                                        || pendingSwitchAnchor == null
+                                        || pendingSwitchAnchor.consumed) {
+                                    return;
+                                }
+                                if (hasModalDialogOpen()) return;
+                                if (newFocus != null && newFocus != source && newFocus != a.root) {
+                                    pendingSwitchAnchor.markUserMovedFocus();
+                                }
+                            });
+        }
         retainedRoot = a.root;
         retainedBody = a.body;
         retainedScroll = a.scroll;
@@ -333,6 +410,10 @@ final class HomeScreen {
         retainedEngineEpoch = a.engineEpoch;
         retainedAppearance = appearance();
         if (a.current != null) a.current.retainedHome = this;
+        if (a.isTvDevice()) {
+            SourcePicker.prewarmForHomeIdle(a);
+            CatalogScreen.prewarmTvHistoryOnIdle(a);
+        }
         Snapshot saved = state.snapshot != null ? state.snapshot : a.homeData.get(site.key);
         if (saved != null
                 && (state.snapshot != null || System.currentTimeMillis() - saved.time < 300000)) {
@@ -345,6 +426,245 @@ final class HomeScreen {
             if (disk != null && !disk.videos.isEmpty()) {
                 snapshot = disk;
                 a.homeData.put(site.key, disk);
+                renderSnapshot();
+                long staleMs = a.isTvDevice() ? 1800000L : 300000L;
+                boolean missingSchema =
+                        disk.filterSchema == null || disk.filterSchema.trim().length() <= 2;
+                if (System.currentTimeMillis() - disk.time >= staleMs
+                        || (missingSchema && !disk.categories.isEmpty())) {
+                    refreshHomeSilently();
+                }
+                return;
+            }
+        }
+        loadHome();
+    }
+
+    private boolean hasModalDialogOpen() {
+        return (a.sourceDialog != null && a.sourceDialog.isShowing())
+                || (a.appDialog != null && a.appDialog.isShowing())
+                || (a.accountDialog != null && a.accountDialog.isShowing());
+    }
+
+    int viewTopInScrollContent(View target) {
+        if (target == null || a.scroll == null || a.scroll.getChildCount() == 0) return 0;
+        View scrollChild = a.scroll.getChildAt(0);
+        int top = 0;
+        View cur = target;
+        while (cur != null && cur != scrollChild) {
+            top += cur.getTop();
+            android.view.ViewParent p = cur.getParent();
+            cur = p instanceof View ? (View) p : null;
+        }
+        return top;
+    }
+
+    int measureAnchorRelTopPx(View target) {
+        if (target == null || a.scroll == null) return 0;
+        int[] tLoc = new int[2];
+        int[] sLoc = new int[2];
+        target.getLocationOnScreen(tLoc);
+        a.scroll.getLocationOnScreen(sLoc);
+        return tLoc[1] - sLoc[1];
+    }
+
+    private android.view.ViewTreeObserver.OnGlobalLayoutListener pendingAnchorLayoutListener;
+    private View pendingAnchorLayoutHost;
+
+    private void detachPendingAnchorLayoutListener() {
+        if (pendingAnchorLayoutListener != null && pendingAnchorLayoutHost != null) {
+            try {
+                pendingAnchorLayoutHost
+                        .getViewTreeObserver()
+                        .removeOnGlobalLayoutListener(pendingAnchorLayoutListener);
+            } catch (Throwable ignored) {
+            }
+        }
+        pendingAnchorLayoutListener = null;
+        pendingAnchorLayoutHost = null;
+    }
+
+    private boolean applySwitchAnchorStep(HomeSourceSwitchAnchor anchor, boolean consumeNow) {
+        if (!active() || pendingSwitchAnchor != anchor) return false;
+        if (!anchor.canApplyFocus(
+                ticket, sourceSwitchSerial, site == null ? "" : site.key, hasModalDialogOpen())) {
+            return false;
+        }
+        boolean layoutMeasured = false;
+        if (a.scroll != null && a.scroll.getChildCount() > 0 && source != null) {
+            View scrollChild = a.scroll.getChildAt(0);
+            int contentH = scrollChild.getHeight();
+            int viewportH = a.scroll.getHeight();
+            layoutMeasured = contentH > 0 && viewportH > 0 && source.getHeight() > 0;
+            int desiredY =
+                    layoutMeasured
+                            ? HomeSourceSwitchAnchor.computeAlignedScrollY(
+                                    viewTopInScrollContent(source),
+                                    anchor.anchorRelTopPx,
+                                    contentH,
+                                    viewportH)
+                            : anchor.fallbackScrollY;
+            if (a.scroll instanceof TvScrollView) {
+                ((TvScrollView) a.scroll).suppressNextReveal = true;
+            }
+            a.scroll.scrollTo(0, desiredY);
+            if (a.homeDock != null) a.homeDock.syncScrollYImmediate(desiredY);
+            if (a.current != null) a.current.scroll = desiredY;
+        }
+        if (source != null && source.isShown() && source.isFocusable()) {
+            if (a.scroll instanceof TvScrollView) {
+                ((TvScrollView) a.scroll).suppressNextReveal = true;
+            }
+            source.requestFocus();
+            a.autoFocus = source;
+            if (a.current != null) a.current.focus = "source-switcher";
+        }
+        if (consumeNow && layoutMeasured) {
+            anchor.consume();
+        }
+        return layoutMeasured;
+    }
+
+    void alignSwitchAnchorIfActive(final boolean consumeAfterAlign) {
+        final HomeSourceSwitchAnchor anchor = pendingSwitchAnchor;
+        if (anchor == null) return;
+        final String curKey = site == null ? "" : site.key;
+        if (!anchor.canApplyFocus(ticket, sourceSwitchSerial, curKey, hasModalDialogOpen())) {
+            detachPendingAnchorLayoutListener();
+            return;
+        }
+        // Apply immediate best-effort alignment without consuming so the post-layout pass
+        // still runs after the newly bound catalog list finishes real measurement/layout.
+        applySwitchAnchorStep(anchor, false);
+        detachPendingAnchorLayoutListener();
+        final View host = a.scroll != null ? a.scroll : a.body;
+        if (host == null) {
+            if (consumeAfterAlign) anchor.consume();
+            return;
+        }
+        final boolean[] settled = {false};
+        final Runnable finalizeAlign =
+                () -> {
+                    if (settled[0]) return;
+                    settled[0] = true;
+                    detachPendingAnchorLayoutListener();
+                    applySwitchAnchorStep(anchor, consumeAfterAlign);
+                    if (consumeAfterAlign && !anchor.consumed && pendingSwitchAnchor == anchor) {
+                        anchor.consume();
+                    }
+                };
+        android.view.ViewTreeObserver.OnGlobalLayoutListener l =
+                new android.view.ViewTreeObserver.OnGlobalLayoutListener() {
+                    @Override
+                    public void onGlobalLayout() {
+                        if (settled[0]) {
+                            detachPendingAnchorLayoutListener();
+                            return;
+                        }
+                        if (!active() || pendingSwitchAnchor != anchor) {
+                            settled[0] = true;
+                            detachPendingAnchorLayoutListener();
+                            return;
+                        }
+                        if (!anchor.canApplyFocus(
+                                ticket,
+                                sourceSwitchSerial,
+                                site == null ? "" : site.key,
+                                hasModalDialogOpen())) {
+                            settled[0] = true;
+                            detachPendingAnchorLayoutListener();
+                            return;
+                        }
+                        finalizeAlign.run();
+                    }
+                };
+        pendingAnchorLayoutListener = l;
+        pendingAnchorLayoutHost = host;
+        try {
+            host.getViewTreeObserver().addOnGlobalLayoutListener(l);
+        } catch (Throwable ignored) {
+            pendingAnchorLayoutListener = null;
+            pendingAnchorLayoutHost = null;
+        }
+        // Post-frame fallback in case layout dimensions did not trigger another global layout pass.
+        host.post(finalizeAlign);
+    }
+
+    /**
+     * Switches the active catalog site in-place without destroying HomeScreen, jumping to scrollY=0,
+     * clearing the back stack, or letting stale requests from previous sites overwrite UI/focus.
+     */
+    void switchSiteInPlace(Cms.Site nextSite, int anchorRelTopPx, int fallbackScrollY) {
+        if (!active() || nextSite == null) return;
+        detachPendingAnchorLayoutListener();
+        cancelGrid();
+        if (pendingTabSwitch != null) {
+            a.ui.removeCallbacks(pendingTabSwitch);
+            pendingTabSwitch = null;
+        }
+        a.cancelPageRequests();
+        request++;
+        gridEpoch++;
+        sourceSwitchSerial++;
+        busy = false;
+        pendingFocus = null;
+
+        this.site = nextSite;
+        this.snapshot = null;
+        this.state = new State(nextSite.key);
+        this.state.engineEpoch = a.engineEpoch;
+        if (a.current != null) {
+            a.current.homeState = this.state;
+            a.current.focus = "source-switcher";
+        }
+        this.pendingSwitchAnchor =
+                new HomeSourceSwitchAnchor(
+                        ticket,
+                        sourceSwitchSerial,
+                        nextSite.key,
+                        "source-switcher",
+                        anchorRelTopPx,
+                        fallbackScrollY);
+
+        if (source != null) {
+            source.setText(nextSite.name);
+            source.setContentDescription("当前片源：" + nextSite.name + "，按确认键切换");
+        }
+        if (filterToggle != null) {
+            filterToggle.setVisibility(
+                    SourceController.isConfigOrNetdiskSite(nextSite) ? View.GONE : View.VISIBLE);
+            updateFilterToggle();
+        }
+        if (filters != null) filters.removeAllViews();
+        tabs.clear();
+        tabIds.clear();
+        if (inlineFilters != null) {
+            inlineFilters.clearViews();
+            inlineFilters.mode = "none";
+            inlineFilters.schema = "";
+            inlineFilters.setVisibility(View.GONE);
+        }
+        clearGrid();
+        if (earlier != null) earlier.setVisibility(View.GONE);
+        if (more != null) more.setVisibility(View.GONE);
+        if (status != null) {
+            status.setText("正在加载 " + nextSite.name + "…");
+            status.setVisibility(View.VISIBLE);
+        }
+        wireNavigation();
+        alignSwitchAnchorIfActive(false);
+
+        Snapshot saved = a.homeData.get(nextSite.key);
+        if (saved != null && System.currentTimeMillis() - saved.time < 300000) {
+            snapshot = saved;
+            renderSnapshot();
+            return;
+        }
+        if (!a.reduced && (nextSite.api == null || !nextSite.api.contains("fixture.test"))) {
+            Snapshot disk = readDiskSnapshot(a, nextSite.key);
+            if (disk != null && !disk.videos.isEmpty()) {
+                snapshot = disk;
+                a.homeData.put(nextSite.key, disk);
                 renderSnapshot();
                 long staleMs = a.isTvDevice() ? 1800000L : 300000L;
                 boolean missingSchema =
@@ -376,11 +696,13 @@ final class HomeScreen {
 
     void refreshHomeSilently() {
         final int token = request;
+        final Cms.Site reqSite = site;
+        if (reqSite == null) return;
         a.submitPage(
                 () -> {
-                    commitLoadingSite(a, site.key);
+                    commitLoadingSite(a, reqSite.key);
                     try {
-                        SourceEngine engine = a.engine(site);
+                        SourceEngine engine = a.engine(reqSite);
                         String raw = engine.home();
                         RequestScope.checkCurrent();
                         List<Cms.Category> categories = Cms.categories(raw);
@@ -404,11 +726,11 @@ final class HomeScreen {
                         final Snapshot fresh =
                                 new Snapshot(list.videos, categories, skip, list.pageCount);
                         fresh.filterSchema = raw;
-                        writeDiskSnapshot(a, site.key, fresh);
+                        writeDiskSnapshot(a, reqSite.key, fresh);
                         a.ui.post(
                                 () -> {
-                                    a.homeData.put(site.key, fresh);
-                                    if (!active() || snapshot == null) return;
+                                    a.homeData.put(reqSite.key, fresh);
+                                    if (!active() || snapshot == null || reqSite != site) return;
                                     boolean onDefaultTab =
                                             !busy
                                                     && token == request
@@ -557,16 +879,92 @@ final class HomeScreen {
         a.scroll = retainedScroll;
         a.homeDock = retainedDock;
         a.homeAmbient = ambient;
-        a.setContentView(retainedRoot);
+        if (ambient != null) ambient.setStagePaused(false);
+        boolean alreadyAttached = retainedRoot.isAttachedToWindow();
+        a.presentRoot(retainedRoot, false);
         historySection();
         int drawn = state.windowStart;
         for (List<View> row : rows) drawn += row.size();
-        if (drawn < windowEnd()) appendCards(drawn, gridEpoch, true);
-        resumeMissingPosters(retainedRoot);
+        boolean appended = drawn < windowEnd();
+        if (appended) {
+            if (alreadyAttached && rows.size() >= 2 && retainedRoot != null) {
+                final int resumeDrawn = drawn;
+                final int resumeEpoch = gridEpoch;
+                retainedRoot.postOnAnimation(
+                        () -> {
+                            if (active() && resumeEpoch == gridEpoch) {
+                                appendCards(resumeDrawn, resumeEpoch, true);
+                            }
+                        });
+            } else {
+                appendCards(drawn, gridEpoch, true);
+            }
+        }
+        if (!alreadyAttached) {
+            resumeVisibleMissingPosters(retainedRoot);
+        }
+        final int resumeTicket = ticket;
+        if (retainedRoot != null) {
+            retainedRoot.postDelayed(
+                    () -> {
+                        if (active() && resumeTicket == ticket) {
+                            resumeMissingPosters(retainedRoot);
+                        }
+                    },
+                    alreadyAttached ? 850L : 16L);
+        }
         updateMore();
         updateFilterContinueButton();
-        wireNavigation();
+        if ((appended && !(alreadyAttached && rows.size() >= 2)) || !a.isTvDevice()) {
+            wireNavigation();
+        }
+        if (a.homeDock != null && a.scroll != null) {
+            a.homeDock.syncScrollYImmediate(a.scroll.getScrollY());
+        }
+        if (alreadyAttached && a.isTvDevice() && a.current != null) {
+            if (a.scroll != null && a.scroll.getScrollY() != a.current.scroll) {
+                a.scroll.scrollTo(0, a.current.scroll);
+                if (a.homeDock != null) {
+                    a.homeDock.syncScrollYImmediate(a.current.scroll);
+                }
+            }
+            if (a.current.focus != null) {
+                View target = retainedRoot.findViewWithTag(a.current.focus);
+                if (target != null
+                        && (!target.isShown() || !target.isFocusable() || !target.isEnabled())) {
+                    target = MainActivity.findVisibleFocusableByTag(retainedRoot, a.current.focus);
+                }
+                if (target != null) {
+                    if (!target.hasFocus()) target.requestFocus();
+                    a.autoFocus = target;
+                }
+            }
+        }
         return true;
+    }
+
+    private void resumeVisibleMissingPosters(View rootView) {
+        if (rootView == null) return;
+        android.graphics.Rect vis = new android.graphics.Rect();
+        resumeVisibleMissingPostersWalk(rootView, vis);
+    }
+
+    private void resumeVisibleMissingPostersWalk(View view, android.graphics.Rect vis) {
+        if (view == null || view.getVisibility() != View.VISIBLE) return;
+        if (view instanceof ImageView) {
+            if (((ImageView) view).getDrawable() == null
+                    && view.getTag() instanceof String
+                    && view.getGlobalVisibleRect(vis)) {
+                a.poster((String) view.getTag(), (ImageView) view);
+            }
+            return;
+        }
+        if (view instanceof android.view.ViewGroup) {
+            android.view.ViewGroup group = (android.view.ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                resumeVisibleMissingPostersWalk(group.getChildAt(i), vis);
+            }
+        }
     }
 
     void resumeMissingPosters(View view) {
@@ -589,19 +987,25 @@ final class HomeScreen {
 
     void loadHome() {
         if (busy) return;
+        final Cms.Site reqSite = site;
+        if (reqSite == null) return;
         busy = true;
         status.setVisibility(View.VISIBLE);
         status.setText("正在整理片单…");
         more.setVisibility(View.GONE);
-        int token = ++request;
+        final int reqGeneration = ticket;
+        final int token = ++request;
+        a.loadingGuard.claim(reqSite.key, reqGeneration, token);
         if (a.prefs != null) {
             a.prefs.edit().putString(Prefs.LOADING_SITE, site.key == null ? "" : site.key).apply();
         }
         a.submitPage(
                 () -> {
-                    commitLoadingSite(a, site.key);
+                    if (a.loadingGuard.isOwner(reqSite.key, reqGeneration, token)) {
+                        commitLoadingSite(a, reqSite.key);
+                    }
                     try {
-                        SourceEngine engine = a.engine(site);
+                        SourceEngine engine = a.engine(reqSite);
                         String raw = engine.home();
                         RequestScope.checkCurrent();
                         List<Cms.Category> categories = Cms.categories(raw);
@@ -609,14 +1013,15 @@ final class HomeScreen {
                         clean(list.videos);
                         if (list.videos.isEmpty()
                                 && !categories.isEmpty()
-                                && !SourceController.isConfigOrNetdiskSite(site)) {
+                                && !SourceController.isConfigOrNetdiskSite(reqSite)) {
                             Snapshot navigation =
                                     new Snapshot(new ArrayList<>(), categories, "", 1);
                             navigation.filterSchema = raw;
                             navigation.recommendationsPending = true;
                             a.ui.post(
                                     () -> {
-                                        if (!active() || token != request) return;
+                                        if (!active() || token != request || reqSite != site)
+                                            return;
                                         snapshot = navigation;
                                         renderSnapshot();
                                         status.setText("正在读取推荐…");
@@ -640,30 +1045,48 @@ final class HomeScreen {
                         RequestScope.checkCurrent();
                         result.filterSchema = raw;
                         if (!a.reduced
-                                && (site.api == null || !site.api.contains("fixture.test"))) {
-                            a.worker.execute(() -> writeDiskSnapshot(a, site.key, result));
+                                && (reqSite.api == null || !reqSite.api.contains("fixture.test"))) {
+                            a.worker.execute(() -> writeDiskSnapshot(a, reqSite.key, result));
                         }
                         a.ui.post(
                                 () -> {
-                                    a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
-                                    if (!active() || token != request) return;
+                                    if (a.loadingGuard.releaseIfOwner(
+                                            reqSite.key, reqGeneration, token)) {
+                                        a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
+                                    }
+                                    if (!active() || token != request || reqSite != site) return;
                                     busy = false;
                                     snapshot = result;
-                                    a.homeData.put(site.key, result);
+                                    a.homeData.put(reqSite.key, result);
                                     renderSnapshot();
                                 });
                     } catch (Throwable e) {
-                        AppLog.w("HomeScreen", "loadHome failed for " + site.key, e);
+                        AppLog.w("HomeScreen", "loadHome failed for " + reqSite.key, e);
                         a.ui.post(
                                 () -> {
-                                    a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
-                                    if (!active() || token != request) return;
+                                    if (a.loadingGuard.releaseIfOwner(
+                                            reqSite.key, reqGeneration, token)) {
+                                        a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
+                                    }
+                                    if (!active() || token != request || reqSite != site) return;
                                     busy = false;
                                     status.setText(a.message(e));
                                     more.setText("重新加载");
                                     more.setVisibility(View.VISIBLE);
                                     wireNavigation();
-                                    if (source != null && source.isShown()) source.requestFocus();
+                                    if (pendingSwitchAnchor != null
+                                            && pendingSwitchAnchor.canApplyFocus(
+                                                    ticket,
+                                                    sourceSwitchSerial,
+                                                    site == null ? "" : site.key,
+                                                    hasModalDialogOpen())) {
+                                        alignSwitchAnchorIfActive(true);
+                                    } else if (source != null
+                                            && source.isShown()
+                                            && (pendingSwitchAnchor == null
+                                                    || !pendingSwitchAnchor.userMovedFocus)) {
+                                        source.requestFocus();
+                                    }
                                 });
                     }
                 });
@@ -1008,23 +1431,53 @@ final class HomeScreen {
                     }
                     final int heroTargetW = a.windowWidth();
                     final int heroTargetH = a.dp(heroHeightDp);
-                    ImmersivePoster.loadOfficialLandscapeInto(
-                            a,
-                            item,
-                            heroArt,
-                            heroImageToken,
-                            heroTargetW,
-                            heroTargetH,
-                            (c0, c1) -> {
-                                if (ambient != null
-                                        && (a.scroll == null
-                                                || a.scroll.getScrollY() < heroTargetH / 3)) {
-                                    ambient.followHeroColors(c0, c1);
+                    final int heroTicket = ticket;
+                    final Runnable loadHeroNow =
+                            () -> {
+                                if (!active()
+                                        || heroTicket != ticket
+                                        || a.current == null
+                                        || !a.current.home
+                                        || hasModalDialogOpen()) {
+                                    return;
                                 }
-                            });
+                                ImmersivePoster.loadOfficialLandscapeInto(
+                                        a,
+                                        item,
+                                        heroArt,
+                                        heroImageToken,
+                                        heroTargetW,
+                                        heroTargetH,
+                                        (c0, c1) -> {
+                                            if (ambient != null
+                                                    && active()
+                                                    && !hasModalDialogOpen()
+                                                    && (a.scroll == null
+                                                            || a.scroll.getScrollY()
+                                                                    < heroTargetH / 3)) {
+                                                ambient.followHeroColors(c0, c1);
+                                            }
+                                        });
+                            };
+                    if (ImmersivePoster.hasFeatheredHeroInCache(item, heroTargetW, heroTargetH)) {
+                        loadHeroNow.run();
+                    } else {
+                        a.ui.postDelayed(loadHeroNow, 3200L);
+                    }
                     if (heroList.size() > 1) {
-                        ImmersivePoster.prewarmOfficialLandscape(
-                                a, heroList.get((idx + 1) % heroList.size()));
+                        final Cms.Video nextHero = heroList.get((idx + 1) % heroList.size());
+                        a.ui.postDelayed(
+                                () -> {
+                                    if (!active()
+                                            || heroTicket != ticket
+                                            || a.current == null
+                                            || !a.current.home
+                                            || hasModalDialogOpen()) {
+                                        return;
+                                    }
+                                    ImmersivePoster.prewarmOfficialLandscape(a, nextHero);
+                                },
+                                4500L);
                     }
                 };
 
@@ -1165,11 +1618,36 @@ final class HomeScreen {
         parent.addView(header, new LinearLayout.LayoutParams(-1, -2));
         a.gap(parent, 10);
 
+        final int shelfOverscanPx = a.dp(48);
+        final int[] shelfRange = new int[] {Integer.MIN_VALUE, Integer.MIN_VALUE};
+        final LinearLayout[] stripRef = new LinearLayout[1];
         final android.widget.HorizontalScrollView hsv =
                 new android.widget.HorizontalScrollView(a) {
                     @Override
                     protected int computeScrollDeltaToGetChildRectOnScreen(Rect rect) {
                         return 0;
+                    }
+
+                    @Override
+                    protected void onScrollChanged(int l, int t, int oldl, int oldt) {
+                        super.onScrollChanged(l, t, oldl, oldt);
+                        LinearLayout s = stripRef[0];
+                        if (l == oldl || s == null || getWidth() <= 0) return;
+                        int visLeft = l - shelfOverscanPx;
+                        int visRight = l + getWidth() + shelfOverscanPx;
+                        int first = -1, last = -1;
+                        for (int i = 0, n = s.getChildCount(); i < n; i++) {
+                            View c = s.getChildAt(i);
+                            if (c.getVisibility() == View.GONE) continue;
+                            if (c.getRight() < visLeft || c.getLeft() > visRight) continue;
+                            if (first < 0) first = i;
+                            last = i;
+                        }
+                        if (first != shelfRange[0] || last != shelfRange[1]) {
+                            shelfRange[0] = first;
+                            shelfRange[1] = last;
+                            s.invalidate();
+                        }
                     }
                 };
         hsv.setHorizontalScrollBarEnabled(false);
@@ -1179,7 +1657,41 @@ final class HomeScreen {
         hsv.setFocusable(false);
 
         final int leftPad = fullBleedTvHero ? tvContentLeftPadPx : a.dp(2);
-        final LinearLayout strip = a.row();
+        final LinearLayout strip =
+                new LinearLayout(a) {
+                    @Override
+                    protected void onLayout(boolean changed, int l, int t, int r, int b) {
+                        super.onLayout(changed, l, t, r, b);
+                        shelfRange[0] = Integer.MIN_VALUE;
+                        shelfRange[1] = Integer.MIN_VALUE;
+                    }
+
+                    @Override
+                    protected void dispatchDraw(android.graphics.Canvas canvas) {
+                        int vw = hsv.getWidth();
+                        if (vw <= 0) {
+                            super.dispatchDraw(canvas);
+                            return;
+                        }
+                        int sx = hsv.getScrollX();
+                        int visLeft = sx - shelfOverscanPx;
+                        int visRight = sx + vw + shelfOverscanPx;
+                        long drawTime = getDrawingTime();
+                        int first = -1, last = -1;
+                        for (int i = 0, n = getChildCount(); i < n; i++) {
+                            View c = getChildAt(i);
+                            if (c.getVisibility() == View.GONE) continue;
+                            if (c.getRight() < visLeft || c.getLeft() > visRight) continue;
+                            if (first < 0) first = i;
+                            last = i;
+                            drawChild(canvas, c, drawTime);
+                        }
+                        shelfRange[0] = first;
+                        shelfRange[1] = last;
+                    }
+                };
+        strip.setOrientation(LinearLayout.HORIZONTAL);
+        stripRef[0] = strip;
         strip.setClipChildren(false);
         strip.setClipToPadding(false);
         strip.setPadding(
@@ -1203,7 +1715,14 @@ final class HomeScreen {
             artWrap.addView(art, new FrameLayout.LayoutParams(-1, -1));
             TvV17PosterCard.attachDoubanBadge(a, artWrap, item);
             card.addView(artWrap, new LinearLayout.LayoutParams(a.dp(cardW), a.dp(cardW * 1.46f)));
-            a.poster(item.poster, art);
+            // Below-the-fold curated shelves on TV start offscreen at scrollY=0: avoid blasting
+            // 28 immediate offscreen poster decodes during cold startup; hydrate lazily once Home
+            // settles or immediately when the user scrolls/focuses a shelf.
+            if (a.isTvDevice() && (a.scroll == null || a.scroll.getScrollY() == 0)) {
+                art.setTag(ImageLoader.normalizeArtworkAddress(item.poster));
+            } else {
+                a.poster(item.poster, art);
+            }
 
             TextView name = a.text(item.title, 13f, 0xffd0d4df);
             single(name);
@@ -1218,6 +1737,9 @@ final class HomeScreen {
             card.setOnFocusChangeListener(
                     (v, f) -> {
                         TvV17PosterCard.focus(a, card, name, f);
+                        if (f && art.getDrawable() == null && art.getTag() instanceof String) {
+                            a.poster((String) art.getTag(), art);
+                        }
                         if (f && ambient != null) ambient.follow(art);
                         if (f) {
                             int stepPx =
@@ -1250,14 +1772,28 @@ final class HomeScreen {
             strip.addView(card, lp);
             outCards.add(card);
         }
+        if (a.isTvDevice() && (a.scroll == null || a.scroll.getScrollY() == 0)) {
+            final int shelfTicket = ticket;
+            a.ui.postDelayed(
+                    () -> {
+                        if (!active()
+                                || shelfTicket != ticket
+                                || a.current == null
+                                || !a.current.home
+                                || hasModalDialogOpen()) {
+                            return;
+                        }
+                        resumeVisibleMissingPosters(strip);
+                    },
+                    5000L);
+        }
     }
 
     void historySection() {
-        if (historyHost == null) return;
+        if (a.isTvDevice() || historyHost == null) return;
         historyHost.removeAllViews();
         historyCards.clear();
         allHistory = null;
-        if (a.isTvDevice()) return;
         List<WatchHistory.Entry> entries = a.watchHistory();
         if (entries.isEmpty()) return;
         boolean compactStack = a.useBottomDock();
@@ -1382,7 +1918,9 @@ final class HomeScreen {
     }
 
     void renderSnapshot() {
-        a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
+        if (site != null && a.loadingGuard.releaseIfSiteMatches(site.key, ticket)) {
+            a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
+        }
         state.snapshot = snapshot;
         boolean first = !state.initialized;
         if (first) {
@@ -1400,7 +1938,16 @@ final class HomeScreen {
             }
         }
         buildTabs();
-        if (first && a.current != null && a.current.focus == null) {
+        boolean switchAnchorActive =
+                pendingSwitchAnchor != null
+                        && pendingSwitchAnchor.canApplyFocus(
+                                ticket,
+                                sourceSwitchSerial,
+                                site == null ? "" : site.key,
+                                hasModalDialogOpen());
+        if (switchAnchorActive) {
+            if (a.current != null) a.current.focus = "source-switcher";
+        } else if (first && a.current != null && a.current.focus == null) {
             View initial =
                     curatedHeroBtn != null && curatedHeroBtn.isShown()
                             ? curatedHeroBtn
@@ -1410,8 +1957,18 @@ final class HomeScreen {
         }
         if (state.ready) {
             drawGrid(false);
-            restoreFocus();
-        } else choose(state.category, false);
+            if (switchAnchorActive) {
+                alignSwitchAnchorIfActive(!snapshot.recommendationsPending);
+            } else {
+                restoreFocus();
+            }
+        } else {
+            choose(state.category, false);
+            if (switchAnchorActive) {
+                alignSwitchAnchorIfActive(
+                        snapshot != null && !snapshot.recommendationsPending && state.ready);
+            }
+        }
     }
 
     void reloadCurrentCategory() {
@@ -1984,6 +2541,8 @@ final class HomeScreen {
 
     void loadCategory(boolean first) {
         if (busy || snapshot == null) return;
+        final Cms.Site reqSite = site;
+        if (reqSite == null) return;
         String category = state.category.isEmpty() ? snapshot.skip : state.category;
         if (category.isEmpty()) return;
         busy = true;
@@ -1998,8 +2557,8 @@ final class HomeScreen {
         final String effectiveCategory = subMatch != null ? subMatch.categoryId : category;
         final String satisfiedDim = subMatch != null ? subMatch.satisfiedDimension : null;
         Map<String, String> remoteFilters =
-                VideoFilters.remoteValues(definitions, selections, site.supported());
-        if (satisfiedDim != null && !site.supported()) {
+                VideoFilters.remoteValues(definitions, selections, reqSite.supported());
+        if (satisfiedDim != null && !reqSite.supported()) {
             remoteFilters.remove(satisfiedDim);
         } else if (satisfiedDim != null) {
             remoteFilters.remove(satisfiedDim);
@@ -2013,7 +2572,7 @@ final class HomeScreen {
                 () -> {
                     try {
                         timing.dispatched = android.os.SystemClock.elapsedRealtime();
-                        SourceEngine engine = a.engine(site);
+                        SourceEngine engine = a.engine(reqSite);
                         timing.engineReady = android.os.SystemClock.elapsedRealtime();
                         long[] phases = new long[2];
                         String raw =
@@ -2126,7 +2685,7 @@ final class HomeScreen {
                         timing.parsed = android.os.SystemClock.elapsedRealtime();
                         a.ui.post(
                                 () -> {
-                                    if (!active() || token != request) return;
+                                    if (!active() || token != request || reqSite != site) return;
                                     busy = false;
                                     int previous = state.videos.size();
                                     boolean focusMore = more.hasFocus();
@@ -2166,17 +2725,25 @@ final class HomeScreen {
                                             !first && focusMore ? "home-video:" + focusIndex : null;
                                     drawGrid(!first && !changedWindow);
                                     content.postOnAnimation(timing::ready);
-                                    if (first
+                                    if (pendingSwitchAnchor != null
+                                            && pendingSwitchAnchor.canApplyFocus(
+                                                    ticket,
+                                                    sourceSwitchSerial,
+                                                    site == null ? "" : site.key,
+                                                    hasModalDialogOpen())) {
+                                        alignSwitchAnchorIfActive(true);
+                                    } else if (first
                                             && a.current != null
                                             && a.current.focus != null
-                                            && a.current.focus.startsWith("home-video:"))
+                                            && a.current.focus.startsWith("home-video:")) {
                                         restoreFocus();
+                                    }
                                 });
                     } catch (Throwable e) {
-                        AppLog.w("HomeScreen", "loadCategory failed for " + site.key, e);
+                        AppLog.w("HomeScreen", "loadCategory failed for " + reqSite.key, e);
                         a.ui.post(
                                 () -> {
-                                    if (!active() || token != request) return;
+                                    if (!active() || token != request || reqSite != site) return;
                                     busy = false;
                                     state.categoryFailed = true;
                                     status.setVisibility(View.VISIBLE);
@@ -2184,6 +2751,14 @@ final class HomeScreen {
                                     more.setText("重新加载");
                                     more.setVisibility(View.VISIBLE);
                                     wireNavigation();
+                                    if (pendingSwitchAnchor != null
+                                            && pendingSwitchAnchor.canApplyFocus(
+                                                    ticket,
+                                                    sourceSwitchSerial,
+                                                    site == null ? "" : site.key,
+                                                    hasModalDialogOpen())) {
+                                        alignSwitchAnchorIfActive(true);
+                                    }
                                 });
                     }
                 });
@@ -2318,11 +2893,11 @@ final class HomeScreen {
         if (state != null
                 && (state.categoryFailed
                         || (!state.ready && "重新加载".equals(String.valueOf(more.getText()))))) {
-            more.setText("重新加载");
-            more.setVisibility(View.VISIBLE);
+            if (!"重新加载".equals(String.valueOf(more.getText()))) more.setText("重新加载");
+            if (more.getVisibility() != View.VISIBLE) more.setVisibility(View.VISIBLE);
             return;
         }
-        if (!more.hasFocus()) {
+        if (!more.hasFocus() && more.getVisibility() != View.GONE) {
             more.setVisibility(View.GONE);
         }
     }
@@ -2366,8 +2941,14 @@ final class HomeScreen {
         pendingGrid = null;
         if (!active() || epoch != gridEpoch) return;
         int end = start;
-        int batchCount = start == 0 ? Math.max(COLUMNS * 2, 10) : Math.max(COLUMNS, 5);
-        long budgetNs = start == 0 ? 12000000L : 5000000L;
+        boolean tvOffscreenInitial =
+                a.isTvDevice() && start == 0 && (a.scroll == null || a.scroll.getScrollY() == 0);
+        int batchCount =
+                tvOffscreenInitial
+                        ? Math.min(COLUMNS, 3)
+                        : (start == 0 ? Math.max(COLUMNS * 2, 10) : Math.max(COLUMNS, 5));
+        long budgetNs =
+                tvOffscreenInitial ? 4000000L : (start == 0 ? 12000000L : 5000000L);
         long batchStarted = System.nanoTime();
         for (int index = start; index < windowEnd() && index < start + batchCount; index++) {
             int column = index % COLUMNS;
@@ -2988,6 +3569,18 @@ final class HomeScreen {
         a.ui.post(
                 () -> {
                     if (!active() || a.current == null) return;
+                    if (pendingSwitchAnchor != null && pendingSwitchAnchor.userMovedFocus) {
+                        return;
+                    }
+                    if (pendingSwitchAnchor != null
+                            && pendingSwitchAnchor.canApplyFocus(
+                                    ticket,
+                                    sourceSwitchSerial,
+                                    site == null ? "" : site.key,
+                                    hasModalDialogOpen())) {
+                        alignSwitchAnchorIfActive(false);
+                        return;
+                    }
                     View saved =
                             a.current.focus == null
                                     ? null

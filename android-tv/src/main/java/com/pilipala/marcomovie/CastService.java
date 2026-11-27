@@ -1,5 +1,6 @@
 package com.pilipala.marcomovie;
 
+import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
@@ -27,11 +28,12 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import org.json.JSONObject;
@@ -107,6 +109,7 @@ final class CastService implements Closeable {
     final ServerSocket httpSocket;
     final String webCastPath;
     volatile boolean closed;
+    private final AtomicBoolean closeOnce = new AtomicBoolean(false);
 
     volatile String currentUri = "";
     volatile String currentMetaData = "";
@@ -122,18 +125,89 @@ final class CastService implements Closeable {
     DatagramSocket notifySocket;
     ScheduledExecutorService scheduler;
 
-    final ThreadPoolExecutor httpPool =
-            new ThreadPoolExecutor(
-                    0,
-                    6,
-                    15,
-                    TimeUnit.SECONDS,
-                    new SynchronousQueue<>(),
-                    r -> {
-                        Thread t = new Thread(r, "movie-cast-http");
-                        t.setDaemon(true);
-                        return t;
-                    });
+    private static void setBackgroundPriority() {
+        try {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    final ThreadPoolExecutor httpPool = createHttpPool();
+
+    private static ThreadPoolExecutor createHttpPool() {
+        ThreadPoolExecutor pool =
+                new ThreadPoolExecutor(
+                        2,
+                        2,
+                        15,
+                        TimeUnit.SECONDS,
+                        new LinkedBlockingQueue<>(16),
+                        r -> {
+                            Thread t =
+                                    new Thread(
+                                            () -> {
+                                                setBackgroundPriority();
+                                                r.run();
+                                            },
+                                            "movie-cast-http");
+                            t.setDaemon(true);
+                            return t;
+                        });
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
+    }
+
+    private static final byte[] SCPD_AV_TRANSPORT_BYTES = utf8Bytes(buildAvTransportScpd());
+    private static final byte[] SCPD_RENDERING_CONTROL_BYTES =
+            utf8Bytes(buildRenderingControlScpd());
+    private static final byte[] SCPD_CONNECTION_MANAGER_BYTES =
+            utf8Bytes(buildConnectionManagerScpd());
+
+    private static byte[] utf8Bytes(String text) {
+        try {
+            return (text == null ? "" : text).getBytes("UTF-8");
+        } catch (Exception err) {
+            return new byte[0];
+        }
+    }
+
+    private static void closeSocketQuietly(Socket socket) {
+        if (socket == null) return;
+        try {
+            socket.close();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /**
+     * Explicit single-owner wrapper for each accepted HTTP socket: either a worker thread claims
+     * ownership and handles/closes it in {@link #serveHttp(Socket)}, or {@link #close()} drains
+     * unstarted queued tasks from {@link #httpPool} and closes the socket immediately.
+     */
+    private final class QueuedHttpTask implements Runnable, AutoCloseable {
+        private final Socket socket;
+        private final AtomicBoolean claimed = new AtomicBoolean(false);
+
+        QueuedHttpTask(Socket socket) {
+            this.socket = socket;
+        }
+
+        @Override
+        public void run() {
+            if (!claimed.compareAndSet(false, true)) return;
+            try {
+                serveHttp(socket);
+            } finally {
+                closeSocketQuietly(socket);
+            }
+        }
+
+        @Override
+        public void close() {
+            if (!claimed.compareAndSet(false, true)) return;
+            closeSocketQuietly(socket);
+        }
+    }
 
     CastService(
             String uuid,
@@ -165,13 +239,19 @@ final class CastService implements Closeable {
         Thread acceptThread =
                 new Thread(
                         () -> {
+                            setBackgroundPriority();
                             while (!closed) {
                                 try {
                                     Socket client = httpSocket.accept();
+                                    QueuedHttpTask task = new QueuedHttpTask(client);
+                                    if (closed) {
+                                        task.close();
+                                        break;
+                                    }
                                     try {
-                                        httpPool.execute(() -> serveHttp(client));
+                                        httpPool.execute(task);
                                     } catch (RejectedExecutionException full) {
-                                        client.close();
+                                        task.close();
                                     }
                                 } catch (IOException err) {
                                     if (!closed) close();
@@ -257,14 +337,17 @@ final class CastService implements Closeable {
             Thread ssdpReader =
                     new Thread(
                             () -> {
+                                setBackgroundPriority();
                                 byte[] buf = new byte[4096];
-                                while (!closed && ssdpSocket != null) {
+                                while (!closed) {
+                                    MulticastSocket sock = ssdpSocket;
+                                    if (sock == null || sock.isClosed()) break;
                                     try {
                                         DatagramPacket pkt = new DatagramPacket(buf, buf.length);
-                                        ssdpSocket.receive(pkt);
+                                        sock.receive(pkt);
                                         handleSsdpPacket(pkt);
-                                    } catch (IOException err) {
-                                        if (closed) break;
+                                    } catch (IOException | RuntimeException err) {
+                                        if (closed || sock.isClosed()) break;
                                     }
                                 }
                             },
@@ -278,12 +361,17 @@ final class CastService implements Closeable {
         scheduler =
                 Executors.newSingleThreadScheduledExecutor(
                         r -> {
-                            Thread t = new Thread(r, "movie-cast-announce");
+                            Thread t =
+                                    new Thread(
+                                            () -> {
+                                                setBackgroundPriority();
+                                                r.run();
+                                            },
+                                            "movie-cast-announce");
                             t.setDaemon(true);
                             return t;
                         });
-        scheduler.execute(() -> sendNotify("ssdp:alive"));
-        scheduler.scheduleWithFixedDelay(() -> sendNotify("ssdp:alive"), 25, 45, TimeUnit.SECONDS);
+        scheduler.scheduleWithFixedDelay(() -> sendNotify("ssdp:alive"), 3, 45, TimeUnit.SECONDS);
     }
 
     static List<String[]> matchSsdpReplies(String text, String deviceUuid) {
@@ -491,7 +579,7 @@ final class CastService implements Closeable {
     private void serveHttp(Socket client) {
         try (Socket s = client) {
             s.setSoTimeout(15000);
-            InputStream in = s.getInputStream();
+            InputStream in = new BufferedInputStream(s.getInputStream(), 4096);
             OutputStream out = s.getOutputStream();
             InetAddress peer = s.getInetAddress();
             if (!ConfigTransferServer.isAllowedLanPeer(peer)) {
@@ -552,15 +640,15 @@ final class CastService implements Closeable {
                 return;
             }
             if ("/dlna/AVTransport.xml".equals(reqPath)) {
-                replyHttp(out, 200, "text/xml", buildAvTransportScpd(), null);
+                replyHttpBytes(out, 200, "text/xml", SCPD_AV_TRANSPORT_BYTES, null);
                 return;
             }
             if ("/dlna/RenderingControl.xml".equals(reqPath)) {
-                replyHttp(out, 200, "text/xml", buildRenderingControlScpd(), null);
+                replyHttpBytes(out, 200, "text/xml", SCPD_RENDERING_CONTROL_BYTES, null);
                 return;
             }
             if ("/dlna/ConnectionManager.xml".equals(reqPath)) {
-                replyHttp(out, 200, "text/xml", buildConnectionManagerScpd(), null);
+                replyHttpBytes(out, 200, "text/xml", SCPD_CONNECTION_MANAGER_BYTES, null);
                 return;
             }
             replyHttp(out, 404, "text/plain", "Not Found", null);
@@ -1667,7 +1755,17 @@ final class CastService implements Closeable {
             String body,
             Map<String, String> extraHeaders)
             throws IOException {
-        byte[] bytes = (body == null ? "" : body).getBytes("UTF-8");
+        replyHttpBytes(out, code, contentType, (body == null ? "" : body).getBytes("UTF-8"), extraHeaders);
+    }
+
+    private static void replyHttpBytes(
+            OutputStream out,
+            int code,
+            String contentType,
+            byte[] bytes,
+            Map<String, String> extraHeaders)
+            throws IOException {
+        if (bytes == null) bytes = new byte[0];
         String status =
                 code == 200
                         ? "OK"
@@ -1704,7 +1802,7 @@ final class CastService implements Closeable {
 
     @Override
     public void close() {
-        if (closed) return;
+        if (!closeOnce.compareAndSet(false, true)) return;
         closed = true;
         ssdpActive = false;
         bonjourActive = false;
@@ -1720,7 +1818,7 @@ final class CastService implements Closeable {
         ssdpSocket = null;
         final DatagramSocket oldNotify = notifySocket;
         notifySocket = null;
-        httpPool.shutdownNow();
+        final List<Runnable> unstarted = httpPool.shutdownNow();
         try {
             bridge.onClosed();
         } catch (Exception ignored) {
@@ -1730,6 +1828,20 @@ final class CastService implements Closeable {
         Thread closer =
                 new Thread(
                         () -> {
+                            if (unstarted != null) {
+                                for (Runnable pending : unstarted) {
+                                    if (pending instanceof AutoCloseable) {
+                                        try {
+                                            ((AutoCloseable) pending).close();
+                                        } catch (Throwable ignored) {
+                                        }
+                                    }
+                                }
+                            }
+                            try {
+                                httpSocket.close();
+                            } catch (Exception ignored) {
+                            }
                             try {
                                 if (oldNotify != null && !oldNotify.isClosed()) {
                                     notifySocket = oldNotify;
@@ -1749,10 +1861,6 @@ final class CastService implements Closeable {
                                     oldNotify.close();
                                 } catch (Exception ignored) {
                                 }
-                            }
-                            try {
-                                httpSocket.close();
-                            } catch (Exception ignored) {
                             }
                         },
                         "cast-service-close");
@@ -1887,7 +1995,15 @@ final class CastService implements Closeable {
                                 () -> {
                                     if (a.player != null && a.prepared) {
                                         try {
-                                            a.player.seekTo(Math.max(0, posMs));
+                                            int target = Math.max(0, posMs);
+                                            if (a.playbackControls != null) {
+                                                a.playbackControls.recordUserSeek(target);
+                                            } else {
+                                                PlaybackController
+                                                        .notifyPendingHistoryMigrationSeek(
+                                                                a, target);
+                                            }
+                                            a.player.seekTo(target);
                                             if (a.playerChrome != null) a.playerChrome.update();
                                         } catch (Exception ignored) {
                                         }
