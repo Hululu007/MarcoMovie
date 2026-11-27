@@ -77,6 +77,7 @@ TEST_AUTHORITIES = {
     'macos/test/app_log_test.dart': {'user:super_secret_pw@dav.jianguoyun.com', 'user:[REDACTED]@dav.jianguoyun.com'},
     'android-tv/tests/LaneEChecks.java': {'user:secret@127.0.0.1:'},
     'android-tv/tests/LiveNetworkChecks.java': {'127.0.0.2', '127.0.0.2:'},
+    'android-tv/tests/TvPlaybackMultiSourceChecks.java': {'api.example.com', 'cdn.example.com', 'valid-', 'big-', '...'},
     'android-mobile/tests/LaneEChecks.java': {'user:secret@127.0.0.1:'},
     'android-mobile/tests/LiveNetworkChecks.java': {'127.0.0.2', '127.0.0.2:'},
     'flutter/test/security_hardening_test.dart': {'192.168.1.10:5005'},
