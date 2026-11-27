@@ -877,7 +877,7 @@ final class AiSubtitleTranslator {
                                             String m,
                                             boolean reload,
                                             Runnable onMounted) {
-                                        return a.player.upsertExternalSubtitle(
+                                        return a.player.upsertAiGeneratedSubtitle(
                                                 subUri, n, m, reload, onMounted);
                                     }
                                 };

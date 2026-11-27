@@ -1992,6 +1992,132 @@ public final class AiBetaLabChecks {
                             + " (0 model/overlay/mount)");
         }
 
+        // 7d. Round-6 P1-3: Selecting a source-provided track named "AI 中文字幕" OR even identically
+        //     named "AI 全片双语字幕" MUST be distinguished by mounted engine track identity (never
+        //     display label prefix) and MUST cancel in-flight online subtitle download / AI
+        //     translation (0 model calls, 0 overlay writes, 0 mounts)!
+        String mountedAppAiId = "marco_ai_sub_7";
+        check(
+                !MoviePlayer.isAppGeneratedAiTrackFormatId("sub-0", mountedAppAiId)
+                        && !MoviePlayer.isAppGeneratedAiTrackFormatId(
+                                "marco_ext_sub_8", mountedAppAiId)
+                        && !MoviePlayer.isAppGeneratedAiTrackFormatId(mountedAppAiId, "")
+                        && MoviePlayer.isAppGeneratedAiTrackFormatId(mountedAppAiId, mountedAppAiId)
+                        && PlaybackControls.shouldCancelAiTranslationOnTrackSelect(0, false)
+                        && PlaybackControls.shouldCancelAiTranslationOnTrackSelect(-2, true)
+                        && !PlaybackControls.shouldCancelAiTranslationOnTrackSelect(2, true),
+                "R6 P1-3A: Media3 track identity guard rejects source-provided 'AI ...' and external tracks even with identical title, matching ONLY mounted marco_ai_sub ID");
+
+        JSONObject mpvEmbeddedAi =
+                new JSONObject().put("id", 1).put("external", false).put("title", "AI 中文字幕");
+        JSONObject mpvEmbeddedSameTitle =
+                new JSONObject()
+                        .put("id", 2)
+                        .put("external", false)
+                        .put("title", AiSubtitleTranslator.AI_TRACK_NAME);
+        JSONObject mpvAppAi =
+                new JSONObject()
+                        .put("id", 9)
+                        .put("external", true)
+                        .put("title", AiSubtitleTranslator.AI_TRACK_NAME)
+                        .put("external-filename", "file:///cache/ai_ep1.srt");
+        List<String[]> mpvPlanWithEmbeddedAi =
+                MpvPlayer.planExternalSubtitleUpsertCommands(
+                        Arrays.asList(mpvEmbeddedAi, mpvEmbeddedSameTitle, mpvAppAi),
+                        "file:///cache/ai_ep1_v2.srt",
+                        AiSubtitleTranslator.AI_TRACK_NAME,
+                        9,
+                        "file:///cache/ai_ep1.srt",
+                        true);
+        boolean removedEmbedded1 = false;
+        boolean removedEmbedded2 = false;
+        boolean removedPriorApp9 = false;
+        for (String[] c : mpvPlanWithEmbeddedAi) {
+            if ("sub-remove".equals(c[0]) && "1".equals(c[1])) removedEmbedded1 = true;
+            if ("sub-remove".equals(c[0]) && "2".equals(c[1])) removedEmbedded2 = true;
+            if ("sub-remove".equals(c[0]) && "9".equals(c[1])) removedPriorApp9 = true;
+        }
+        check(
+                !MpvPlayer.isAppGeneratedAiMpvTrack(mpvEmbeddedAi, 9, "file:///cache/ai_ep1.srt")
+                        && !MpvPlayer.isAppGeneratedAiMpvTrack(
+                                mpvEmbeddedSameTitle, 9, "file:///cache/ai_ep1.srt")
+                        && MpvPlayer.isAppGeneratedAiMpvTrack(
+                                mpvAppAi, 9, "file:///cache/ai_ep1.srt")
+                        && !removedEmbedded1
+                        && !removedEmbedded2
+                        && removedPriorApp9,
+                "R6 P1-3B: MPV identifies app AI track strictly by external SID/URI and preserves embedded source 'AI ...' tracks");
+
+        // End-to-end delayed download + user selects source-provided "AI 中文字幕" / "AI 全片双语字幕"
+        for (String sourceAiLabel : new String[] {"AI 中文字幕", AiSubtitleTranslator.AI_TRACK_NAME}) {
+            final AtomicInteger r6Gen = new AtomicInteger(30);
+            final String r6Ep = "demo|v9|line1|第1集|u9";
+            OnlineSubtitleDanmakuService.PlaybackStateProbe r6Probe =
+                    new OnlineSubtitleDanmakuService.PlaybackStateProbe() {
+                        @Override
+                        public boolean isExiting() {
+                            return false;
+                        }
+
+                        @Override
+                        public int currentGeneration() {
+                            return r6Gen.get();
+                        }
+
+                        @Override
+                        public String currentEpisodeIdentity() {
+                            return r6Ep;
+                        }
+                    };
+            OnlineSubtitleDanmakuService.SubtitleSelectionToken r6Tok =
+                    OnlineSubtitleDanmakuService.beginSubtitleSelection(r6Gen.get(), r6Ep);
+            final AtomicInteger r6Models = new AtomicInteger(0);
+            final AtomicInteger r6Overlays = new AtomicInteger(0);
+            final AtomicInteger r6Mounts = new AtomicInteger(0);
+            boolean r6Delivered =
+                    OnlineSubtitleDanmakuService.completeSubtitleSelectionAfterDownload(
+                            r6Tok,
+                            r6Probe,
+                            true,
+                            () -> {
+                                // User taps source-embedded track whose label starts with "AI " or
+                                // matches AI_TRACK_NAME; engine track identity check returns false!
+                                boolean isAppAi =
+                                        MoviePlayer.isAppGeneratedAiTrackFormatId(
+                                                "source_embedded_0", mountedAppAiId);
+                                if (PlaybackControls.shouldCancelAiTranslationOnTrackSelect(
+                                        0, isAppAi)) {
+                                    AiSubtitleTranslator.cancelActiveTranslation();
+                                }
+                                return completeTwoCueSrt;
+                            },
+                            new OnlineSubtitleDanmakuService.SubtitleDeliverySink() {
+                                @Override
+                                public void runAiTranslation(
+                                        String srt,
+                                        OnlineSubtitleDanmakuService.SubtitleSelectionToken t) {
+                                    r6Models.incrementAndGet();
+                                    r6Overlays.incrementAndGet();
+                                    r6Mounts.incrementAndGet();
+                                }
+
+                                @Override
+                                public void mountPlainSubtitle(
+                                        String srt,
+                                        OnlineSubtitleDanmakuService.SubtitleSelectionToken t) {
+                                    r6Mounts.incrementAndGet();
+                                }
+                            });
+            check(
+                    !r6Delivered
+                            && r6Models.get() == 0
+                            && r6Overlays.get() == 0
+                            && r6Mounts.get() == 0,
+                    "R6 P1-3C: selecting source-provided '"
+                            + sourceAiLabel
+                            + "' cancels in-flight translation (0 model/overlay/mount)");
+        }
+
         // 8. Round-4 P1-5: Unified 4 MiB subtitle completion disk cache write/read limit — verify
         //    742,995-byte complete full-episode sample hits disk cache on 2nd open with 0 model
         //    requests, oversize payload is symmetrically rejected, and legacy half-baked rejected!

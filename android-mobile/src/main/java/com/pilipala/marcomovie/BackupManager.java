@@ -101,6 +101,24 @@ final class BackupManager {
         a.prefs.edit().putBoolean(Prefs.WALLPAPER_ENABLED, true).apply();
     }
 
+    /**
+     * Sanitizes user data for manual backup export and restore. For {@link Prefs#WATCH_HISTORY},
+     * migrates non-sensitive {@code episodeKey}/{@code driveKey} while stripping legacy {@code
+     * episodeUrl}, temporary download URLs, signed parameters, and local proxy leases.
+     */
+    static String sanitizeBackupUserData(String dataKey, Object rawValue) {
+        if (Prefs.WATCH_HISTORY.equals(dataKey)) {
+            if (rawValue == null) return null;
+            String text =
+                    rawValue instanceof String
+                            ? ((String) rawValue).trim()
+                            : String.valueOf(rawValue).trim();
+            if ("null".equals(text)) return null;
+            return WatchHistory.sanitizeHistoryJson(text);
+        }
+        return Prefs.sanitizeUserData(dataKey, rawValue);
+    }
+
     static JSONObject buildBackupPayload(MainActivity a) throws Exception {
         boolean tv = a.isTvDevice();
         JSONObject backup =
@@ -137,7 +155,7 @@ final class BackupManager {
                     Prefs.GLOBAL_SEARCH_HISTORY
                 }) {
             if (a.prefs.contains(dataKey)) {
-                String clean = Prefs.sanitizeUserData(dataKey, a.prefs.getString(dataKey, ""));
+                String clean = sanitizeBackupUserData(dataKey, a.prefs.getString(dataKey, ""));
                 if (clean != null) settings.put(dataKey, clean);
             }
         }
@@ -337,7 +355,7 @@ final class BackupManager {
                         Prefs.GLOBAL_SEARCH_HISTORY
                     }) {
                 if (settings.has(dataKey)) {
-                    String cleanData = Prefs.sanitizeUserData(dataKey, settings.opt(dataKey));
+                    String cleanData = sanitizeBackupUserData(dataKey, settings.opt(dataKey));
                     if (cleanData != null) edit.putString(dataKey, cleanData);
                 }
             }

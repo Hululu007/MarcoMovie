@@ -2287,6 +2287,80 @@ public final class MobileUiRedesignChecks {
                         && MobileLivePage.consumeRelayoutState() == null,
                 "R5 P2-2: two consecutive resizes before slow catalog returns preserve both column scroll offsets and non-first preview channel/stream");
 
+        // Round-6 P2-2: Two different channels in DIFFERENT groups sharing the EXACT same stream
+        // URL + two consecutive reconstructions before slow catalog returns MUST restore the
+        // original group, original channel name (row highlight & fullscreen target), and stream!
+        LiveCatalog.Catalog sharedUrlCat = new LiveCatalog.Catalog();
+        LiveCatalog.Group grp0 = new LiveCatalog.Group();
+        grp0.name = "央视";
+        LiveCatalog.Channel g0Ch0 = new LiveCatalog.Channel();
+        g0Ch0.name = "央视一套";
+        LiveCatalog.Stream g0St0 = new LiveCatalog.Stream();
+        g0St0.url = "https://live.example/cctv1.m3u8";
+        g0Ch0.streams.add(g0St0);
+        LiveCatalog.Channel g0Shared = new LiveCatalog.Channel();
+        g0Shared.name = "央视综合";
+        LiveCatalog.Stream g0SharedSt = new LiveCatalog.Stream();
+        g0SharedSt.url = "https://live.example/shared_hd.m3u8";
+        g0Shared.streams.add(g0SharedSt);
+        grp0.channels.add(g0Ch0);
+        grp0.channels.add(g0Shared);
+
+        LiveCatalog.Group grp1 = new LiveCatalog.Group();
+        grp1.name = "高清专区";
+        LiveCatalog.Channel g1First = new LiveCatalog.Channel();
+        g1First.name = "高清新闻";
+        LiveCatalog.Stream g1FirstSt = new LiveCatalog.Stream();
+        g1FirstSt.url = "https://live.example/hd_news.m3u8";
+        g1First.streams.add(g1FirstSt);
+        LiveCatalog.Channel g1Shared = new LiveCatalog.Channel();
+        g1Shared.name = "高清综合";
+        LiveCatalog.Stream g1AltSt = new LiveCatalog.Stream();
+        g1AltSt.url = "https://live.example/shared_sd.m3u8";
+        LiveCatalog.Stream g1SharedSt = new LiveCatalog.Stream();
+        g1SharedSt.url = "https://live.example/shared_hd.m3u8";
+        g1Shared.streams.add(g1AltSt);
+        g1Shared.streams.add(g1SharedSt);
+        grp1.channels.add(g1First);
+        grp1.channels.add(g1Shared);
+        sharedUrlCat.groups.add(grp0);
+        sharedUrlCat.groups.add(grp1);
+
+        // First resize captures Group 1, non-first channel "高清综合", stream #1 (shared_hd.m3u8)
+        MobileLivePage.LiveRelayoutState r6Snap1 =
+                new MobileLivePage.LiveRelayoutState(
+                        "https://live.example/main.m3u",
+                        0,
+                        1,
+                        "",
+                        120,
+                        640,
+                        "高清综合",
+                        "https://live.example/shared_hd.m3u8",
+                        1);
+        // Second consecutive resize BEFORE slow catalog loads (curChannel=null, scrolls=0)
+        MobileLivePage.LiveRelayoutState r6Snap2 =
+                MobileLivePage.buildConsecutiveRelayoutSnapshot(
+                        "https://live.example/main.m3u", 0, 1, "", 0, 0, true, r6Snap1, "", "", 0);
+        int r6RestoredGrp =
+                MobileLivePage.resolveRestoredGroupIndex(r6Snap2, sharedUrlCat.groups.size());
+        LiveCatalog.Channel r6RestoredCh =
+                MobileLivePage.resolveRestoredChannel(sharedUrlCat, r6RestoredGrp, r6Snap2);
+        LiveCatalog.Stream r6RestoredSt =
+                MobileLivePage.resolveRestoredStream(r6RestoredCh, r6Snap2);
+        int r6AlignedGrp =
+                MobileLivePage.resolveRestoredGroupIndexForChannel(
+                        sharedUrlCat, r6RestoredGrp, r6RestoredCh);
+        check(
+                r6RestoredGrp == 1
+                        && r6AlignedGrp == 1
+                        && r6RestoredCh == g1Shared
+                        && "高清综合".equals(r6RestoredCh.name)
+                        && r6RestoredSt == g1SharedSt
+                        && r6Snap2.groupScrollY == 120
+                        && r6Snap2.channelScrollY == 640,
+                "R6 P2-2: cross-group shared stream URL restores original group 1, non-first channel 高清综合 (not group 0 央视综合), exact stream, and scrolls across 2 consecutive rebuilds");
+
         // Round-4 P2-2b: Short scrollable Dock quick menu rejects finger release outside viewport
         // OR over rows scrolled outside the visible viewport!
         float[] qTops = {100f, 150f, 200f, 250f};

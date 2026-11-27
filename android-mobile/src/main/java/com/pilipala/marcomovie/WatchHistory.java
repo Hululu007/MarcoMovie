@@ -325,14 +325,171 @@ final class WatchHistory {
         return "";
     }
 
+    static String extractLowerHost(String rawUrl) {
+        if (rawUrl == null) return "";
+        String trimmed = rawUrl.trim();
+        if (trimmed.isEmpty()) return "";
+        String lower = trimmed.toLowerCase(Locale.ROOT);
+        if (!lower.startsWith("http://") && !lower.startsWith("https://")) return "";
+        try {
+            java.net.URL u = new java.net.URL(trimmed);
+            String host = u.getHost();
+            return host == null ? "" : host.trim().toLowerCase(Locale.ROOT);
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    static boolean hostEqualsOrSubdomain(String host, String domain) {
+        if (host == null || host.isEmpty() || domain == null || domain.isEmpty()) return false;
+        return host.equals(domain) || host.endsWith("." + domain);
+    }
+
     static String detectDriveKeyFromUrl(String rawUrl) {
-        if (rawUrl == null || rawUrl.trim().isEmpty()) return "";
-        String lower = rawUrl.trim().toLowerCase(Locale.ROOT);
-        if (lower.contains("pan.quark.cn")) return "quark";
-        if (lower.contains("drive.uc.cn") || lower.contains("fast.uc.cn")) return "uc";
-        if (lower.contains("pan.baidu.com") || lower.contains("yun.baidu.com")) return "baidu";
-        if (lower.contains("alipan.com") || lower.contains("aliyundrive.com")) return "ali";
+        String host = extractLowerHost(rawUrl);
+        if (host.isEmpty()) return "";
+        if (hostEqualsOrSubdomain(host, "pan.quark.cn")) return "quark";
+        if (hostEqualsOrSubdomain(host, "drive.uc.cn")
+                || hostEqualsOrSubdomain(host, "fast.uc.cn")) {
+            return "uc";
+        }
+        if (hostEqualsOrSubdomain(host, "pan.baidu.com")
+                || hostEqualsOrSubdomain(host, "yun.baidu.com")) {
+            return "baidu";
+        }
+        if (hostEqualsOrSubdomain(host, "alipan.com")
+                || hostEqualsOrSubdomain(host, "aliyundrive.com")) {
+            return "ali";
+        }
         return "";
+    }
+
+    private static final Set<String> VOLATILE_QUERY_KEYS =
+            Collections.unmodifiableSet(
+                    new HashSet<>(
+                            Arrays.asList(
+                                    "sign",
+                                    "sig",
+                                    "signature",
+                                    "token",
+                                    "tk",
+                                    "auth",
+                                    "auth_key",
+                                    "authkey",
+                                    "key",
+                                    "api_key",
+                                    "apikey",
+                                    "access_token",
+                                    "refresh_token",
+                                    "id_token",
+                                    "jwt",
+                                    "ticket",
+                                    "st",
+                                    "e",
+                                    "exp",
+                                    "expire",
+                                    "expires",
+                                    "expires_in",
+                                    "ts",
+                                    "t",
+                                    "time",
+                                    "timestamp",
+                                    "nonce",
+                                    "rand",
+                                    "random",
+                                    "_",
+                                    "_t",
+                                    "cb",
+                                    "cache",
+                                    "cachebuster",
+                                    "hash",
+                                    "md5",
+                                    "sha",
+                                    "sha1",
+                                    "sha256",
+                                    "hmac",
+                                    "policy",
+                                    "session",
+                                    "session_id",
+                                    "sess",
+                                    "cookie",
+                                    "secret",
+                                    "wssecret",
+                                    "wstime",
+                                    "txsecret",
+                                    "txtime",
+                                    "pwd",
+                                    "password",
+                                    "pass",
+                                    "passcode",
+                                    "code",
+                                    "lease",
+                                    "lease_id",
+                                    "ip",
+                                    "client_ip",
+                                    "uid",
+                                    "userid",
+                                    "user_id",
+                                    "did",
+                                    "device_id",
+                                    "uuid",
+                                    "ossaccesskeyid",
+                                    "googleaccessid",
+                                    "awsaccesskeyid")));
+
+    private static boolean isVolatileOrSensitiveQueryParam(String rawKey) {
+        if (rawKey == null || rawKey.isEmpty()) return true;
+        String k = rawKey.trim().toLowerCase(Locale.ROOT);
+        if (k.isEmpty()) return true;
+        if (VOLATILE_QUERY_KEYS.contains(k)) return true;
+        if (k.startsWith("x-amz-")
+                || k.startsWith("x-oss-")
+                || k.startsWith("x-cos-")
+                || k.startsWith("x-qiniu-")
+                || k.startsWith("q-sign")
+                || k.startsWith("q-ak")
+                || k.startsWith("q-key-time")
+                || k.startsWith("q-header-list")
+                || k.startsWith("q-url-param-list")
+                || k.startsWith("utm_")) {
+            return true;
+        }
+        return k.contains("sign")
+                || k.contains("token")
+                || k.contains("auth")
+                || k.contains("secret")
+                || k.contains("expire")
+                || k.contains("passwd")
+                || k.contains("password")
+                || k.contains("cookie")
+                || k.contains("session")
+                || k.contains("ticket")
+                || k.contains("nonce")
+                || k.contains("hmac")
+                || k.contains("lease")
+                || k.contains("timestamp");
+    }
+
+    private static String canonicalizeNonSensitiveQuery(String rawQuery) {
+        if (rawQuery == null || rawQuery.isEmpty()) return "";
+        String[] parts = rawQuery.split("&");
+        List<String> kept = new ArrayList<>();
+        for (String part : parts) {
+            if (part == null || part.isEmpty()) continue;
+            int eq = part.indexOf('=');
+            String k = (eq >= 0 ? part.substring(0, eq) : part).trim().toLowerCase(Locale.ROOT);
+            String v = eq >= 0 ? part.substring(eq + 1).trim() : "";
+            if (isVolatileOrSensitiveQueryParam(k)) continue;
+            kept.add(k + "=" + v);
+        }
+        if (kept.isEmpty()) return "";
+        Collections.sort(kept);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < kept.size(); i++) {
+            if (i > 0) sb.append('&');
+            sb.append(kept.get(i));
+        }
+        return sb.toString();
     }
 
     /**
@@ -383,24 +540,27 @@ final class WatchHistory {
     }
 
     /**
-     * Computes a non-sensitive stable episode fingerprint from an upstream episode identifier/URL
-     * after stripping query parameters, fragments, and userinfo. Returns {@code ""} for local proxy
-     * leases or temporary signed netdisk download URLs so sensitive/ephemeral URLs never enter
-     * local bookmarks or CloudSync payloads.
+     * Computes a non-sensitive stable episode fingerprint from an upstream episode identifier/URL,
+     * preserving episode-identifying query parameters (e.g. {@code id=11} vs {@code id=12}) while
+     * stripping volatile signing, auth, token, expiration, and fragment components. Returns {@code
+     * ""} for local proxy leases or temporary signed netdisk download URLs so sensitive/ephemeral
+     * URLs never enter local bookmarks, backups, or CloudSync payloads.
      */
     static String stableEpisodeKey(String rawUrl) {
         if (rawUrl == null || rawUrl.trim().isEmpty()) return "";
         if (isSensitiveOrEphemeralUrl(rawUrl)) return "";
         String trimmed = rawUrl.trim();
-        String canonical;
-        int qIdx = trimmed.indexOf('?');
         int hIdx = trimmed.indexOf('#');
-        int cut = qIdx >= 0 && hIdx >= 0 ? Math.min(qIdx, hIdx) : (qIdx >= 0 ? qIdx : hIdx);
-        String noQuery = cut >= 0 ? trimmed.substring(0, cut) : trimmed;
-        if (noQuery.toLowerCase(Locale.ROOT).startsWith("http://")
-                || noQuery.toLowerCase(Locale.ROOT).startsWith("https://")) {
+        String noFrag = hIdx >= 0 ? trimmed.substring(0, hIdx) : trimmed;
+        int qIdx = noFrag.indexOf('?');
+        String basePart = qIdx >= 0 ? noFrag.substring(0, qIdx) : noFrag;
+        String rawQuery = qIdx >= 0 ? noFrag.substring(qIdx + 1) : "";
+        String cleanQuery = canonicalizeNonSensitiveQuery(rawQuery);
+        String canonical;
+        if (basePart.toLowerCase(Locale.ROOT).startsWith("http://")
+                || basePart.toLowerCase(Locale.ROOT).startsWith("https://")) {
             try {
-                java.net.URL u = new java.net.URL(noQuery);
+                java.net.URL u = new java.net.URL(basePart);
                 String proto = u.getProtocol().toLowerCase(Locale.ROOT);
                 String host = u.getHost() == null ? "" : u.getHost().toLowerCase(Locale.ROOT);
                 int port = u.getPort();
@@ -416,10 +576,74 @@ final class WatchHistory {
                 return "";
             }
         } else {
-            canonical = noQuery;
+            canonical = basePart;
         }
         if (canonical.isEmpty()) return "";
+        if (!cleanQuery.isEmpty()) {
+            canonical = canonical + "?" + cleanQuery;
+        }
         return "epk1:" + sha256Hex(canonical).substring(0, 24);
+    }
+
+    /**
+     * Sanitizes a raw watch-history JSON array (e.g. from legacy backups or remote sync payloads),
+     * migrating non-sensitive {@code episodeKey}/{@code driveKey} while stripping any legacy {@code
+     * episodeUrl}, temporary download URLs, signed parameters, or local proxy leases.
+     */
+    static JSONArray sanitizeHistoryArray(JSONArray rawArr) {
+        JSONArray clean = new JSONArray();
+        if (rawArr == null) return clean;
+        Set<String> keys = new HashSet<>();
+        for (int i = 0; i < rawArr.length() && clean.length() < LIMIT; i++) {
+            JSONObject o = rawArr.optJSONObject(i);
+            if (o == null) continue;
+            Entry e = new Entry();
+            e.site = Cms.optSafeString(o, "site");
+            e.id = Cms.optSafeString(o, "id");
+            e.title = Cms.optSafeString(o, "title");
+            e.poster = Cms.optSafeString(o, "poster");
+            e.line = Cms.optSafeString(o, "line");
+            e.lineId = Cms.optSafeString(o, "lineId");
+            e.driveKey = Cms.optSafeString(o, "driveKey");
+            e.episode = Cms.optSafeString(o, "episode");
+            e.episodeKey = Cms.optSafeString(o, "episodeKey");
+            String legacyUrl = Cms.optSafeString(o, "episodeUrl");
+            if (e.episodeKey.isEmpty() && !legacyUrl.isEmpty()) {
+                e.episodeKey = stableEpisodeKey(legacyUrl);
+            }
+            if (e.driveKey.isEmpty() && !legacyUrl.isEmpty()) {
+                e.driveKey = detectDriveKeyFromUrl(legacyUrl);
+            }
+            e.episodeUrl = "";
+            e.index = Math.max(0, o.optInt("index"));
+            e.position = Math.max(0, o.optInt("position"));
+            e.duration = Math.max(0, o.optInt("duration"));
+            e.updated = o.optLong("updated");
+            if (!e.site.isEmpty() && !e.id.isEmpty() && keys.add(e.key())) {
+                try {
+                    clean.put(e.json());
+                } catch (JSONException ignored) {
+                }
+            }
+        }
+        return clean;
+    }
+
+    /**
+     * Validates and sanitizes a serialized watch-history JSON array string for backup/restore.
+     * Returns {@code null} if {@code rawJson} is not a valid JSON array.
+     */
+    static String sanitizeHistoryJson(String rawJson) {
+        if (rawJson == null) return null;
+        String trimmed = rawJson.trim();
+        if (trimmed.isEmpty()) return "[]";
+        if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return null;
+        try {
+            JSONArray rawArr = new JSONArray(trimmed);
+            return sanitizeHistoryArray(rawArr).toString();
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     static String bookmarkDriveKey(Entry bookmark) {

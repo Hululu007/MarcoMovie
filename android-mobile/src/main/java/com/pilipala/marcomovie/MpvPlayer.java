@@ -777,6 +777,8 @@ public final class MpvPlayer extends MoviePlayer {
                     if (mediaUri == null) throw new IllegalStateException("No media item");
                     prepared = false;
                     eofReached = false;
+                    activeAppAiTrackSid = -1;
+                    activeAppAiTrackUri = "";
                     positionSec = 0;
                     durationSec = 0;
                     firstFrameMs = -1;
@@ -993,31 +995,79 @@ public final class MpvPlayer extends MoviePlayer {
         return sb.toString();
     }
 
+    private volatile int activeAppAiTrackSid = -1;
+    private volatile String activeAppAiTrackUri = "";
+
+    static boolean isAppGeneratedAiMpvTrack(JSONObject track, int activeAiSid, String activeAiUri) {
+        if (track == null || !track.optBoolean("external", false)) return false;
+        int id = track.optInt("id", -1);
+        if (activeAiSid > 0 && id == activeAiSid) return true;
+        String extFile = track.optString("external-filename", "").trim();
+        return activeAiUri != null && !activeAiUri.isEmpty() && activeAiUri.equals(extFile);
+    }
+
+    @Override
+    public boolean isAppGeneratedAiSubtitleTrack(int trackIndex) {
+        if (trackIndex < 0) return false;
+        final int sid = activeAppAiTrackSid;
+        final String uriStr = activeAppAiTrackUri;
+        if (sid <= 0 && (uriStr == null || uriStr.isEmpty())) return false;
+        return onMain(
+                () -> {
+                    List<JSONObject> tracks = mpvTracks(C.TRACK_TYPE_TEXT);
+                    if (trackIndex >= tracks.size()) return false;
+                    return isAppGeneratedAiMpvTrack(tracks.get(trackIndex), sid, uriStr);
+                });
+    }
+
     /**
      * Pure-JVM deduplication planner for libmpv external subtitle upsert: emits {@code sub-remove}
-     * for any prior matching external/AI track followed by a single {@code sub-add ... select}
-     * command so progressive updates and cache hits never duplicate subtitle tracks or trigger
-     * playback reload.
+     * ONLY for prior external matching/app-AI tracks (never removing embedded source tracks that
+     * merely carry an "AI " title prefix) followed by a single {@code sub-add ... select} command
+     * so progressive updates and cache hits never duplicate subtitle tracks or trigger reload.
      */
     static List<String[]> planExternalSubtitleUpsertCommands(
             List<JSONObject> existingSubTracks, String targetUri, String trackName) {
+        return planExternalSubtitleUpsertCommands(
+                existingSubTracks,
+                targetUri,
+                trackName,
+                -1,
+                "",
+                AiSubtitleTranslator.AI_TRACK_NAME.equals(
+                        trackName == null ? "" : trackName.trim()));
+    }
+
+    static List<String[]> planExternalSubtitleUpsertCommands(
+            List<JSONObject> existingSubTracks,
+            String targetUri,
+            String trackName,
+            int priorAiSid,
+            String priorAiUri,
+            boolean appGeneratedAi) {
         List<String[]> cmds = new ArrayList<>();
         if (targetUri == null || targetUri.trim().isEmpty()) return cmds;
         String safeUri = targetUri.trim();
         String safeName =
                 trackName == null || trackName.trim().isEmpty() ? "外挂字幕" : trackName.trim();
-        boolean isAiTrack = safeName.startsWith("AI ");
         if (existingSubTracks != null) {
             for (JSONObject t : existingSubTracks) {
                 if (t == null) continue;
                 int id = t.optInt("id", -1);
                 if (id <= 0) continue;
                 boolean external = t.optBoolean("external", false);
+                if (!external) continue;
                 String extFile = t.optString("external-filename", "").trim();
                 String title = t.optString("title", "").trim();
                 boolean sameFile = !extFile.isEmpty() && extFile.equals(safeUri);
-                boolean sameAi = isAiTrack && title.startsWith("AI ");
-                if ((external && (sameFile || sameAi || title.equals(safeName))) || sameAi) {
+                boolean priorAppAi =
+                        appGeneratedAi
+                                && (isAppGeneratedAiMpvTrack(t, priorAiSid, priorAiUri)
+                                        || (priorAiSid <= 0
+                                                && (priorAiUri == null || priorAiUri.isEmpty())
+                                                && AiSubtitleTranslator.AI_TRACK_NAME.equals(
+                                                        title)));
+                if (sameFile || priorAppAi || title.equals(safeName)) {
                     cmds.add(new String[] {"sub-remove", Integer.toString(id)});
                 }
             }
@@ -1032,17 +1082,49 @@ public final class MpvPlayer extends MoviePlayer {
     }
 
     @Override
+    public boolean upsertAiGeneratedSubtitle(
+            Uri subtitle, String name, String mime, boolean reloadMediaSource, Runnable onMounted) {
+        return upsertExternalSubtitleInternal(subtitle, name, mime, onMounted, true);
+    }
+
+    @Override
     public boolean upsertExternalSubtitle(
             Uri subtitle, String name, String mime, boolean reloadMediaSource, Runnable onMounted) {
+        AiSubtitleTranslator.cancelActiveTranslation();
+        return upsertExternalSubtitleInternal(subtitle, name, mime, onMounted, false);
+    }
+
+    private boolean upsertExternalSubtitleInternal(
+            Uri subtitle, String name, String mime, Runnable onMounted, boolean appGeneratedAi) {
         return onMain(
                 () -> {
                     checkState();
                     if (subtitle == null) return false;
+                    String uriStr = subtitle.toString();
                     List<String[]> cmds =
                             planExternalSubtitleUpsertCommands(
-                                    mpvTracks(C.TRACK_TYPE_TEXT), subtitle.toString(), name);
+                                    mpvTracks(C.TRACK_TYPE_TEXT),
+                                    uriStr,
+                                    name,
+                                    activeAppAiTrackSid,
+                                    activeAppAiTrackUri,
+                                    appGeneratedAi);
                     for (String[] cmd : cmds) {
                         MPVLib.command(cmd);
+                    }
+                    if (appGeneratedAi) {
+                        activeAppAiTrackUri = uriStr;
+                        activeAppAiTrackSid = -1;
+                        List<JSONObject> after = mpvTracks(C.TRACK_TYPE_TEXT);
+                        for (int i = after.size() - 1; i >= 0; i--) {
+                            JSONObject t = after.get(i);
+                            if (t != null
+                                    && t.optBoolean("external", false)
+                                    && uriStr.equals(t.optString("external-filename", "").trim())) {
+                                activeAppAiTrackSid = t.optInt("id", -1);
+                                break;
+                            }
+                        }
                     }
                     if (onMounted != null) onMounted.run();
                     return true;

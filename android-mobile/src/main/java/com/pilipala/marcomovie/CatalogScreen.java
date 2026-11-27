@@ -447,7 +447,10 @@ final class CatalogScreen {
                                                 if (progressDialog.isShowing()) {
                                                     progressDialog.dismiss();
                                                 }
-                                                int resumePos = bookmark.resume();
+                                                int resumePos =
+                                                        HistoryResumeMatcher
+                                                                .resolveFailoverResumePositionMs(
+                                                                        matched, bookmark);
                                                 String oldKey = bookmark.key();
                                                 String newKey = hit.site.key + "\n" + readyVideo.id;
                                                 a.migratingHistoryOldKey =

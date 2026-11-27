@@ -709,23 +709,65 @@ final class NetdiskStore {
     }
 
     private static boolean isNetdiskShareUrl(String rawUrl) {
-        if (rawUrl == null || rawUrl.trim().isEmpty()) return false;
-        String lower = rawUrl.trim().toLowerCase(Locale.ROOT);
-        return lower.contains("pan.quark.cn")
-                || lower.contains("drive.uc.cn")
-                || lower.contains("fast.uc.cn")
-                || lower.contains("pan.baidu.com")
-                || lower.contains("yun.baidu.com")
-                || lower.contains("alipan.com")
-                || lower.contains("aliyundrive.com")
-                || lower.contains("115.com")
-                || lower.contains("115cdn.com")
-                || lower.contains("cloud.189.cn")
-                || lower.contains("yun.139.com")
-                || lower.contains("123pan.com")
-                || lower.contains("123684.com")
-                || lower.contains("pan.xunlei.com")
-                || lower.contains("mypikpak.com");
+        String host = WatchHistory.extractLowerHost(rawUrl);
+        if (host.isEmpty()) return false;
+        return WatchHistory.hostEqualsOrSubdomain(host, "pan.quark.cn")
+                || WatchHistory.hostEqualsOrSubdomain(host, "drive.uc.cn")
+                || WatchHistory.hostEqualsOrSubdomain(host, "fast.uc.cn")
+                || WatchHistory.hostEqualsOrSubdomain(host, "pan.baidu.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "yun.baidu.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "alipan.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "aliyundrive.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "115.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "115cdn.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "anxia.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "cloud.189.cn")
+                || WatchHistory.hostEqualsOrSubdomain(host, "yun.139.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "caiyun.139.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "123pan.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "123684.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "123865.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "123912.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "pan.xunlei.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "mypikpak.com");
+    }
+
+    private static boolean isExtendedNetdiskShareHost(String rawUrl) {
+        String host = WatchHistory.extractLowerHost(rawUrl);
+        if (host.isEmpty()) return false;
+        return WatchHistory.hostEqualsOrSubdomain(host, "115.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "115cdn.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "anxia.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "cloud.189.cn")
+                || WatchHistory.hostEqualsOrSubdomain(host, "yun.139.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "caiyun.139.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "123pan.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "123684.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "123865.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "123912.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "pan.xunlei.com")
+                || WatchHistory.hostEqualsOrSubdomain(host, "mypikpak.com");
+    }
+
+    private static boolean isBare115Name(String label) {
+        if (label == null) return false;
+        String norm = label.trim().toLowerCase(Locale.ROOT);
+        if ("115".equals(norm)) return true;
+        int hashIdx = norm.indexOf('#');
+        if (hashIdx > 0 && "115".equals(norm.substring(0, hashIdx).trim())) {
+            String suffix = norm.substring(hashIdx + 1).trim();
+            if (!suffix.isEmpty()) {
+                boolean allDigits = true;
+                for (int i = 0; i < suffix.length(); i++) {
+                    if (!Character.isDigit(suffix.charAt(i))) {
+                        allDigits = false;
+                        break;
+                    }
+                }
+                if (allDigits) return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -808,18 +850,18 @@ final class NetdiskStore {
 
     static boolean isExtendedNetdiskLine(Cms.Line line) {
         if (line == null || hasExplicitDirectMediaUrl(line)) return false;
-        String combined =
-                ((line.rawName() == null ? "" : line.rawName())
-                                + " "
-                                + (line.name == null ? "" : line.name))
-                        .toLowerCase(Locale.ROOT);
+        String rawName = line.rawName() == null ? "" : line.rawName();
+        String dispName = line.name == null ? "" : line.name;
+        if (isBare115Name(rawName) || isBare115Name(dispName)) {
+            return true;
+        }
+        String combined = (rawName + " " + dispName).toLowerCase(Locale.ROOT);
         if (combined.contains("115网盘")
                 || combined.contains("115云")
                 || combined.contains("115盘")
                 || combined.contains("115原画")
                 || combined.contains("115超清")
                 || combined.contains("pan115")
-                || combined.trim().equals("115")
                 || combined.contains("天翼")
                 || combined.contains("189云")
                 || combined.contains("189网盘")
@@ -841,15 +883,13 @@ final class NetdiskStore {
             return true;
         }
         if (line.episodes != null && !line.episodes.isEmpty()) {
-            Cms.Episode ep = line.episodes.get(0);
-            String u = ep != null && ep.url != null ? ep.url.toLowerCase(Locale.ROOT) : "";
-            return u.contains("115.com")
-                    || u.contains("115cdn.com")
-                    || u.contains("cloud.189.cn")
-                    || u.contains("yun.139.com")
-                    || u.contains("123pan.com")
-                    || u.contains("123684.com")
-                    || u.contains("pan.xunlei.com");
+            int limit = Math.min(2, line.episodes.size());
+            for (int i = 0; i < limit; i++) {
+                Cms.Episode ep = line.episodes.get(i);
+                if (ep != null && isExtendedNetdiskShareHost(ep.url)) {
+                    return true;
+                }
+            }
         }
         return false;
     }

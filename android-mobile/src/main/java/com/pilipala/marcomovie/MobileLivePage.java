@@ -184,49 +184,119 @@ final class MobileLivePage {
         return Math.min(saved.groupIndex, groupCount - 1);
     }
 
+    private static boolean channelHasStreamUrl(LiveCatalog.Channel ch, String url) {
+        if (ch == null || ch.streams == null || url == null || url.isEmpty()) return false;
+        for (LiveCatalog.Stream st : ch.streams) {
+            if (st != null && url.equals(st.url)) return true;
+        }
+        return false;
+    }
+
+    private static LiveCatalog.Channel findChannelInGroup(
+            LiveCatalog.Group g, String channelName, String streamUrl) {
+        if (g == null || g.channels == null || g.channels.isEmpty()) return null;
+        boolean hasName = channelName != null && !channelName.isEmpty();
+        boolean hasUrl = streamUrl != null && !streamUrl.isEmpty();
+        if (hasName && hasUrl) {
+            for (LiveCatalog.Channel ch : g.channels) {
+                if (ch != null
+                        && channelName.equals(ch.name)
+                        && channelHasStreamUrl(ch, streamUrl)) {
+                    return ch;
+                }
+            }
+        }
+        if (hasName) {
+            for (LiveCatalog.Channel ch : g.channels) {
+                if (ch != null && channelName.equals(ch.name)) {
+                    return ch;
+                }
+            }
+        }
+        if (hasUrl) {
+            for (LiveCatalog.Channel ch : g.channels) {
+                if (channelHasStreamUrl(ch, streamUrl)) {
+                    return ch;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Restores the active preview channel after relayout, strictly prioritizing the original group
+     * ({@code groupIndex}) and matching {@code (channelName + streamUrl)} before falling back to
+     * {@code channelName} or {@code streamUrl} inside that group, and only then across other
+     * groups. Prevents cross-group channels sharing the same stream URL from hijacking the preview
+     * title, row highlight, or fullscreen entry.
+     */
     static LiveCatalog.Channel resolveRestoredChannel(
             LiveCatalog.Catalog catalog, int groupIndex, LiveRelayoutState saved) {
         if (catalog == null || catalog.groups == null || catalog.groups.isEmpty()) return null;
+        int clampedG = Math.max(0, Math.min(catalog.groups.size() - 1, groupIndex));
+        LiveCatalog.Group prefGroup = catalog.groups.get(clampedG);
         if (saved != null) {
-            if (!saved.streamUrl.isEmpty()) {
+            LiveCatalog.Channel inPref =
+                    findChannelInGroup(prefGroup, saved.channelName, saved.streamUrl);
+            if (inPref != null) return inPref;
+
+            boolean hasName = !saved.channelName.isEmpty();
+            boolean hasUrl = !saved.streamUrl.isEmpty();
+            if (hasName && hasUrl) {
                 for (LiveCatalog.Group g : catalog.groups) {
                     if (g == null || g.channels == null) continue;
                     for (LiveCatalog.Channel ch : g.channels) {
-                        if (ch == null || ch.streams == null) continue;
-                        for (LiveCatalog.Stream st : ch.streams) {
-                            if (st != null && saved.streamUrl.equals(st.url)) {
-                                return ch;
-                            }
+                        if (ch != null
+                                && saved.channelName.equals(ch.name)
+                                && channelHasStreamUrl(ch, saved.streamUrl)) {
+                            return ch;
                         }
                     }
                 }
             }
-            if (!saved.channelName.isEmpty()) {
-                int clampedG = Math.max(0, Math.min(catalog.groups.size() - 1, groupIndex));
-                LiveCatalog.Group prefGroup = catalog.groups.get(clampedG);
-                if (prefGroup != null && prefGroup.channels != null) {
-                    for (LiveCatalog.Channel ch : prefGroup.channels) {
+            if (hasName) {
+                for (LiveCatalog.Group g : catalog.groups) {
+                    if (g == null || g.channels == null) continue;
+                    for (LiveCatalog.Channel ch : g.channels) {
                         if (ch != null && saved.channelName.equals(ch.name)) {
                             return ch;
                         }
                     }
                 }
+            }
+            if (hasUrl) {
                 for (LiveCatalog.Group g : catalog.groups) {
                     if (g == null || g.channels == null) continue;
                     for (LiveCatalog.Channel ch : g.channels) {
-                        if (ch != null && saved.channelName.equals(ch.name)) {
+                        if (channelHasStreamUrl(ch, saved.streamUrl)) {
                             return ch;
                         }
                     }
                 }
             }
         }
-        int clampedG = Math.max(0, Math.min(catalog.groups.size() - 1, groupIndex));
-        LiveCatalog.Group g = catalog.groups.get(clampedG);
-        if (g != null && g.channels != null && !g.channels.isEmpty()) {
-            return g.channels.get(0);
+        if (prefGroup != null && prefGroup.channels != null && !prefGroup.channels.isEmpty()) {
+            return prefGroup.channels.get(0);
         }
         return null;
+    }
+
+    static int resolveRestoredGroupIndexForChannel(
+            LiveCatalog.Catalog catalog, int fallbackGroupIndex, LiveCatalog.Channel restored) {
+        if (catalog == null || catalog.groups == null || catalog.groups.isEmpty()) return 0;
+        int clamped = Math.max(0, Math.min(catalog.groups.size() - 1, fallbackGroupIndex));
+        if (restored == null) return clamped;
+        LiveCatalog.Group pref = catalog.groups.get(clamped);
+        if (pref != null && pref.channels != null && pref.channels.contains(restored)) {
+            return clamped;
+        }
+        for (int i = 0; i < catalog.groups.size(); i++) {
+            LiveCatalog.Group g = catalog.groups.get(i);
+            if (g != null && g.channels != null && g.channels.contains(restored)) {
+                return i;
+            }
+        }
+        return clamped;
     }
 
     static LiveCatalog.Stream resolveRestoredStream(
@@ -960,6 +1030,10 @@ final class MobileLivePage {
                                                             resolveRestoredStream(
                                                                     targetCh, pendingRestore);
                                                     if (targetCh != null && targetSt != null) {
+                                                        grpIdx[0] =
+                                                                resolveRestoredGroupIndexForChannel(
+                                                                        catalog, grpIdx[0],
+                                                                        targetCh);
                                                         curSource[0] = selSrc;
                                                         curChannel[0] = targetCh;
                                                         curStream[0] = targetSt;

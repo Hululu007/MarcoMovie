@@ -770,14 +770,226 @@ final class Prefs {
             if (text.startsWith("[") && text.endsWith("]") && text.length() <= 65536) return text;
             return null;
         }
-        if (WATCH_HISTORY.equals(key)
-                || FAVORITES.equals(key)
-                || GLOBAL_SEARCH_HISTORY.equals(key)) {
+        if (WATCH_HISTORY.equals(key)) {
+            if (text.isEmpty()) return "[]";
+            return stripSensitiveWatchHistoryUrls(text);
+        }
+        if (FAVORITES.equals(key) || GLOBAL_SEARCH_HISTORY.equals(key)) {
             if (text.isEmpty()) return "[]";
             if (text.startsWith("[") && text.endsWith("]")) return text;
             return null;
         }
         return null;
+    }
+
+    /**
+     * Pure-JDK JSON array sanitizer for {@link #WATCH_HISTORY} so legacy {@code episodeUrl} /
+     * temporary signed playback URLs / local proxy leases are stripped even when {@link
+     * #sanitizeUserData} is invoked directly without {@code org.json} or {@link WatchHistory}.
+     */
+    static String stripSensitiveWatchHistoryUrls(String rawJson) {
+        if (rawJson == null) return null;
+        String s = rawJson.trim();
+        if (s.isEmpty()) return "[]";
+        if (!s.startsWith("[") || !s.endsWith("]")) return null;
+        int len = s.length();
+        int[] pos = {1};
+        StringBuilder out = new StringBuilder(len);
+        out.append('[');
+        boolean firstElem = true;
+        while (true) {
+            skipJsonWs(s, pos);
+            if (pos[0] >= len) return null;
+            char c = s.charAt(pos[0]);
+            if (c == ']') {
+                pos[0]++;
+                skipJsonWs(s, pos);
+                return pos[0] == len ? out.append(']').toString() : null;
+            }
+            if (!firstElem) {
+                if (c != ',') return null;
+                pos[0]++;
+                skipJsonWs(s, pos);
+                if (pos[0] >= len) return null;
+                c = s.charAt(pos[0]);
+            }
+            if (c == '{') {
+                String cleanObj = stripSensitiveKeysFromJsonObject(s, pos);
+                if (cleanObj == null) return null;
+                if (!firstElem) out.append(',');
+                out.append(cleanObj);
+                firstElem = false;
+            } else {
+                int start = pos[0];
+                if (!skipJsonValue(s, pos)) return null;
+                if (!firstElem) out.append(',');
+                out.append(s, start, pos[0]);
+                firstElem = false;
+            }
+        }
+    }
+
+    private static boolean isSensitiveHistoryFieldName(String decodedKey) {
+        return "episodeUrl".equals(decodedKey)
+                || "playUrl".equals(decodedKey)
+                || "downloadUrl".equals(decodedKey)
+                || "proxyUrl".equals(decodedKey);
+    }
+
+    private static String stripSensitiveKeysFromJsonObject(String s, int[] pos) {
+        int len = s.length();
+        if (pos[0] >= len || s.charAt(pos[0]) != '{') return null;
+        pos[0]++;
+        StringBuilder obj = new StringBuilder();
+        obj.append('{');
+        boolean firstInput = true;
+        boolean firstOutput = true;
+        while (true) {
+            skipJsonWs(s, pos);
+            if (pos[0] >= len) return null;
+            char c = s.charAt(pos[0]);
+            if (c == '}') {
+                pos[0]++;
+                return obj.append('}').toString();
+            }
+            if (!firstInput) {
+                if (c != ',') return null;
+                pos[0]++;
+                skipJsonWs(s, pos);
+                if (pos[0] >= len) return null;
+            }
+            firstInput = false;
+            int keyStart = pos[0];
+            String decodedKey = readJsonStringToken(s, pos);
+            if (decodedKey == null) return null;
+            int keyEnd = pos[0];
+            skipJsonWs(s, pos);
+            if (pos[0] >= len || s.charAt(pos[0]) != ':') return null;
+            pos[0]++;
+            skipJsonWs(s, pos);
+            int valStart = pos[0];
+            if (!skipJsonValue(s, pos)) return null;
+            int valEnd = pos[0];
+            if (!isSensitiveHistoryFieldName(decodedKey)) {
+                if (!firstOutput) obj.append(',');
+                obj.append(s, keyStart, keyEnd).append(':').append(s, valStart, valEnd);
+                firstOutput = false;
+            }
+        }
+    }
+
+    private static void skipJsonWs(String s, int[] pos) {
+        int len = s.length();
+        while (pos[0] < len) {
+            char c = s.charAt(pos[0]);
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') pos[0]++;
+            else break;
+        }
+    }
+
+    private static String readJsonStringToken(String s, int[] pos) {
+        int len = s.length();
+        if (pos[0] >= len || s.charAt(pos[0]) != '"') return null;
+        pos[0]++;
+        StringBuilder sb = new StringBuilder();
+        while (pos[0] < len) {
+            char c = s.charAt(pos[0]++);
+            if (c == '"') return sb.toString();
+            if (c == '\\') {
+                if (pos[0] >= len) return null;
+                char esc = s.charAt(pos[0]++);
+                if (esc == 'u') {
+                    if (pos[0] + 4 > len) return null;
+                    try {
+                        sb.append((char) Integer.parseInt(s.substring(pos[0], pos[0] + 4), 16));
+                    } catch (Exception ignored) {
+                        return null;
+                    }
+                    pos[0] += 4;
+                } else {
+                    sb.append(esc);
+                }
+            } else {
+                sb.append(c);
+            }
+        }
+        return null;
+    }
+
+    private static boolean skipJsonValue(String s, int[] pos) {
+        skipJsonWs(s, pos);
+        int len = s.length();
+        if (pos[0] >= len) return false;
+        char c = s.charAt(pos[0]);
+        if (c == '"') {
+            return readJsonStringToken(s, pos) != null;
+        }
+        if (c == '{') {
+            pos[0]++;
+            boolean first = true;
+            while (true) {
+                skipJsonWs(s, pos);
+                if (pos[0] >= len) return false;
+                if (s.charAt(pos[0]) == '}') {
+                    pos[0]++;
+                    return true;
+                }
+                if (!first) {
+                    if (s.charAt(pos[0]) != ',') return false;
+                    pos[0]++;
+                    skipJsonWs(s, pos);
+                }
+                if (readJsonStringToken(s, pos) == null) return false;
+                skipJsonWs(s, pos);
+                if (pos[0] >= len || s.charAt(pos[0]) != ':') return false;
+                pos[0]++;
+                if (!skipJsonValue(s, pos)) return false;
+                first = false;
+            }
+        }
+        if (c == '[') {
+            pos[0]++;
+            boolean first = true;
+            while (true) {
+                skipJsonWs(s, pos);
+                if (pos[0] >= len) return false;
+                if (s.charAt(pos[0]) == ']') {
+                    pos[0]++;
+                    return true;
+                }
+                if (!first) {
+                    if (s.charAt(pos[0]) != ',') return false;
+                    pos[0]++;
+                }
+                if (!skipJsonValue(s, pos)) return false;
+                first = false;
+            }
+        }
+        if (s.startsWith("true", pos[0])) {
+            pos[0] += 4;
+            return true;
+        }
+        if (s.startsWith("false", pos[0])) {
+            pos[0] += 5;
+            return true;
+        }
+        if (s.startsWith("null", pos[0])) {
+            pos[0] += 4;
+            return true;
+        }
+        int start = pos[0];
+        if (c == '-') pos[0]++;
+        while (pos[0] < len && Character.isDigit(s.charAt(pos[0]))) pos[0]++;
+        if (pos[0] < len && s.charAt(pos[0]) == '.') {
+            pos[0]++;
+            while (pos[0] < len && Character.isDigit(s.charAt(pos[0]))) pos[0]++;
+        }
+        if (pos[0] < len && (s.charAt(pos[0]) == 'e' || s.charAt(pos[0]) == 'E')) {
+            pos[0]++;
+            if (pos[0] < len && (s.charAt(pos[0]) == '+' || s.charAt(pos[0]) == '-')) pos[0]++;
+            while (pos[0] < len && Character.isDigit(s.charAt(pos[0]))) pos[0]++;
+        }
+        return pos[0] > start;
     }
 
     static String sanitizeHttpUrl(String raw) {

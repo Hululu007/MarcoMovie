@@ -1809,27 +1809,76 @@ public class MoviePlayer {
             options.put("subtitles", tracks);
         }
         String safeName = name == null ? "外挂字幕" : name;
-        boolean isAiTrack = safeName.startsWith("AI ");
+        boolean hasExplicitId = trackId != null && !trackId.isEmpty();
+        boolean isAiTrack =
+                hasExplicitId
+                        ? trackId.startsWith("marco_ai_sub_")
+                        : AiSubtitleTranslator.AI_TRACK_NAME.equals(safeName);
         org.json.JSONObject entry =
                 new org.json.JSONObject()
                         .put("url", url)
                         .put("name", safeName)
                         .put("mimeType", mime == null ? "" : mime);
-        if (trackId != null && !trackId.isEmpty()) {
+        if (hasExplicitId) {
             entry.put("id", trackId);
         }
         for (int i = 0; i < tracks.length(); i++) {
             org.json.JSONObject existing = tracks.optJSONObject(i);
             if (existing == null) continue;
             String existingUrl = existing.optString("url", "");
+            String existingId = existing.optString("id", "");
             String existingName = existing.optString("name", "");
-            if (url.equals(existingUrl) || (isAiTrack && existingName.startsWith("AI "))) {
+            boolean existingIsAppAi =
+                    existingId.startsWith("marco_ai_sub_")
+                            || (existingId.isEmpty()
+                                    && AiSubtitleTranslator.AI_TRACK_NAME.equals(existingName));
+            if (url.equals(existingUrl) || (isAiTrack && existingIsAppAi)) {
                 tracks.put(i, entry);
                 return false;
             }
         }
         tracks.put(entry);
         return true;
+    }
+
+    private volatile String activeAppAiTrackId = "";
+
+    static boolean isAppGeneratedAiTrackFormatId(String formatId, String activeMountedAiTrackId) {
+        return formatId != null
+                && activeMountedAiTrackId != null
+                && !activeMountedAiTrackId.isEmpty()
+                && activeMountedAiTrackId.startsWith("marco_ai_sub_")
+                && activeMountedAiTrackId.equals(formatId);
+    }
+
+    /**
+     * Returns {@code true} ONLY when the text track at {@code trackIndex} is the actual subtitle
+     * track mounted by Marco Movie's own AI translator (matched strictly by engine track identity,
+     * never by display label prefix or title string).
+     */
+    public boolean isAppGeneratedAiSubtitleTrack(int trackIndex) {
+        if (trackIndex < 0) return false;
+        final String mountedId = activeAppAiTrackId;
+        if (mountedId == null || mountedId.isEmpty()) return false;
+        return onMain(
+                () -> {
+                    if (released || exo == null) return false;
+                    int count = 0;
+                    for (androidx.media3.common.Tracks.Group group :
+                            exo.getCurrentTracks().getGroups()) {
+                        if (group.getType() != C.TRACK_TYPE_TEXT) continue;
+                        for (int i = 0; i < group.length; i++) {
+                            if (group.isTrackSupported(i)) {
+                                if (count++ == trackIndex) {
+                                    androidx.media3.common.Format f = group.getTrackFormat(i);
+                                    return f != null
+                                            && isAppGeneratedAiTrackFormatId(f.id, mountedId);
+                                }
+                            }
+                        }
+                    }
+                    return false;
+                });
     }
 
     public void cancelPendingSubtitleMount() {
@@ -1854,6 +1903,17 @@ public class MoviePlayer {
     }
 
     /**
+     * Mounts or updates an app-generated AI subtitle track with verified internal track ID ({@code
+     * marco_ai_sub_<seq>}) so source-provided tracks sharing the "AI " prefix or identical display
+     * name can never masquerade as our app's AI track.
+     */
+    public boolean upsertAiGeneratedSubtitle(
+            Uri subtitle, String name, String mime, boolean reloadMediaSource, Runnable onMounted) {
+        return upsertExternalSubtitleInternal(
+                subtitle, name, mime, reloadMediaSource, onMounted, true);
+    }
+
+    /**
      * Mounts or updates an external subtitle track without duplicating existing AI tracks.
      *
      * <p>On Media3 reload, keeps the live overlay active and registers a {@link
@@ -1863,8 +1923,19 @@ public class MoviePlayer {
      */
     public boolean upsertExternalSubtitle(
             Uri subtitle, String name, String mime, boolean reloadMediaSource, Runnable onMounted) {
+        return upsertExternalSubtitleInternal(
+                subtitle, name, mime, reloadMediaSource, onMounted, false);
+    }
+
+    private boolean upsertExternalSubtitleInternal(
+            Uri subtitle,
+            String name,
+            String mime,
+            boolean reloadMediaSource,
+            Runnable onMounted,
+            boolean appGeneratedAi) {
         final String safeName = name == null ? "外挂字幕" : name;
-        if (!safeName.startsWith("AI ")) {
+        if (!appGeneratedAi) {
             AiSubtitleTranslator.cancelActiveTranslation();
         }
         return onMain(
@@ -1872,8 +1943,11 @@ public class MoviePlayer {
                     check();
                     if (mediaSourceFactory == null) throw new IllegalStateException("请等待视频开始播放");
                     String targetId =
-                            (safeName.startsWith("AI ") ? "marco_ai_sub_" : "marco_ext_sub_")
+                            (appGeneratedAi ? "marco_ai_sub_" : "marco_ext_sub_")
                                     + (++subtitleMountSeq);
+                    if (appGeneratedAi) {
+                        activeAppAiTrackId = targetId;
+                    }
                     upsertSubtitleTrackJson(options, subtitle.toString(), safeName, mime, targetId);
                     if (reloadMediaSource) {
                         if (pendingSubtitleMount != null) {
@@ -2174,6 +2248,7 @@ public class MoviePlayer {
                 () -> {
                     if (!released) {
                         released = true;
+                        activeAppAiTrackId = "";
                         preparation++;
                         RequestScope current = probeScope;
                         if (current != null) current.cancel();

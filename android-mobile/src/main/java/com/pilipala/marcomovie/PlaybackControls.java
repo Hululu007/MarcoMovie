@@ -2776,8 +2776,8 @@ final class PlaybackControls {
 
         final boolean liveAiActive = hasLiveAiSubtitles();
         boolean hasMountedAiTrack = false;
-        for (String name : cleanNames) {
-            if (name != null && name.startsWith("AI ")) {
+        for (int i = 0; i < cleanNames.size(); i++) {
+            if (a.player != null && a.player.isAppGeneratedAiSubtitleTrack(i)) {
                 hasMountedAiTrack = true;
                 break;
             }
@@ -2810,7 +2810,7 @@ final class PlaybackControls {
             final String label = cleanNames.get(i);
             boolean rowSelected =
                     liveAiActive
-                            ? (label != null && label.startsWith("AI "))
+                            ? (a.player != null && a.player.isAppGeneratedAiSubtitleTrack(trackIdx))
                             : (trackIdx == selectedIdx);
             addDarkCheckRow(
                     container,
@@ -6898,9 +6898,25 @@ final class PlaybackControls {
         a.prefs.edit().putString(Prefs.VIDEO_SUBTITLE_RECORDS, updated).apply();
     }
 
+    /**
+     * Pure-JVM subtitle track-switch cancellation guard: cancels active AI translation whenever
+     * subtitles are turned off or the chosen track is NOT an actual app-generated AI subtitle track
+     * (even if a source-provided track shares the "AI " prefix or identical display name).
+     */
+    static boolean shouldCancelAiTranslationOnTrackSelect(
+            int trackIndex, boolean isAppGeneratedAiTrack) {
+        return trackIndex == -2 || !isAppGeneratedAiTrack;
+    }
+
+    private boolean isSelectingAppGeneratedAiTrack(int trackIndex) {
+        return trackIndex >= 0
+                && a.player != null
+                && a.player.isAppGeneratedAiSubtitleTrack(trackIndex);
+    }
+
     void selectAndRememberSubtitle(int trackIndex, String rawLabel) {
-        boolean selectingAiTrack = rawLabel != null && rawLabel.startsWith("AI ");
-        if (trackIndex == -2 || !selectingAiTrack) {
+        boolean selectingAppAiTrack = isSelectingAppGeneratedAiTrack(trackIndex);
+        if (shouldCancelAiTranslationOnTrackSelect(trackIndex, selectingAppAiTrack)) {
             AiSubtitleTranslator.cancelActiveTranslation();
             if (a.player != null) {
                 a.player.cancelPendingSubtitleMount();

@@ -708,9 +708,32 @@ public final class SystemPlayer extends MoviePlayer {
     }
 
     @Override
+    public boolean isAppGeneratedAiSubtitleTrack(int trackIndex) {
+        if (trackIndex < 0) return false;
+        return onMain(
+                () -> {
+                    if (released || !prepared || activeAiTrackIndex < 0) return false;
+                    List<Integer> matching = tracks(3);
+                    if (trackIndex >= matching.size()) return false;
+                    return matching.get(trackIndex) == activeAiTrackIndex;
+                });
+    }
+
+    @Override
     public void addExternalSubtitle(Uri uri, String name, String declaredMime) {
         AiSubtitleTranslator.cancelActiveTranslation();
         addExternalSubtitleInternal(uri, name, declaredMime, false, null);
+    }
+
+    @Override
+    public boolean upsertAiGeneratedSubtitle(
+            Uri uri,
+            String name,
+            String declaredMime,
+            boolean reloadMediaSource,
+            Runnable onMounted) {
+        return upsertExternalSubtitleInternal(
+                uri, name, declaredMime, reloadMediaSource, onMounted, true);
     }
 
     @Override
@@ -720,6 +743,18 @@ public final class SystemPlayer extends MoviePlayer {
             String declaredMime,
             boolean reloadMediaSource,
             Runnable onMounted) {
+        AiSubtitleTranslator.cancelActiveTranslation();
+        return upsertExternalSubtitleInternal(
+                uri, name, declaredMime, reloadMediaSource, onMounted, false);
+    }
+
+    private boolean upsertExternalSubtitleInternal(
+            Uri uri,
+            String name,
+            String declaredMime,
+            boolean reloadMediaSource,
+            Runnable onMounted,
+            boolean appGeneratedAi) {
         if (!reloadMediaSource) {
             // Progressive non-final updates render smoothly via SubtitleOverlayView without
             // bloating MediaPlayer's append-only timed-text track table or interrupting playback.
@@ -741,7 +776,7 @@ public final class SystemPlayer extends MoviePlayer {
                     });
             return false;
         }
-        addExternalSubtitleInternal(uri, name, declaredMime, true, onMounted);
+        addExternalSubtitleInternal(uri, name, declaredMime, appGeneratedAi, onMounted);
         // Async load: keep live SubtitleOverlayView active until onMounted fires after
         // addTimedTextSource + selectTrack succeed on the main thread.
         return false;
@@ -828,9 +863,7 @@ public final class SystemPlayer extends MoviePlayer {
                                                                     externalTrackLabels.put(
                                                                             i, safeName);
                                                                 }
-                                                                if (replacePriorAiTrack
-                                                                        || safeName.startsWith(
-                                                                                "AI ")) {
+                                                                if (replacePriorAiTrack) {
                                                                     activeAiTrackIndex = i;
                                                                 }
                                                                 nativePlayer.selectTrack(i);
