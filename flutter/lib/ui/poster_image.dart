@@ -5026,7 +5026,15 @@ class PosterLoader {
     String title = '',
     String year = '',
     bool asHd = false,
+    bool isPrivate = false,
   }) {
+    if (isPrivate) {
+      final trimmed = rawUrl.trim();
+      if (trimmed.isNotEmpty) {
+        _rememberPrivate('private:$trimmed', bytes);
+      }
+      return;
+    }
     final u = upgradeUrlToHd(rawUrl);
     if (u.isNotEmpty && !_isKnownDeadPosterHost(u)) {
       _remember(u, bytes);

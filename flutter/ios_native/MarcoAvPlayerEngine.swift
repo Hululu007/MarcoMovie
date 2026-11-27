@@ -860,8 +860,8 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     // Explicitly reset native subtitle suppression and track capability on
     // every media handoff so a previous film's AI bilingual overlay never
     // leaves native subtitles suppressed on the next film.
-    suppressNativeSubtitleRenderingRequested = suppressNativeSubtitleRendering
-    suppressNativeSubtitleAllowNonText =
+    self.suppressNativeSubtitleRenderingRequested = suppressNativeSubtitleRendering
+    self.suppressNativeSubtitleAllowNonText =
       suppressNativeSubtitleRendering && suppressNativeSubtitleAllowNonText
     selectedLegibleStaticFormat = .unknown
     legibleTrackConfirmedText = false
