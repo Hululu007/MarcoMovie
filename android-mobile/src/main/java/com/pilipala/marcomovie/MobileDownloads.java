@@ -416,17 +416,50 @@ final class MobileDownloads {
     // Episode picker (mobile detail page — rendered inside MobileBottomSheet)
     // =========================================================================
 
-    /** Lets the user pick episodes of one line; {@code current} is preselected. */
+    /**
+     * Pure-JVM initial-selection index policy for {@link #pick}: returns {@code -1} (0 episodes
+     * selected) when {@code preselectDefault} is {@code false}; otherwise matches {@code current}
+     * by episode name or falls back to index {@code 0}.
+     */
+    static int resolveInitialPickIndex(
+            List<Cms.Episode> episodes, String current, boolean preselectDefault) {
+        if (episodes == null || episodes.isEmpty() || !preselectDefault) return -1;
+        int initial = 0;
+        if (current != null && !current.isEmpty()) {
+            for (int i = 0; i < episodes.size(); i++) {
+                Cms.Episode ep = episodes.get(i);
+                if (ep != null && current.equals(ep.name)) {
+                    initial = i;
+                }
+            }
+        }
+        return initial;
+    }
+
+    /** Lets the user pick episodes of one line; {@code current} (or episode 0) is preselected. */
     static void pick(MainActivity a, Cms.Site s, Cms.Video v, Cms.Line line, String current) {
+        pick(a, s, v, line, current, true);
+    }
+
+    /**
+     * Lets the user pick episodes of one line. When {@code preselectDefault} is {@code false}
+     * (e.g. detail screen is awaiting explicit re-selection), starts with 0 episodes selected.
+     */
+    static void pick(
+            MainActivity a,
+            Cms.Site s,
+            Cms.Video v,
+            Cms.Line line,
+            String current,
+            boolean preselectDefault) {
         final int total = line.episodes.size();
         if (total == 0) return;
         final MobileTheme.Palette p = MobileTheme.of(a);
         final boolean[] chosen = new boolean[total];
-        int initial = 0;
-        for (int i = 0; i < total; i++) {
-            if (line.episodes.get(i).name.equals(current)) initial = i;
+        int initial = resolveInitialPickIndex(line.episodes, current, preselectDefault);
+        if (initial >= 0 && initial < total) {
+            chosen[initial] = true;
         }
-        chosen[initial] = true;
         final TextView[] cells = new TextView[total];
         final MobileBottomSheet.SheetHandle[] handleRef = {null};
 
@@ -457,6 +490,7 @@ final class MobileDownloads {
 
         // Primary confirm CTA at sheet bottom
         final LinearLayout startBtn = a.row();
+        startBtn.setTag("download-pick-confirm");
         startBtn.setGravity(Gravity.CENTER);
         startBtn.setPadding(a.dp(18), a.dp(13), a.dp(18), a.dp(13));
         startBtn.setBackground(MobileTheme.accentPillBg(a, 999));

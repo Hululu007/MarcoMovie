@@ -5474,8 +5474,20 @@ public final class MobileIos077ParityChecks {
                         && freshNoHist.resumePositionMs == 0,
                 "R14 P2: awaitingReselection blocks fallback to another line's history or default Ep 1 while fresh no-history open still plays Ep 1 directly");
 
+        // 34. Round-15 P2: MobileDownloads.resolveInitialPickIndex returns -1 (0 selected) when
+        //     preselectDefault is false (awaiting re-selection), while preserving current-episode
+        //     or index-0 default selection for normal detail and player entry points.
+        check(
+                MobileDownloads.resolveInitialPickIndex(r12AliS2.episodes, "", false) == -1
+                        && MobileDownloads.resolveInitialPickIndex(r12AliS2.episodes, "第3集", false)
+                                == -1
+                        && MobileDownloads.resolveInitialPickIndex(r12AliS2.episodes, "", true) == 0
+                        && MobileDownloads.resolveInitialPickIndex(r12AliS2.episodes, "第3集", true)
+                                == 2,
+                "R15 P2: MobileDownloads.resolveInitialPickIndex starts at 0 selected when preselectDefault=false and preserves default selection when true");
+
         pass(
-                "DriveOrder + R4..R14 P1-1..P2: line-season failover, Dart-aligned episodeMediaId, same-site drive conflict, direct-card, line-management rebind & awaiting-reselection verified");
+                "DriveOrder + R4..R15 P1-1..P2: line-season failover, Dart-aligned episodeMediaId, same-site drive conflict, direct-card, line-management rebind, awaiting-reselection & 0-preselect download picker verified");
     }
 
     private static String computeWindowsV073MediaId(String canonicalUrl) throws Exception {

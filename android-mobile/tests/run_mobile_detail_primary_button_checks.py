@@ -782,20 +782,58 @@ import android.app.Dialog;
 import android.view.View;
 import android.widget.TextView;
 
-/** Capturing MobileBottomSheet override for real-bytecode line picker & PlaybackLineRules manage sheet tests. */
+/** Capturing MobileBottomSheet override for real-bytecode line picker, PlaybackLineRules & MobileDownloads tests. */
 final class MobileBottomSheet {
     static final class SheetHandle {
         final Dialog dialog = new Dialog();
-        void dismiss() { dialog.dismiss(); }
-        void updateSubtitle(String s) {}
+        String title = "";
+        String subtitle = "";
+        String actionLabel = "";
+        boolean actionVisible;
+        boolean dismissed;
+
+        void dismiss() {
+            dismissed = true;
+            dialog.dismiss();
+        }
+
+        void setSubtitle(String s) {
+            subtitle = s == null ? "" : s;
+            lastSubtitle = subtitle;
+        }
+
+        void updateSubtitle(String s) {
+            setSubtitle(s);
+        }
+
+        void setAction(String label, boolean visible) {
+            if (label != null) actionLabel = label;
+            actionVisible = visible && !actionLabel.isEmpty();
+            lastActionLabel = actionLabel;
+            lastActionVisible = actionVisible;
+        }
+
+        void setActionVisible(boolean visible) {
+            setAction(null, visible);
+        }
     }
 
+    static String lastTitle = "";
+    static String lastSubtitle = "";
+    static String lastActionLabel = "";
+    static boolean lastActionVisible;
+    static SheetHandle lastHandle;
     static View lastContent;
     static String[] lastPickerOptions;
     static PlayerBubble.IntAction lastPickerCallback;
     static Runnable lastConfirmCallback;
 
     static void resetForTest() {
+        lastTitle = "";
+        lastSubtitle = "";
+        lastActionLabel = "";
+        lastActionVisible = false;
+        lastHandle = null;
         lastContent = null;
         lastPickerOptions = null;
         lastPickerCallback = null;
@@ -852,8 +890,18 @@ final class MobileBottomSheet {
             Runnable onAction,
             View content,
             boolean allowScroll) {
+        SheetHandle h = new SheetHandle();
+        h.title = title == null ? "" : title;
+        h.subtitle = subtitle == null ? "" : subtitle;
+        h.actionLabel = actionLabel == null ? "" : actionLabel;
+        h.actionVisible = !h.actionLabel.isEmpty();
+        lastTitle = h.title;
+        lastSubtitle = h.subtitle;
+        lastActionLabel = h.actionLabel;
+        lastActionVisible = h.actionVisible;
+        lastHandle = h;
         lastContent = content;
-        return new SheetHandle();
+        return h;
     }
 
     static Dialog showPicker(
@@ -877,6 +925,73 @@ final class MobileBottomSheet {
             Runnable onConfirm) {
         lastConfirmCallback = onConfirm;
         return new Dialog();
+    }
+}
+"""
+
+DOWNLOAD_MANAGER_OVERRIDE = r"""package com.pilipala.marcomovie;
+
+import android.content.Context;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+/** Capturing DownloadManager override recording exact queued site/video/line/episodes from real MobileDownloads. */
+final class DownloadManager {
+    static final int WAITING = 0;
+    static final int RUNNING = 1;
+    static final int PAUSED = 2;
+    static final int DONE = 3;
+    static final int FAILED = 4;
+    static final String HLS_MIME = "application/x-mpegURL";
+
+    static final class Task {
+        String id = "";
+        String title = "";
+        String episode = "";
+        String line = "";
+        String poster = "";
+        String path = "";
+        volatile int state = WAITING;
+        int percent() { return 0; }
+        String status() { return ""; }
+    }
+
+    static final class EnqueueCall {
+        final Cms.Site site;
+        final Cms.Video video;
+        final Cms.Line line;
+        final List<Cms.Episode> episodes;
+        EnqueueCall(Cms.Site s, Cms.Video v, Cms.Line l, List<Cms.Episode> eps) {
+            this.site = s;
+            this.video = v;
+            this.line = l;
+            this.episodes = eps == null ? Collections.<Cms.Episode>emptyList() : new ArrayList<>(eps);
+        }
+    }
+
+    private static final DownloadManager INSTANCE = new DownloadManager();
+    static final List<EnqueueCall> enqueueCalls = new ArrayList<>();
+
+    static void resetForTest() {
+        enqueueCalls.clear();
+    }
+
+    static synchronized DownloadManager get(Context context) {
+        return INSTANCE;
+    }
+
+    List<Task> snapshot() { return Collections.emptyList(); }
+    String folderPath() { return "/downloads"; }
+    void resumeAll() {}
+    void pauseAll() {}
+    void pause(String id) {}
+    void resume(String id) {}
+    void delete(String id) {}
+
+    int enqueue(Cms.Site site, Cms.Video video, Cms.Line line, List<Cms.Episode> episodes) {
+        enqueueCalls.add(new EnqueueCall(site, video, line, episodes));
+        return episodes == null ? 0 : episodes.size();
     }
 }
 """
@@ -1738,6 +1853,153 @@ public final class MobileDetailPrimaryButtonChecks {
                     "R14-3b-play: clicking main button plays 夸克 / 第52集 / 0 ms");
         }
 
+        // =====================================================================
+        // Round-15 P2: When awaiting re-selection after hiding active line, opening offline
+        //   download picker ("离线缓存 · 阿里") MUST start with 0/60 selected, reject empty
+        //   confirm with 0 queue calls, enqueue ONLY the explicitly selected 阿里/第3集 (1 call),
+        //   trigger 0 play calls across open/confirm/close, and keep detail primary button
+        //   prompting re-selection; meanwhile normal detail & 5-arg pick keep default preselect!
+        // =====================================================================
+        for (int entryMode = 0; entryMode < 2; entryMode++) {
+            String tag = entryMode == 0 ? "R15-longpress" : "R15-toppicker";
+            MobileBottomSheet.resetForTest();
+            DownloadManager.resetForTest();
+            Cms.Line qk = numberedLine("夸克", "https://pan.quark.cn/s/r15_qk_e", 60);
+            Cms.Line bd = numberedLine("百度", "https://pan.baidu.com/s/r15_bd_e", 60);
+            Cms.Line ali = numberedLine("阿里", "https://www.alipan.com/s/r15_ali_e", 60);
+            Cms.Video v = video("vod_r15", "星河", qk, bd, ali);
+            MainActivity act = new MainActivity();
+            act.setupForTest(site, Collections.singletonList(bmQuarkEp1), v, 0);
+            CatalogScreen.resumeHistory(act, bmQuarkEp1);
+            Button btn = (Button) act.root.findViewWithTag("detail-play");
+
+            // Hand-select 百度 第2集, then hide 百度 -> remaining [夸克, 阿里], preview on 阿里, awaiting re-select
+            act.root.findViewWithTag("detail-line-pill:百度").performClick();
+            act.root.findViewWithTag("episode:百度:1").performClick();
+            if (entryMode == 0) {
+                act.root.findViewWithTag("detail-line-pill:百度").performLongClick();
+            } else {
+                act.root.findViewWithTag("detail-source-pill").performClick();
+                MobileBottomSheet.lastContent.findViewWithTag("line-picker-manage:百度").performClick();
+            }
+            MobileBottomSheet.pickOptionContaining("删除（隐藏）此线路");
+            MobileBottomSheet.confirmPending();
+
+            // 1. Open 「离线缓存 · 阿里」 -> initial subtitle MUST be 「已选 0 / 60 集」, confirm without selecting -> 0 queue calls
+            View dlBtn = act.root.findViewWithTag("episodes-download");
+            check(dlBtn != null, tag + ": episodes-download button exists");
+            dlBtn.performClick();
+            check(
+                    "离线缓存 · 阿里".equals(MobileBottomSheet.lastTitle)
+                            && "已选 0 / 60 集".equals(MobileBottomSheet.lastSubtitle)
+                            && !MobileBottomSheet.lastActionVisible
+                            && act.playCalls.isEmpty()
+                            && DownloadManager.enqueueCalls.isEmpty(),
+                    tag + "-open: 「离线缓存 · 阿里」starts at '已选 0 / 60 集' with 0 plays & 0 queue calls (title='" + MobileBottomSheet.lastTitle + "', sub='" + MobileBottomSheet.lastSubtitle + "')");
+
+            View confirmEmpty = MobileBottomSheet.lastContent.findViewWithTag("download-pick-confirm");
+            check(confirmEmpty != null, tag + ": download-pick-confirm exists");
+            int toastsBeforeEmpty = act.toasts.size();
+            confirmEmpty.performClick();
+            check(
+                    DownloadManager.enqueueCalls.isEmpty()
+                            && act.playCalls.isEmpty()
+                            && !MobileBottomSheet.lastHandle.dismissed
+                            && act.toasts.size() == toastsBeforeEmpty + 1
+                            && act.toasts.get(act.toasts.size() - 1).contains("至少选择一集"),
+                    tag + "-empty-confirm: confirming with 0 selected makes 0 queue calls, 0 plays & stays open");
+
+            // Close sheet without selecting -> 0 plays, 0 queue calls, main button still prompts re-select
+            MobileBottomSheet.lastHandle.dismiss();
+            check(
+                    DownloadManager.enqueueCalls.isEmpty()
+                            && act.playCalls.isEmpty()
+                            && btn.getText().toString().contains("原线路已变更")
+                            && btn.getText().toString().contains("重选"),
+                    tag + "-close: closing cache sheet triggers 0 plays & keeps detail main button awaiting re-select");
+
+            // 2. Re-open 「离线缓存 · 阿里」, select 阿里 第3集 -> confirm -> queue receives ONLY 阿里 / 第3集 strictly once
+            dlBtn.performClick();
+            check(
+                    "离线缓存 · 阿里".equals(MobileBottomSheet.lastTitle)
+                            && "已选 0 / 60 集".equals(MobileBottomSheet.lastSubtitle),
+                    tag + "-reopen: re-opening 「离线缓存 · 阿里」still starts at '已选 0 / 60 集'");
+            View ep3Cell = MobileBottomSheet.lastContent.findViewWithTag("download-pick:2");
+            check(ep3Cell != null, tag + ": download-pick:2 (第3集) cell exists");
+            ep3Cell.performClick();
+            check(
+                    "已选 1 / 60 集".equals(MobileBottomSheet.lastSubtitle)
+                            && MobileBottomSheet.lastActionVisible,
+                    tag + "-select-ep3: selecting 第3集 updates subtitle to '已选 1 / 60 集'");
+            View confirmEp3 = MobileBottomSheet.lastContent.findViewWithTag("download-pick-confirm");
+            confirmEp3.performClick();
+            check(
+                    MobileBottomSheet.lastHandle.dismissed
+                            && DownloadManager.enqueueCalls.size() == 1
+                            && "阿里".equals(DownloadManager.enqueueCalls.get(0).line.name)
+                            && "阿里".equals(DownloadManager.enqueueCalls.get(0).line.lineId())
+                            && DownloadManager.enqueueCalls.get(0).episodes.size() == 1
+                            && "第3集".equals(DownloadManager.enqueueCalls.get(0).episodes.get(0).name)
+                            && "https://www.alipan.com/s/r15_ali_e3".equals(
+                                    DownloadManager.enqueueCalls.get(0).episodes.get(0).url)
+                            && act.playCalls.isEmpty(),
+                    tag + "-confirm-ep3: queue receives strictly 1 call with 阿里 / 第3集 and 0 plays");
+
+            // 3. Back on detail page after confirming download: main button STILL prompts re-select & 0 plays on click!
+            int toastsBeforeBtn = act.toasts.size();
+            btn.performClick();
+            check(
+                    act.playCalls.isEmpty()
+                            && act.resumeAt == 0
+                            && btn.getText().toString().contains("原线路已变更")
+                            && btn.getText().toString().contains("重选")
+                            && act.toasts.size() == toastsBeforeBtn + 1
+                            && MobileDetailScreen.RESELECT_TOAST_TEXT.equals(
+                                    act.toasts.get(act.toasts.size() - 1)),
+                    tag + "-back-detail: after cache confirm, detail main button still prompts re-select with 0 plays & resumeAt=0");
+        }
+
+        // R15-normal: Preserve existing default pre-selection on normal detail page (fresh no-history,
+        //   history-matched, and explicit detail selection) AND 5-arg MobileDownloads.pick (player entry)!
+        {
+            MobileBottomSheet.resetForTest();
+            DownloadManager.resetForTest();
+            Cms.Line qk = numberedLine("夸克", "https://pan.quark.cn/s/r15_norm_qk_e", 60);
+            Cms.Line bd = numberedLine("百度", "https://pan.baidu.com/s/r15_norm_bd_e", 60);
+            Cms.Video v = video("vod_r15_norm", "晨光", qk, bd);
+            MainActivity act = new MainActivity();
+            act.setupForTest(site, Collections.<WatchHistory.Entry>emptyList(), v, 0);
+            act.detail(site, v);
+            act.root.findViewWithTag("episodes-download").performClick();
+            check(
+                    "离线缓存 · 夸克".equals(MobileBottomSheet.lastTitle)
+                            && "已选 1 / 60 集".equals(MobileBottomSheet.lastSubtitle),
+                    "R15-normal-fresh: normal fresh detail open keeps default '已选 1 / 60 集' pre-selection");
+            MobileBottomSheet.lastContent.findViewWithTag("download-pick-confirm").performClick();
+            check(
+                    DownloadManager.enqueueCalls.size() == 1
+                            && "夸克".equals(DownloadManager.enqueueCalls.get(0).line.name)
+                            && DownloadManager.enqueueCalls.get(0).episodes.size() == 1
+                            && "第1集".equals(DownloadManager.enqueueCalls.get(0).episodes.get(0).name)
+                            && act.playCalls.isEmpty(),
+                    "R15-normal-fresh-confirm: fresh detail download confirm enqueues 夸克 / 第1集 (1 call, 0 plays)");
+
+            // Explicit 5-arg MobileDownloads.pick (player / external caller) preserves current-episode preselect
+            DownloadManager.resetForTest();
+            MobileDownloads.pick(act, site, v, bd, "第5集");
+            check(
+                    "离线缓存 · 百度".equals(MobileBottomSheet.lastTitle)
+                            && "已选 1 / 60 集".equals(MobileBottomSheet.lastSubtitle),
+                    "R15-normal-5arg: 5-arg MobileDownloads.pick keeps default pre-selection of 第5集");
+            MobileBottomSheet.lastContent.findViewWithTag("download-pick-confirm").performClick();
+            check(
+                    DownloadManager.enqueueCalls.size() == 1
+                            && "百度".equals(DownloadManager.enqueueCalls.get(0).line.name)
+                            && DownloadManager.enqueueCalls.get(0).episodes.size() == 1
+                            && "第5集".equals(DownloadManager.enqueueCalls.get(0).episodes.get(0).name),
+                    "R15-normal-5arg-confirm: 5-arg pick enqueues 百度 / 第5集 (1 call)");
+        }
+
         System.out.println("MobileDetailPrimaryButtonChecks OK (" + passed + " checks passed)");
     }
 }
@@ -1793,6 +2055,7 @@ def main() -> int:
             "com/pilipala/marcomovie/ImmersivePoster.java": IMMERSIVE_POSTER_OVERRIDE,
             "com/pilipala/marcomovie/AiBetaGate.java": AI_BETA_GATE_OVERRIDE,
             "com/pilipala/marcomovie/MobileBottomSheet.java": MOBILE_BOTTOM_SHEET_OVERRIDE,
+            "com/pilipala/marcomovie/DownloadManager.java": DOWNLOAD_MANAGER_OVERRIDE,
             "com/pilipala/marcomovie/MobileDetailPrimaryButtonChecks.java": TEST_DRIVER_JAVA,
         }
         test_files = []

@@ -583,6 +583,21 @@ final class MobileDetailScreen {
         }
     }
 
+    private static void bindTopDownloadButton(
+            MainActivity a,
+            Cms.Site site,
+            Cms.Video video,
+            Cms.Line line,
+            String currentName,
+            boolean preselectDefault) {
+        if (a == null || a.root == null || line == null) return;
+        View topDownView = a.root.findViewWithTag("episodes-download");
+        if (topDownView == null) return;
+        final String safeName = currentName == null ? "" : currentName;
+        topDownView.setOnClickListener(
+                v -> MobileDownloads.pick(a, site, video, line, safeName, preselectDefault));
+    }
+
     private static void bindPrimaryPlayButton(
             MainActivity a,
             Cms.Site site,
@@ -2166,20 +2181,19 @@ final class MobileDetailScreen {
                             v -> a.crossSearch(Cms.searchTitle(video)));
                 }
             }
-            View topDownView = a.root.findViewWithTag("episodes-download");
-            if (topDownView != null) {
-                String pickFrom = "";
-                if (lineMatchesBookmark && !renderPlayAction.requiresReselection) {
-                    pickFrom =
-                            line.episodes.get(
-                                            HistoryResumeMatcher.findMatchedEpisodeIndex(
-                                                    line, remembered))
-                                    .name;
+            final boolean preselectDownload = !renderPlayAction.requiresReselection;
+            String pickFrom = "";
+            if (preselectDownload) {
+                if (hasExplicitEpisodeOnLine) {
+                    pickFrom = line.episodes.get(selectedEpisodeIndex).name;
+                } else if (lineMatchesBookmark) {
+                    int matchedIdx = HistoryResumeMatcher.findMatchedEpisodeIndex(line, remembered);
+                    if (matchedIdx >= 0 && matchedIdx < line.episodes.size()) {
+                        pickFrom = line.episodes.get(matchedIdx).name;
+                    }
                 }
-                final String currentName = pickFrom;
-                topDownView.setOnClickListener(
-                        v -> MobileDownloads.pick(a, site, video, line, currentName));
             }
+            bindTopDownloadButton(a, site, video, line, pickFrom, preselectDownload);
         }
 
         // Keep line strip in place when switching between lines so its scroll position stays steady
@@ -2577,6 +2591,8 @@ final class MobileDetailScreen {
                                 bindPrimaryPlayButton(
                                         a, site, video, (Button) playBtnView, pickedAction);
                             }
+                            bindTopDownloadButton(
+                                    a, site, video, line, ep != null ? ep.name : "", true);
                         });
                 selectionState.numPills.put(posIdx, numPill);
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, a.dp(34));
@@ -2634,6 +2650,8 @@ final class MobileDetailScreen {
                         if (playBtnView instanceof Button) {
                             bindPrimaryPlayButton(a, site, video, (Button) playBtnView, cardAction);
                         }
+                        bindTopDownloadButton(
+                                a, site, video, line, ep != null ? ep.name : "", true);
                         a.resumeAt = cardAction.resumePositionMs;
                         handleDetailEpisodeTap(a, site, video, line, ep, posIdx + 1, false);
                     });
