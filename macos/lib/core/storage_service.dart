@@ -22,6 +22,7 @@ import 'macos_video_sync.dart';
 import 'macos_window_bounds.dart';
 import 'mdk_platform_player.dart';
 import 'models.dart';
+import 'next_episode_prebuffer.dart';
 import 'quark_account.dart';
 import 'netdisk_session.dart';
 import 'ohos_runtime.dart';
@@ -92,6 +93,12 @@ class StorageService {
   static const String keyEpisodesDescending = 'episodes_descending';
   static const String keyPlaySpeed = 'play_speed';
   static const String keyAutoNext = 'auto_next';
+  static const String keyNextEpisodePrebufferEnabled =
+      'next_episode_prebuffer_enabled';
+  static const String keyNextEpisodePrebufferTriggerSec =
+      'next_episode_prebuffer_trigger_sec';
+  static const String keyNextEpisodePrebufferMaxMb =
+      'next_episode_prebuffer_max_mb';
   static const String keySkipIntroSec = 'skip_intro_sec';
   static const String keySkipOutroSec = 'skip_outro_sec';
   static const String keyRepeatMode = 'repeat_mode';
@@ -792,6 +799,24 @@ class StorageService {
   double get playSpeed =>
       (_prefs.getDouble(keyPlaySpeed) ?? 1.0).clamp(minPlaySpeed, maxPlaySpeed);
   bool get autoNext => _prefs.getBool(keyAutoNext) ?? true;
+  bool get nextEpisodePrebufferEnabled =>
+      _prefs.getBool(keyNextEpisodePrebufferEnabled) ?? false;
+  int get nextEpisodePrebufferTriggerSec =>
+      NextEpisodePrebufferConfig.normalizeTriggerSeconds(
+        _prefs.getInt(keyNextEpisodePrebufferTriggerSec) ??
+            NextEpisodePrebufferConfig.defaultTriggerSeconds,
+      );
+  int get nextEpisodePrebufferMaxMb =>
+      NextEpisodePrebufferConfig.normalizeMaxMb(
+        _prefs.getInt(keyNextEpisodePrebufferMaxMb) ??
+            NextEpisodePrebufferConfig.defaultMaxMb,
+      );
+  NextEpisodePrebufferConfig get nextEpisodePrebufferConfig =>
+      NextEpisodePrebufferConfig(
+        enabled: nextEpisodePrebufferEnabled,
+        triggerRemainingSeconds: nextEpisodePrebufferTriggerSec,
+        maxPrebufferMb: nextEpisodePrebufferMaxMb,
+      );
   int get skipIntroSec => (_prefs.getInt(keySkipIntroSec) ?? 0).clamp(0, 600);
   int get skipOutroSec => (_prefs.getInt(keySkipOutroSec) ?? 0).clamp(0, 600);
   bool get playerAlwaysShowClock =>
@@ -2600,6 +2625,21 @@ class StorageService {
   }
   Future<void> setAutoNext(bool value) async {
     await _prefs.setBool(keyAutoNext, value);
+  }
+  Future<void> setNextEpisodePrebufferEnabled(bool value) async {
+    await _prefs.setBool(keyNextEpisodePrebufferEnabled, value);
+  }
+  Future<void> setNextEpisodePrebufferTriggerSec(int seconds) async {
+    await _prefs.setInt(
+      keyNextEpisodePrebufferTriggerSec,
+      NextEpisodePrebufferConfig.normalizeTriggerSeconds(seconds),
+    );
+  }
+  Future<void> setNextEpisodePrebufferMaxMb(int mb) async {
+    await _prefs.setInt(
+      keyNextEpisodePrebufferMaxMb,
+      NextEpisodePrebufferConfig.normalizeMaxMb(mb),
+    );
   }
   Future<void> setSkipIntroSec(int seconds) async {
     await _prefs.setInt(keySkipIntroSec, seconds.clamp(0, 600));

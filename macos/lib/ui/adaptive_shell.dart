@@ -31,6 +31,7 @@ import '../core/macos_window_bounds.dart';
 import '../core/mdk_platform_player.dart';
 import '../core/models.dart';
 import '../core/netdisk_service.dart';
+import '../core/next_episode_prebuffer.dart';
 import '../core/python_source_host.dart';
 import '../core/storage_service.dart';
 import '../core/subscription_refresh_service.dart';
@@ -11995,6 +11996,66 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 },
               ),
             ),
+            AppleGroupedTile(
+              icon: CupertinoIcons.bolt_horizontal_circle_fill,
+              iconBgColor: AppleColors.systemIndigo,
+              title: '下一集预缓冲（可选）',
+              subtitle: widget.storage.nextEpisodePrebufferEnabled
+                  ? '剩余 ${widget.storage.nextEpisodePrebufferTriggerSec} 秒触发 · 单集上限 ${widget.storage.nextEpisodePrebufferMaxMb} MB'
+                  : '关闭时不产生额外流量；开启后接近片尾提前预取下一集片头',
+              trailing: CupertinoSwitch(
+                key: const Key('next-episode-prebuffer-toggle'),
+                value: widget.storage.nextEpisodePrebufferEnabled,
+                activeTrackColor: AppleColors.systemGreen,
+                onChanged: (v) async {
+                  await widget.storage.setNextEpisodePrebufferEnabled(v);
+                  refreshBoth();
+                },
+              ),
+            ),
+            if (widget.storage.nextEpisodePrebufferEnabled) ...[
+              _buildExpandableChoiceDrawerTile<int>(
+                settingKey: 'next_episode_prebuffer_trigger',
+                icon: CupertinoIcons.timer,
+                iconBgColor: AppleColors.systemPurple,
+                title: '预缓冲触发时机',
+                subtitle: '当前剧集剩余时长进入此窗口且播放流畅时开始预取',
+                trailingText:
+                    '剩余 ${widget.storage.nextEpisodePrebufferTriggerSec} 秒',
+                currentValue: widget.storage.nextEpisodePrebufferTriggerSec,
+                onStateChanged: refreshBoth,
+                options: const [
+                  (30, '剩余 30 秒', '较晚触发，减少中途切集浪费的流量'),
+                  (45, '剩余 45 秒（推荐）', '平衡片尾等待时间与额外流量开销'),
+                  (60, '剩余 60 秒', '适合高码率 4K 或解析较慢片源'),
+                  (90, '剩余 90 秒', '提前准备，适配较长片尾或跳过片尾'),
+                ],
+                onSelected: (val) async {
+                  await widget.storage.setNextEpisodePrebufferTriggerSec(val);
+                  refreshBoth();
+                },
+              ),
+              _buildExpandableChoiceDrawerTile<int>(
+                settingKey: 'next_episode_prebuffer_cap',
+                icon: CupertinoIcons.tray_arrow_down_fill,
+                iconBgColor: AppleColors.systemTeal,
+                title: '单集预缓冲上限',
+                subtitle: '严格限制每集预取字节数，切源、跳集、退出或直播时立即取消',
+                trailingText: '${widget.storage.nextEpisodePrebufferMaxMb} MB',
+                currentValue: widget.storage.nextEpisodePrebufferMaxMb,
+                onStateChanged: refreshBoth,
+                options: const [
+                  (4, '4 MB', '轻量省流量，覆盖片头解析与起播关键帧'),
+                  (8, '8 MB（推荐）', '兼顾 1080p/4K 起播速度与带宽占用'),
+                  (16, '16 MB', '适合高码率 4K 片源快速首帧'),
+                  (32, '32 MB', '高宽带环境，更大片头缓冲余量'),
+                ],
+                onSelected: (val) async {
+                  await widget.storage.setNextEpisodePrebufferMaxMb(val);
+                  refreshBoth();
+                },
+              ),
+            ],
             AppleGroupedTile(
               icon: CupertinoIcons.clock_fill,
               iconBgColor: AppleColors.systemTeal,

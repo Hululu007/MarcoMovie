@@ -30,6 +30,7 @@ import '../core/ios_mpv_profile.dart';
 import '../core/local_media_proxy.dart';
 import '../core/macos_video_sync.dart';
 import '../core/models.dart';
+import '../core/next_episode_prebuffer.dart';
 import '../core/playback_recovery_policy.dart';
 import '../core/playback_startup.dart';
 import '../core/playback_status_telemetry.dart';
@@ -143,6 +144,8 @@ class PlayerScreen extends StatefulWidget {
   final Stream<int>? debugUpstreamBytesStream;
   @visibleForTesting
   final Stream<double>? debugCacheSpeedStream;
+  @visibleForTesting
+  final NextEpisodePrebufferController? debugPrebufferController;
 
   const PlayerScreen({
     super.key,
@@ -177,6 +180,7 @@ class PlayerScreen extends StatefulWidget {
     this.debugClient,
     this.debugUpstreamBytesStream,
     this.debugCacheSpeedStream,
+    this.debugPrebufferController,
   });
 
   /// The resolver already applies origin rules and explicit playback headers.
@@ -557,7 +561,65 @@ class _PlayerScreenState extends State<PlayerScreen>
   Completer<void>? _sourceAbort;
   final _cloudMedia = PlayerCloudMediaSession();
   final _localMedia = PlayerLocalMediaSession();
+  late final NextEpisodePrebufferController _nextPrebuffer =
+      widget.debugPrebufferController ??
+      NextEpisodePrebufferController(
+        client: _client,
+        diskCache: DiskBlockCache.shared,
+        qualitySelector: (resolved) {
+          if (resolved.variants.length <= 1) return resolved;
+          final pref = widget.storage.preferredQuality;
+          final hasHighTier =
+              resolved.variants.any((v) => _rankVariantQuality(v) > 60);
+          if (pref == '4k_netdisk' || (pref == 'auto' && hasHighTier)) {
+            return _selectBestQualityVariant(resolved);
+          }
+          return resolved;
+        },
+      );
   final _startup = PlaybackStartup();
+
+  void _maybeTriggerNextEpisodePrebuffer(Duration position) {
+    if (!mounted ||
+        _isLiveStream ||
+        widget.embedded ||
+        !_playing ||
+        _loading ||
+        _buffering) {
+      return;
+    }
+    final config = widget.storage.nextEpisodePrebufferConfig;
+    if (!config.enabled) return;
+    final nextIdx = _adjacentVisibleEpisodeIndex(1);
+    if (nextIdx == null ||
+        nextIdx < 0 ||
+        nextIdx >= _currentLine.episodes.length) {
+      return;
+    }
+    final nextEp = _currentLine.episodes[nextIdx];
+    final savedConfig = widget.storage.loadSavedConfig();
+    _nextPrebuffer.maybeStart(
+      config: config,
+      site: widget.site,
+      videoId: widget.video.id,
+      lineIndex: _lineIndex,
+      nextEpisodeIndex: nextIdx,
+      nextEpisode: nextEp,
+      isLive: _isLiveStream,
+      embedded: widget.embedded,
+      isBlurayIso: _blurayIsoLease != null,
+      repeatMode: _repeatMode,
+      isPlaying: _playing,
+      isLoading: _loading,
+      isBuffering: _buffering,
+      positionMs: position.inMilliseconds,
+      durationMs: _duration.inMilliseconds,
+      parses: savedConfig?.parses ?? const [],
+      rules: savedConfig?.rules ?? const [],
+      ads: savedConfig?.ads ?? const [],
+      enableMediaHeadPrefetch: _effectiveDiskCacheLimitMb > 0,
+    );
+  }
   final _tvSeek = TvRemoteSeekController();
   final GlobalKey _playerStageKey = GlobalKey();
   late final CastController _castController = CastController()
@@ -1974,6 +2036,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         setState(() => _hasStartedVodPlayback = true);
       }
       _maybeEvaluateSkipTriggers(positionOverride: pos);
+      _maybeTriggerNextEpisodePrebuffer(pos);
     }));
 
     _playerSubscriptions.add(_player.stream.duration.listen((dur) {
@@ -3088,12 +3151,33 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     final qualityLease = quality == null ? null : PlayerCloudMediaSession.of(quality);
     final keepsLease = _cloudMedia.owns(qualityLease);
+    PreparedNextEpisode? adoptedNext;
+    if (_isLiveStream) {
+      unawaited(_nextPrebuffer.cancelAll(NextEpisodePrebufferCancelReason.liveMode));
+    } else if (quality == null) {
+      adoptedNext = _nextPrebuffer.adoptPrepared(
+        siteKey: widget.site.key,
+        videoId: widget.video.id,
+        lineIndex: _lineIndex,
+        episodeIndex: _episodeIndex,
+        rawEpisodeUrl: _currentEpisode.url,
+      );
+      if (adoptedNext == null) {
+        unawaited(
+          _nextPrebuffer.cancelAll(NextEpisodePrebufferCancelReason.manualJump),
+        );
+      }
+    } else {
+      unawaited(
+        _nextPrebuffer.cancelAll(NextEpisodePrebufferCancelReason.sourceSwitch),
+      );
+    }
     // Quality variants of one cloud file share their proxy and cancellation
     // owner. Cancelling that owner here would revoke the next quality as well.
     if (!keepsLease && _sourceAbort?.isCompleted == false) _sourceAbort!.complete();
     final sourceAbort = keepsLease && _sourceAbort != null
         ? _sourceAbort!
-        : (_sourceAbort = Completer<void>());
+        : (_sourceAbort = adoptedNext?.sourceAbort ?? Completer<void>());
     final session = ++_playSession;
     if (quality == null) {
       _qualityChoices = const [];
@@ -3124,10 +3208,14 @@ class _PlayerScreenState extends State<PlayerScreen>
         await previousOfflineHlsLease?.close();
       });
     } catch (_) {
+      await adoptedNext?.dispose();
       if (session == _playSession) _failPlayback();
       return;
     }
-    if (!mounted || session != _playSession) return;
+    if (!mounted || session != _playSession) {
+      await adoptedNext?.dispose();
+      return;
+    }
     final effectiveResumeMs = _isLiveStream
         ? 0
         : (resumeMs != null && resumeMs > 0)
@@ -3165,6 +3253,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!canOpenDirectly &&
         !_currentEpisode.needsSourceResolution &&
         unavailableReason != null) {
+      await adoptedNext?.dispose();
       _pendingResumeMs = 0;
       if (mounted) {
         setState(() {
@@ -3181,7 +3270,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     if (mounted) {
       _unbindLeaseThroughput();
-      if (quality != null || _currentEpisode.isLocalFile) {
+      if (adoptedNext != null || quality != null || _currentEpisode.isLocalFile) {
         _playbackStatus.beginConnecting(
           isLocalFile: _currentEpisode.isLocalFile,
         );
@@ -3210,32 +3299,34 @@ class _PlayerScreenState extends State<PlayerScreen>
     OfflineHlsLease? pendingOfflineHlsLease;
     List<BlurayChapter> pendingBlurayChapters = const [];
     try {
-      var resolvedEpisode = quality ?? (_currentEpisode.isLocalFile
-          ? _currentEpisode
-          : widget.isLive
-          ? _client.resolveLiveEpisodeForPlayback(widget.site, _currentEpisode)
-          : await _client.runSourceOperation<CmsEpisode>(
-              () async {
-                final result = await _client.resolveEpisodeForPlayback(
-                  widget.site,
-                  _currentEpisode,
-                  parses: configuredParses,
-                  rules: configuredRules,
-                  ads: configuredAds,
-                );
-                if (!mounted || session != _playSession || sourceAbort.isCompleted) {
-                  await _cloudMedia.discard(PlayerCloudMediaSession.of(result));
-                  throw StateError('片源加载已取消');
-                }
-                return result;
-              },
-              cancellation: sourceAbort,
-            ).timeout(const Duration(seconds: 90), onTimeout: () {
-              if (!sourceAbort.isCompleted) sourceAbort.complete();
-              throw const FormatException('片源解析超时，请重试');
-            }));
+      var resolvedEpisode = adoptedNext?.resolvedEpisode ??
+          quality ??
+          (_currentEpisode.isLocalFile
+              ? _currentEpisode
+              : widget.isLive
+              ? _client.resolveLiveEpisodeForPlayback(widget.site, _currentEpisode)
+              : await _client.runSourceOperation<CmsEpisode>(
+                  () async {
+                    final result = await _client.resolveEpisodeForPlayback(
+                      widget.site,
+                      _currentEpisode,
+                      parses: configuredParses,
+                      rules: configuredRules,
+                      ads: configuredAds,
+                    );
+                    if (!mounted || session != _playSession || sourceAbort.isCompleted) {
+                      await _cloudMedia.discard(PlayerCloudMediaSession.of(result));
+                      throw StateError('片源加载已取消');
+                    }
+                    return result;
+                  },
+                  cancellation: sourceAbort,
+                ).timeout(const Duration(seconds: 90), onTimeout: () {
+                  if (!sourceAbort.isCompleted) sourceAbort.complete();
+                  throw const FormatException('片源解析超时，请重试');
+                }));
       pendingLease = PlayerCloudMediaSession.of(resolvedEpisode);
-      if (quality == null && resolvedEpisode.variants.length > 1) {
+      if (adoptedNext == null && quality == null && resolvedEpisode.variants.length > 1) {
         final pref = widget.storage.preferredQuality;
         final hasHighTier = resolvedEpisode.variants
             .any((v) => _rankVariantQuality(v) > 60);
@@ -4590,6 +4681,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _loadingUiRefreshTimer?.cancel();
     _loadingUiRefreshTimer = null;
     _unbindLeaseThroughput();
+    unawaited(_nextPrebuffer.cancelAll(NextEpisodePrebufferCancelReason.exit));
     _hudTimer?.cancel();
     _gestureTickTimer?.cancel();
     _desktopKeyTickTimer?.cancel();
@@ -5448,6 +5540,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     _failedLinesForEpisode.clear();
     _failedLiveEpisodes.clear();
+    unawaited(
+      _nextPrebuffer.cancelAll(NextEpisodePrebufferCancelReason.sourceSwitch),
+    );
     final keepPos = _position.inMilliseconds >= 1000
         ? _position.inMilliseconds
         : _lastKnownPositionMs;
@@ -10362,6 +10457,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         : (_repeatMode == 'one' ? 'all' : 'off');
     setState(() => _repeatMode = next);
     widget.storage.setRepeatMode(next);
+    if (next == 'one') {
+      unawaited(
+        _nextPrebuffer.cancelAll(NextEpisodePrebufferCancelReason.repeatOne),
+      );
+    }
     _showHud('循环模式：$_repeatLabel');
   }
 
@@ -12237,6 +12337,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _switchLiveChannel(LiveChannel channel, {int lineIdx = 0}) {
     if (!mounted || channel.episodes.isEmpty) return;
+    unawaited(_nextPrebuffer.cancelAll(NextEpisodePrebufferCancelReason.liveMode));
     _failedLinesForEpisode.clear();
     _failedLiveEpisodes.clear();
     _liveDirectFallbackTried = false;
