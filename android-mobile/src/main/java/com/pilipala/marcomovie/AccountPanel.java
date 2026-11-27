@@ -1010,15 +1010,17 @@ final class AccountPanel {
 
         final Cms.Site configSite = findConfigCenterSite(a);
         final boolean hasCatPaw = CatPawSettings.available(a);
+        final LinearLayout bannerHolder = a.vertical();
         final LinearLayout drivesHolder = a.vertical();
+        final Runnable[] refreshRef = new Runnable[1];
 
         FrameLayout pageRoot =
                 new MainActivity.GlassFreezeFrameLayout(a, a.glassFreezeController) {
                     @Override
                     public void onWindowFocusChanged(boolean hasWindowFocus) {
                         super.onWindowFocusChanged(hasWindowFocus);
-                        if (hasWindowFocus) {
-                            populateDriveCards(a, drivesHolder, configSite);
+                        if (hasWindowFocus && refreshRef[0] != null) {
+                            refreshRef[0].run();
                         }
                     }
 
@@ -1035,12 +1037,14 @@ final class AccountPanel {
         a.root = pageRoot;
         a.setContentView(pageRoot);
 
-        activePageRefresh =
+        refreshRef[0] =
                 () -> {
-                    if (drivesHolder.isAttachedToWindow()) {
-                        populateDriveCards(a, drivesHolder, configSite);
-                    }
+                    if (!drivesHolder.isAttachedToWindow()) return;
+                    bannerHolder.removeAllViews();
+                    bannerHolder.addView(buildPriorityOrderBanner(a, configSite, refreshRef[0]));
+                    populateDriveCards(a, drivesHolder, configSite);
                 };
+        activePageRefresh = refreshRef[0];
 
         LinearLayout outerCol = a.vertical();
         pageRoot.addView(outerCol, new FrameLayout.LayoutParams(-1, -1));
@@ -1086,17 +1090,7 @@ final class AccountPanel {
         outerCol.addView(sv, new LinearLayout.LayoutParams(-1, 0, 1f));
 
         // Card A: Priority Order Banner (always visible on mobile, backed by NetdiskStore)
-        final LinearLayout bannerHolder = a.vertical();
-        bannerHolder.addView(
-                buildPriorityOrderBanner(
-                        a,
-                        configSite,
-                        () -> {
-                            bannerHolder.removeAllViews();
-                            bannerHolder.addView(
-                                    buildPriorityOrderBanner(a, configSite, activePageRefresh));
-                            populateDriveCards(a, drivesHolder, configSite);
-                        }));
+        bannerHolder.addView(buildPriorityOrderBanner(a, configSite, refreshRef[0]));
         body.addView(bannerHolder, new LinearLayout.LayoutParams(-1, -2));
         a.gap(body, 14);
 
@@ -1155,18 +1149,21 @@ final class AccountPanel {
         View switchBtn =
                 buildIosCapsuleButton(
                         a,
-                        ICON_REFRESH,
+                        ICON_SORT,
                         "切换盘序",
                         false,
                         true,
-                        () -> PersonalNetdiskBrowser.showManualCredentialSheet(a, "", onRefresh));
+                        () -> PersonalNetdiskBrowser.showDriveOrderSheet(a, onRefresh));
         LinearLayout.LayoutParams sLp = new LinearLayout.LayoutParams(-2, a.dp(30));
         sLp.leftMargin = a.dp(8);
         row.addView(switchBtn, sLp);
         banner.addView(row, new LinearLayout.LayoutParams(-1, -2));
 
         TextView hint =
-                a.text("一次扫码自动同步至本机「我的云盘」与已识别订阅配置中心；拒绝存储权限也可正常登录、重启与播放", 11.5f, p.textSecondary);
+                a.text(
+                        "播放含多网盘线路的影片时按以上盘序默认拉取；一次扫码自动同步至本机「我的云盘」与已识别配置中心，无需存储权限",
+                        11.5f,
+                        p.textSecondary);
         hint.setLineSpacing(a.dp(2), 1f);
         hint.setPadding(0, a.dp(6), 0, 0);
         banner.addView(hint, new LinearLayout.LayoutParams(-1, -2));
@@ -1176,7 +1173,19 @@ final class AccountPanel {
     private static void populateDriveCards(
             final MainActivity a, final LinearLayout container, final Cms.Site configSite) {
         container.removeAllViews();
-        for (DriveSpec drive : DRIVES) {
+        java.util.List<String> order = NetdiskStore.getOrder(a);
+        java.util.List<DriveSpec> orderedDrives = new java.util.ArrayList<>(DRIVES.length);
+        for (String key : order) {
+            for (DriveSpec spec : DRIVES) {
+                if (spec.key.equals(key) && !orderedDrives.contains(spec)) {
+                    orderedDrives.add(spec);
+                }
+            }
+        }
+        for (DriveSpec spec : DRIVES) {
+            if (!orderedDrives.contains(spec)) orderedDrives.add(spec);
+        }
+        for (DriveSpec drive : orderedDrives) {
             View tile = buildIosDriveTile(a, configSite, drive);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
             lp.bottomMargin = a.dp(10);

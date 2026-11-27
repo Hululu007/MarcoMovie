@@ -61,6 +61,7 @@ public final class MobileIos077ParityChecks {
         test9And14CspHardeningAndExternalParserChain(workDir);
         test10Round2AdversarialReworkChecks(workDir);
         p1Item7Api23ContentLengthAndRangeModes();
+        test11NetdiskDrivePriorityOrderAndPlaybackSelection();
 
         System.out.println("PASS ALL MobileIos077ParityChecks (" + passedCount + " suites passed)");
     }
@@ -2897,5 +2898,146 @@ public final class MobileIos077ParityChecks {
         }
         pass(
                 "P1-7: API-23-safe Content-Length parsing + 206 / small 200 / non-zero 200 / oversize 200 verified");
+    }
+
+    private static Cms.Line mkLineWithUrl(String name, String epUrl) {
+        Cms.Line l = new Cms.Line();
+        l.name = name;
+        l.rawName = name;
+        Cms.Episode ep = new Cms.Episode();
+        ep.name = "第1集";
+        ep.url = epUrl;
+        l.episodes.add(ep);
+        return l;
+    }
+
+    private static void test11NetdiskDrivePriorityOrderAndPlaybackSelection() throws Exception {
+        // 1. Line drive classification + ASCII word-boundary false-positive protection
+        check(
+                NetdiskStore.DRIVE_QUARK.equals(NetdiskStore.detectDriveKeyFromLineName("夸父原1"))
+                        && NetdiskStore.DRIVE_QUARK.equals(
+                                NetdiskStore.detectDriveKeyFromLineName("夸克4K"))
+                        && NetdiskStore.DRIVE_UC.equals(
+                                NetdiskStore.detectDriveKeyFromLineName("优汐智1"))
+                        && NetdiskStore.DRIVE_UC.equals(
+                                NetdiskStore.detectDriveKeyFromLineName("UC原画"))
+                        && NetdiskStore.DRIVE_BAIDU.equals(
+                                NetdiskStore.detectDriveKeyFromLineName("嘟嘟无限2"))
+                        && NetdiskStore.DRIVE_BAIDU.equals(
+                                NetdiskStore.detectDriveKeyFromLineName("百度网盘"))
+                        && NetdiskStore.DRIVE_ALI.equals(
+                                NetdiskStore.detectDriveKeyFromLineName("阿狸原画"))
+                        && NetdiskStore.DRIVE_ALI.equals(
+                                NetdiskStore.detectDriveKeyFromLineName("ALI-4K")),
+                "DriveOrder: detects all 4 core netdisk aliases cleanly");
+        check(
+                NetdiskStore.detectDriveKeyFromLineName("Focus HD").isEmpty()
+                        && NetdiskStore.detectDriveKeyFromLineName("Music Live").isEmpty()
+                        && NetdiskStore.detectDriveKeyFromLineName("Quality 4K").isEmpty()
+                        && NetdiskStore.detectDriveKeyFromLineName("Alias 线路").isEmpty()
+                        && NetdiskStore.detectDriveKeyFromLineName("官方直连 M3U8").isEmpty(),
+                "DriveOrder: zero false positives on non-netdisk English words (Focus/Music/Quality/Alias)");
+
+        // 2. Fallback detection by episode share URL when line name is generic
+        Cms.Line genericQ = mkLineWithUrl("网盘线路A", "https://pan.quark.cn/s/abc123");
+        Cms.Line genericB = mkLineWithUrl("网盘线路B", "https://pan.baidu.com/s/xyz999");
+        List<Cms.Line> urlOrdered =
+                NetdiskStore.sortLinesByDriveOrder(
+                        Arrays.asList(genericQ, genericB),
+                        Arrays.asList(
+                                NetdiskStore.DRIVE_BAIDU,
+                                NetdiskStore.DRIVE_QUARK,
+                                NetdiskStore.DRIVE_UC,
+                                NetdiskStore.DRIVE_ALI));
+        check(
+                "网盘线路B".equals(urlOrdered.get(0).name) && "网盘线路A".equals(urlOrdered.get(1).name),
+                "DriveOrder: classifies generic netdisk lines by episode share URL");
+
+        // 3. Real 4-drive source with multiple lines per drive -> stable order within same drive
+        List<Cms.Line> fourDrives =
+                Arrays.asList(
+                        mkLineWithUrl("夸父原1", "quark://1"),
+                        mkLineWithUrl("夸父智1", "quark://2"),
+                        mkLineWithUrl("优汐智1", "uc://1"),
+                        mkLineWithUrl("嘟嘟无限2", "baidu://1"),
+                        mkLineWithUrl("阿狸原画", "ali://1"));
+        List<String> customOrder =
+                Arrays.asList(
+                        NetdiskStore.DRIVE_BAIDU,
+                        NetdiskStore.DRIVE_ALI,
+                        NetdiskStore.DRIVE_UC,
+                        NetdiskStore.DRIVE_QUARK);
+        List<Cms.Line> sorted4 =
+                PlaybackLineRules.applyToLines(fourDrives, new JSONObject(), customOrder);
+        check(
+                "嘟嘟无限2".equals(sorted4.get(0).name)
+                        && "阿狸原画".equals(sorted4.get(1).name)
+                        && "优汐智1".equals(sorted4.get(2).name)
+                        && "夸父原1".equals(sorted4.get(3).name)
+                        && "夸父智1".equals(sorted4.get(4).name),
+                "DriveOrder: 4-drive lines sort strictly by custom order & preserve same-drive stability");
+
+        // 4. Mixed direct stream + extended netdisks + core drives:
+        //    non-netdisk direct stream keeps slot 0; core drives lead extended netdisks
+        List<Cms.Line> mixed =
+                Arrays.asList(
+                        mkLineWithUrl("官方直连", "https://cdn.example/live.m3u8"),
+                        mkLineWithUrl("115原画", "pan115://sw123"),
+                        mkLineWithUrl("天翼云盘", "pan189://abc"),
+                        mkLineWithUrl("夸父原1", "quark://1"),
+                        mkLineWithUrl("嘟嘟无限2", "baidu://1"));
+        List<Cms.Line> mixedOut =
+                PlaybackLineRules.applyToLines(mixed, new JSONObject(), customOrder);
+        check(
+                "官方直连".equals(mixedOut.get(0).name)
+                        && "嘟嘟无限2".equals(mixedOut.get(1).name)
+                        && "夸父原1".equals(mixedOut.get(2).name)
+                        && "115原画".equals(mixedOut.get(3).name)
+                        && "天翼云盘".equals(mixedOut.get(4).name),
+                "DriveOrder: preserves non-netdisk direct slot & ranks core drives ahead of 115/天翼");
+
+        // 5. Explicit per-site PlaybackLineRules preferred overrides global drive order
+        JSONObject perSiteRule = new JSONObject();
+        PlaybackLineRules.setPreferred(perSiteRule, "优汐智1");
+        List<Cms.Line> withOverride =
+                PlaybackLineRules.applyToLines(fourDrives, perSiteRule, customOrder);
+        check(
+                "优汐智1".equals(withOverride.get(0).name)
+                        && "嘟嘟无限2".equals(withOverride.get(1).name)
+                        && "阿狸原画".equals(withOverride.get(2).name),
+                "DriveOrder: per-site explicit preferred line takes precedence while rest obey drive order");
+
+        // 6. UI reorder helper (pin-to-top, move up, move down)
+        List<String> moved = NetdiskStore.moveDriveInOrder(NetdiskStore.DEFAULT_ORDER, 2, 0);
+        check(
+                Arrays.asList(
+                                NetdiskStore.DRIVE_BAIDU,
+                                NetdiskStore.DRIVE_QUARK,
+                                NetdiskStore.DRIVE_UC,
+                                NetdiskStore.DRIVE_ALI)
+                        .equals(moved),
+                "DriveOrder: moveDriveInOrder pins baidu to #1 cleanly");
+
+        // 7. Static wiring verification: AccountPanel "切换盘序" opens showDriveOrderSheet (not manual
+        // creds)
+        File repoRoot = new File(".").getCanonicalFile();
+        File acctFile =
+                new File(
+                        repoRoot,
+                        "android-mobile/src/main/java/com/pilipala/marcomovie/AccountPanel.java");
+        if (acctFile.isFile()) {
+            String acctSrc =
+                    new String(
+                            java.nio.file.Files.readAllBytes(acctFile.toPath()),
+                            StandardCharsets.UTF_8);
+            check(
+                    acctSrc.contains("PersonalNetdiskBrowser.showDriveOrderSheet(a, onRefresh)"),
+                    "DriveOrder: AccountPanel 切换盘序 button opens dedicated showDriveOrderSheet");
+            check(
+                    !acctSrc.contains(
+                            "\"切换盘序\",\n                        false,\n                        true,\n                        () -> PersonalNetdiskBrowser.showManualCredentialSheet"),
+                    "DriveOrder: AccountPanel 切换盘序 no longer opens manual credential sheet");
+        }
+        pass("DriveOrder: dedicated 切换盘序 sheet wiring + 4-drive default line ordering verified");
     }
 }

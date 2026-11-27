@@ -206,6 +206,11 @@ final class PlaybackLineRules {
      * mutations (e.g. reordering in-place during playback).
      */
     static List<Cms.Line> applyToLines(List<Cms.Line> inputLines, JSONObject rule) {
+        return applyToLines(inputLines, rule, null);
+    }
+
+    static List<Cms.Line> applyToLines(
+            List<Cms.Line> inputLines, JSONObject rule, List<String> netdiskDriveOrder) {
         if (inputLines == null || inputLines.isEmpty()) return new ArrayList<>();
         JSONObject aliases = rule != null ? rule.optJSONObject("aliases") : null;
         Set<String> hidden =
@@ -279,7 +284,11 @@ final class PlaybackLineRules {
             Cms.Line l = byId.remove(lid);
             if (l != null) ordered.add(l);
         }
-        ordered.addAll(byId.values());
+        List<Cms.Line> remaining = new ArrayList<>(byId.values());
+        if (netdiskDriveOrder != null && !netdiskDriveOrder.isEmpty() && remaining.size() > 1) {
+            remaining = NetdiskStore.sortLinesByDriveOrder(remaining, netdiskDriveOrder);
+        }
+        ordered.addAll(remaining);
         return ordered;
     }
 
@@ -330,7 +339,8 @@ final class PlaybackLineRules {
         Cms.Line prevActive = trackingActive ? a.activeLine : null;
         Cms.Episode prevEp = trackingActive ? a.activeEpisode : null;
         JSONObject rule = loadRuleForSite(a, site);
-        List<Cms.Line> transformed = applyToLines(video.lines, rule);
+        List<String> driveOrder = NetdiskStore.getOrder(a);
+        List<Cms.Line> transformed = applyToLines(video.lines, rule, driveOrder);
         video.lines.clear();
         video.lines.addAll(transformed);
         if (trackingActive) {

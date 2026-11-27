@@ -1122,6 +1122,7 @@ final class MobileDetailScreen {
                     for (java.util.Iterator<Cms.Line> it = v.lines.iterator(); it.hasNext(); ) {
                         if (it.next().episodes.isEmpty()) it.remove();
                     }
+                    PlaybackLineRules.applyToVideo(a, curSite, v);
                     int firstLineCount =
                             v.lines.isEmpty()
                                     ? 0

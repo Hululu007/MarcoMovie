@@ -671,6 +671,223 @@ final class NetdiskStore {
         return sb.toString();
     }
 
+    static String joinOrderCsv(List<String> order) {
+        List<String> list = order == null || order.isEmpty() ? DEFAULT_ORDER : order;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < list.size(); i++) {
+            if (i > 0) sb.append(',');
+            sb.append(list.get(i));
+        }
+        return sb.toString();
+    }
+
+    static List<String> moveDriveInOrder(List<String> currentOrder, int fromIndex, int toIndex) {
+        List<String> list =
+                new ArrayList<>(
+                        currentOrder == null || currentOrder.isEmpty()
+                                ? DEFAULT_ORDER
+                                : currentOrder);
+        if (fromIndex < 0
+                || fromIndex >= list.size()
+                || toIndex < 0
+                || toIndex >= list.size()
+                || fromIndex == toIndex) {
+            return list;
+        }
+        String moved = list.remove(fromIndex);
+        list.add(toIndex, moved);
+        return list;
+    }
+
+    private static boolean isAsciiLetter(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    }
+
+    private static boolean containsAsciiWord(String lower, String word) {
+        int wlen = word.length();
+        int idx = lower.indexOf(word);
+        while (idx >= 0) {
+            boolean leftOk = idx == 0 || !isAsciiLetter(lower.charAt(idx - 1));
+            int end = idx + wlen;
+            boolean rightOk = end >= lower.length() || !isAsciiLetter(lower.charAt(end));
+            if (leftOk && rightOk) return true;
+            idx = lower.indexOf(word, idx + 1);
+        }
+        return false;
+    }
+
+    /** Recognizes one of the 4 core netdisk keys from a line title (with ASCII boundary guards). */
+    static String detectDriveKeyFromLineName(String raw) {
+        if (raw == null || raw.trim().isEmpty()) return "";
+        String lower = raw.trim().toLowerCase(Locale.ROOT);
+        if (lower.contains("夸克")
+                || lower.contains("夸父")
+                || lower.contains("kuake")
+                || lower.contains("quark")
+                || lower.contains("pan.quark.cn")
+                || lower.contains("qk原画")
+                || lower.contains("qk4k")
+                || lower.contains("qk智")) {
+            return DRIVE_QUARK;
+        }
+        if (lower.contains("优汐")
+                || lower.contains("drive.uc.cn")
+                || lower.contains("fast.uc.cn")
+                || containsAsciiWord(lower, "uc")) {
+            return DRIVE_UC;
+        }
+        if (lower.contains("百度")
+                || lower.contains("摆渡")
+                || lower.contains("嘟嘟")
+                || lower.contains("baidu")
+                || lower.contains("baidupan")
+                || lower.contains("pan.baidu.com")
+                || lower.contains("yun.baidu.com")
+                || lower.contains("bdwp")) {
+            return DRIVE_BAIDU;
+        }
+        if (lower.contains("阿里")
+                || lower.contains("阿狸")
+                || lower.contains("alipan")
+                || lower.contains("aliyundrive")
+                || lower.contains("aliyun")
+                || containsAsciiWord(lower, "ali")) {
+            return DRIVE_ALI;
+        }
+        return "";
+    }
+
+    private static String detectDriveKeyFromEpisodeUrl(String rawUrl) {
+        if (rawUrl == null || rawUrl.trim().isEmpty()) return "";
+        String lower = rawUrl.trim().toLowerCase(Locale.ROOT);
+        if (lower.contains("pan.quark.cn")) return DRIVE_QUARK;
+        if (lower.contains("drive.uc.cn") || lower.contains("fast.uc.cn")) return DRIVE_UC;
+        if (lower.contains("pan.baidu.com") || lower.contains("yun.baidu.com")) return DRIVE_BAIDU;
+        if (lower.contains("alipan.com") || lower.contains("aliyundrive.com")) return DRIVE_ALI;
+        return "";
+    }
+
+    /**
+     * Classifies a playback {@link Cms.Line} into one of the 4 core netdisk keys ({@code quark},
+     * {@code uc}, {@code baidu}, {@code ali}), inspecting {@code rawName}, display {@code name},
+     * and (as fallback) episode share URLs.
+     */
+    static String detectLineDriveKey(Cms.Line line) {
+        if (line == null) return "";
+        String byRaw = detectDriveKeyFromLineName(line.rawName());
+        if (!byRaw.isEmpty()) return byRaw;
+        String byName = detectDriveKeyFromLineName(line.name);
+        if (!byName.isEmpty()) return byName;
+        if (line.episodes != null) {
+            int limit = Math.min(2, line.episodes.size());
+            for (int i = 0; i < limit; i++) {
+                Cms.Episode ep = line.episodes.get(i);
+                if (ep == null) continue;
+                String byUrl = detectDriveKeyFromEpisodeUrl(ep.url);
+                if (!byUrl.isEmpty()) return byUrl;
+            }
+        }
+        return "";
+    }
+
+    static boolean isExtendedNetdiskLine(Cms.Line line) {
+        if (line == null) return false;
+        String combined =
+                ((line.rawName() == null ? "" : line.rawName())
+                                + " "
+                                + (line.name == null ? "" : line.name))
+                        .toLowerCase(Locale.ROOT);
+        if (combined.contains("115")
+                || combined.contains("天翼")
+                || combined.contains("189")
+                || combined.contains("移动云")
+                || combined.contains("移动网盘")
+                || combined.contains("移动原画")
+                || combined.contains("139")
+                || combined.contains("123云")
+                || combined.contains("123盘")
+                || combined.contains("123网盘")
+                || combined.contains("迅雷")
+                || combined.contains("thunder")
+                || combined.contains("pikpak")) {
+            return true;
+        }
+        if (line.episodes != null && !line.episodes.isEmpty()) {
+            Cms.Episode ep = line.episodes.get(0);
+            String u = ep != null && ep.url != null ? ep.url.toLowerCase(Locale.ROOT) : "";
+            return u.contains("115.com")
+                    || u.contains("115cdn.com")
+                    || u.contains("cloud.189.cn")
+                    || u.contains("yun.139.com")
+                    || u.contains("123pan.com")
+                    || u.contains("123684.com")
+                    || u.contains("pan.xunlei.com");
+        }
+        return false;
+    }
+
+    /**
+     * Stably reorders netdisk lines according to {@code driveOrder} while keeping non-netdisk
+     * (e.g. direct stream) lines in their original slots. Multiple lines belonging to the same
+     * drive retain their upstream relative order, and prioritized core drives are placed ahead of
+     * extended netdisk lines (115 / 天翼 / 移动 / 123 / 迅雷).
+     */
+    static List<Cms.Line> sortLinesByDriveOrder(List<Cms.Line> lines, List<String> driveOrder) {
+        if (lines == null || lines.size() <= 1) {
+            return lines == null ? new ArrayList<Cms.Line>() : new ArrayList<Cms.Line>(lines);
+        }
+        final List<String> effectiveOrder =
+                (driveOrder == null || driveOrder.isEmpty())
+                        ? DEFAULT_ORDER
+                        : parseOrder(joinOrderCsv(driveOrder));
+        final Map<String, Integer> rankMap = new HashMap<>();
+        for (int i = 0; i < effectiveOrder.size(); i++) {
+            rankMap.put(effectiveOrder.get(i), i);
+        }
+        final int extendedRank = effectiveOrder.size();
+
+        List<Integer> netdiskSlots = new ArrayList<>();
+        List<Cms.Line> netdiskLines = new ArrayList<>();
+        boolean hasCoreDrive = false;
+        for (int i = 0; i < lines.size(); i++) {
+            Cms.Line l = lines.get(i);
+            String dk = detectLineDriveKey(l);
+            if (!dk.isEmpty()) {
+                hasCoreDrive = true;
+                netdiskSlots.add(i);
+                netdiskLines.add(l);
+            } else if (isExtendedNetdiskLine(l)) {
+                netdiskSlots.add(i);
+                netdiskLines.add(l);
+            }
+        }
+        if (!hasCoreDrive || netdiskLines.size() <= 1) {
+            return new ArrayList<>(lines);
+        }
+
+        Collections.sort(
+                netdiskLines,
+                (a, b) -> {
+                    String da = detectLineDriveKey(a);
+                    String db = detectLineDriveKey(b);
+                    int ra =
+                            !da.isEmpty() && rankMap.containsKey(da)
+                                    ? rankMap.get(da)
+                                    : extendedRank;
+                    int rb =
+                            !db.isEmpty() && rankMap.containsKey(db)
+                                    ? rankMap.get(db)
+                                    : extendedRank;
+                    return Integer.compare(ra, rb);
+                });
+
+        List<Cms.Line> out = new ArrayList<>(lines);
+        for (int i = 0; i < netdiskSlots.size(); i++) {
+            out.set(netdiskSlots.get(i), netdiskLines.get(i));
+        }
+        return out;
+    }
+
     static Map<String, String> allCredentials(KeyValueStore store) {
         Map<String, String> out = new LinkedHashMap<>();
         for (String d : DEFAULT_ORDER) {

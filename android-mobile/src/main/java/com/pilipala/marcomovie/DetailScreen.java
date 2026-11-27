@@ -243,6 +243,7 @@ final class DetailScreen {
                     for (java.util.Iterator<Cms.Line> it = v.lines.iterator(); it.hasNext(); ) {
                         if (it.next().episodes.isEmpty()) it.remove();
                     }
+                    PlaybackLineRules.applyToVideo(a, s, v);
                     if (v.lines.isEmpty()) {
                         TextView empty = a.text("这部影片没有返回可识别的播放线路。", 15, MainActivity.MUTED);
                         empty.setGravity(Gravity.CENTER);

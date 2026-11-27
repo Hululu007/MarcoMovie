@@ -342,6 +342,240 @@ final class PersonalNetdiskBrowser {
     }
 
     // =========================================================================
+    // 1b. Dedicated Visual Netdisk Priority Order Sheet ("切换盘序")
+    // =========================================================================
+
+    static void showDriveOrderSheet(final MainActivity a, final Runnable onSaved) {
+        if (a == null || a.isFinishing()) return;
+        final MobileTheme.Palette p = MobileTheme.of(a);
+        final List<String> working = new ArrayList<>(NetdiskStore.getOrder(a));
+
+        LinearLayout box = a.vertical();
+        box.setPadding(a.dp(4), a.dp(4), a.dp(4), a.dp(8));
+
+        TextView note =
+                a.text(
+                        "同一片源包含多个网盘线路时，将按以下顺序排列并默认优先拉取播放；已有观看续播记录或该源单独设置过默认线路时仍优先尊重。",
+                        12f,
+                        p.textSecondary);
+        note.setLineSpacing(a.dp(2), 1f);
+        box.addView(note);
+        a.gap(box, 10);
+
+        final TextView previewTv = a.text(NetdiskStore.formatOrderBanner(working), 13f, p.accent);
+        previewTv.setTypeface(null, Typeface.BOLD);
+        previewTv.setSingleLine(true);
+        previewTv.setEllipsize(TextUtils.TruncateAt.END);
+        previewTv.setPadding(a.dp(12), a.dp(8), a.dp(12), a.dp(8));
+        previewTv.setBackground(
+                MobileTheme.outlinedBg(
+                        a,
+                        MobileTheme.withAlpha(p.accent, p.isDark ? 0x26 : 0x16),
+                        MobileTheme.withAlpha(p.accent, p.isDark ? 0x66 : 0x44),
+                        12));
+        box.addView(previewTv, new LinearLayout.LayoutParams(-1, -2));
+        a.gap(box, 10);
+
+        final LinearLayout listBox = a.vertical();
+        box.addView(listBox, new LinearLayout.LayoutParams(-1, -2));
+
+        final Runnable[] rebuild = new Runnable[1];
+        rebuild[0] =
+                () -> {
+                    previewTv.setText(NetdiskStore.formatOrderBanner(working));
+                    listBox.removeAllViews();
+                    for (int i = 0; i < working.size(); i++) {
+                        final int idx = i;
+                        final String driveKey = working.get(i);
+                        final boolean isFirst = (i == 0);
+                        final boolean logged = AccountPanel.isDriveLoggedIn(a, driveKey);
+
+                        LinearLayout row = a.row();
+                        row.setTag("drive-order-row-" + driveKey);
+                        row.setGravity(Gravity.CENTER_VERTICAL);
+                        row.setPadding(a.dp(12), a.dp(11), a.dp(10), a.dp(11));
+                        row.setBackground(
+                                MobileTheme.outlinedBg(
+                                        a,
+                                        p.bgCard,
+                                        isFirst
+                                                ? MobileTheme.withAlpha(
+                                                        p.accent, p.isDark ? 0x80 : 0x60)
+                                                : p.hairline,
+                                        14));
+
+                        TextView rankBadge =
+                                a.text(
+                                        String.valueOf(i + 1),
+                                        12.5f,
+                                        isFirst ? p.accentOnFill : p.textSecondary);
+                        rankBadge.setTypeface(null, Typeface.BOLD);
+                        rankBadge.setGravity(Gravity.CENTER);
+                        rankBadge.setBackground(
+                                isFirst ? a.bg(p.accent, 999) : MobileTheme.subtleBg(a, 999));
+                        LinearLayout.LayoutParams rbLp =
+                                new LinearLayout.LayoutParams(a.dp(26), a.dp(26));
+                        rbLp.rightMargin = a.dp(10);
+                        row.addView(rankBadge, rbLp);
+
+                        LinearLayout info = a.vertical();
+                        LinearLayout titleLine = a.row();
+                        titleLine.setGravity(Gravity.CENTER_VERTICAL);
+                        TextView nameTv =
+                                a.text(NetdiskStore.displayName(driveKey), 14.5f, p.textPrimary);
+                        nameTv.setTypeface(null, Typeface.BOLD);
+                        nameTv.setSingleLine(true);
+                        titleLine.addView(nameTv);
+
+                        TextView statusTv =
+                                a.text(
+                                        logged ? "已登录" : "未登录",
+                                        10.5f,
+                                        logged ? p.success : p.textTertiary);
+                        statusTv.setTypeface(null, Typeface.BOLD);
+                        statusTv.setPadding(a.dp(7), a.dp(2), a.dp(7), a.dp(2));
+                        statusTv.setBackground(
+                                logged
+                                        ? a.bg(
+                                                MobileTheme.withAlpha(
+                                                        p.success, p.isDark ? 0x2A : 0x1A),
+                                                999)
+                                        : MobileTheme.subtleBg(a, 999));
+                        LinearLayout.LayoutParams stLp = new LinearLayout.LayoutParams(-2, -2);
+                        stLp.leftMargin = a.dp(6);
+                        titleLine.addView(statusTv, stLp);
+                        info.addView(titleLine);
+
+                        TextView aliasTv =
+                                a.text(
+                                        driveOrderSubtitle(driveKey, isFirst),
+                                        11.5f,
+                                        isFirst ? p.accent : p.textSecondary);
+                        aliasTv.setSingleLine(true);
+                        aliasTv.setEllipsize(TextUtils.TruncateAt.END);
+                        aliasTv.setPadding(0, a.dp(2), 0, 0);
+                        info.addView(aliasTv);
+                        row.addView(info, new LinearLayout.LayoutParams(0, -2, 1f));
+
+                        LinearLayout actions = a.row();
+                        actions.setGravity(Gravity.CENTER_VERTICAL);
+                        if (i > 1) {
+                            TextView topBtn = buildOrderActionPill(a, "置顶", false);
+                            topBtn.setOnClickListener(
+                                    v -> {
+                                        List<String> next =
+                                                NetdiskStore.moveDriveInOrder(working, idx, 0);
+                                        working.clear();
+                                        working.addAll(next);
+                                        rebuild[0].run();
+                                    });
+                            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+                            lp.rightMargin = a.dp(5);
+                            actions.addView(topBtn, lp);
+                        }
+                        if (i > 0) {
+                            TextView upBtn = buildOrderActionPill(a, "上移", true);
+                            upBtn.setOnClickListener(
+                                    v -> {
+                                        List<String> next =
+                                                NetdiskStore.moveDriveInOrder(
+                                                        working, idx, idx - 1);
+                                        working.clear();
+                                        working.addAll(next);
+                                        rebuild[0].run();
+                                    });
+                            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+                            lp.rightMargin = i < working.size() - 1 ? a.dp(5) : 0;
+                            actions.addView(upBtn, lp);
+                        }
+                        if (i < working.size() - 1) {
+                            TextView downBtn = buildOrderActionPill(a, "下移", false);
+                            downBtn.setOnClickListener(
+                                    v -> {
+                                        List<String> next =
+                                                NetdiskStore.moveDriveInOrder(
+                                                        working, idx, idx + 1);
+                                        working.clear();
+                                        working.addAll(next);
+                                        rebuild[0].run();
+                                    });
+                            actions.addView(downBtn, new LinearLayout.LayoutParams(-2, -2));
+                        }
+                        LinearLayout.LayoutParams actLp = new LinearLayout.LayoutParams(-2, -2);
+                        actLp.leftMargin = a.dp(6);
+                        row.addView(actions, actLp);
+
+                        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(-1, -2);
+                        rowLp.bottomMargin = a.dp(8);
+                        listBox.addView(row, rowLp);
+                    }
+                };
+        rebuild[0].run();
+        a.gap(box, 6);
+
+        LinearLayout footer = a.row();
+        footer.setGravity(Gravity.CENTER_VERTICAL);
+        TextView resetBtn = buildPillBtn(a, "恢复默认", false);
+        LinearLayout.LayoutParams resetLp = new LinearLayout.LayoutParams(0, a.dp(42), 1f);
+        resetLp.rightMargin = a.dp(8);
+        footer.addView(resetBtn, resetLp);
+
+        TextView saveBtn = buildPillBtn(a, "保存盘序", true);
+        LinearLayout.LayoutParams saveLp = new LinearLayout.LayoutParams(0, a.dp(42), 1.4f);
+        footer.addView(saveBtn, saveLp);
+        box.addView(footer, new LinearLayout.LayoutParams(-1, -2));
+
+        final MobileBottomSheet.SheetHandle handle =
+                MobileBottomSheet.showCustom(a, "切换默认盘序", box, null);
+
+        resetBtn.setOnClickListener(
+                v -> {
+                    working.clear();
+                    working.addAll(NetdiskStore.DEFAULT_ORDER);
+                    rebuild[0].run();
+                });
+
+        saveBtn.setOnClickListener(
+                v -> {
+                    NetdiskStore.setOrder(a, working);
+                    ConfigCenterBridge.pushAuthorizedDrives(
+                            a, a.config, Collections.<String>emptyList(), true);
+                    handle.dismiss();
+                    a.toast("已保存默认" + NetdiskStore.formatOrderBanner(working));
+                    if (onSaved != null) onSaved.run();
+                });
+    }
+
+    private static String driveOrderSubtitle(String driveKey, boolean isFirst) {
+        String alias;
+        if (NetdiskStore.DRIVE_QUARK.equals(driveKey)) {
+            alias = "夸父 / 夸克线路";
+        } else if (NetdiskStore.DRIVE_UC.equals(driveKey)) {
+            alias = "优汐 / UC 线路";
+        } else if (NetdiskStore.DRIVE_BAIDU.equals(driveKey)) {
+            alias = "嘟嘟 / 百度线路";
+        } else if (NetdiskStore.DRIVE_ALI.equals(driveKey)) {
+            alias = "阿狸 / 阿里线路";
+        } else {
+            alias = driveKey;
+        }
+        return isFirst ? ("默认优先 · " + alias) : alias;
+    }
+
+    private static TextView buildOrderActionPill(MainActivity a, String label, boolean accent) {
+        MobileTheme.Palette p = MobileTheme.of(a);
+        TextView tv = a.text(label, 12f, accent ? p.accent : p.textSecondary);
+        tv.setTypeface(null, Typeface.BOLD);
+        tv.setPadding(a.dp(9), a.dp(5), a.dp(9), a.dp(5));
+        tv.setBackground(
+                accent
+                        ? a.bg(MobileTheme.withAlpha(p.accent, p.isDark ? 0x2B : 0x1A), 999)
+                        : MobileTheme.subtleBg(a, 999));
+        MobileMotion.bindPress(tv, 0.94f);
+        return tv;
+    }
+
+    // =========================================================================
     // 2. Manual Credential & Drive Order Sheet (Path 2)
     // =========================================================================
 
