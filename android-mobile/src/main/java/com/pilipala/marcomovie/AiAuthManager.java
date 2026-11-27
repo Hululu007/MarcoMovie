@@ -576,20 +576,27 @@ final class AiAuthManager {
         }
     }
 
+    static final long OPENROUTER_FOREGROUND_WAIT_MS = 15_000L;
+
     static boolean awaitForeground(long timeoutMs) {
+        return awaitForeground(timeoutMs, null);
+    }
+
+    static boolean awaitForeground(long timeoutMs, AtomicBoolean cancelled) {
         long deadline = System.currentTimeMillis() + Math.max(0L, timeoutMs);
         synchronized (FOREGROUND_LOCK) {
             while (!activityForeground) {
+                if (cancelled != null && cancelled.get()) return false;
                 long remain = deadline - System.currentTimeMillis();
                 if (remain <= 0L) return false;
                 try {
-                    FOREGROUND_LOCK.wait(Math.min(remain, 500L));
+                    FOREGROUND_LOCK.wait(Math.min(remain, 250L));
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     return activityForeground;
                 }
             }
-            return true;
+            return cancelled == null || !cancelled.get();
         }
     }
 
@@ -758,6 +765,9 @@ final class AiAuthManager {
     static void cancelOAuthAttempt(Store store, OAuthAttemptToken attempt) {
         if (attempt == null) return;
         attempt.cancelled.set(true);
+        synchronized (FOREGROUND_LOCK) {
+            FOREGROUND_LOCK.notifyAll();
+        }
         if (store == null || attempt.providerId == null || attempt.providerId.isEmpty()) return;
         synchronized (AUTH_SELECTION_LOCK) {
             synchronized (sessionStateLockFor(attempt.providerId)) {
@@ -775,6 +785,66 @@ final class AiAuthManager {
                     bumpAuthSelectionEpochLocked(store);
                 }
             }
+        }
+    }
+
+    /**
+     * Pure-JVM lifecycle coordinator distinguishing immediate user-initiated sheet close (before
+     * exit animation ends) from programmatic close after a committed OAuth login.
+     */
+    static final class OAuthSheetCancellationCoordinator {
+        private final Store store;
+        private final OAuthAttemptToken attempt;
+        private final Runnable closeCallbackServer;
+        private final AtomicBoolean programmaticSuccess = new AtomicBoolean(false);
+
+        OAuthSheetCancellationCoordinator(
+                Store store, OAuthAttemptToken attempt, Runnable closeCallbackServer) {
+            this.store = store;
+            this.attempt = attempt;
+            this.closeCallbackServer = closeCallbackServer;
+        }
+
+        /** Called synchronously the moment user taps Close/Cancel/backdrop/Back/drag. */
+        void onUserCloseInitiated() {
+            if (programmaticSuccess.get()) return;
+            cancelOAuthAttempt(store, attempt);
+            if (closeCallbackServer != null) {
+                try {
+                    closeCallbackServer.run();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+
+        /**
+         * Atomically commits the bundle and enables AI ONLY if user close was not initiated before
+         * token exchange completed.
+         */
+        boolean commitSuccessAtomically(
+                OAuthBundle bundle, GateCheck gateCheck, Runnable onEnableAi) {
+            boolean committed = completeOAuthSignInAtomically(store, attempt, bundle, gateCheck);
+            if (!committed) return false;
+            programmaticSuccess.set(true);
+            if (onEnableAi != null) onEnableAi.run();
+            return true;
+        }
+
+        /** Called when the dialog finishes its exit animation. */
+        void onDialogDismissAnimationFinished() {
+            if (!programmaticSuccess.get()) {
+                cancelOAuthAttempt(store, attempt);
+            }
+            if (closeCallbackServer != null) {
+                try {
+                    closeCallbackServer.run();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+
+        boolean isProgrammaticSuccess() {
+            return programmaticSuccess.get();
         }
     }
 
@@ -1709,6 +1779,14 @@ final class AiAuthManager {
         final Store st = store(a);
         final OAuthAttemptToken attempt = beginOAuthAttempt(st, OAUTH_OPENROUTER);
         final LoopbackCallbackServer[] serverRef = new LoopbackCallbackServer[1];
+        final OAuthSheetCancellationCoordinator coordinator =
+                new OAuthSheetCancellationCoordinator(
+                        st,
+                        attempt,
+                        () -> {
+                            LoopbackCallbackServer srv = serverRef[0];
+                            if (srv != null) srv.close();
+                        });
 
         LinearLayout box = a.vertical();
         box.setPadding(a.dp(4), a.dp(6), a.dp(4), a.dp(6));
@@ -1722,10 +1800,8 @@ final class AiAuthManager {
                         a,
                         "OpenRouter 官方 OAuth 登录",
                         box,
-                        () -> {
-                            cancelOAuthAttempt(st, attempt);
-                            if (serverRef[0] != null) serverRef[0].close();
-                        });
+                        coordinator::onDialogDismissAnimationFinished);
+        handle.setOnUserDismissInitiated(coordinator::onUserCloseInitiated);
 
         a.worker.execute(
                 () -> {
@@ -1758,24 +1834,36 @@ final class AiAuthManager {
                         if (code == null || code.trim().isEmpty()) {
                             throw new IOException("回调缺少授权码 code");
                         }
+                        final long fgWaitSec = OPENROUTER_FOREGROUND_WAIT_MS / 1000L;
                         a.ui.post(
                                 () -> {
                                     if (!attempt.cancelled.get()) {
-                                        statusTv.setText("已收到授权回调，等待回到应用前台并换取密钥…");
+                                        statusTv.setText(
+                                                "已收到授权回调，请在 " + fgWaitSec + " 秒内返回应用前台以完成密钥换取…");
                                     }
                                 });
-                        awaitForeground(15_000L);
+                        boolean returnedFg =
+                                awaitForeground(OPENROUTER_FOREGROUND_WAIT_MS, attempt.cancelled);
                         if (attempt.cancelled.get()) return;
+                        if (!returnedFg) {
+                            throw new IOException(
+                                    "等待返回应用前台超时（" + fgWaitSec + " 秒），请切回应用后重新发起 OpenRouter 登录");
+                        }
                         final OAuthBundle bundle =
                                 exchangeOpenRouterCode(
                                         OPENROUTER_EXCHANGE_URL, code.trim(), pkce.verifier);
                         boolean committed =
-                                completeOAuthSignInAtomically(
-                                        st, attempt, bundle, () -> AiBetaGate.isUnlocked(a));
+                                coordinator.commitSuccessAtomically(
+                                        bundle,
+                                        () -> AiBetaGate.isUnlocked(a),
+                                        () ->
+                                                a.mobilePrefs()
+                                                        .edit()
+                                                        .putBoolean(Prefs.AI_ENABLED, true)
+                                                        .apply());
                         if (!committed) {
                             return;
                         }
-                        a.mobilePrefs().edit().putBoolean(Prefs.AI_ENABLED, true).apply();
                         a.ui.post(
                                 () -> {
                                     if (handle != null) handle.dismiss();

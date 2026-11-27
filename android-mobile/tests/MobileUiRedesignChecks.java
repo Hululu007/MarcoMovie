@@ -2211,6 +2211,59 @@ public final class MobileUiRedesignChecks {
                                 == -1,
                 "Pillar 10 dock (P2-3): same-orientation fold relayout preserves active tab and scroll position");
 
+        // Round-4 P2-2a: Same-orientation fold on Live TV preserves source, group, filter query,
+        // and left/right scroll positions!
+        MobileLivePage.clearRelayoutState();
+        MobileLivePage.recordRelayoutState(
+                new MobileLivePage.LiveRelayoutState(
+                        "https://live.example/backup.m3u", 1, 3, "CCTV", 180, 920));
+        MobileLivePage.LiveRelayoutState liveRestored = MobileLivePage.consumeRelayoutState();
+        List<String> liveUrls =
+                Arrays.asList(
+                        "https://live.example/main.m3u",
+                        "https://live.example/extra.m3u",
+                        "https://live.example/backup.m3u");
+        check(
+                liveRestored != null
+                        && MobileLivePage.resolveRestoredSourceIndex(liveRestored, liveUrls) == 2
+                        && MobileLivePage.resolveRestoredGroupIndex(liveRestored, 5) == 3
+                        && "CCTV".equals(liveRestored.filterQuery)
+                        && liveRestored.groupScrollY == 180
+                        && liveRestored.channelScrollY == 920
+                        && MobileLivePage.consumeRelayoutState() == null,
+                "R4 P2-2: same-orientation fold preserves Live TV source, group, filter query, and left/right scroll offsets");
+
+        // Round-4 P2-2b: Short scrollable Dock quick menu rejects finger release outside viewport
+        // OR over rows scrolled outside the visible viewport!
+        float[] qTops = {100f, 150f, 200f, 250f};
+        float[] qBottoms = {150f, 200f, 250f, 300f};
+        int hitVisibleRow0 =
+                MobileRootShell.hitTestQuickAction(
+                        300f, 120f, 200f, 420f, 100f, 190f, qTops, qBottoms, 4f);
+        int hitVisibleRow1 =
+                MobileRootShell.hitTestQuickAction(
+                        300f, 170f, 200f, 420f, 100f, 190f, qTops, qBottoms, 4f);
+        int hitOutsideBottomInvisibleRow2 =
+                MobileRootShell.hitTestQuickAction(
+                        300f, 220f, 200f, 420f, 100f, 190f, qTops, qBottoms, 4f);
+        int hitOutsideLeft =
+                MobileRootShell.hitTestQuickAction(
+                        150f, 120f, 200f, 420f, 100f, 190f, qTops, qBottoms, 4f);
+        int hitOutsideRight =
+                MobileRootShell.hitTestQuickAction(
+                        460f, 120f, 200f, 420f, 100f, 190f, qTops, qBottoms, 4f);
+        check(
+                hitVisibleRow0 == 0
+                        && hitVisibleRow1 == 1
+                        && hitOutsideBottomInvisibleRow2 == -1
+                        && hitOutsideLeft == -1
+                        && hitOutsideRight == -1,
+                "R4 P2-2: releasing outside short Dock menu viewport or over clipped invisible row never executes action");
+
+        String livePageSrc =
+                readUtf8(
+                        root,
+                        "android-mobile/src/main/java/com/pilipala/marcomovie/MobileLivePage.java");
         String settingsSrc =
                 readUtf8(
                         root,
@@ -2253,10 +2306,12 @@ public final class MobileUiRedesignChecks {
                         && shellSrc.contains("mobile-side-rail-scroll")
                         && shellSrc.contains("dock-quick-menu-scroll")
                         && shellSrc.contains("recordRelayoutScrollState(activeTab, curScroll)")
+                        && shellSrc.contains("MobileLivePage.captureForRelayout()")
+                        && livePageSrc.contains("consumeRelayoutState()")
                         && shellSrc.contains("dlp.leftMargin = lastInsetLeft")
                         && shellSrc.contains("int cPadL = rightRail ? lastInsetLeft : 0;")
                         && homeSrc.contains("void updatePageWidth(int newWidthPx)"),
-                "Pillar 10 dock (P2-2/P2-3): Settings, 4-edge insets, scrollable side rail & quick menu, fold scroll preservation, and HeroPagerView width sync verified");
+                "Pillar 10 dock (P2-2/P2-3): Settings, 4-edge insets, scrollable side rail & quick menu, Live/fold scroll preservation, and HeroPagerView width sync verified");
         check(
                 !sourceCtrlSrc.contains("\uD83D\uDCCB")
                         && !sourceCtrlSrc.contains("\uD83D\uDCC2")

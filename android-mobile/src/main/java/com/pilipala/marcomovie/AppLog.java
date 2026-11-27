@@ -61,7 +61,7 @@ final class AppLog {
     static void registerSecretForRedaction(String secret) {
         if (secret == null) return;
         String trimmed = secret.trim();
-        if (trimmed.length() < 3) return;
+        if (trimmed.isEmpty()) return;
         synchronized (REGISTERED_SECRETS) {
             REGISTERED_SECRETS.remove(trimmed);
             while (REGISTERED_SECRETS.size() >= MAX_REGISTERED_SECRETS) {
@@ -80,11 +80,13 @@ final class AppLog {
     static String redactKnownSecret(String raw, String knownSecret) {
         if (raw == null || raw.isEmpty() || knownSecret == null) return raw == null ? "" : raw;
         String trimmed = knownSecret.trim();
-        if (trimmed.length() < 3) return raw;
+        if (trimmed.isEmpty()) return raw;
         if (trimmed.length() >= 4) {
             return raw.replace(trimmed, "[REDACTED_KEY]");
         }
-        // For 3-char custom secrets, redact token-bounded occurrences so ordinary words stay intact
+        // For 1-3 char custom gateway secrets, redact token-bounded occurrences so ordinary error
+        // bodies & diagnostic exports never leak the bare short key while preserving substrings
+        // inside unrelated words.
         return Pattern.compile("(?<![A-Za-z0-9_-])" + Pattern.quote(trimmed) + "(?![A-Za-z0-9_-])")
                 .matcher(raw)
                 .replaceAll("[REDACTED_KEY]");

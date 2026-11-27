@@ -43,6 +43,25 @@ final class AiSubtitleTranslator {
     static final int COMPLETION_CACHE_VERSION = 2;
     static final String COMPLETION_CACHE_PREFIX = "subfull_v2_";
     static final String AI_TRACK_NAME = "AI 全片双语字幕";
+    private static final java.util.concurrent.atomic.AtomicLong ACTIVE_TRANSLATION_SESSION =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+
+    static long beginActiveTranslationSession() {
+        return ACTIVE_TRANSLATION_SESSION.incrementAndGet();
+    }
+
+    static boolean isTranslationSessionActive(long sessionId) {
+        return sessionId > 0L && ACTIVE_TRANSLATION_SESSION.get() == sessionId;
+    }
+
+    /**
+     * Cancels any in-flight background subtitle translation session (e.g. when the user explicitly
+     * turns subtitles off or switches to another subtitle track) so late chunks or async mount
+     * callbacks NEVER overwrite the user's selection.
+     */
+    static void cancelActiveTranslation() {
+        ACTIVE_TRANSLATION_SESSION.incrementAndGet();
+    }
 
     private static final Pattern SRT_BLOCK =
             Pattern.compile(
@@ -269,6 +288,11 @@ final class AiSubtitleTranslator {
                 throws Exception;
     }
 
+    /** API-23-safe activity/session predicate checked before applying subtitle overlay or mounts. */
+    interface ActivityCheck {
+        boolean isActive();
+    }
+
     /**
      * Safe mount order shared across Media3, MPV, and SystemPlayer: ALWAYS keeps/populates live
      * overlay first and clears it ONLY inside {@code onMounted} after the engine successfully
@@ -282,11 +306,33 @@ final class AiSubtitleTranslator {
             String[] translations,
             boolean bilingual,
             boolean reloadMediaSource) {
+        return applySubtitleMountSafely(
+                target, uri, mime, cues, translations, bilingual, reloadMediaSource, null);
+    }
+
+    static boolean applySubtitleMountSafely(
+            SubtitleMountTarget target,
+            String uri,
+            String mime,
+            List<SrtCue> cues,
+            String[] translations,
+            boolean bilingual,
+            boolean reloadMediaSource,
+            final ActivityCheck stillActive) {
         if (target == null) return false;
+        if (stillActive != null && !stillActive.isActive()) return false;
         target.setLiveOverlay(cues, translations, bilingual);
         try {
             target.upsertExternalSubtitle(
-                    uri, AI_TRACK_NAME, mime, reloadMediaSource, target::clearLiveOverlay);
+                    uri,
+                    AI_TRACK_NAME,
+                    mime,
+                    reloadMediaSource,
+                    () -> {
+                        if (stillActive == null || stillActive.isActive()) {
+                            target.clearLiveOverlay();
+                        }
+                    });
             return true;
         } catch (Exception ex) {
             AppLog.w(
@@ -546,6 +592,7 @@ final class AiSubtitleTranslator {
 
         final boolean bilingual = a.mobilePrefs().getBoolean(Prefs.SUBTITLE_BILINGUAL, true);
         final int ticket = a.generation;
+        final long sessionId = beginActiveTranslationSession();
         final String fullCacheKey =
                 COMPLETION_CACHE_PREFIX
                         + AiAssistantService.sha256((bilingual ? "bi|" : "zh|") + rawSrtText);
@@ -553,15 +600,18 @@ final class AiSubtitleTranslator {
         a.worker.execute(
                 () -> {
                     try {
+                        if (!isTranslationSessionActive(sessionId)) return;
                         String rawCache = AiAssistantService.readDiskCache(a, fullCacheKey);
                         String cachedSrt =
                                 decodeVerifiedCompletionCache(rawCache, cues.size(), bilingual);
                         if (cachedSrt != null) {
+                            if (!isTranslationSessionActive(sessionId)) return;
                             writeUtf8(targetFile, cachedSrt);
                             List<SrtCue> cachedCues = parseSrt(cachedSrt);
                             updateOverlayAndSingleTrackOnUi(
                                     a,
                                     ticket,
+                                    sessionId,
                                     targetFile,
                                     cachedCues,
                                     null,
@@ -582,7 +632,9 @@ final class AiSubtitleTranslator {
                                 planSlidingChunks(cues.size(), focusIdx, DEFAULT_CHUNK_SIZE);
 
                         for (int cIdx = 0; cIdx < chunks.size(); cIdx++) {
-                            if (a.isFinishing() || ticket != a.generation) return;
+                            if (a.isFinishing()
+                                    || ticket != a.generation
+                                    || !isTranslationSessionActive(sessionId)) return;
                             if (!AiBetaGate.isUnlocked(a)) return;
                             int[] range = chunks.get(cIdx);
                             List<String> lines = new ArrayList<>(range[1] - range[0]);
@@ -591,7 +643,9 @@ final class AiSubtitleTranslator {
                             }
                             ChunkTranslation res = null;
                             for (int attempt = 1; attempt <= MAX_CHUNK_ATTEMPTS; attempt++) {
-                                if (a.isFinishing() || ticket != a.generation) return;
+                                if (a.isFinishing()
+                                        || ticket != a.generation
+                                        || !isTranslationSessionActive(sessionId)) return;
                                 try {
                                     ChunkTranslation cand =
                                             requestChunkFromModel(a, showTitle, lines, glossary);
@@ -614,6 +668,7 @@ final class AiSubtitleTranslator {
                                     }
                                 }
                             }
+                            if (!isTranslationSessionActive(sessionId)) return;
                             if (res != null) {
                                 for (int i = 0; i < lines.size(); i++) {
                                     translations[range[0] + i] = res.zhLines.get(i).trim();
@@ -648,6 +703,7 @@ final class AiSubtitleTranslator {
                                                 a, fullCacheKey, envelope);
                                     }
                                 }
+                                if (!isTranslationSessionActive(sessionId)) return;
                                 String toastMsg =
                                         isLast
                                                 ? (fullyDone
@@ -667,6 +723,7 @@ final class AiSubtitleTranslator {
                                 updateOverlayAndSingleTrackOnUi(
                                         a,
                                         ticket,
+                                        sessionId,
                                         targetFile,
                                         cues,
                                         translations.clone(),
@@ -683,7 +740,11 @@ final class AiSubtitleTranslator {
                                 final String[] snap = translations.clone();
                                 a.ui.post(
                                         () -> {
-                                            if (a.isFinishing() || ticket != a.generation) return;
+                                            if (a.isFinishing()
+                                                    || ticket != a.generation
+                                                    || !isTranslationSessionActive(sessionId)) {
+                                                return;
+                                            }
                                             if (a.playbackControls != null) {
                                                 a.playbackControls.setLiveAiSubtitles(
                                                         cues, snap, bilingual);
@@ -723,6 +784,7 @@ final class AiSubtitleTranslator {
     private static void updateOverlayAndSingleTrackOnUi(
             final MainActivity a,
             final int ticket,
+            final long sessionId,
             final File targetFile,
             final List<SrtCue> cues,
             final String[] translations,
@@ -735,13 +797,22 @@ final class AiSubtitleTranslator {
             final boolean completed) {
         a.ui.post(
                 () -> {
-                    if (a.isFinishing() || ticket != a.generation) return;
+                    if (a.isFinishing()
+                            || ticket != a.generation
+                            || !isTranslationSessionActive(sessionId)) {
+                        return;
+                    }
                     if (a.playbackControls != null) {
                         a.playbackControls.setActiveSubtitleFile(targetFile);
                     }
                     final boolean effectiveReload =
                             reloadPlayerMediaSource
                                     || (completed && a.player instanceof SystemPlayer);
+                    final ActivityCheck stillActive =
+                            () ->
+                                    !a.isFinishing()
+                                            && ticket == a.generation
+                                            && isTranslationSessionActive(sessionId);
                     if (a.player != null && a.prepared) {
                         final Uri subUri = Uri.fromFile(targetFile);
                         final String mime = MediaOptions.subtitleMime(targetFile.getName(), "");
@@ -750,16 +821,14 @@ final class AiSubtitleTranslator {
                                     @Override
                                     public void setLiveOverlay(
                                             List<SrtCue> c, String[] t, boolean bi) {
-                                        if (a.playbackControls != null) {
+                                        if (a.playbackControls != null && stillActive.isActive()) {
                                             a.playbackControls.setLiveAiSubtitles(c, t, bi);
                                         }
                                     }
 
                                     @Override
                                     public void clearLiveOverlay() {
-                                        if (a.playbackControls != null
-                                                && !a.isFinishing()
-                                                && ticket == a.generation) {
+                                        if (a.playbackControls != null && stillActive.isActive()) {
                                             a.playbackControls.clearLiveAiSubtitles();
                                         }
                                     }
@@ -782,14 +851,15 @@ final class AiSubtitleTranslator {
                                 cues,
                                 translations,
                                 bilingual,
-                                effectiveReload);
-                        if (toastMsg != null && !toastMsg.isEmpty()) {
+                                effectiveReload,
+                                stillActive);
+                        if (toastMsg != null && !toastMsg.isEmpty() && stillActive.isActive()) {
                             a.toast(toastMsg);
                         }
-                    } else if (a.playbackControls != null) {
+                    } else if (a.playbackControls != null && stillActive.isActive()) {
                         a.playbackControls.setLiveAiSubtitles(cues, translations, bilingual);
                     }
-                    if (listener != null) {
+                    if (listener != null && stillActive.isActive()) {
                         listener.onPartialReady(targetFile, done, total, completed);
                     }
                 });

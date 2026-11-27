@@ -768,6 +768,8 @@ const LS_LEDGER = "marco_ai_ed25519_ledger_v2";
 let activeSeed = null;
 let activePubHex = MarcoEd25519.DEFAULT_PUB_HEX;
 let pendingRawSeed = null;
+let importSessionId = 0;
+let activeFileReader = null;
 let selectedPlats = new Set(["all"]);
 let lastIssued = { items: [], summary: "" };
 
@@ -828,7 +830,16 @@ function clearFileInput() {
     try { vf.value = ""; } catch (_) {}
   }
 }
+function invalidateActiveFileReader() {
+  importSessionId += 1;
+  const r = activeFileReader;
+  activeFileReader = null;
+  if (r && typeof r.abort === "function") {
+    try { r.abort(); } catch (_) {}
+  }
+}
 function scrubPendingImport() {
+  invalidateActiveFileReader();
   if (pendingRawSeed && pendingRawSeed.fill) pendingRawSeed.fill(0);
   pendingRawSeed = null;
   const np = document.getElementById("newVaultPwd");
@@ -912,17 +923,26 @@ function handleImportFile(ev) {
     scrubPendingImport();
     return;
   }
+  scrubPendingImport();
+  const token = ++importSessionId;
   const reader = new FileReader();
+  activeFileReader = reader;
   reader.onerror = () => {
+    if (token !== importSessionId) return;
+    if (activeFileReader === reader) activeFileReader = null;
     scrubPendingImport();
     clearVisibleOutputs();
     toast("读取密钥文件失败，已清除待处理状态");
   };
   reader.onabort = () => {
+    if (token !== importSessionId) return;
+    if (activeFileReader === reader) activeFileReader = null;
     scrubPendingImport();
     clearVisibleOutputs();
   };
   reader.onload = () => {
+    if (token !== importSessionId) return;
+    if (activeFileReader === reader) activeFileReader = null;
     clearFileInput();
     const text = String(reader.result || "").trim();
     try {

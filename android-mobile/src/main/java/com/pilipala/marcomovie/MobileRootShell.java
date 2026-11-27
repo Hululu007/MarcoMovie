@@ -424,6 +424,36 @@ final class MobileRootShell {
         return -1;
     }
 
+    /**
+     * Viewport-clipped hit-tester for scrollable low-height Dock quick menus: releasing outside the
+     * visible card/scroll viewport or over an item scrolled out of view ALWAYS returns {@code -1}.
+     */
+    static int hitTestQuickAction(
+            float fingerX,
+            float fingerY,
+            float menuLeft,
+            float menuRight,
+            float viewportTop,
+            float viewportBottom,
+            float[] itemTops,
+            float[] itemBottoms,
+            float slopPx) {
+        if (itemTops == null || itemBottoms == null || itemTops.length == 0) return -1;
+        if (viewportBottom <= viewportTop) return -1;
+        if (fingerX < menuLeft || fingerX > menuRight) return -1;
+        if (fingerY < viewportTop || fingerY > viewportBottom) return -1;
+        int n = Math.min(itemTops.length, itemBottoms.length);
+        for (int i = 0; i < n; i++) {
+            float visTop = Math.max(itemTops[i], viewportTop);
+            float visBottom = Math.min(itemBottoms[i], viewportBottom);
+            if (visBottom <= visTop) continue;
+            if (fingerY >= visTop && fingerY <= visBottom) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     interface TextAction {
         void run(String text);
     }
@@ -448,6 +478,7 @@ final class MobileRootShell {
 
     static void resetStaticState() {
         activeTab = TAB_HOME;
+        MobileLivePage.clearRelayoutState();
         librarySubTab = 0;
         settingsSubPage = 0;
         settingsHighlightKey = "";
@@ -552,6 +583,9 @@ final class MobileRootShell {
 
     static void show(MainActivity a) {
         if (a != null && a.mobileShell != null && a.mobileShell.contentContainer != null) {
+            if (activeTab == TAB_LIVE) {
+                MobileLivePage.captureForRelayout();
+            }
             int curScroll = findFirstScrollY(a.mobileShell.contentContainer);
             if (curScroll > 0) {
                 recordRelayoutScrollState(activeTab, curScroll);
@@ -1498,6 +1532,9 @@ final class MobileRootShell {
                             menuActive[0] = false;
                             sessionRef[0] = null;
                             if (act == MotionEvent.ACTION_UP && s != null) {
+                                if (draggedDuringMenu[0]) {
+                                    s.updateHover(ev.getRawX(), ev.getRawY());
+                                }
                                 if (s.hoveredIndex >= 0) {
                                     s.commitHovered();
                                 } else if (draggedDuringMenu[0]) {
@@ -1528,11 +1565,13 @@ final class MobileRootShell {
     private final class QuickMenuSession {
         final FrameLayout overlay;
         final LinearLayout card;
+        final ScrollView menuScroll;
         final List<DockQuickAction> actions;
         final List<LinearLayout> rowViews;
         final List<MobileIcons.IconView> rowIcons;
         final List<TextView> rowLabels;
         final int[] cardLoc = new int[2];
+        final int[] scrollLoc = new int[2];
         final int[] rowLoc = new int[2];
         final float[] itemTops;
         final float[] itemBottoms;
@@ -1541,12 +1580,14 @@ final class MobileRootShell {
         QuickMenuSession(
                 FrameLayout overlay,
                 LinearLayout card,
+                ScrollView menuScroll,
                 List<DockQuickAction> actions,
                 List<LinearLayout> rowViews,
                 List<MobileIcons.IconView> rowIcons,
                 List<TextView> rowLabels) {
             this.overlay = overlay;
             this.card = card;
+            this.menuScroll = menuScroll;
             this.actions = actions;
             this.rowViews = rowViews;
             this.rowIcons = rowIcons;
@@ -1560,6 +1601,16 @@ final class MobileRootShell {
             card.getLocationOnScreen(cardLoc);
             float menuLeft = cardLoc[0];
             float menuRight = cardLoc[0] + card.getWidth();
+            float viewportTop;
+            float viewportBottom;
+            if (menuScroll != null && menuScroll.getHeight() > 0) {
+                menuScroll.getLocationOnScreen(scrollLoc);
+                viewportTop = scrollLoc[1];
+                viewportBottom = scrollLoc[1] + menuScroll.getHeight();
+            } else {
+                viewportTop = cardLoc[1];
+                viewportBottom = cardLoc[1] + card.getHeight();
+            }
             for (int i = 0; i < rowViews.size(); i++) {
                 LinearLayout rv = rowViews.get(i);
                 rv.getLocationOnScreen(rowLoc);
@@ -1568,7 +1619,15 @@ final class MobileRootShell {
             }
             int next =
                     hitTestQuickAction(
-                            rawX, rawY, menuLeft, menuRight, itemTops, itemBottoms, a.dp(24));
+                            rawX,
+                            rawY,
+                            menuLeft,
+                            menuRight,
+                            viewportTop,
+                            viewportBottom,
+                            itemTops,
+                            itemBottoms,
+                            0f);
             if (next != hoveredIndex) {
                 hoveredIndex = next;
                 applyHighlight(next);
@@ -1738,7 +1797,8 @@ final class MobileRootShell {
                     .setInterpolator(MotionTokens.createStandardInterpolator())
                     .start();
         }
-        return new QuickMenuSession(overlay, card, actions, rowViews, rowIcons, rowLabels);
+        return new QuickMenuSession(
+                overlay, card, menuScroll, actions, rowViews, rowIcons, rowLabels);
     }
 
     private boolean dismissQuickMenu(boolean animate) {
@@ -2028,6 +2088,7 @@ final class MobileRootShell {
         int prevTab = lastRenderedTab;
         if (prevTab >= 0 && prevTab != index) {
             clearPendingRelayoutScrollState();
+            MobileLivePage.clearRelayoutState();
         }
         activeTab = index;
         lastRenderedTab = index;

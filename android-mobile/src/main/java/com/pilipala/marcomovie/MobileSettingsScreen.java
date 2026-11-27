@@ -1936,7 +1936,7 @@ final class MobileSettingsScreen {
                                     a,
                                     MobileIcons.IC_SLIDERS,
                                     TINT_BLUE,
-                                    "AI 认证中心（API Key / 订阅账号）",
+                                    "AI 认证中心（API Key / OpenRouter 账号）",
                                     trimCompact(AiAuthManager.activeSummaryLabel(a), 14),
                                     () -> showAiConfigDialog(shell, sv)),
                             "ms-ai-cfg"));
@@ -3105,7 +3105,7 @@ final class MobileSettingsScreen {
                 MobileBottomSheet.showHandle(
                         a,
                         "AI 认证中心",
-                        "支持 BYOK API Key 与 OpenRouter / Kimi Code 订阅账号登录",
+                        "支持 BYOK API Key 与 OpenRouter 官方账号登录 (PKCE)",
                         null,
                         null,
                         form,

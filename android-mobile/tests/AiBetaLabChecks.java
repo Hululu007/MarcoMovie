@@ -3,6 +3,7 @@ package com.pilipala.marcomovie;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -15,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -834,6 +836,79 @@ public final class AiBetaLabChecks {
                         && "mutex-fresh-at".equals(res1.get())
                         && "mutex-fresh-at".equals(res2.get()),
                 "P1-2: same-provider refresh mutex deduplicates concurrent token refreshes into 1 network call");
+
+        // 12. Round-4 P1-3: OpenRouter immediate close cancellation ("点击关闭 -> 换码成功 -> 动画结束")
+        //     MUST NOT save account or enable AI; programmatic close after normal login success
+        //     still persists account & enables AI cleanly!
+        MemoryOAuthStore stClose = new MemoryOAuthStore();
+        AiAuthManager.setAuthMode(stClose, AiAuthManager.AUTH_MODE_API_KEY);
+        AtomicBoolean serverClosed = new AtomicBoolean(false);
+        AtomicBoolean aiEnabledFlag = new AtomicBoolean(false);
+        AiAuthManager.OAuthAttemptToken openRouterCloseAttempt =
+                AiAuthManager.beginOAuthAttempt(stClose, AiAuthManager.OAUTH_OPENROUTER);
+        AiAuthManager.OAuthSheetCancellationCoordinator closeCoord =
+                new AiAuthManager.OAuthSheetCancellationCoordinator(
+                        stClose, openRouterCloseAttempt, () -> serverClosed.set(true));
+        // Step 1: User taps Close/backdrop/Back BEFORE exit animation finishes
+        closeCoord.onUserCloseInitiated();
+        // Step 2: In-flight token exchange succeeds during the exit animation window
+        AiAuthManager.OAuthBundle lateOrBundle = new AiAuthManager.OAuthBundle();
+        lateOrBundle.providerId = AiAuthManager.OAUTH_OPENROUTER;
+        lateOrBundle.accessToken = "sk-or-v1-late-during-close-anim";
+        boolean committedDuringCloseAnim =
+                closeCoord.commitSuccessAtomically(
+                        lateOrBundle, () -> true, () -> aiEnabledFlag.set(true));
+        // Step 3: Exit animation ends
+        closeCoord.onDialogDismissAnimationFinished();
+        check(
+                !committedDuringCloseAnim
+                        && serverClosed.get()
+                        && !aiEnabledFlag.get()
+                        && AiAuthManager.loadBundle(stClose, AiAuthManager.OAUTH_OPENROUTER) == null
+                        && AiAuthManager.AUTH_MODE_API_KEY.equals(AiAuthManager.authMode(stClose)),
+                "R4 P1-3: OpenRouter click-close -> late code exchange -> anim-end writes 0 account and never enables AI");
+
+        // Normal login success -> programmatic dismiss -> animation end keeps account & enables AI
+        AtomicBoolean normalServerClosed = new AtomicBoolean(false);
+        AtomicBoolean normalAiEnabled = new AtomicBoolean(false);
+        AiAuthManager.OAuthAttemptToken normalOrAttempt =
+                AiAuthManager.beginOAuthAttempt(stClose, AiAuthManager.OAUTH_OPENROUTER);
+        AiAuthManager.OAuthSheetCancellationCoordinator normalCoord =
+                new AiAuthManager.OAuthSheetCancellationCoordinator(
+                        stClose, normalOrAttempt, () -> normalServerClosed.set(true));
+        AiAuthManager.OAuthBundle okOrBundle = new AiAuthManager.OAuthBundle();
+        okOrBundle.providerId = AiAuthManager.OAUTH_OPENROUTER;
+        okOrBundle.accessToken = "sk-or-v1-normal-ok";
+        boolean normalCommitted =
+                normalCoord.commitSuccessAtomically(
+                        okOrBundle, () -> true, () -> normalAiEnabled.set(true));
+        normalCoord.onDialogDismissAnimationFinished();
+        AiAuthManager.OAuthBundle savedOkOr =
+                AiAuthManager.loadBundle(stClose, AiAuthManager.OAUTH_OPENROUTER);
+        check(
+                normalCommitted
+                        && normalCoord.isProgrammaticSuccess()
+                        && normalAiEnabled.get()
+                        && normalServerClosed.get()
+                        && savedOkOr != null
+                        && "sk-or-v1-normal-ok".equals(savedOkOr.accessToken)
+                        && AiAuthManager.AUTH_MODE_OAUTH.equals(AiAuthManager.authMode(stClose)),
+                "R4 P1-3: OpenRouter normal login -> programmatic dismiss persists account and enables AI");
+
+        // 13. Round-4 P2-3: OpenRouter foreground wait returns false cleanly on cancel / timeout
+        //     and matches 15s waiting prompt constant
+        AiAuthManager.notifyActivityBackgrounded();
+        AtomicBoolean waitCancel = new AtomicBoolean(true);
+        boolean fgWhenCancelled = AiAuthManager.awaitForeground(2_000L, waitCancel);
+        boolean fgWhenTimeout = AiAuthManager.awaitForeground(40L, new AtomicBoolean(false));
+        AiAuthManager.notifyActivityResumed();
+        boolean fgWhenActive = AiAuthManager.awaitForeground(50L, new AtomicBoolean(false));
+        check(
+                AiAuthManager.OPENROUTER_FOREGROUND_WAIT_MS == 15_000L
+                        && !fgWhenCancelled
+                        && !fgWhenTimeout
+                        && fgWhenActive,
+                "R4 P2-3: OpenRouter foreground wait honors 15s timeout constant, cancellation, and active foreground");
     }
 
     private static String makeUnsignedJwt(String payloadJson) {
@@ -1157,6 +1232,77 @@ public final class AiBetaLabChecks {
                         && !combinedDiag.contains(jsonAntHeaderVal)
                         && !combinedDiag.contains(jsonGemHeaderVal),
                 "P2-6: short custom key, JSON native auth headers (raw & escaped), nested exception causes, AppLog.dump & CrashReportStore diagnostic export are all 0-leak");
+
+        // 7. Round-4 P2-4: 1-char & 2-char custom API keys (still allowed as custom input) MUST
+        //    be redacted in ordinary error bodies AND CrashReportStore diagnostic exports without
+        //    corrupting unrelated words!
+        AppLog.clear();
+        AppLog.clearRegisteredSecrets();
+        String key1Char = "q";
+        String key2Char = "k9";
+        IOException caught1 = null;
+        try {
+            AiAuthManager.executeChatCompletion(
+                    new AiAuthManager.ResolvedRequest(
+                            AiAuthManager.WIRE_OPENAI_COMPAT,
+                            "https://relay.example/v1",
+                            "gpt-4o-mini",
+                            key1Char,
+                            "",
+                            ""),
+                    "sys",
+                    "hi",
+                    32,
+                    0.2,
+                    (u, ct, body, hdrs) ->
+                            new AiAuthManager.HttpResult(
+                                    401,
+                                    "{\"error\":{\"message\":\"Request quota rejected bare key: q\"}}"));
+        } catch (IOException e) {
+            caught1 = e;
+        }
+        IOException caught2 = null;
+        try {
+            AiAuthManager.executeChatCompletion(
+                    new AiAuthManager.ResolvedRequest(
+                            AiAuthManager.WIRE_OPENAI_COMPAT,
+                            "https://relay.example/v1",
+                            "gpt-4o-mini",
+                            key2Char,
+                            "",
+                            ""),
+                    "sys",
+                    "hi",
+                    32,
+                    0.2,
+                    (u, ct, body, hdrs) ->
+                            new AiAuthManager.HttpResult(
+                                    500, "upstream failed with token k9 on request"));
+        } catch (IOException e) {
+            caught2 = e;
+        }
+        AppLog.w("AiAssistant", "1-char fail", caught1);
+        AppLog.w("AiAssistant", "2-char fail", caught2);
+        String diag12 =
+                AppLog.dump()
+                        + "\n"
+                        + CrashReportStore.formatStackTrace(caught1)
+                        + "\n"
+                        + CrashReportStore.formatStackTrace(caught2)
+                        + "\n"
+                        + CrashReportStore.collectSanitizedAppLogs(50);
+        check(
+                caught1 != null
+                        && caught2 != null
+                        && !caught1.getMessage().contains("bare key: q")
+                        && caught1.getMessage().contains("quota")
+                        && caught1.getMessage().contains("[REDACTED_KEY]")
+                        && !caught2.getMessage().contains("token k9 ")
+                        && caught2.getMessage().contains("[REDACTED_KEY]")
+                        && !diag12.contains("bare key: q")
+                        && !diag12.contains("token k9 ")
+                        && diag12.contains("[REDACTED_KEY]"),
+                "R4 P2-4: 1-char & 2-char custom keys are redacted in ordinary error bodies and CrashReportStore diagnostic exports without mangling words");
         AppLog.clearRegisteredSecrets();
     }
 
@@ -1553,6 +1699,220 @@ public final class AiBetaLabChecks {
                         && !mountOkOnFail
                         && sysOverlayVisible.get(),
                 "P1-4: SystemPlayer progressive + cache-hit re-entry + dedupe + error-fallback overlay visibility verified");
+
+        // 7. Round-4 P1-4: User turning off subtitles or switching tracks cancels active
+        //    background AI translation so late chunks & deferred mounts NEVER overwrite user
+        // choice;
+        //    AND Media3 waits for exact target AI track selection even when another pre-existing
+        //    external subtitle is already selected!
+        long sid = AiSubtitleTranslator.beginActiveTranslationSession();
+        AiSubtitleTranslator.ActivityCheck sidActive =
+                () -> AiSubtitleTranslator.isTranslationSessionActive(sid);
+        final AtomicInteger lateOverlayWrites = new AtomicInteger(0);
+        final AtomicInteger lateOverlayClears = new AtomicInteger(0);
+        final AtomicInteger lateUpserts = new AtomicInteger(0);
+        final AtomicReference<Runnable> inFlightMountCb = new AtomicReference<>(null);
+        AiSubtitleTranslator.SubtitleMountTarget cancelProbeTarget =
+                new AiSubtitleTranslator.SubtitleMountTarget() {
+                    @Override
+                    public void setLiveOverlay(
+                            List<AiSubtitleTranslator.SrtCue> c, String[] t, boolean bi) {
+                        lateOverlayWrites.incrementAndGet();
+                    }
+
+                    @Override
+                    public void clearLiveOverlay() {
+                        lateOverlayClears.incrementAndGet();
+                    }
+
+                    @Override
+                    public boolean upsertExternalSubtitle(
+                            String uri,
+                            String name,
+                            String mime,
+                            boolean reload,
+                            Runnable onMounted) {
+                        lateUpserts.incrementAndGet();
+                        inFlightMountCb.set(onMounted);
+                        return false;
+                    }
+                };
+        // Initial chunk mounts while active
+        boolean firstMounted =
+                AiSubtitleTranslator.applySubtitleMountSafely(
+                        cancelProbeTarget,
+                        "file:///sub/ep1.srt",
+                        "application/x-subrip",
+                        cachedTwoCues,
+                        new String[] {"第一句译文", null},
+                        true,
+                        true,
+                        sidActive);
+        // User turns off subtitles OR switches to embedded English track
+        AiSubtitleTranslator.cancelActiveTranslation();
+        // Late chunk arrives after cancel -> MUST be completely ignored!
+        boolean lateMounted =
+                AiSubtitleTranslator.applySubtitleMountSafely(
+                        cancelProbeTarget,
+                        "file:///sub/ep1.srt",
+                        "application/x-subrip",
+                        cachedTwoCues,
+                        new String[] {"第一句译文", "第二句译文"},
+                        true,
+                        false,
+                        sidActive);
+        // Earlier in-flight async mount callback finishes after cancel -> MUST NOT clear overlay!
+        if (inFlightMountCb.get() != null) inFlightMountCb.get().run();
+        check(
+                firstMounted
+                        && !lateMounted
+                        && lateOverlayWrites.get() == 1
+                        && lateUpserts.get() == 1
+                        && lateOverlayClears.get() == 0,
+                "R4 P1-4: cancelling AI translation on subtitle-off/track-switch blocks late chunks and stale mount callbacks");
+
+        // Media3 state machine with pre-existing external subtitle selected:
+        final AtomicBoolean m3OverlayAlive = new AtomicBoolean(true);
+        MoviePlayer.PendingSubtitleMount pm =
+                new MoviePlayer.PendingSubtitleMount(
+                        "marco_ai_sub_2",
+                        AiSubtitleTranslator.AI_TRACK_NAME,
+                        () -> m3OverlayAlive.set(false));
+        // Update 1: pre-existing other external subtitle is selected, target AI track is NOT yet
+        // selected -> MUST return SELECT_TARGET and KEEP overlay alive!
+        List<MoviePlayer.SubtitleTrackProbe> probesOtherSelected =
+                Arrays.asList(
+                        new MoviePlayer.SubtitleTrackProbe(
+                                0, 0, "marco_ext_sub_1", "外挂英文字幕", true, true),
+                        new MoviePlayer.SubtitleTrackProbe(
+                                1,
+                                0,
+                                "marco_ai_sub_2",
+                                AiSubtitleTranslator.AI_TRACK_NAME,
+                                true,
+                                false));
+        MoviePlayer.MountReconcileResult rec1 =
+                MoviePlayer.reconcilePendingSubtitleMount(pm, probesOtherSelected);
+        boolean stayedAliveBeforeTargetSelected =
+                rec1.decision == MoviePlayer.MountDecision.SELECT_TARGET
+                        && rec1.groupIndex == 1
+                        && rec1.trackIndex == 0
+                        && !pm.completed
+                        && m3OverlayAlive.get();
+        // Update 2: Media3 confirms exact target AI track is now selected ->
+        // CONFIRMED_CLEAR_OVERLAY
+        List<MoviePlayer.SubtitleTrackProbe> probesAiSelected =
+                Arrays.asList(
+                        new MoviePlayer.SubtitleTrackProbe(
+                                0, 0, "marco_ext_sub_1", "外挂英文字幕", true, false),
+                        new MoviePlayer.SubtitleTrackProbe(
+                                1,
+                                0,
+                                "marco_ai_sub_2",
+                                AiSubtitleTranslator.AI_TRACK_NAME,
+                                true,
+                                true));
+        MoviePlayer.MountReconcileResult rec2 =
+                MoviePlayer.reconcilePendingSubtitleMount(pm, probesAiSelected);
+        if (rec2.decision == MoviePlayer.MountDecision.CONFIRMED_CLEAR_OVERLAY
+                && pm.onMounted != null) {
+            pm.onMounted.run();
+        }
+        // Update 3: Cancelled pending mount never selects or clears
+        MoviePlayer.PendingSubtitleMount cancelledPm =
+                new MoviePlayer.PendingSubtitleMount(
+                        "marco_ai_sub_3", AiSubtitleTranslator.AI_TRACK_NAME, () -> {});
+        cancelledPm.cancelled = true;
+        MoviePlayer.MountReconcileResult recCancelled =
+                MoviePlayer.reconcilePendingSubtitleMount(cancelledPm, probesAiSelected);
+        check(
+                stayedAliveBeforeTargetSelected
+                        && rec2.decision == MoviePlayer.MountDecision.CONFIRMED_CLEAR_OVERLAY
+                        && pm.completed
+                        && !m3OverlayAlive.get()
+                        && recCancelled.decision == MoviePlayer.MountDecision.WAIT,
+                "R4 P1-4: Media3 keeps overlay when another external track is selected and clears ONLY once target AI track is confirmed selected");
+
+        // 8. Round-4 P1-5: Unified 4 MiB subtitle completion disk cache write/read limit — verify
+        //    742,995-byte complete full-episode sample hits disk cache on 2nd open with 0 model
+        //    requests, oversize payload is symmetrically rejected, and legacy half-baked rejected!
+        StringBuilder largeSrt = new StringBuilder(750_000);
+        int largeCueCount = 0;
+        while (largeSrt.toString().getBytes(StandardCharsets.UTF_8).length < 742_995) {
+            largeCueCount++;
+            long st = largeCueCount * 2000L;
+            largeSrt.append(largeCueCount)
+                    .append('\n')
+                    .append(formatSrtTs(st))
+                    .append(" --> ")
+                    .append(formatSrtTs(st + 1800L))
+                    .append('\n')
+                    .append("第")
+                    .append(largeCueCount)
+                    .append("句完整双语译文内容用于验证七十四万字节全片字幕缓存读取一致性测试文本\n")
+                    .append("Cue ")
+                    .append(largeCueCount)
+                    .append(
+                            " full episode bilingual verification dialogue payload line for cache parity\n\n");
+        }
+        String largeSrtStr = largeSrt.toString();
+        int largeSrtBytes = largeSrtStr.getBytes(StandardCharsets.UTF_8).length;
+        String largeEnvelope =
+                AiSubtitleTranslator.encodeCompletionCache(
+                        largeSrtStr, largeCueCount, largeCueCount, true);
+        int largeEnvelopeBytes =
+                largeEnvelope == null ? 0 : largeEnvelope.getBytes(StandardCharsets.UTF_8).length;
+        File tmpCacheDir = Files.createTempDirectory("marco-sub-cache-r4-").toFile();
+        try {
+            String cacheKey = AiSubtitleTranslator.COMPLETION_CACHE_PREFIX + "large_742k";
+            boolean wroteLarge =
+                    AiAssistantService.writeDiskCacheFile(tmpCacheDir, cacheKey, largeEnvelope);
+            // Second open: read from disk cache -> decode -> 0 model calls!
+            AtomicInteger secondOpenModelCalls = new AtomicInteger(0);
+            String readBack = AiAssistantService.readDiskCacheFile(tmpCacheDir, cacheKey);
+            String verifiedLarge =
+                    AiSubtitleTranslator.decodeVerifiedCompletionCache(
+                            readBack, largeCueCount, true);
+            if (verifiedLarge == null) {
+                secondOpenModelCalls.incrementAndGet();
+            }
+            List<AiSubtitleTranslator.SrtCue> parsedLarge =
+                    AiSubtitleTranslator.parseSrt(verifiedLarge);
+            String visibleFirstCue =
+                    AiSubtitleTranslator.activeCueTextAt(parsedLarge, null, 2500L, true);
+
+            // Oversize (> MAX_DISK_CACHE_BYTES = 4 MiB) symmetrically rejected on write & read
+            StringBuilder tooBig =
+                    new StringBuilder(AiAssistantService.MAX_DISK_CACHE_BYTES + 2048);
+            while (tooBig.length() <= AiAssistantService.MAX_DISK_CACHE_BYTES + 128) {
+                tooBig.append("0123456789abcdef");
+            }
+            boolean wroteOversize =
+                    AiAssistantService.writeDiskCacheFile(
+                            tmpCacheDir, "oversize_entry", tooBig.toString());
+            // Also plant an oversized file directly on disk to verify read rejects > 4 MiB
+            File plantedOversize = new File(tmpCacheDir, "planted_oversize.json");
+            Files.writeString(plantedOversize.toPath(), tooBig.toString(), StandardCharsets.UTF_8);
+            String readOversize =
+                    AiAssistantService.readDiskCacheFile(tmpCacheDir, "planted_oversize");
+
+            check(
+                    largeSrtBytes >= 742_995
+                            && largeEnvelopeBytes > 742_995
+                            && wroteLarge
+                            && verifiedLarge != null
+                            && secondOpenModelCalls.get() == 0
+                            && parsedLarge.size() == largeCueCount
+                            && visibleFirstCue.contains("第1句完整双语译文")
+                            && !wroteOversize
+                            && !new File(tmpCacheDir, "oversize_entry.json").exists()
+                            && readOversize == null,
+                    "R4 P1-5: 742,995B+ full-episode cache roundtrips cleanly with 0 model calls on 2nd open; >4MiB rejected symmetrically");
+        } finally {
+            File[] files = tmpCacheDir.listFiles();
+            if (files != null) for (File f : files) f.delete();
+            tmpCacheDir.delete();
+        }
     }
 
     private static void test6_AntiSpoilerCutoffAndCopilotPrompts() {
@@ -1749,6 +2109,127 @@ public final class AiBetaLabChecks {
             String src = Files.readString(root.resolve(rel), StandardCharsets.UTF_8);
             check(!containsEmoji(src), "Hygiene: zero UI chrome emoji in " + rel);
         }
+
+        // Round-4 P1-7: Episode list render snapshots gate status ONCE per render pass (50 vs 200
+        // episodes -> constant 1 Ed25519 verification each, never O(N)), while real AI request
+        // initiation still re-verifies gate!
+        List<Cms.Episode> eps50 = new ArrayList<>();
+        for (int i = 1; i <= 50; i++) {
+            Cms.Episode ep = new Cms.Episode();
+            ep.name = "第" + i + "集.1080P.WEB-DL";
+            eps50.add(ep);
+        }
+        List<Cms.Episode> eps200 = new ArrayList<>();
+        for (int i = 1; i <= 200; i++) {
+            Cms.Episode ep = new Cms.Episode();
+            ep.name = "第" + i + "集.1080P.WEB-DL";
+            eps200.add(ep);
+        }
+        byte[] probePub = new byte[32];
+        String probeTok = "MMAILAB1.eyJ2IjoxfQ." + "A".repeat(86);
+        long before50 = AiBetaGate.verifyCallCountForTest();
+        List<MobileDetailScreen.EpisodeDisplay> disp50 =
+                MobileDetailScreen.formatEpisodeDisplaysForRender(
+                        eps50,
+                        2,
+                        () ->
+                                AiBetaGate.verifyPasscode(
+                                                probeTok,
+                                                103,
+                                                1_768_000_010_000L,
+                                                probePub,
+                                                AiBetaGate.PLATFORM_ANDROID)
+                                        .ok);
+        long calls50 = AiBetaGate.verifyCallCountForTest() - before50;
+        long before200 = AiBetaGate.verifyCallCountForTest();
+        List<MobileDetailScreen.EpisodeDisplay> disp200 =
+                MobileDetailScreen.formatEpisodeDisplaysForRender(
+                        eps200,
+                        2,
+                        () ->
+                                AiBetaGate.verifyPasscode(
+                                                probeTok,
+                                                103,
+                                                1_768_000_010_000L,
+                                                probePub,
+                                                AiBetaGate.PLATFORM_ANDROID)
+                                        .ok);
+        long calls200 = AiBetaGate.verifyCallCountForTest() - before200;
+        // Real AI request still re-verifies gate every time!
+        AtomicInteger realReqGateChecks = new AtomicInteger(0);
+        MemoryOAuthStore reqStore = new MemoryOAuthStore();
+        long reqVer = AiAuthManager.beginOAuthSession(reqStore, AiAuthManager.OAUTH_OPENROUTER);
+        AiAuthManager.OAuthBundle reqBundle = new AiAuthManager.OAuthBundle();
+        reqBundle.providerId = AiAuthManager.OAUTH_OPENROUTER;
+        reqBundle.accessToken = "sk-or-reverify-123";
+        AiAuthManager.commitOAuthSignInIfCurrent(
+                reqStore,
+                AiAuthManager.OAUTH_OPENROUTER,
+                reqVer,
+                reqBundle,
+                () -> {
+                    realReqGateChecks.incrementAndGet();
+                    return true;
+                });
+        String detailSrc =
+                Files.readString(
+                        root.resolve(
+                                "android-mobile/src/main/java/com/pilipala/marcomovie/MobileDetailScreen.java"),
+                        StandardCharsets.UTF_8);
+        check(
+                disp50.size() == 50
+                        && disp200.size() == 200
+                        && calls50 == 1L
+                        && calls200 == 1L
+                        && realReqGateChecks.get() == 1
+                        && authSrc.contains(
+                                "if (!AiBetaGate.isUnlocked(a)) {\n            throw new IOException")
+                        && detailSrc.contains(
+                                "final boolean presentAiUnlocked = !a.isTvDevice() && AiBetaGate.isUnlocked(a);")
+                        && detailSrc.contains(
+                                "final boolean renderAiUnlocked = !a.isTvDevice() && AiBetaGate.isUnlocked(a);")
+                        && detailSrc.contains(
+                                "final boolean gridAiUnlocked = !a.isTvDevice() && AiBetaGate.isUnlocked(a);")
+                        && detailSrc.contains("renderAiUnlocked, renderStoredCleanMode")
+                        && detailSrc.contains("gridAiUnlocked, gridStoredCleanMode"),
+                "R4 P1-7: 50 & 200 episodes each verify gate strictly once per render pass while real AI requests still re-verify");
+
+        // Round-4 P2-3: Zero residual Kimi subscription claims in Auth Center UI & aligned
+        // OpenRouter foreground waiting prompt + timeout handling
+        String settingsIndexSrc =
+                Files.readString(
+                        root.resolve(
+                                "android-mobile/src/main/java/com/pilipala/marcomovie/MobileSettingsIndex.java"),
+                        StandardCharsets.UTF_8);
+        String gateSrc =
+                Files.readString(
+                        root.resolve(
+                                "android-mobile/src/main/java/com/pilipala/marcomovie/AiBetaGate.java"),
+                        StandardCharsets.UTF_8);
+        String copilotSrc =
+                Files.readString(
+                        root.resolve(
+                                "android-mobile/src/main/java/com/pilipala/marcomovie/AiCinemaCopilot.java"),
+                        StandardCharsets.UTF_8);
+        String sheetSrc =
+                Files.readString(
+                        root.resolve(
+                                "android-mobile/src/main/java/com/pilipala/marcomovie/MobileBottomSheet.java"),
+                        StandardCharsets.UTF_8);
+        check(
+                !settingsSrc.contains("OpenRouter / Kimi Code")
+                        && !settingsSrc.contains("Kimi Code 订阅")
+                        && !settingsSrc.contains("登录订阅账号")
+                        && !settingsIndexSrc.contains("订阅账号")
+                        && !gateSrc.contains("订阅账号")
+                        && !controlsSrc.contains("登录订阅账号")
+                        && !copilotSrc.contains("登录订阅账号")
+                        && authSrc.contains("OPENROUTER_FOREGROUND_WAIT_MS / 1000L")
+                        && authSrc.contains("秒内返回应用前台以完成密钥换取")
+                        && authSrc.contains("等待返回应用前台超时（")
+                        && authSrc.contains("setOnUserDismissInitiated")
+                        && sheetSrc.contains("dismissByUser()"),
+                "R4 P2-3/P1-3 static: zero residual Kimi/subscription claims in Auth Center UI, 15s foreground wait prompt aligned, MobileBottomSheet immediate user-dismiss wired");
     }
 
     private static boolean containsEmoji(String text) {

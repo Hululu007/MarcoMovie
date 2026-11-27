@@ -389,12 +389,20 @@ final class AiBetaGate {
      *
      * <p>Format: {@code MMAILAB1.<payload_b64url>.<sig_b64url>}.
      */
+    private static final java.util.concurrent.atomic.AtomicLong VERIFY_CALL_COUNT =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+
+    static long verifyCallCountForTest() {
+        return VERIFY_CALL_COUNT.get();
+    }
+
     static VerifyResult verifyPasscode(
             String rawCode,
             int currentAppVersionCode,
             long nowEpochMillis,
             byte[] pubKey32,
             String targetPlatform) {
+        VERIFY_CALL_COUNT.incrementAndGet();
         String cleaned = extractToken(rawCode);
         if (cleaned.isEmpty()) return VerifyResult.fail("请输入内测口令");
         if (pubKey32 == null || pubKey32.length != 32) {
@@ -568,7 +576,7 @@ final class AiBetaGate {
         a.gap(infoCard, 5);
         TextView infoDesc =
                 a.text(
-                        "「AI 观影实验室」包含全片滑动窗口双语字幕、播放页防剧透剧情/台词问答、AI 找片推荐，以及 API Key / 订阅账号双模式登录。当前为限量测试阶段，请输入作者签发的 MMAILAB1.… 口令（Android 移动端 / iOS / Windows 通用同一套口令体系）。",
+                        "「AI 观影实验室」包含全片滑动窗口双语字幕、播放页防剧透剧情/台词问答、AI 找片推荐，以及 API Key / OpenRouter 官方账号双模式登录。当前为限量测试阶段，请输入作者签发的 MMAILAB1.… 口令（Android 移动端 / iOS / Windows 通用同一套口令体系）。",
                         12.5f,
                         p.textSecondary);
         infoDesc.setLineSpacing(a.dp(3f), 1f);

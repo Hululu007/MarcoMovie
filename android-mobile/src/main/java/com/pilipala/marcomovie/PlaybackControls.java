@@ -2843,6 +2843,9 @@ final class PlaybackControls {
         importRow.setOnClickListener(
                 v -> {
                     if (dlgRef[0] != null) dlgRef[0].dismiss();
+                    AiSubtitleTranslator.cancelActiveTranslation();
+                    clearLiveAiSubtitles();
+                    if (a.player != null) a.player.cancelPendingSubtitleMount();
                     a.pickSubtitle();
                 });
         LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(-1, -2);
@@ -2903,6 +2906,11 @@ final class PlaybackControls {
                                 p.accent,
                                 () -> {
                                     if (dlgRef[0] != null) dlgRef[0].dismiss();
+                                    if (!aiBilingual) {
+                                        AiSubtitleTranslator.cancelActiveTranslation();
+                                        clearLiveAiSubtitles();
+                                        if (a.player != null) a.player.cancelPendingSubtitleMount();
+                                    }
                                     OnlineSubtitleDanmakuService.downloadAndAttachSubtitleAsync(
                                             a, cand, aiBilingual);
                                 });
@@ -2943,7 +2951,7 @@ final class PlaybackControls {
         if (!AiAssistantService.isConfigured(a)) {
             String hintMsg =
                     AiBetaGate.isUnlocked(a)
-                            ? "尚未配置 AI 模型凭据。请前往「设置 → AI 观影实验室」填写 API Key 或登录订阅账号后，即可为整集在线字幕实时生成滑动窗口双语译文。"
+                            ? "尚未配置 AI 模型凭据。请前往「设置 → AI 观影实验室」填写 API Key 或登录 OpenRouter 账号后，即可为整集在线字幕实时生成滑动窗口双语译文。"
                             : "AI 全片双语字幕属于「AI 观影实验室」内测功能。请前往「设置 → 网盘、追剧与 AI 助手」输入内测口令开启。";
             TextView hint = a.text(hintMsg, 12.5f, 0xFFB8C0CE);
             hint.setLineSpacing(a.dp(4), 1f);
@@ -4595,6 +4603,11 @@ final class PlaybackControls {
     }
 
     void close() {
+        AiSubtitleTranslator.cancelActiveTranslation();
+        clearLiveAiSubtitles();
+        if (a.player != null) {
+            a.player.cancelPendingSubtitleMount();
+        }
         cancelPendingSkipTap();
         hideButtonTooltip(true);
         if (buttonTooltip != null && buttonTooltip.getParent() instanceof ViewGroup) {
@@ -6886,6 +6899,13 @@ final class PlaybackControls {
     }
 
     void selectAndRememberSubtitle(int trackIndex, String rawLabel) {
+        boolean selectingAiTrack = rawLabel != null && rawLabel.startsWith("AI ");
+        if (trackIndex == -2 || !selectingAiTrack) {
+            AiSubtitleTranslator.cancelActiveTranslation();
+            if (a.player != null) {
+                a.player.cancelPendingSubtitleMount();
+            }
+        }
         clearLiveAiSubtitles();
         subtitlePrefAppliedForEpisode = true;
         if (a.player != null && a.prepared) {

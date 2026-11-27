@@ -212,7 +212,7 @@ final class AiCinemaCopilot {
             return;
         }
         if (!AiAssistantService.isConfigured(a)) {
-            a.toast("请先在「设置 → AI 观影实验室」中配置 API Key 或登录订阅账号");
+            a.toast("请先在「设置 → AI 观影实验室」中配置 API Key 或登录 OpenRouter 账号");
             return;
         }
         final MobileTheme.Palette p = MobileTheme.of(a);
@@ -432,7 +432,7 @@ final class AiCinemaCopilot {
             return;
         }
         if (!AiAssistantService.isConfigured(a)) {
-            a.toast("请先在「设置 → AI 观影实验室」中配置 API Key 或登录订阅账号");
+            a.toast("请先在「设置 → AI 观影实验室」中配置 API Key 或登录 OpenRouter 账号");
             return;
         }
         final MobileTheme.Palette p = MobileTheme.of(a);

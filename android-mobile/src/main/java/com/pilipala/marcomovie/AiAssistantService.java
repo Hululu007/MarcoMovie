@@ -297,24 +297,72 @@ final class AiAssistantService {
         return d;
     }
 
+    static final int MAX_DISK_CACHE_BYTES = 4 * 1024 * 1024;
+
     static String readDiskCache(MainActivity a, String key) {
-        File f = new File(cacheDir(a), key + ".json");
+        return readDiskCacheFile(cacheDir(a), key);
+    }
+
+    static String readDiskCacheFile(File dir, String key) {
+        if (dir == null || key == null || key.isEmpty()) return null;
+        File f = new File(dir, key + ".json");
         if (!f.exists() || System.currentTimeMillis() - f.lastModified() > 14L * 86400_000L) {
             return null;
         }
+        if (f.length() > MAX_DISK_CACHE_BYTES) {
+            return null;
+        }
         try (InputStream in = new FileInputStream(f)) {
-            return Cms.read(in, 512 * 1024);
+            return Cms.read(in, MAX_DISK_CACHE_BYTES);
         } catch (Exception ignored) {
             return null;
         }
     }
 
-    static void writeDiskCache(MainActivity a, String key, String json) {
-        File f = new File(cacheDir(a), key + ".json");
-        try (OutputStream out = new FileOutputStream(f)) {
-            out.write(json.getBytes(StandardCharsets.UTF_8));
-        } catch (Exception ignored) {
+    static boolean writeDiskCache(MainActivity a, String key, String json) {
+        return writeDiskCacheFile(cacheDir(a), key, json);
+    }
+
+    static boolean writeDiskCacheFile(File dir, String key, String json) {
+        if (dir == null || key == null || key.isEmpty() || json == null) return false;
+        byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > MAX_DISK_CACHE_BYTES) {
+            AppLog.w(
+                    "AiAssistantService",
+                    "Disk cache entry exceeds unified limit ("
+                            + bytes.length
+                            + " > "
+                            + MAX_DISK_CACHE_BYTES
+                            + ")");
+            return false;
         }
+        if (!dir.exists() && !dir.mkdirs()) return false;
+        File target = new File(dir, key + ".json");
+        File tmp = new File(dir, key + ".json.tmp");
+        try (OutputStream out = new FileOutputStream(tmp)) {
+            out.write(bytes);
+            out.flush();
+        } catch (Exception ignored) {
+            tmp.delete();
+            return false;
+        }
+        if (target.exists() && !target.delete()) {
+            // Fallback direct overwrite if rename cannot replace
+            try (OutputStream out = new FileOutputStream(target)) {
+                out.write(bytes);
+                out.flush();
+                tmp.delete();
+                return true;
+            } catch (Exception ignored) {
+                tmp.delete();
+                return false;
+            }
+        }
+        if (!tmp.renameTo(target)) {
+            tmp.delete();
+            return false;
+        }
+        return true;
     }
 
     static long cacheBytes(MainActivity a) {

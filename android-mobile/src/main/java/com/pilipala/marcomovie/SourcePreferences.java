@@ -56,13 +56,43 @@ final class SourcePreferences {
     }
 
     static int lineIndex(MainActivity a, Cms.Video video) {
-        String preferred = a.prefs.getString(Prefs.PREFERRED_LINE, "");
-        for (int i = 0; i < video.lines.size(); i++) {
-            if (PlaybackLineRules.matchesLine(video.lines.get(i), preferred)
-                    && !video.lines.get(i).episodes.isEmpty()) return i;
+        return lineIndex(a, null, video);
+    }
+
+    static int lineIndex(MainActivity a, Cms.Site site, Cms.Video video) {
+        if (video == null || video.lines == null || video.lines.isEmpty()) return 0;
+        org.json.JSONObject siteRule =
+                (a != null && site != null) ? PlaybackLineRules.loadRuleForSite(a, site) : null;
+        String globalPref =
+                (a != null && a.prefs != null) ? a.prefs.getString(Prefs.PREFERRED_LINE, "") : "";
+        return resolveDefaultLineIndex(video.lines, siteRule, globalPref);
+    }
+
+    /**
+     * Pure-JVM default line selector: (1) explicit per-site default set via {@link
+     * PlaybackLineRules#setPreferred} (works even after manual per-site reordering), (2) explicit
+     * global preferred line, (3) first non-empty line (already ordered by per-site manual order and
+     * global {@link NetdiskStore} drive priority).
+     */
+    static int resolveDefaultLineIndex(
+            List<Cms.Line> lines, org.json.JSONObject siteRule, String globalPreferredLine) {
+        if (lines == null || lines.isEmpty()) return 0;
+        int sitePrefIdx = PlaybackLineRules.preferredLineIndex(lines, siteRule);
+        if (sitePrefIdx >= 0) return sitePrefIdx;
+        if (globalPreferredLine != null && !globalPreferredLine.trim().isEmpty()) {
+            for (int i = 0; i < lines.size(); i++) {
+                Cms.Line l = lines.get(i);
+                if (l != null
+                        && !l.episodes.isEmpty()
+                        && PlaybackLineRules.matchesLine(l, globalPreferredLine)) {
+                    return i;
+                }
+            }
         }
-        for (int i = 0; i < video.lines.size(); i++)
-            if (!video.lines.get(i).episodes.isEmpty()) return i;
+        for (int i = 0; i < lines.size(); i++) {
+            Cms.Line l = lines.get(i);
+            if (l != null && !l.episodes.isEmpty()) return i;
+        }
         return 0;
     }
 

@@ -673,6 +673,9 @@ public final class SystemPlayer extends MoviePlayer {
 
     @Override
     public void selectTrack(int type, int index) {
+        if (type == 3) {
+            subtitleMountGen.incrementAndGet();
+        }
         onMain(
                 () -> {
                     check();
@@ -696,8 +699,17 @@ public final class SystemPlayer extends MoviePlayer {
                 });
     }
 
+    private final java.util.concurrent.atomic.AtomicLong subtitleMountGen =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+
+    @Override
+    public void cancelPendingSubtitleMount() {
+        subtitleMountGen.incrementAndGet();
+    }
+
     @Override
     public void addExternalSubtitle(Uri uri, String name, String declaredMime) {
+        AiSubtitleTranslator.cancelActiveTranslation();
         addExternalSubtitleInternal(uri, name, declaredMime, false, null);
     }
 
@@ -751,6 +763,7 @@ public final class SystemPlayer extends MoviePlayer {
                     return null;
                 });
         final String safeName = name == null ? "" : name.trim();
+        final long mountTicket = subtitleMountGen.incrementAndGet();
         Thread load =
                 new Thread(
                         () -> {
@@ -765,11 +778,12 @@ public final class SystemPlayer extends MoviePlayer {
                                     byte[] buffer = new byte[8192];
                                     int total = 0, n;
                                     while ((n = in.read(buffer)) != -1) {
-                                        if (released)
-                                            throw new InterruptedIOException("Player released");
+                                        if (released || subtitleMountGen.get() != mountTicket)
+                                            throw new InterruptedIOException(
+                                                    "Subtitle load cancelled");
                                         total += n;
-                                        if (total > 2 * 1024 * 1024)
-                                            throw new IOException("字幕文件超过2MiB");
+                                        if (total > AiAssistantService.MAX_DISK_CACHE_BYTES)
+                                            throw new IOException("字幕文件超过4MiB");
                                         out.write(buffer, 0, n);
                                     }
                                 }
@@ -777,7 +791,10 @@ public final class SystemPlayer extends MoviePlayer {
                                 posted =
                                         main.post(
                                                 () -> {
-                                                    if (released || !prepared) {
+                                                    if (released
+                                                            || !prepared
+                                                            || subtitleMountGen.get()
+                                                                    != mountTicket) {
                                                         ready.delete();
                                                         return;
                                                     }

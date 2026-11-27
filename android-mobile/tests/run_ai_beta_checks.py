@@ -418,8 +418,25 @@ const els = {
   ledgerList: makeEl("ledgerList"),
 };
 const lsMap = new Map();
+const deferredReaders = [];
 class FakeFileReader {
+  constructor() {
+    this.aborted = false;
+    this.result = "";
+  }
+  abort() {
+    this.aborted = true;
+    if (this.onabort) this.onabort();
+  }
   readAsText(file) {
+    if (file && file.defer) {
+      this._pendingFile = file;
+      deferredReaders.push(this);
+      return;
+    }
+    this._deliver(file);
+  }
+  _deliver(file) {
     if (file && file.fail) {
       if (this.onerror) this.onerror(new Error("read failed"));
       return;
@@ -499,6 +516,60 @@ if (
   els.newVaultPwd.value !== ""
 ) {
   throw new Error("P1-5: lockVault failed to clear FileList=0, seeds, passwords, or outputs!");
+}
+
+// Step E (Round-4 P1-6): Stale FileReader onload arriving LAST after lockVault() MUST NOT restore pendingRawSeed!
+deferredReaders.length = 0;
+vaultFileVal = "C:\\fakepath\\slow-lock.key";
+vaultFileList = [{ name: "slow-lock.key", content: seedHex, defer: true }];
+vm.runInContext("handleImportFile({ target: document.getElementById('vaultFile') });", ctx);
+if (deferredReaders.length !== 1) throw new Error("P1-6: expected 1 deferred FileReader for lock test");
+const staleLockReader = deferredReaders.shift();
+vm.runInContext("lockVault();", ctx);
+staleLockReader._deliver({ name: "slow-lock.key", content: seedHex });
+if (!staleLockReader.aborted || vm.runInContext("pendingRawSeed !== null", ctx) || !els.rawPwdBox.classList.contains("hidden")) {
+  throw new Error("R4 P1-6: stale FileReader after lockVault restored pendingRawSeed!");
+}
+
+// Step F (Round-4 P1-6): Stale FileReader onload arriving LAST after cancelRawImport() MUST NOT restore pendingRawSeed!
+vaultFileVal = "C:\\fakepath\\slow-cancel.key";
+vaultFileList = [{ name: "slow-cancel.key", content: seedHex, defer: true }];
+vm.runInContext("handleImportFile({ target: document.getElementById('vaultFile') });", ctx);
+const staleCancelReader = deferredReaders.shift();
+vm.runInContext("cancelRawImport();", ctx);
+staleCancelReader._deliver({ name: "slow-cancel.key", content: seedHex });
+if (!staleCancelReader.aborted || vm.runInContext("pendingRawSeed !== null", ctx) || !els.rawPwdBox.classList.contains("hidden")) {
+  throw new Error("R4 P1-6: stale FileReader after cancelRawImport restored pendingRawSeed!");
+}
+
+// Step G (Round-4 P1-6): Stale FileReader (File A) arriving LAST after user selects newer Vault B MUST NOT overwrite Vault B!
+const vaultBJson = JSON.stringify({
+  format: "marco-ai-ed25519-vault-v1",
+  kdf: "pbkdf2-sha256",
+  iterations: 210000,
+  salt_b64: "AAAAAAAAAAAAAAAAAAAAAA==",
+  nonce_b64: "AAAAAAAAAAAAAAAA",
+  ct_b64: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+  mac_b64: "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=",
+  pub_hex: "11".repeat(32),
+});
+vaultFileVal = "C:\\fakepath\\old-file-A.key";
+vaultFileList = [{ name: "old-file-A.key", content: seedHex, defer: true }];
+vm.runInContext("handleImportFile({ target: document.getElementById('vaultFile') });", ctx);
+const staleFileAReader = deferredReaders.shift();
+vaultFileVal = "C:\\fakepath\\new-vault-B.json";
+vaultFileList = [{ name: "new-vault-B.json", content: vaultBJson }];
+vm.runInContext("handleImportFile({ target: document.getElementById('vaultFile') });", ctx);
+// Now deliver stale File A callback LAST!
+staleFileAReader._deliver({ name: "old-file-A.key", content: seedHex });
+const savedVaultAfterRace = lsMap.get("marco_ai_ed25519_vault_v1");
+if (
+  !staleFileAReader.aborted ||
+  vm.runInContext("pendingRawSeed !== null", ctx) ||
+  !els.rawPwdBox.classList.contains("hidden") ||
+  savedVaultAfterRace !== vaultBJson
+) {
+  throw new Error("R4 P1-6: stale FileReader from File A overwrote newer Vault B or restored pendingRawSeed!");
 }
 
 console.log(JSON.stringify({ nodeExecuted: true, jsAllPlatCode, jsIosOnlyCode, jsWinOnlyCode, reVault }));

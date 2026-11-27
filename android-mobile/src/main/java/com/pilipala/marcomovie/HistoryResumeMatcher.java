@@ -120,10 +120,110 @@ final class HistoryResumeMatcher {
                 || lower.contains("全集");
     }
 
+    static int lineMatchStrength(Cms.Line line, WatchHistory.Entry bookmark) {
+        if (line == null || bookmark == null) return 0;
+        String bmLineId = bookmark.lineId == null ? "" : bookmark.lineId.trim();
+        String bmLine = bookmark.line == null ? "" : bookmark.line.trim();
+        String candId = line.lineId();
+        String candRaw = line.rawName();
+        String candName = line.name == null ? "" : line.name.trim();
+        if (!bmLineId.isEmpty()) {
+            if (bmLineId.equals(candId)) return 3;
+            return 0;
+        }
+        if (bmLine.isEmpty()) return 0;
+        if (!candId.isEmpty() && bmLine.equals(candId)) return 2;
+        if (PlaybackLineRules.matchesLine(line, bmLine)
+                || bmLine.equalsIgnoreCase(candRaw)
+                || bmLine.equalsIgnoreCase(candName)) {
+            return 1;
+        }
+        return 0;
+    }
+
+    static boolean isSameBookmarkLine(Cms.Line line, WatchHistory.Entry bookmark) {
+        if (line == null || bookmark == null) return false;
+        if (lineMatchStrength(line, bookmark) > 0) return true;
+        String bmEpUrl = bookmark.episodeUrl == null ? "" : bookmark.episodeUrl.trim();
+        if (!bmEpUrl.isEmpty() && line.episodes != null) {
+            for (Cms.Episode ep : line.episodes) {
+                if (ep != null && ep.url != null && bmEpUrl.equals(ep.url.trim())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    static boolean matchesBookmarkSelection(
+            Cms.Line line, Cms.Episode ep, int epIdx, WatchHistory.Entry bookmark) {
+        if (line == null || ep == null || bookmark == null) return false;
+        String bmEpUrl = bookmark.episodeUrl == null ? "" : bookmark.episodeUrl.trim();
+        String candUrl = ep.url == null ? "" : ep.url.trim();
+        if (!bmEpUrl.isEmpty() && !candUrl.isEmpty()) {
+            if (!bmEpUrl.equals(candUrl)) {
+                return false;
+            }
+            int ls = lineMatchStrength(line, bookmark);
+            if (ls > 0) return true;
+            String bmLineId = bookmark.lineId == null ? "" : bookmark.lineId.trim();
+            return bmLineId.isEmpty();
+        }
+        int lineStrength = lineMatchStrength(line, bookmark);
+        String bmLineId = bookmark.lineId == null ? "" : bookmark.lineId.trim();
+        String bmLine = bookmark.line == null ? "" : bookmark.line.trim();
+        if ((!bmLineId.isEmpty() || !bmLine.isEmpty()) && lineStrength <= 0) {
+            return false;
+        }
+        boolean sameName =
+                ep.name != null
+                        && bookmark.episode != null
+                        && !bookmark.episode.trim().isEmpty()
+                        && ep.name.trim().equalsIgnoreCase(bookmark.episode.trim());
+        boolean sameIndex = epIdx >= 0 && epIdx == bookmark.index;
+        return sameName || sameIndex;
+    }
+
+    static int findMatchedLineIndex(Cms.Video video, WatchHistory.Entry bookmark) {
+        EpisodeMatch m = matchEpisode(video, bookmark);
+        if (m == null || video == null || video.lines == null) return -1;
+        return video.lines.indexOf(m.line);
+    }
+
+    static int findMatchedEpisodeIndex(Cms.Line line, WatchHistory.Entry bookmark) {
+        if (line == null || line.episodes == null || line.episodes.isEmpty() || bookmark == null) {
+            return 0;
+        }
+        String bmEpUrl = bookmark.episodeUrl == null ? "" : bookmark.episodeUrl.trim();
+        if (!bmEpUrl.isEmpty()) {
+            for (int i = 0; i < line.episodes.size(); i++) {
+                Cms.Episode ep = line.episodes.get(i);
+                if (ep != null && ep.url != null && bmEpUrl.equals(ep.url.trim())) {
+                    return i;
+                }
+            }
+        }
+        String bmEp = bookmark.episode == null ? "" : bookmark.episode.trim();
+        if (!bmEp.isEmpty()) {
+            for (int i = 0; i < line.episodes.size(); i++) {
+                Cms.Episode ep = line.episodes.get(i);
+                if (ep != null && ep.name != null && bmEp.equalsIgnoreCase(ep.name.trim())) {
+                    return i;
+                }
+            }
+        }
+        if (bookmark.index >= 0 && bookmark.index < line.episodes.size()) {
+            return bookmark.index;
+        }
+        return 0;
+    }
+
     static EpisodeMatch matchEpisode(Cms.Video video, WatchHistory.Entry bookmark) {
         if (video == null || video.lines == null || video.lines.isEmpty()) return null;
         String bmLine = bookmark == null || bookmark.line == null ? "" : bookmark.line.trim();
         String bmEp = bookmark == null || bookmark.episode == null ? "" : bookmark.episode.trim();
+        String bmEpUrl =
+                bookmark == null || bookmark.episodeUrl == null ? "" : bookmark.episodeUrl.trim();
         int bmIndex = bookmark == null ? 0 : Math.max(0, bookmark.index);
         int bmEpNum = extractEpisodeNumber(bmEp);
         int bmSeason = extractSeasonNumber(bmEp);
@@ -132,9 +232,13 @@ final class HistoryResumeMatcher {
         EpisodeMatch best = null;
         for (Cms.Line line : video.lines) {
             if (line == null || line.episodes == null || line.episodes.isEmpty()) continue;
-            boolean sameLine = !bmLine.isEmpty() && bmLine.equalsIgnoreCase(line.name);
+            int lineStrength = lineMatchStrength(line, bookmark);
+            boolean sameLine = lineStrength > 0;
             int lineCount = line.episodes.size();
-            int lineBonus = sameLine ? 25 : 0;
+            int lineBonus =
+                    lineStrength >= 3
+                            ? 60
+                            : (lineStrength == 2 ? 45 : (lineStrength == 1 ? 25 : 0));
             if (!sameLine && lineCount > 1) {
                 lineBonus += 4;
             }
@@ -146,11 +250,16 @@ final class HistoryResumeMatcher {
                 Cms.Episode ep = line.episodes.get(i);
                 if (ep == null) continue;
                 String candName = ep.name == null ? "" : ep.name.trim();
+                String candUrl = ep.url == null ? "" : ep.url.trim();
                 int score = -1;
 
-                // 1. Exact episode name match
-                if (!bmEp.isEmpty() && bmEp.equalsIgnoreCase(candName)) {
-                    score = 120 + lineBonus;
+                // 0. Exact canonical episode URL match (stable across duplicate names, drive
+                //    reorders, and line renames)
+                if (!bmEpUrl.isEmpty() && bmEpUrl.equals(candUrl)) {
+                    score = 180 + lineBonus + (bmIndex == i ? 10 : 0);
+                } else if (!bmEp.isEmpty() && bmEp.equalsIgnoreCase(candName)) {
+                    // 1. Exact episode name match
+                    score = 120 + lineBonus + (sameLine && bmIndex == i ? 10 : 0);
                 } else {
                     // 2. Normalized episode number match (e.g. 第05集 <-> EP05 <-> S01E05 <-> 05)
                     int candNum = extractEpisodeNumber(candName);

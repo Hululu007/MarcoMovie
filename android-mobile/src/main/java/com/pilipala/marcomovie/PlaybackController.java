@@ -223,14 +223,7 @@ final class PlaybackController {
         int epIdx = line != null ? line.episodes.indexOf(ep) : -1;
         for (WatchHistory.Entry entry : a.watchHistory()) {
             if (s.key.equals(entry.site) && v.id.equals(entry.id)) {
-                boolean sameName = ep.name != null && ep.name.equals(entry.episode);
-                boolean sameIndex =
-                        line != null
-                                && line.name != null
-                                && line.name.equals(entry.line)
-                                && epIdx >= 0
-                                && epIdx == entry.index;
-                if (sameName || sameIndex) {
+                if (HistoryResumeMatcher.matchesBookmarkSelection(line, ep, epIdx, entry)) {
                     return entry;
                 }
                 break;
@@ -1227,7 +1220,9 @@ final class PlaybackController {
             a.playingBookmark.title = v.title;
             a.playingBookmark.poster = v.poster;
             a.playingBookmark.line = a.activeLine.rawName();
+            a.playingBookmark.lineId = a.activeLine.lineId();
             a.playingBookmark.episode = a.activeEpisode.name;
+            a.playingBookmark.episodeUrl = a.activeEpisode.url != null ? a.activeEpisode.url : "";
             a.playingBookmark.index = a.activeLine.episodes.indexOf(a.activeEpisode);
             a.playingBookmark.position = Math.max(0, initialResume);
             a.playingBookmark.duration = saved != null ? Math.max(0, saved.duration) : 0;

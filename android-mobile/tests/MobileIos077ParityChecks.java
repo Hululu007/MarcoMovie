@@ -3038,6 +3038,204 @@ public final class MobileIos077ParityChecks {
                             "\"切换盘序\",\n                        false,\n                        true,\n                        () -> PersonalNetdiskBrowser.showManualCredentialSheet"),
                     "DriveOrder: AccountPanel 切换盘序 no longer opens manual credential sheet");
         }
-        pass("DriveOrder: dedicated 切换盘序 sheet wiring + 4-drive default line ordering verified");
+        // 8. Round-4 P1-1: Direct media URL slot protection — vendor names/numbers/aliases sharing
+        //    an explicit .m3u8 URL MUST NOT be reclassified as netdisk lines
+        String sharedHls = "https://cdn.example/live/master.m3u8";
+        Cms.Line aliCdnDirect = mkLineWithUrl("阿里云 CDN 直连", sharedHls);
+        Cms.Line line115Direct = mkLineWithUrl("线路115", sharedHls);
+        Cms.Line backupDirect = mkLineWithUrl("备用线路", sharedHls);
+        Cms.Line realQuark = mkLineWithUrl("夸父原画", "quark://share/q1");
+        Cms.Line realBaidu = mkLineWithUrl("嘟嘟原画", "baidu://share/b1");
+        check(
+                NetdiskStore.detectLineDriveKey(aliCdnDirect).isEmpty()
+                        && NetdiskStore.detectLineDriveKey(line115Direct).isEmpty()
+                        && NetdiskStore.detectLineDriveKey(backupDirect).isEmpty()
+                        && !NetdiskStore.isExtendedNetdiskLine(aliCdnDirect)
+                        && !NetdiskStore.isExtendedNetdiskLine(line115Direct)
+                        && !NetdiskStore.isExtendedNetdiskLine(backupDirect),
+                "R4 P1-1: explicit .m3u8 URL prevents vendor/number/alias names from being classified as netdisk");
+        List<Cms.Line> mixedDirectAndDrives =
+                Arrays.asList(aliCdnDirect, realQuark, line115Direct, realBaidu, backupDirect);
+        List<Cms.Line> reorderedKeepDirect =
+                PlaybackLineRules.applyToLines(
+                        mixedDirectAndDrives,
+                        new JSONObject(),
+                        Arrays.asList(
+                                NetdiskStore.DRIVE_BAIDU,
+                                NetdiskStore.DRIVE_ALI,
+                                NetdiskStore.DRIVE_UC,
+                                NetdiskStore.DRIVE_QUARK));
+        check(
+                "阿里云 CDN 直连".equals(reorderedKeepDirect.get(0).name)
+                        && "嘟嘟原画".equals(reorderedKeepDirect.get(1).name)
+                        && "线路115".equals(reorderedKeepDirect.get(2).name)
+                        && "夸父原画".equals(reorderedKeepDirect.get(3).name)
+                        && "备用线路".equals(reorderedKeepDirect.get(4).name),
+                "R4 P1-1: 阿里云 CDN 直连 / 线路115 / 备用线路 keep exact direct slots when drive order changes");
+
+        // 9. Round-4 P1-2: Stable lineId + episodeUrl resume across duplicate-named twin lines,
+        //    renamed lines, and legacy history lacking lineId
+        Cms.Line twinQuark = new Cms.Line();
+        twinQuark.lineId = "原画";
+        twinQuark.name = "原画";
+        twinQuark.rawName = "原画";
+        Cms.Episode qEp1 = new Cms.Episode();
+        qEp1.name = "第1集";
+        qEp1.url = "https://pan.quark.cn/s/twin_q_ep1";
+        Cms.Episode qEp2 = new Cms.Episode();
+        qEp2.name = "第2集";
+        qEp2.url = "https://pan.quark.cn/s/twin_q_ep2";
+        twinQuark.episodes.add(qEp1);
+        twinQuark.episodes.add(qEp2);
+
+        Cms.Line twinBaidu = new Cms.Line();
+        twinBaidu.lineId = "原画#2";
+        twinBaidu.name = "原画";
+        twinBaidu.rawName = "原画";
+        Cms.Episode bEp1 = new Cms.Episode();
+        bEp1.name = "第1集";
+        bEp1.url = "https://pan.baidu.com/s/twin_b_ep1";
+        Cms.Episode bEp2 = new Cms.Episode();
+        bEp2.name = "第2集";
+        bEp2.url = "https://pan.baidu.com/s/twin_b_ep2";
+        twinBaidu.episodes.add(bEp1);
+        twinBaidu.episodes.add(bEp2);
+
+        WatchHistory.Entry savedQuarkEp2 = new WatchHistory.Entry();
+        savedQuarkEp2.site = "demo";
+        savedQuarkEp2.id = "v100";
+        savedQuarkEp2.line = twinQuark.name;
+        savedQuarkEp2.lineId = twinQuark.lineId();
+        savedQuarkEp2.index = 1;
+        savedQuarkEp2.episode = qEp2.name;
+        savedQuarkEp2.episodeUrl = qEp2.url;
+        savedQuarkEp2.position = 62_000;
+        savedQuarkEp2.duration = 240_000;
+        // Roundtrip JSON persistence of lineId + episodeUrl
+        List<WatchHistory.Entry> roundtrippedHist =
+                WatchHistory.read(new org.json.JSONArray().put(savedQuarkEp2.json()).toString());
+        WatchHistory.Entry restoredQuarkEp2 = roundtrippedHist.get(0);
+        check(
+                "原画".equals(restoredQuarkEp2.lineId)
+                        && qEp2.url.equals(restoredQuarkEp2.episodeUrl),
+                "R4 P1-2: WatchHistory persists and restores stable lineId and episodeUrl");
+
+        // Pin Baidu #1 -> Baidu moves to slot 0, Quark moves to slot 1
+        List<Cms.Line> twinsBaiduFirst =
+                PlaybackLineRules.applyToLines(
+                        Arrays.asList(twinQuark, twinBaidu),
+                        new JSONObject(),
+                        Arrays.asList(
+                                NetdiskStore.DRIVE_BAIDU,
+                                NetdiskStore.DRIVE_QUARK,
+                                NetdiskStore.DRIVE_UC,
+                                NetdiskStore.DRIVE_ALI));
+        Cms.Video twinVideo = new Cms.Video();
+        twinVideo.id = "v100";
+        twinVideo.title = "测试双盘";
+        twinVideo.lines.addAll(twinsBaiduFirst);
+        check(
+                "原画#2".equals(twinsBaiduFirst.get(0).lineId())
+                        && "原画".equals(twinsBaiduFirst.get(1).lineId()),
+                "R4 P1-2: pinning Baidu places Baidu twin at index 0 and Quark twin at index 1");
+        HistoryResumeMatcher.EpisodeMatch twinMatch =
+                HistoryResumeMatcher.matchEpisode(twinVideo, restoredQuarkEp2);
+        check(
+                twinMatch != null
+                        && twinMatch.line == twinsBaiduFirst.get(1)
+                        && twinMatch.episode == qEp2
+                        && HistoryResumeMatcher.findMatchedLineIndex(twinVideo, restoredQuarkEp2)
+                                == 1
+                        && HistoryResumeMatcher.findMatchedEpisodeIndex(
+                                        twinsBaiduFirst.get(1), restoredQuarkEp2)
+                                == 1
+                        && HistoryResumeMatcher.matchesBookmarkSelection(
+                                twinsBaiduFirst.get(1), qEp2, 1, restoredQuarkEp2)
+                        && !HistoryResumeMatcher.matchesBookmarkSelection(
+                                twinsBaiduFirst.get(0), bEp2, 1, restoredQuarkEp2),
+                "R4 P1-2: Detail, History, Fullscreen & Inline all resume Quark Ep2 (not Baidu) after Baidu pinned #1");
+
+        // Legacy history lacking lineId & episodeUrl still picks original "原画" twin cleanly
+        WatchHistory.Entry legacyNoId = new WatchHistory.Entry();
+        legacyNoId.line = "原画";
+        legacyNoId.index = 1;
+        legacyNoId.episode = "第2集";
+        HistoryResumeMatcher.EpisodeMatch legacyMatch =
+                HistoryResumeMatcher.matchEpisode(twinVideo, legacyNoId);
+        check(
+                legacyMatch != null
+                        && legacyMatch.line == twinsBaiduFirst.get(1)
+                        && legacyMatch.episode == qEp2,
+                "R4 P1-2: legacy history lacking lineId still resolves exact primary line id over #2 twin");
+
+        // Renamed line re-open preserves episode count and progress
+        JSONObject renameRule = new JSONObject();
+        PlaybackLineRules.setAlias(renameRule, "原画", "我的夸克极速");
+        List<Cms.Line> renamedTwins =
+                PlaybackLineRules.applyToLines(
+                        Arrays.asList(twinQuark, twinBaidu),
+                        renameRule,
+                        Arrays.asList(
+                                NetdiskStore.DRIVE_BAIDU,
+                                NetdiskStore.DRIVE_QUARK,
+                                NetdiskStore.DRIVE_UC,
+                                NetdiskStore.DRIVE_ALI));
+        Cms.Video renamedVideo = new Cms.Video();
+        renamedVideo.id = "v100";
+        renamedVideo.title = "测试双盘";
+        renamedVideo.lines.addAll(renamedTwins);
+        HistoryResumeMatcher.EpisodeMatch renamedMatch =
+                HistoryResumeMatcher.matchEpisode(renamedVideo, restoredQuarkEp2);
+        check(
+                renamedMatch != null
+                        && "我的夸克极速".equals(renamedMatch.line.name)
+                        && renamedMatch.line.episodes.size() == 2
+                        && renamedMatch.episode == qEp2
+                        && HistoryResumeMatcher.matchesBookmarkSelection(
+                                renamedMatch.line,
+                                renamedMatch.line.episodes.get(1),
+                                1,
+                                restoredQuarkEp2),
+                "R4 P1-2/P2-1: renaming line preserves display name, episode count, and exact Ep2 resume progress");
+
+        // 10. Round-4 P2-1: Single-source manual reorder THEN setPreferred makes default playback
+        //     select the preferred line cleanly!
+        JSONObject manualThenDefaultRule = new JSONObject();
+        PlaybackLineRules.setOrder(
+                manualThenDefaultRule, Arrays.asList("优汐智1", "夸父原1", "嘟嘟无限2", "阿狸原画"));
+        PlaybackLineRules.setPreferred(manualThenDefaultRule, "嘟嘟无限2");
+        List<Cms.Line> manualOrdered =
+                PlaybackLineRules.applyToLines(
+                        fourDrives, manualThenDefaultRule, NetdiskStore.DEFAULT_ORDER);
+        int resolvedDefaultIdx =
+                SourcePreferences.resolveDefaultLineIndex(manualOrdered, manualThenDefaultRule, "");
+        check(
+                "优汐智1".equals(manualOrdered.get(0).name)
+                        && resolvedDefaultIdx >= 0
+                        && "嘟嘟无限2".equals(manualOrdered.get(resolvedDefaultIdx).name),
+                "R4 P2-1: manual reorder followed by setPreferred preserves list order AND selects preferred default line");
+
+        // Static wiring checks across PlaybackController, MobileInlinePlayer, MobileDetailScreen,
+        // DetailScreen
+        if (repoRoot.isDirectory()) {
+            String[] resumeFiles = {
+                "android-mobile/src/main/java/com/pilipala/marcomovie/PlaybackController.java",
+                "android-mobile/src/main/java/com/pilipala/marcomovie/MobileInlinePlayer.java",
+                "android-mobile/src/main/java/com/pilipala/marcomovie/MobileDetailScreen.java",
+                "android-mobile/src/main/java/com/pilipala/marcomovie/DetailScreen.java"
+            };
+            for (String rel : resumeFiles) {
+                String src =
+                        new String(
+                                java.nio.file.Files.readAllBytes(new File(repoRoot, rel).toPath()),
+                                StandardCharsets.UTF_8);
+                check(
+                        src.contains("HistoryResumeMatcher.")
+                                || src.contains("PlaybackController.lookupSavedBookmark("),
+                        "R4 P1-2 static: " + rel + " uses unified HistoryResumeMatcher");
+            }
+        }
+        pass(
+                "DriveOrder + R4 P1-1/P1-2/P2-1: direct-URL protection, twin-line resume & manual+preferred verified");
     }
 }

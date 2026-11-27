@@ -370,6 +370,11 @@ final class MobileDetailScreen {
                 act != null && !act.isTvDevice()
                         ? act.mobilePrefs().getInt(Prefs.EPISODE_CLEAN_MODE, 0)
                         : 0;
+        return parseEpisodeDisplay(rawName, epNumber, aiUnlocked, storedMode);
+    }
+
+    static EpisodeDisplay parseEpisodeDisplay(
+            String rawName, int epNumber, boolean aiUnlocked, int storedMode) {
         int cleanMode = effectiveEpisodeCleanMode(storedMode, aiUnlocked);
         if (cleanMode == 1) {
             String raw =
@@ -389,8 +394,40 @@ final class MobileDetailScreen {
         return new EpisodeDisplay(label, c.specBadge);
     }
 
+    /** API-23-safe gate predicate evaluated once per episode-list render pass. */
+    interface GateCheck {
+        boolean isUnlocked();
+    }
+
+    /**
+     * Pure-JVM episode display batch renderer: evaluates {@code gateCheck} strictly ONCE per render
+     * pass regardless of whether the episode list has 50 or 200 items, avoiding O(N) Ed25519
+     * signature verification on the UI thread.
+     */
+    static List<EpisodeDisplay> formatEpisodeDisplaysForRender(
+            List<Cms.Episode> episodes, int storedMode, GateCheck gateCheck) {
+        List<EpisodeDisplay> out = new ArrayList<>();
+        if (episodes == null || episodes.isEmpty()) return out;
+        boolean aiUnlocked = gateCheck != null && gateCheck.isUnlocked();
+        for (int i = 0; i < episodes.size(); i++) {
+            Cms.Episode ep = episodes.get(i);
+            String name = ep == null ? "" : ep.name;
+            out.add(parseEpisodeDisplay(name, i + 1, aiUnlocked, storedMode));
+        }
+        return out;
+    }
+
     static String formatPlayEpisodeLabel(String rawName, int epNumber) {
-        EpisodeDisplay disp = parseEpisodeDisplay(rawName, epNumber);
+        return formatPlayEpisodeLabel(parseEpisodeDisplay(rawName, epNumber), epNumber);
+    }
+
+    static String formatPlayEpisodeLabel(
+            String rawName, int epNumber, boolean aiUnlocked, int storedMode) {
+        return formatPlayEpisodeLabel(
+                parseEpisodeDisplay(rawName, epNumber, aiUnlocked, storedMode), epNumber);
+    }
+
+    private static String formatPlayEpisodeLabel(EpisodeDisplay disp, int epNumber) {
         String clean = disp.cleanTitle == null ? "" : disp.cleanTitle.trim();
         Matcher mEp = Pattern.compile("第\\s*([一二三四五六七八九十百零两\\d]+)\\s*([集话期篇])").matcher(clean);
         if (mEp.find()) {
@@ -1123,13 +1160,9 @@ final class MobileDetailScreen {
                         if (it.next().episodes.isEmpty()) it.remove();
                     }
                     PlaybackLineRules.applyToVideo(a, curSite, v);
+                    int defaultLineIdx = SourcePreferences.lineIndex(a, curSite, v);
                     int firstLineCount =
-                            v.lines.isEmpty()
-                                    ? 0
-                                    : v.lines
-                                            .get(SourcePreferences.lineIndex(a, v))
-                                            .episodes
-                                            .size();
+                            v.lines.isEmpty() ? 0 : v.lines.get(defaultLineIdx).episodes.size();
                     populateHeroPills(a, pillsRow, v, firstLineCount);
                     updateRatingBadges(doubanBadge, rtBadge, v, 0.0);
                     ImmersivePoster.resolveMediaRatings(
@@ -1232,31 +1265,50 @@ final class MobileDetailScreen {
                     final WatchHistory.Entry remembered = bookmark;
 
                     // Full-Width Accent Stadium Play Button
+                    final boolean presentAiUnlocked = !a.isTvDevice() && AiBetaGate.isUnlocked(a);
+                    final int presentStoredCleanMode =
+                            !a.isTvDevice()
+                                    ? a.mobilePrefs().getInt(Prefs.EPISODE_CLEAN_MODE, 0)
+                                    : 0;
                     SeasonMeta curSeason = parseSeasonMeta(v.title);
+                    final HistoryResumeMatcher.EpisodeMatch rememberedMatch =
+                            remembered != null
+                                    ? HistoryResumeMatcher.matchEpisode(v, remembered)
+                                    : null;
                     int remEpNum = 1;
-                    if (remembered != null) {
-                        for (Cms.Line l : v.lines) {
-                            if (l.name.equals(remembered.line)) {
-                                for (int idx = 0; idx < l.episodes.size(); idx++) {
-                                    if (l.episodes.get(idx).name.equals(remembered.episode)) {
-                                        remEpNum = idx + 1;
-                                        break;
-                                    }
-                                }
-                                break;
-                            }
+                    String remDisplayLine = remembered != null ? remembered.line : "";
+                    if (rememberedMatch != null) {
+                        int epPos = rememberedMatch.line.episodes.indexOf(rememberedMatch.episode);
+                        if (epPos >= 0) remEpNum = epPos + 1;
+                        if (rememberedMatch.line.name != null
+                                && !rememberedMatch.line.name.isEmpty()) {
+                            remDisplayLine = rememberedMatch.line.name;
                         }
                     }
                     String playEpLabel =
-                            remembered != null
-                                    ? formatPlayEpisodeLabel(remembered.episode, remEpNum)
-                                    : formatPlayEpisodeLabel(
-                                            v.lines
-                                                    .get(SourcePreferences.lineIndex(a, v))
-                                                    .episodes
-                                                    .get(0)
-                                                    .name,
-                                            1);
+                            rememberedMatch != null
+                                    ? formatPlayEpisodeLabel(
+                                            rememberedMatch.episode.name,
+                                            remEpNum,
+                                            presentAiUnlocked,
+                                            presentStoredCleanMode)
+                                    : (remembered != null
+                                            ? formatPlayEpisodeLabel(
+                                                    remembered.episode,
+                                                    remEpNum,
+                                                    presentAiUnlocked,
+                                                    presentStoredCleanMode)
+                                            : formatPlayEpisodeLabel(
+                                                    v.lines
+                                                            .get(
+                                                                    SourcePreferences.lineIndex(
+                                                                            a, curSite, v))
+                                                            .episodes
+                                                            .get(0)
+                                                            .name,
+                                                    1,
+                                                    presentAiUnlocked,
+                                                    presentStoredCleanMode));
 
                     Button playBtn = new Button(a);
                     playBtn.setTag("detail-play");
@@ -1276,22 +1328,18 @@ final class MobileDetailScreen {
                     playBtn.setText(buildPlayButtonLabel(a, p.accentOnFill, playEpLabel));
                     playBtn.setOnClickListener(
                             view -> {
-                                int li = SourcePreferences.lineIndex(a, v);
+                                int li = SourcePreferences.lineIndex(a, curSite, v);
                                 Cms.Line defLine = v.lines.get(li);
                                 Cms.Episode defEp = defLine.episodes.get(0);
                                 if (remembered != null) {
-                                    a.resumeAt = remembered.resume();
-                                    for (Cms.Line candL : v.lines) {
-                                        if (PlaybackLineRules.matchesLine(candL, remembered.line)) {
-                                            defLine = candL;
-                                            for (Cms.Episode candE : candL.episodes) {
-                                                if (candE.name.equals(remembered.episode)) {
-                                                    defEp = candE;
-                                                    break;
-                                                }
-                                            }
-                                            break;
-                                        }
+                                    HistoryResumeMatcher.EpisodeMatch m =
+                                            HistoryResumeMatcher.matchEpisode(v, remembered);
+                                    if (m != null) {
+                                        defLine = m.line;
+                                        defEp = m.episode;
+                                        a.resumeAt = remembered.resume();
+                                    } else {
+                                        a.resumeAt = 0;
                                     }
                                 } else {
                                     a.resumeAt = 0;
@@ -1308,7 +1356,14 @@ final class MobileDetailScreen {
                     playBtnWrap.addView(playBtn, new LinearLayout.LayoutParams(-1, a.dp(48)));
 
                     if (remembered != null) {
-                        String bmEpTitle = formatPlayEpisodeLabel(remembered.episode, remEpNum);
+                        String bmEpTitle =
+                                formatPlayEpisodeLabel(
+                                        rememberedMatch != null
+                                                ? rememberedMatch.episode.name
+                                                : remembered.episode,
+                                        remEpNum,
+                                        presentAiUnlocked,
+                                        presentStoredCleanMode);
                         String bmSummary =
                                 remembered.position > 0
                                         ? "已观看 ["
@@ -1316,8 +1371,8 @@ final class MobileDetailScreen {
                                                 + "] 至 "
                                                 + PlaybackController.formatTime(remembered.position)
                                                 + " · 线路："
-                                                + remembered.line
-                                        : "已观看 [" + bmEpTitle + "] · 线路：" + remembered.line;
+                                                + remDisplayLine
+                                        : "已观看 [" + bmEpTitle + "] · 线路：" + remDisplayLine;
                         TextView bmInfo = a.text(bmSummary, 12, p.textSecondary);
                         bmInfo.setSingleLine(true);
                         bmInfo.setEllipsize(TextUtils.TruncateAt.MIDDLE);
@@ -1326,23 +1381,23 @@ final class MobileDetailScreen {
                         playBtnWrap.addView(bmInfo, new LinearLayout.LayoutParams(-1, -2));
                     }
 
-                    int initLine = SourcePreferences.lineIndex(a, v), initPage = 0;
-                    if (remembered != null) {
-                        for (int i = 0; i < v.lines.size(); i++) {
-                            if (PlaybackLineRules.matchesLine(v.lines.get(i), remembered.line)) {
-                                initLine = i;
-                                int remIdx =
-                                        resolveInitialEpisodeIndex(
-                                                v.lines.get(i).episodes, remembered.episode);
-                                initPage =
-                                        (activeVideoDescending
-                                                        ? v.lines.get(i).episodes.size()
-                                                                - 1
-                                                                - remIdx
-                                                        : remIdx)
-                                                / 50;
-                                break;
-                            }
+                    int initLine = SourcePreferences.lineIndex(a, curSite, v), initPage = 0;
+                    if (rememberedMatch != null) {
+                        int matchedIdx = v.lines.indexOf(rememberedMatch.line);
+                        if (matchedIdx >= 0) {
+                            initLine = matchedIdx;
+                            int remIdx =
+                                    Math.max(
+                                            0,
+                                            rememberedMatch.line.episodes.indexOf(
+                                                    rememberedMatch.episode));
+                            initPage =
+                                    (activeVideoDescending
+                                                    ? rememberedMatch.line.episodes.size()
+                                                            - 1
+                                                            - remIdx
+                                                    : remIdx)
+                                            / 50;
                         }
                     }
 
@@ -1641,14 +1696,22 @@ final class MobileDetailScreen {
         final SeasonMeta curSeason = parseSeasonMeta(video.title);
         final int total = line.episodes.size();
         final boolean multiEpisode = shouldShowMultiEpisodeTools(total);
+        // Snapshot AI gate state & clean mode ONCE per episode-list render (P1-7: avoid O(N)
+        // Ed25519
+        // signature verifications across 50/200 episodes on the UI thread).
+        final boolean renderAiUnlocked = !a.isTvDevice() && AiBetaGate.isUnlocked(a);
+        final int renderStoredCleanMode =
+                !a.isTvDevice() ? a.mobilePrefs().getInt(Prefs.EPISODE_CLEAN_MODE, 0) : 0;
+        final boolean lineMatchesBookmark =
+                remembered != null && HistoryResumeMatcher.isSameBookmarkLine(line, remembered);
 
         int activeEpIdx = 0;
         if (selectedEpisodeIndex >= 0
                 && selectedEpisodeIndex < total
                 && line.name.equals(selectedEpisodeLine)) {
             activeEpIdx = selectedEpisodeIndex;
-        } else if (remembered != null && line.name.equals(remembered.line)) {
-            activeEpIdx = resolveInitialEpisodeIndex(line.episodes, remembered.episode);
+        } else if (lineMatchesBookmark) {
+            activeEpIdx = HistoryResumeMatcher.findMatchedEpisodeIndex(line, remembered);
         }
 
         // Update Top-Right Source Pill, Primary Play Button & Download Button
@@ -1662,21 +1725,25 @@ final class MobileDetailScreen {
                                 a,
                                 p.accentOnFill,
                                 formatPlayEpisodeLabel(
-                                        line.episodes.get(targetEpIdx).name, targetEpIdx + 1)));
+                                        line.episodes.get(targetEpIdx).name,
+                                        targetEpIdx + 1,
+                                        renderAiUnlocked,
+                                        renderStoredCleanMode)));
                 playBtn.setOnClickListener(
                         v -> {
+                            Cms.Episode targetEp = line.episodes.get(targetEpIdx);
                             a.resumeAt =
-                                    (remembered != null && line.name.equals(remembered.line))
+                                    (remembered != null
+                                                    && HistoryResumeMatcher
+                                                            .matchesBookmarkSelection(
+                                                                    line,
+                                                                    targetEp,
+                                                                    targetEpIdx,
+                                                                    remembered))
                                             ? remembered.resume()
                                             : 0;
                             handleDetailEpisodeTap(
-                                    a,
-                                    site,
-                                    video,
-                                    line,
-                                    line.episodes.get(targetEpIdx),
-                                    targetEpIdx + 1,
-                                    true);
+                                    a, site, video, line, targetEp, targetEpIdx + 1, true);
                         });
             }
             View topSourceLabelView = a.root.findViewWithTag("detail-source-picker");
@@ -1712,8 +1779,12 @@ final class MobileDetailScreen {
             View topDownView = a.root.findViewWithTag("episodes-download");
             if (topDownView != null) {
                 String pickFrom = "";
-                if (remembered != null && line.name.equals(remembered.line)) {
-                    pickFrom = remembered.episode;
+                if (lineMatchesBookmark) {
+                    pickFrom =
+                            line.episodes.get(
+                                            HistoryResumeMatcher.findMatchedEpisodeIndex(
+                                                    line, remembered))
+                                    .name;
                 }
                 final String currentName = pickFrom;
                 topDownView.setOnClickListener(
@@ -1890,8 +1961,8 @@ final class MobileDetailScreen {
         headerRow.addView(seasonBtn, new LinearLayout.LayoutParams(0, -2, 1f));
 
         // Episode Name Purifier Pill (Local Regex / AI when unlocked / Raw)
-        final boolean aiUnlocked = AiBetaGate.isUnlocked(a);
-        final int storedCleanMode = a.mobilePrefs().getInt(Prefs.EPISODE_CLEAN_MODE, 0);
+        final boolean aiUnlocked = renderAiUnlocked;
+        final int storedCleanMode = renderStoredCleanMode;
         final int curCleanMode = effectiveEpisodeCleanMode(storedCleanMode, aiUnlocked);
         boolean cleanActive = curCleanMode != 1;
         String cleanLabel = episodeCleanPillLabel(storedCleanMode, aiUnlocked);
@@ -1980,8 +2051,8 @@ final class MobileDetailScreen {
                                         ? (total - 1 - selectedEpisodeIndex)
                                         : selectedEpisodeIndex;
                         nextPage = visIdx / 50;
-                    } else if (remembered != null && line.name.equals(remembered.line)) {
-                        int remIdx = resolveInitialEpisodeIndex(line.episodes, remembered.episode);
+                    } else if (lineMatchesBookmark) {
+                        int remIdx = HistoryResumeMatcher.findMatchedEpisodeIndex(line, remembered);
                         int visIdx = activeVideoDescending ? (total - 1 - remIdx) : remIdx;
                         nextPage = visIdx / 50;
                     }
@@ -2096,15 +2167,21 @@ final class MobileDetailScreen {
                                         buildPlayButtonLabel(
                                                 a,
                                                 p.accentOnFill,
-                                                formatPlayEpisodeLabel(ep.name, posIdx + 1)));
+                                                formatPlayEpisodeLabel(
+                                                        ep.name,
+                                                        posIdx + 1,
+                                                        renderAiUnlocked,
+                                                        renderStoredCleanMode)));
                                 playBtn.setOnClickListener(
                                         pv -> {
                                             a.resumeAt =
                                                     (remembered != null
-                                                                    && line.name.equals(
-                                                                            remembered.line)
-                                                                    && ep.name.equals(
-                                                                            remembered.episode))
+                                                                    && HistoryResumeMatcher
+                                                                            .matchesBookmarkSelection(
+                                                                                    line,
+                                                                                    ep,
+                                                                                    posIdx,
+                                                                                    remembered))
                                                             ? remembered.resume()
                                                             : 0;
                                             handleDetailEpisodeTap(
@@ -2134,7 +2211,9 @@ final class MobileDetailScreen {
             final int posIdx = descending ? (total - 1 - i) : i;
             final Cms.Episode ep = line.episodes.get(posIdx);
             boolean isCurrent = posIdx == activeEpIdx;
-            EpisodeDisplay disp = parseEpisodeDisplay(ep.name, posIdx + 1);
+            EpisodeDisplay disp =
+                    parseEpisodeDisplay(
+                            ep.name, posIdx + 1, renderAiUnlocked, renderStoredCleanMode);
             String eBadgeText = "E" + String.format(Locale.US, "%02d", posIdx + 1);
 
             LinearLayout cardWrap = a.vertical();
@@ -2313,7 +2392,7 @@ final class MobileDetailScreen {
             bodyHost.addView(groupScroll, new LinearLayout.LayoutParams(-1, -2));
         }
 
-        if (activeEpIdx > 0 || (remembered != null && line.name.equals(remembered.line))) {
+        if (activeEpIdx > 0 || lineMatchesBookmark) {
             selectionState.scrollToEpisode(activeEpIdx, false);
         }
 
@@ -2515,9 +2594,14 @@ final class MobileDetailScreen {
 
         final Dialog[] dlgRef = {null};
 
+        final boolean gridAiUnlocked = !a.isTvDevice() && AiBetaGate.isUnlocked(a);
+        final int gridStoredCleanMode =
+                !a.isTvDevice() ? a.mobilePrefs().getInt(Prefs.EPISODE_CLEAN_MODE, 0) : 0;
         boolean hasLongTitles = false;
         for (int i = 0; i < Math.min(12, total); i++) {
-            EpisodeDisplay sample = parseEpisodeDisplay(line.episodes.get(i).name, i + 1);
+            EpisodeDisplay sample =
+                    parseEpisodeDisplay(
+                            line.episodes.get(i).name, i + 1, gridAiUnlocked, gridStoredCleanMode);
             if (sample.cleanTitle != null && sample.cleanTitle.length() > 11) {
                 hasLongTitles = true;
                 break;
@@ -2537,9 +2621,10 @@ final class MobileDetailScreen {
                     selectedEpisodeIndex >= 0 && line.name.equals(selectedEpisodeLine)
                             ? (posIdx == selectedEpisodeIndex)
                             : (remembered != null
-                                    && line.name.equals(remembered.line)
-                                    && ep.name.equals(remembered.episode));
-            EpisodeDisplay disp = parseEpisodeDisplay(ep.name, posIdx + 1);
+                                    && HistoryResumeMatcher.matchesBookmarkSelection(
+                                            line, ep, posIdx, remembered));
+            EpisodeDisplay disp =
+                    parseEpisodeDisplay(ep.name, posIdx + 1, gridAiUnlocked, gridStoredCleanMode);
             TextView cell = a.text(disp.cleanTitle, 13, isCurrent ? p.accentOnFill : p.textPrimary);
             cell.setTypeface(null, isCurrent ? Typeface.BOLD : Typeface.NORMAL);
             cell.setGravity(cols == 1 ? Gravity.CENTER_VERTICAL : Gravity.CENTER);

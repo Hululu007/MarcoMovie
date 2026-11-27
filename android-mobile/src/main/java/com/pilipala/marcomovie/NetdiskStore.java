@@ -767,13 +767,60 @@ final class NetdiskStore {
         return "";
     }
 
+    private static boolean isNetdiskShareUrl(String rawUrl) {
+        if (rawUrl == null || rawUrl.trim().isEmpty()) return false;
+        String lower = rawUrl.trim().toLowerCase(Locale.ROOT);
+        return lower.contains("pan.quark.cn")
+                || lower.contains("drive.uc.cn")
+                || lower.contains("fast.uc.cn")
+                || lower.contains("pan.baidu.com")
+                || lower.contains("yun.baidu.com")
+                || lower.contains("alipan.com")
+                || lower.contains("aliyundrive.com")
+                || lower.contains("115.com")
+                || lower.contains("115cdn.com")
+                || lower.contains("cloud.189.cn")
+                || lower.contains("yun.139.com")
+                || lower.contains("123pan.com")
+                || lower.contains("123684.com")
+                || lower.contains("pan.xunlei.com");
+    }
+
+    /**
+     * Returns {@code true} when a line already carries explicit direct playable media URLs (e.g.
+     * {@code .m3u8} / {@code .mp4} / {@code .mkv} on non-netdisk-share hosts). Such direct-stream
+     * lines MUST keep their original slot even if their display title contains vendor names,
+     * numbers, or aliases such as "阿里云 CDN 直连" or "线路115".
+     */
+    static boolean hasExplicitDirectMediaUrl(Cms.Line line) {
+        if (line == null || line.episodes == null || line.episodes.isEmpty()) return false;
+        int checked = 0;
+        for (int i = 0; i < line.episodes.size() && checked < 3; i++) {
+            Cms.Episode ep = line.episodes.get(i);
+            if (ep == null || ep.url == null) continue;
+            String url = ep.url.trim();
+            if (url.isEmpty()) continue;
+            checked++;
+            if (isNetdiskShareUrl(url)) return false;
+            if (Cms.isDirectStreamUrl(url)) return true;
+            String lower = url.toLowerCase(Locale.ROOT);
+            if ((lower.startsWith("http://") || lower.startsWith("https://"))
+                    && !lower.contains("/share/")
+                    && Cms.isMedia(url)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
      * Classifies a playback {@link Cms.Line} into one of the 4 core netdisk keys ({@code quark},
      * {@code uc}, {@code baidu}, {@code ali}), inspecting {@code rawName}, display {@code name},
-     * and (as fallback) episode share URLs.
+     * and (as fallback) episode share URLs. Explicit direct-stream media URLs are never
+     * misclassified as netdisk lines.
      */
     static String detectLineDriveKey(Cms.Line line) {
-        if (line == null) return "";
+        if (line == null || hasExplicitDirectMediaUrl(line)) return "";
         String byRaw = detectDriveKeyFromLineName(line.rawName());
         if (!byRaw.isEmpty()) return byRaw;
         String byName = detectDriveKeyFromLineName(line.name);
@@ -791,22 +838,34 @@ final class NetdiskStore {
     }
 
     static boolean isExtendedNetdiskLine(Cms.Line line) {
-        if (line == null) return false;
+        if (line == null || hasExplicitDirectMediaUrl(line)) return false;
         String combined =
                 ((line.rawName() == null ? "" : line.rawName())
                                 + " "
                                 + (line.name == null ? "" : line.name))
                         .toLowerCase(Locale.ROOT);
-        if (combined.contains("115")
+        if (combined.contains("115网盘")
+                || combined.contains("115云")
+                || combined.contains("115盘")
+                || combined.contains("115原画")
+                || combined.contains("115超清")
+                || combined.contains("pan115")
+                || combined.trim().equals("115")
                 || combined.contains("天翼")
-                || combined.contains("189")
+                || combined.contains("189云")
+                || combined.contains("189网盘")
+                || combined.contains("189盘")
+                || combined.contains("pan189")
                 || combined.contains("移动云")
                 || combined.contains("移动网盘")
                 || combined.contains("移动原画")
-                || combined.contains("139")
+                || combined.contains("139云")
+                || combined.contains("139网盘")
+                || combined.contains("pan139")
                 || combined.contains("123云")
                 || combined.contains("123盘")
                 || combined.contains("123网盘")
+                || combined.contains("pan123")
                 || combined.contains("迅雷")
                 || combined.contains("thunder")
                 || combined.contains("pikpak")) {

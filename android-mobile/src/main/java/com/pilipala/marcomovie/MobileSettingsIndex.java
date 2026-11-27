@@ -219,8 +219,8 @@ final class MobileSettingsIndex {
                 SUB_SERVICES,
                 "ms-ai-cfg",
                 "网盘、追剧与 AI 助手",
-                "AI 认证中心（API Key / 订阅账号登录）",
-                "ai api key oauth 订阅账号 openrouter kimi code openai claude anthropic gemini deepseek 通义千问 硅基流动 glm ollama");
+                "AI 认证中心（API Key / OpenRouter 账号）",
+                "ai api key oauth openrouter moonshot kimi openai claude anthropic gemini deepseek 通义千问 硅基流动 glm ollama");
         addAiOnly(
                 SUB_SERVICES,
                 "ms-ai-discovery",

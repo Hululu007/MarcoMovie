@@ -193,6 +193,111 @@ public class MoviePlayer {
     private String mediaMime;
     private boolean hlsFallbackAttempted;
     private final boolean ijkMode;
+    private PendingSubtitleMount pendingSubtitleMount;
+    private long subtitleMountSeq;
+
+    static final class SubtitleTrackProbe {
+        final int groupIndex;
+        final int trackIndex;
+        final String id;
+        final String label;
+        final boolean supported;
+        final boolean selected;
+
+        SubtitleTrackProbe(
+                int groupIndex,
+                int trackIndex,
+                String id,
+                String label,
+                boolean supported,
+                boolean selected) {
+            this.groupIndex = groupIndex;
+            this.trackIndex = trackIndex;
+            this.id = id == null ? "" : id;
+            this.label = label == null ? "" : label;
+            this.supported = supported;
+            this.selected = selected;
+        }
+    }
+
+    static final class PendingSubtitleMount {
+        final String targetId;
+        final String targetLabel;
+        final Runnable onMounted;
+        boolean cancelled;
+        boolean completed;
+
+        PendingSubtitleMount(String targetId, String targetLabel, Runnable onMounted) {
+            this.targetId = targetId == null ? "" : targetId;
+            this.targetLabel = targetLabel == null ? "" : targetLabel;
+            this.onMounted = onMounted;
+        }
+    }
+
+    enum MountDecision {
+        WAIT,
+        SELECT_TARGET,
+        CONFIRMED_CLEAR_OVERLAY
+    }
+
+    static final class MountReconcileResult {
+        final MountDecision decision;
+        final int groupIndex;
+        final int trackIndex;
+
+        MountReconcileResult(MountDecision decision, int groupIndex, int trackIndex) {
+            this.decision = decision;
+            this.groupIndex = groupIndex;
+            this.trackIndex = trackIndex;
+        }
+    }
+
+    /**
+     * Pure-JVM Media3 subtitle mount state machine: never clears the live AI overlay merely because
+     * another pre-existing external track is selected. Explicitly requests selection of the target
+     * AI track and confirms {@link MountDecision#CONFIRMED_CLEAR_OVERLAY} ONLY once Media3 reports
+     * that exact target track as {@code selected == true}.
+     */
+    static MountReconcileResult reconcilePendingSubtitleMount(
+            PendingSubtitleMount pending, java.util.List<SubtitleTrackProbe> textTracks) {
+        if (pending == null
+                || pending.cancelled
+                || pending.completed
+                || textTracks == null
+                || textTracks.isEmpty()) {
+            return new MountReconcileResult(MountDecision.WAIT, -1, -1);
+        }
+        SubtitleTrackProbe matched = null;
+        if (!pending.targetId.isEmpty()) {
+            for (SubtitleTrackProbe p : textTracks) {
+                if (p != null && pending.targetId.equals(p.id)) {
+                    matched = p;
+                    break;
+                }
+            }
+        }
+        if (matched == null && !pending.targetLabel.isEmpty()) {
+            for (SubtitleTrackProbe p : textTracks) {
+                if (p != null && pending.targetLabel.equals(p.label)) {
+                    matched = p;
+                    break;
+                }
+            }
+        }
+        if (matched == null) {
+            return new MountReconcileResult(MountDecision.WAIT, -1, -1);
+        }
+        if (matched.selected) {
+            pending.completed = true;
+            return new MountReconcileResult(
+                    MountDecision.CONFIRMED_CLEAR_OVERLAY, matched.groupIndex, matched.trackIndex);
+        }
+        if (matched.supported) {
+            return new MountReconcileResult(
+                    MountDecision.SELECT_TARGET, matched.groupIndex, matched.trackIndex);
+        }
+        return new MountReconcileResult(MountDecision.WAIT, -1, -1);
+    }
 
     public interface OnHdrChangedListener {
         void onHdrChanged(boolean hdr);
@@ -422,11 +527,29 @@ public class MoviePlayer {
                                             hasText = false,
                                             hasAudio = false;
                                     boolean detectedHdr = false, detectedDvP5 = false;
+                                    java.util.List<androidx.media3.common.Tracks.Group> textGroups =
+                                            new java.util.ArrayList<>();
+                                    java.util.List<SubtitleTrackProbe> textProbes =
+                                            new java.util.ArrayList<>();
                                     for (androidx.media3.common.Tracks.Group group :
                                             tracks.getGroups())
                                         if (group.getType() == C.TRACK_TYPE_TEXT
                                                 && group.length > 0) {
                                             hasText = true;
+                                            int gIdx = textGroups.size();
+                                            textGroups.add(group);
+                                            for (int ti = 0; ti < group.length; ti++) {
+                                                androidx.media3.common.Format tf =
+                                                        group.getTrackFormat(ti);
+                                                textProbes.add(
+                                                        new SubtitleTrackProbe(
+                                                                gIdx,
+                                                                ti,
+                                                                tf != null ? tf.id : "",
+                                                                tf != null ? tf.label : "",
+                                                                group.isTrackSupported(ti),
+                                                                group.isTrackSelected(ti)));
+                                            }
                                         } else if (group.getType() == C.TRACK_TYPE_AUDIO
                                                 && group.length > 0) {
                                             hasAudio = true;
@@ -451,6 +574,41 @@ public class MoviePlayer {
                                                 }
                                             }
                                         }
+                                    if (hasText && pendingSubtitleMount != null) {
+                                        PendingSubtitleMount pm = pendingSubtitleMount;
+                                        MountReconcileResult rec =
+                                                reconcilePendingSubtitleMount(pm, textProbes);
+                                        if (rec.decision == MountDecision.SELECT_TARGET
+                                                && rec.groupIndex >= 0
+                                                && rec.groupIndex < textGroups.size()
+                                                && exo != null) {
+                                            androidx.media3.common.Tracks.Group targetGroup =
+                                                    textGroups.get(rec.groupIndex);
+                                            androidx.media3.common.TrackSelectionParameters.Builder
+                                                    tb =
+                                                            exo.getTrackSelectionParameters()
+                                                                    .buildUpon()
+                                                                    .clearOverridesOfType(
+                                                                            C.TRACK_TYPE_TEXT)
+                                                                    .setTrackTypeDisabled(
+                                                                            C.TRACK_TYPE_TEXT,
+                                                                            false)
+                                                                    .addOverride(
+                                                                            new androidx.media3
+                                                                                    .common
+                                                                                    .TrackSelectionOverride(
+                                                                                    targetGroup
+                                                                                            .getMediaTrackGroup(),
+                                                                                    rec.trackIndex));
+                                            exo.setTrackSelectionParameters(tb.build());
+                                        } else if (rec.decision
+                                                == MountDecision.CONFIRMED_CLEAR_OVERLAY) {
+                                            pendingSubtitleMount = null;
+                                            if (pm.onMounted != null && !pm.cancelled) {
+                                                pm.onMounted.run();
+                                            }
+                                        }
+                                    }
                                     if (hasText && textTracksChangedListener != null) {
                                         textTracksChangedListener.onTextTracksChanged();
                                     }
@@ -1574,18 +1732,29 @@ public class MoviePlayer {
         }
         java.util.List<MediaItem.SubtitleConfiguration> tracks = new java.util.ArrayList<>();
         org.json.JSONArray subtitles = options.optJSONArray("subtitles");
+        String preferredSubId =
+                pendingSubtitleMount != null && !pendingSubtitleMount.cancelled
+                        ? pendingSubtitleMount.targetId
+                        : "";
         if (subtitles != null)
             for (int i = 0; i < subtitles.length(); i++) {
                 org.json.JSONObject sub = subtitles.optJSONObject(i);
                 if (sub == null || sub.optString("url").isEmpty()) continue;
+                String subId = sub.optString("id", "").trim();
+                if (subId.isEmpty()) subId = "marco_ext_sub_" + i;
+                int selFlags =
+                        !preferredSubId.isEmpty()
+                                ? (preferredSubId.equals(subId) ? C.SELECTION_FLAG_DEFAULT : 0)
+                                : (i == 0 ? C.SELECTION_FLAG_DEFAULT : 0);
                 tracks.add(
                         new MediaItem.SubtitleConfiguration.Builder(Uri.parse(sub.optString("url")))
+                                .setId(subId)
                                 .setMimeType(
                                         MediaOptions.subtitleMime(
                                                 sub.optString("url"), sub.optString("mimeType")))
                                 .setLabel(sub.optString("name", "外挂字幕"))
                                 .setLanguage(sub.optString("language", "zh"))
-                                .setSelectionFlags(i == 0 ? C.SELECTION_FLAG_DEFAULT : 0)
+                                .setSelectionFlags(selFlags)
                                 .build());
             }
         item.setSubtitleConfigurations(tracks);
@@ -1625,6 +1794,12 @@ public class MoviePlayer {
      */
     static boolean upsertSubtitleTrackJson(
             org.json.JSONObject options, String url, String name, String mime) throws Exception {
+        return upsertSubtitleTrackJson(options, url, name, mime, "");
+    }
+
+    static boolean upsertSubtitleTrackJson(
+            org.json.JSONObject options, String url, String name, String mime, String trackId)
+            throws Exception {
         if (options == null || url == null || url.trim().isEmpty()) return false;
         org.json.JSONArray tracks = options.optJSONArray("subtitles");
         if (tracks == null) {
@@ -1638,6 +1813,9 @@ public class MoviePlayer {
                         .put("url", url)
                         .put("name", safeName)
                         .put("mimeType", mime == null ? "" : mime);
+        if (trackId != null && !trackId.isEmpty()) {
+            entry.put("id", trackId);
+        }
         for (int i = 0; i < tracks.length(); i++) {
             org.json.JSONObject existing = tracks.optJSONObject(i);
             if (existing == null) continue;
@@ -1652,6 +1830,18 @@ public class MoviePlayer {
         return true;
     }
 
+    public void cancelPendingSubtitleMount() {
+        if (pendingSubtitleMount == null) return;
+        onMain(
+                () -> {
+                    if (pendingSubtitleMount != null) {
+                        pendingSubtitleMount.cancelled = true;
+                        pendingSubtitleMount = null;
+                    }
+                    return null;
+                });
+    }
+
     public void addExternalSubtitle(Uri subtitle, String name, String mime) {
         upsertExternalSubtitle(subtitle, name, mime, true, null);
     }
@@ -1664,26 +1854,37 @@ public class MoviePlayer {
     /**
      * Mounts or updates an external subtitle track without duplicating existing AI tracks.
      *
-     * @return {@code true} when the engine synchronously mounted and selected the track (caller may
-     *     clear live overlay); {@code false} when the caller should keep live overlay active (e.g.,
-     *     progressive non-reloading Media3 updates or async SystemPlayer loading until {@code
-     *     onMounted} runs).
+     * <p>On Media3 reload, keeps the live overlay active and registers a {@link
+     * PendingSubtitleMount}; {@code onMounted} runs ONLY inside {@code onTracksChanged} once Media3
+     * confirms the target subtitle track itself is selected (never clearing early when another
+     * pre-existing external subtitle is selected).
      */
     public boolean upsertExternalSubtitle(
             Uri subtitle, String name, String mime, boolean reloadMediaSource, Runnable onMounted) {
+        final String safeName = name == null ? "外挂字幕" : name;
+        if (!safeName.startsWith("AI ")) {
+            AiSubtitleTranslator.cancelActiveTranslation();
+        }
         return onMain(
                 () -> {
                     check();
                     if (mediaSourceFactory == null) throw new IllegalStateException("请等待视频开始播放");
-                    upsertSubtitleTrackJson(options, subtitle.toString(), name, mime);
+                    String targetId =
+                            (safeName.startsWith("AI ") ? "marco_ai_sub_" : "marco_ext_sub_")
+                                    + (++subtitleMountSeq);
+                    upsertSubtitleTrackJson(options, subtitle.toString(), safeName, mime, targetId);
                     if (reloadMediaSource) {
+                        if (pendingSubtitleMount != null) {
+                            pendingSubtitleMount.cancelled = true;
+                        }
+                        pendingSubtitleMount =
+                                new PendingSubtitleMount(targetId, safeName, onMounted);
                         long position = exo.getCurrentPosition();
                         boolean play = exo.getPlayWhenReady();
                         exo.setMediaSource(playbackSource(uri), position);
                         exo.prepare();
                         exo.setPlayWhenReady(play);
-                        if (onMounted != null) onMounted.run();
-                        return true;
+                        return false;
                     }
                     return false;
                 });
@@ -1937,6 +2138,11 @@ public class MoviePlayer {
                     check();
                     if (type == C.TRACK_TYPE_VIDEO) {
                         manualVideoTrackIndex = index >= 0 ? index : -1;
+                    } else if (type == C.TRACK_TYPE_TEXT) {
+                        if (pendingSubtitleMount != null) {
+                            pendingSubtitleMount.cancelled = true;
+                            pendingSubtitleMount = null;
+                        }
                     }
                     androidx.media3.common.TrackSelectionParameters.Builder p =
                             exo.getTrackSelectionParameters()

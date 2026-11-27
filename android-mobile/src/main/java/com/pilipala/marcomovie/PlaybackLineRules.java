@@ -180,6 +180,29 @@ final class PlaybackLineRules {
         return rule == null ? "" : rule.optString("preferred", "").trim();
     }
 
+    /**
+     * Resolves the index of the site's explicitly preferred default line (if any) in {@code lines},
+     * honoring per-site "设为该片源默认优先线路" even when the user also manually reordered lines.
+     */
+    static int preferredLineIndex(List<Cms.Line> lines, JSONObject rule) {
+        if (lines == null || lines.isEmpty() || rule == null) return -1;
+        String pref = preferredRawName(rule);
+        if (pref.isEmpty()) return -1;
+        for (int i = 0; i < lines.size(); i++) {
+            Cms.Line l = lines.get(i);
+            if (l != null && !l.episodes.isEmpty() && pref.equals(l.lineId())) {
+                return i;
+            }
+        }
+        for (int i = 0; i < lines.size(); i++) {
+            Cms.Line l = lines.get(i);
+            if (l != null && !l.episodes.isEmpty() && matchesLine(l, pref)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     static void setOrder(JSONObject rule, List<String> orderedRawNames) {
         if (rule == null) return;
         try {

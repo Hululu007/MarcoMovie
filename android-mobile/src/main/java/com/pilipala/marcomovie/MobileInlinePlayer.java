@@ -791,6 +791,12 @@ final class MobileInlinePlayer {
 
         a.activeLine = line;
         a.activeEpisode = ep;
+        if (a.resumeAt == 0) {
+            WatchHistory.Entry saved = PlaybackController.lookupSavedBookmark(a, s, v, line, ep);
+            if (saved != null) {
+                a.resumeAt = saved.resume();
+            }
+        }
         a.inlinePlayer = this;
         a.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
@@ -1139,7 +1145,18 @@ final class MobileInlinePlayer {
         }
         long now = System.currentTimeMillis();
         String lineKey = activeLine.rawName();
-        String epKey = site.key + "\n" + video.id + "\n" + lineKey + "\n" + rawEpisode.name;
+        String lineId = activeLine.lineId();
+        String epUrl = rawEpisode.url != null ? rawEpisode.url : "";
+        String epKey =
+                site.key
+                        + "\n"
+                        + video.id
+                        + "\n"
+                        + (lineId.isEmpty() ? lineKey : lineId)
+                        + "\n"
+                        + rawEpisode.name
+                        + "\n"
+                        + epUrl;
         if (!checkpointPolicy.shouldWrite(now, pos, dur, epKey, force)) {
             return;
         }
@@ -1149,7 +1166,9 @@ final class MobileInlinePlayer {
         entry.title = video.title;
         entry.poster = video.poster;
         entry.line = lineKey;
+        entry.lineId = lineId;
         entry.episode = rawEpisode.name;
+        entry.episodeUrl = epUrl;
         entry.index = activeLine.episodes.indexOf(rawEpisode);
         entry.position = pos;
         entry.duration = dur;

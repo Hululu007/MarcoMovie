@@ -63,6 +63,12 @@ final class MobileBottomSheet {
             this.animatedDismiss = animatedDismiss;
         }
 
+        void setOnUserDismissInitiated(Runnable onUserDismissInitiated) {
+            if (dialog instanceof SheetDialog) {
+                ((SheetDialog) dialog).setOnUserDismissInitiated(onUserDismissInitiated);
+            }
+        }
+
         Dialog dialog() {
             return dialog;
         }
@@ -169,7 +175,7 @@ final class MobileBottomSheet {
         final FrameLayout backdrop = new FrameLayout(a);
         backdrop.setTag(DRAWER_TAG);
         backdrop.setBackgroundColor(p.scrimBackdrop);
-        backdrop.setOnClickListener(v -> dlg.dismissAnimated());
+        backdrop.setOnClickListener(v -> dlg.dismissByUser());
 
         boolean portrait = a.isPortrait();
         int winW = a.windowWidth();
@@ -249,7 +255,7 @@ final class MobileBottomSheet {
             }
 
             FrameLayout closeBtn =
-                    buildCloseButton(a, p.bgSubtle, p.textSecondary, dlg::dismissAnimated);
+                    buildCloseButton(a, p.bgSubtle, p.textSecondary, dlg::dismissByUser);
             header.addView(closeBtn, new LinearLayout.LayoutParams(a.dp(32), a.dp(32)));
 
             LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(-1, -2);
@@ -258,7 +264,7 @@ final class MobileBottomSheet {
         }
 
         attachSheetContent(a, sheet, content, allowScroll);
-        sheet.bindInteractiveDismiss(a, backdrop, false, dlg::dismissAnimated);
+        sheet.bindInteractiveDismiss(a, backdrop, false, dlg::dismissByUser);
         dlg.attachSheetViews(backdrop, sheet);
 
         FrameLayout.LayoutParams sheetLp =
@@ -278,7 +284,7 @@ final class MobileBottomSheet {
         dlg.show();
         finalizeSheetWindow(dlg, false);
         animateSheetIn(a, backdrop, sheet, false);
-        return new SheetHandle(dlg, subtitleView, actionBtn, dlg::dismissAnimated);
+        return new SheetHandle(dlg, subtitleView, actionBtn, dlg::dismissProgrammatically);
     }
 
     /** Clean borderless Inset Grouped picker sheet with accent selection + vector checkmark. */
@@ -725,6 +731,8 @@ final class MobileBottomSheet {
         private View backdrop;
         private MaxHeightLinearLayout sheet;
         private boolean dismissing;
+        private Runnable onUserDismissInitiated;
+        private boolean userDismissFired;
 
         SheetDialog(MainActivity a, boolean sideMode) {
             super(a);
@@ -732,14 +740,35 @@ final class MobileBottomSheet {
             this.sideMode = sideMode;
         }
 
+        void setOnUserDismissInitiated(Runnable hook) {
+            this.onUserDismissInitiated = hook;
+        }
+
         void attachSheetViews(View backdrop, MaxHeightLinearLayout sheet) {
             this.backdrop = backdrop;
             this.sheet = sheet;
         }
 
+        private void fireUserDismissOnce() {
+            if (userDismissFired) return;
+            userDismissFired = true;
+            Runnable hook = onUserDismissInitiated;
+            if (hook != null) {
+                try {
+                    hook.run();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+
         @Override
         public void onBackPressed() {
-            cancel();
+            dismissByUser();
+        }
+
+        @Override
+        public void cancel() {
+            dismissByUser();
         }
 
         @Override
@@ -747,6 +776,15 @@ final class MobileBottomSheet {
             if (dismissing) {
                 return;
             }
+            dismissAnimated();
+        }
+
+        void dismissByUser() {
+            fireUserDismissOnce();
+            dismissAnimated();
+        }
+
+        void dismissProgrammatically() {
             dismissAnimated();
         }
 

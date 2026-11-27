@@ -275,7 +275,7 @@ final class DetailScreen {
                                     () -> {
                                         if (remembered != null) a.playBookmark(s, v, remembered);
                                         else {
-                                            int prefIdx = SourcePreferences.lineIndex(a, v);
+                                            int prefIdx = SourcePreferences.lineIndex(a, s, v);
                                             a.resolvePlayer(
                                                     s,
                                                     v,
@@ -298,29 +298,26 @@ final class DetailScreen {
                         lastLp.topMargin = a.dp(6);
                         hero.addView(last, lastLp);
                     }
-                    int rememberedLine = SourcePreferences.lineIndex(a, v), rememberedPage = 0;
-                    if (remembered != null)
-                        for (int i = 0; i < v.lines.size(); i++)
-                            if (v.lines.get(i).name.equals(remembered.line)) {
-                                rememberedLine = i;
-                                for (int n = 0; n < v.lines.get(i).episodes.size(); n++)
-                                    if (v.lines
-                                            .get(i)
-                                            .episodes
-                                            .get(n)
-                                            .name
-                                            .equals(remembered.episode))
-                                        rememberedPage =
-                                                (a.prefs.getBoolean(
-                                                                        Prefs.EPISODES_DESCENDING,
-                                                                        false)
-                                                                ? v.lines.get(i).episodes.size()
-                                                                        - 1
-                                                                        - n
-                                                                : n)
-                                                        / 50;
-                                break;
+                    int rememberedLine = SourcePreferences.lineIndex(a, s, v), rememberedPage = 0;
+                    if (remembered != null) {
+                        HistoryResumeMatcher.EpisodeMatch bmMatch =
+                                HistoryResumeMatcher.matchEpisode(v, remembered);
+                        if (bmMatch != null) {
+                            int matchedLineIdx = v.lines.indexOf(bmMatch.line);
+                            if (matchedLineIdx >= 0) {
+                                rememberedLine = matchedLineIdx;
+                                int matchedEpIdx =
+                                        Math.max(0, bmMatch.line.episodes.indexOf(bmMatch.episode));
+                                rememberedPage =
+                                        (a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false)
+                                                        ? bmMatch.line.episodes.size()
+                                                                - 1
+                                                                - matchedEpIdx
+                                                        : matchedEpIdx)
+                                                / 50;
                             }
+                        }
+                    }
                     if (a.current != null && a.current.selection.selected)
                         for (int i = 0; i < v.lines.size(); i++)
                             if (v.lines.get(i).name.equals(a.current.selection.line)) {
