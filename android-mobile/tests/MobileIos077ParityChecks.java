@@ -5162,8 +5162,196 @@ public final class MobileIos077ParityChecks {
                         && !bdCloudOut.has("episodeUrl"),
                 "R10 P1-2B: Baidu spaced 'Movie Part 2.mkv' duplicate files round-trip Windows(480003)->Android([0,480003])->487003->CloudSync preserving exact Dart mid:v1");
 
+        // 30. Round-11 P2-1: Missing original drive on same site MUST require re-selection on BOTH
+        //     (1) MobileDetailScreen primary button for series & single-episode movies, AND
+        //     (2) HistoryResumeMatcher single-episode movie fallback (never fall back to Baidu on
+        //     confirmed same-site drive conflict). Explicit user selection of Baidu plays at 0 ms;
+        //     present Quark recovers 42,000 ms; cross-site failover still switches & recovers 42s.
+        WatchHistory.Entry bmMovieQuark = new WatchHistory.Entry();
+        bmMovieQuark.site = "movie_site";
+        bmMovieQuark.id = "vod_chunchao";
+        bmMovieQuark.title = "春潮";
+        bmMovieQuark.line = "夸克";
+        bmMovieQuark.lineId = "夸克";
+        bmMovieQuark.driveKey = NetdiskStore.DRIVE_QUARK;
+        bmMovieQuark.episode = "正片";
+        bmMovieQuark.episodeKey =
+                WatchHistory.stableEpisodeKey("https://pan.quark.cn/s/chunchao_quark_full");
+        bmMovieQuark.index = 0;
+        bmMovieQuark.position = 42_000;
+        bmMovieQuark.duration = 7_200_000;
+
+        Cms.Line baiduMovieLine = new Cms.Line();
+        baiduMovieLine.lineId = "百度";
+        baiduMovieLine.name = "百度";
+        baiduMovieLine.rawName = "百度";
+        Cms.Episode baiduMovieEp = new Cms.Episode();
+        baiduMovieEp.name = "正片";
+        baiduMovieEp.url = "https://pan.baidu.com/s/chunchao_baidu_full";
+        baiduMovieLine.episodes.add(baiduMovieEp);
+
+        Cms.Line baiduMovieTokenLine = new Cms.Line();
+        baiduMovieTokenLine.lineId = "百度";
+        baiduMovieTokenLine.name = "百度";
+        baiduMovieTokenLine.rawName = "百度";
+        Cms.Episode baiduMovieTokenEp = new Cms.Episode();
+        baiduMovieTokenEp.name = "正片";
+        baiduMovieTokenEp.url = "baidu_cms_token_chunchao";
+        baiduMovieTokenLine.episodes.add(baiduMovieTokenEp);
+
+        Cms.Line quarkMovieLine = new Cms.Line();
+        quarkMovieLine.lineId = "夸克";
+        quarkMovieLine.name = "夸克";
+        quarkMovieLine.rawName = "夸克";
+        Cms.Episode quarkMovieEp = new Cms.Episode();
+        quarkMovieEp.name = "正片";
+        quarkMovieEp.url = "https://pan.quark.cn/s/chunchao_quark_full";
+        quarkMovieLine.episodes.add(quarkMovieEp);
+
+        Cms.Video movieSameSiteOnlyBaidu = new Cms.Video();
+        movieSameSiteOnlyBaidu.id = "vod_chunchao";
+        movieSameSiteOnlyBaidu.title = "春潮";
+        movieSameSiteOnlyBaidu.lines.add(baiduMovieLine);
+
+        Cms.Video movieSameSiteOnlyBaiduToken = new Cms.Video();
+        movieSameSiteOnlyBaiduToken.id = "vod_chunchao";
+        movieSameSiteOnlyBaiduToken.title = "春潮";
+        movieSameSiteOnlyBaiduToken.lines.add(baiduMovieTokenLine);
+
+        Cms.Video movieSameSiteHasQuark = new Cms.Video();
+        movieSameSiteHasQuark.id = "vod_chunchao";
+        movieSameSiteHasQuark.title = "春潮";
+        movieSameSiteHasQuark.lines.addAll(Arrays.asList(baiduMovieLine, quarkMovieLine));
+
+        HistoryResumeMatcher.EpisodeMatch mvMissingQuark =
+                HistoryResumeMatcher.matchEpisode(movieSameSiteOnlyBaidu, bmMovieQuark);
+        HistoryResumeMatcher.EpisodeMatch mvMissingQuarkToken =
+                HistoryResumeMatcher.matchEpisode(movieSameSiteOnlyBaiduToken, bmMovieQuark);
+        HistoryResumeMatcher.EpisodeMatch mvHasQuark =
+                HistoryResumeMatcher.matchEpisode(movieSameSiteHasQuark, bmMovieQuark);
+        HistoryResumeMatcher.EpisodeMatch mvCrossSiteBaidu =
+                HistoryResumeMatcher.matchEpisodeForFailover(movieSameSiteOnlyBaidu, bmMovieQuark);
+        check(
+                mvMissingQuark == null
+                        && mvMissingQuarkToken == null
+                        && mvHasQuark != null
+                        && mvHasQuark.line == quarkMovieLine
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        quarkMovieLine, quarkMovieEp, 0, bmMovieQuark)
+                                == 42_000
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        baiduMovieLine, baiduMovieEp, 0, bmMovieQuark)
+                                == 0
+                        && mvCrossSiteBaidu != null
+                        && mvCrossSiteBaidu.line == baiduMovieLine
+                        && HistoryResumeMatcher.resolveFailoverResumePositionMs(
+                                        mvCrossSiteBaidu, bmMovieQuark)
+                                == 42_000,
+                "R11 P2-1A: same-site single-episode movie fallback respects confirmed drive conflict (returns null when Quark vanished, recovers 42s when Quark present, allows cross-site Baidu failover at 42s)");
+
+        // MobileDetailScreen primary play button resolution for BOTH series & single-episode movie
+        Cms.Line r11BaiduS2 = new Cms.Line();
+        r11BaiduS2.lineId = "百度·第二季";
+        r11BaiduS2.name = "百度·第二季";
+        r11BaiduS2.rawName = "百度·第二季";
+        Cms.Episode r11BdE1 = new Cms.Episode();
+        r11BdE1.name = "第1集";
+        r11BdE1.url = "https://pan.baidu.com/s/r11_s2_e1";
+        Cms.Episode r11BdE2 = new Cms.Episode();
+        r11BdE2.name = "第2集";
+        r11BdE2.url = "https://pan.baidu.com/s/r11_s2_e2";
+        r11BaiduS2.episodes.add(r11BdE1);
+        r11BaiduS2.episodes.add(r11BdE2);
+
+        Cms.Line r11QuarkS2 = new Cms.Line();
+        r11QuarkS2.lineId = "夸克·第二季";
+        r11QuarkS2.name = "夸克·第二季";
+        r11QuarkS2.rawName = "夸克·第二季";
+        Cms.Episode r11QkE1 = new Cms.Episode();
+        r11QkE1.name = "第1集";
+        r11QkE1.url = "https://pan.quark.cn/s/r11_s2_e1";
+        Cms.Episode r11QkE2 = new Cms.Episode();
+        r11QkE2.name = "第2集";
+        r11QkE2.url = "https://pan.quark.cn/s/r11_s2_e2";
+        r11QuarkS2.episodes.add(r11QkE1);
+        r11QuarkS2.episodes.add(r11QkE2);
+
+        WatchHistory.Entry bmR11SeriesQuark = new WatchHistory.Entry();
+        bmR11SeriesQuark.site = "same_site";
+        bmR11SeriesQuark.id = "vod_r11_s2";
+        bmR11SeriesQuark.title = "星途";
+        bmR11SeriesQuark.line = "夸克·第二季";
+        bmR11SeriesQuark.lineId = "夸克·第二季";
+        bmR11SeriesQuark.driveKey = NetdiskStore.DRIVE_QUARK;
+        bmR11SeriesQuark.episode = "第2集";
+        bmR11SeriesQuark.episodeKey = WatchHistory.stableEpisodeKey(r11QkE2.url);
+        bmR11SeriesQuark.index = 1;
+        bmR11SeriesQuark.position = 42_000;
+        bmR11SeriesQuark.duration = 240_000;
+
+        Cms.Video r11SeriesOnlyBaidu = new Cms.Video();
+        r11SeriesOnlyBaidu.id = "vod_r11_s2";
+        r11SeriesOnlyBaidu.title = "星途";
+        r11SeriesOnlyBaidu.lines.add(r11BaiduS2);
+
+        Cms.Video r11SeriesHasQuark = new Cms.Video();
+        r11SeriesHasQuark.id = "vod_r11_s2";
+        r11SeriesHasQuark.title = "星途";
+        r11SeriesHasQuark.lines.addAll(Arrays.asList(r11BaiduS2, r11QuarkS2));
+
+        MobileDetailScreen.PrimaryPlayAction seriesMissingAct =
+                MobileDetailScreen.resolvePrimaryPlayAction(
+                        r11SeriesOnlyBaidu, 0, bmR11SeriesQuark, false, null, -1, false, 0);
+        MobileDetailScreen.PrimaryPlayAction seriesUserBaiduAct =
+                MobileDetailScreen.resolvePrimaryPlayAction(
+                        r11SeriesOnlyBaidu, 0, bmR11SeriesQuark, true, r11BaiduS2, 1, false, 0);
+        MobileDetailScreen.PrimaryPlayAction seriesPresentQuarkAct =
+                MobileDetailScreen.resolvePrimaryPlayAction(
+                        r11SeriesHasQuark, 0, bmR11SeriesQuark, false, null, -1, false, 0);
+        MobileDetailScreen.PrimaryPlayAction movieMissingAct =
+                MobileDetailScreen.resolvePrimaryPlayAction(
+                        movieSameSiteOnlyBaidu, 0, bmMovieQuark, false, null, -1, false, 0);
+        MobileDetailScreen.PrimaryPlayAction movieUserBaiduAct =
+                MobileDetailScreen.resolvePrimaryPlayAction(
+                        movieSameSiteOnlyBaidu, 0, bmMovieQuark, true, baiduMovieLine, 0, false, 0);
+        MobileDetailScreen.PrimaryPlayAction moviePresentQuarkAct =
+                MobileDetailScreen.resolvePrimaryPlayAction(
+                        movieSameSiteHasQuark, 0, bmMovieQuark, false, null, -1, false, 0);
+        check(
+                seriesMissingAct.requiresReselection
+                        && MobileDetailScreen.RESELECT_BUTTON_TEXT.equals(
+                                seriesMissingAct.buttonLabel)
+                        && !seriesMissingAct.buttonLabel.contains("第 2 集")
+                        && !seriesMissingAct.buttonLabel.contains("播放")
+                        && seriesMissingAct.line == null
+                        && seriesMissingAct.episode == null
+                        && seriesMissingAct.resumePositionMs == 0
+                        && !seriesUserBaiduAct.requiresReselection
+                        && seriesUserBaiduAct.line == r11BaiduS2
+                        && seriesUserBaiduAct.episode == r11BdE2
+                        && seriesUserBaiduAct.resumePositionMs == 0
+                        && !seriesPresentQuarkAct.requiresReselection
+                        && seriesPresentQuarkAct.line == r11QuarkS2
+                        && seriesPresentQuarkAct.episode == r11QkE2
+                        && seriesPresentQuarkAct.resumePositionMs == 42_000
+                        && movieMissingAct.requiresReselection
+                        && MobileDetailScreen.RESELECT_BUTTON_TEXT.equals(
+                                movieMissingAct.buttonLabel)
+                        && movieMissingAct.line == null
+                        && movieMissingAct.episode == null
+                        && movieMissingAct.resumePositionMs == 0
+                        && !movieUserBaiduAct.requiresReselection
+                        && movieUserBaiduAct.line == baiduMovieLine
+                        && movieUserBaiduAct.episode == baiduMovieEp
+                        && movieUserBaiduAct.resumePositionMs == 0
+                        && !moviePresentQuarkAct.requiresReselection
+                        && moviePresentQuarkAct.line == quarkMovieLine
+                        && moviePresentQuarkAct.episode == quarkMovieEp
+                        && moviePresentQuarkAct.resumePositionMs == 42_000,
+                "R11 P2-1B: MobileDetailScreen.resolvePrimaryPlayAction prompts re-selection when original drive vanished (series & movie), plays Baidu at 0ms only after explicit user selection, and recovers Quark at 42000ms when present");
+
         pass(
-                "DriveOrder + R4..R10 P1-1..P2-3: line-season failover, Dart-aligned episodeMediaId, same-site drive conflict, re-index resume, and O(N) 250/500/800-ep perf verified");
+                "DriveOrder + R4..R11 P1-1..P2-1: line-season failover, Dart-aligned episodeMediaId, same-site drive conflict (series+movie+detail-play), re-index resume, and O(N) 250/500/800-ep perf verified");
     }
 
     private static String computeWindowsV073MediaId(String canonicalUrl) throws Exception {

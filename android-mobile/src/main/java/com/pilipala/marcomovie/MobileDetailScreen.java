@@ -57,6 +57,7 @@ final class MobileDetailScreen {
     private static final Map<String, String> activeAiEpisodeTitles = new HashMap<>();
     private static String selectedEpisodeLine = "";
     private static int selectedEpisodeIndex = -1;
+    private static boolean userSelectedDetailTarget = false;
     private static boolean activeVideoDescending = false;
     private static final WeakHashMap<View, EpisodeSelectionState> SELECTION_STATES =
             new WeakHashMap<>();
@@ -191,6 +192,103 @@ final class MobileDetailScreen {
         return episodeCount > 1;
     }
 
+    static final String RESELECT_BUTTON_TEXT = "原线路已变更 · 请重选";
+    static final String RESELECT_TOAST_TEXT = "上次的线路或集数已变更，请在下方重新选择线路或剧集";
+
+    /**
+     * Resolved primary play button state on {@link MobileDetailScreen}. When watch history exists
+     * for the current title on the same site, {@link HistoryResumeMatcher#matchEpisode} returns
+     * {@code null} (e.g. original Quark drive vanished and only Baidu remains), and the user has
+     * not explicitly chosen a replacement line/episode yet, {@code requiresReselection} is {@code
+     * true} so the primary button prompts re-selection instead of silently playing a default
+     * episode on another drive.
+     */
+    static final class PrimaryPlayAction {
+        final boolean requiresReselection;
+        final String buttonLabel;
+        final Cms.Line line;
+        final Cms.Episode episode;
+        final int episodeIndex;
+        final int resumePositionMs;
+
+        PrimaryPlayAction(
+                boolean requiresReselection,
+                String buttonLabel,
+                Cms.Line line,
+                Cms.Episode episode,
+                int episodeIndex,
+                int resumePositionMs) {
+            this.requiresReselection = requiresReselection;
+            this.buttonLabel = buttonLabel;
+            this.line = line;
+            this.episode = episode;
+            this.episodeIndex = episodeIndex;
+            this.resumePositionMs = resumePositionMs;
+        }
+    }
+
+    static PrimaryPlayAction resolvePrimaryPlayAction(
+            Cms.Video video,
+            int preferredLineIndex,
+            WatchHistory.Entry remembered,
+            boolean userSelected,
+            Cms.Line userSelectedLine,
+            int userSelectedEpIndex,
+            boolean aiUnlocked,
+            int storedCleanMode) {
+        if (video == null || video.lines == null || video.lines.isEmpty()) {
+            return new PrimaryPlayAction(true, RESELECT_BUTTON_TEXT, null, null, -1, 0);
+        }
+        if (userSelected
+                && userSelectedLine != null
+                && userSelectedLine.episodes != null
+                && !userSelectedLine.episodes.isEmpty()) {
+            int epIdx =
+                    Math.max(
+                            0, Math.min(userSelectedEpIndex, userSelectedLine.episodes.size() - 1));
+            Cms.Episode ep = userSelectedLine.episodes.get(epIdx);
+            int resumePos =
+                    remembered != null
+                            ? HistoryResumeMatcher.resolveResumePositionMs(
+                                    userSelectedLine, ep, epIdx, remembered)
+                            : 0;
+            String label =
+                    formatPlayEpisodeLabel(
+                            ep == null ? "" : ep.name, epIdx + 1, aiUnlocked, storedCleanMode);
+            return new PrimaryPlayAction(false, label, userSelectedLine, ep, epIdx, resumePos);
+        }
+        if (remembered != null) {
+            HistoryResumeMatcher.EpisodeMatch matched =
+                    HistoryResumeMatcher.matchEpisode(video, remembered);
+            if (matched == null || matched.line == null || matched.episode == null) {
+                return new PrimaryPlayAction(true, RESELECT_BUTTON_TEXT, null, null, -1, 0);
+            }
+            int epIdx =
+                    matched.line.episodes != null
+                            ? matched.line.episodes.indexOf(matched.episode)
+                            : -1;
+            int safeIdx = Math.max(0, epIdx);
+            int resumePos =
+                    HistoryResumeMatcher.resolveResumePositionMs(
+                            matched.line, matched.episode, epIdx, remembered);
+            String label =
+                    formatPlayEpisodeLabel(
+                            matched.episode.name, safeIdx + 1, aiUnlocked, storedCleanMode);
+            return new PrimaryPlayAction(
+                    false, label, matched.line, matched.episode, safeIdx, resumePos);
+        }
+        int safeLineIdx = Math.max(0, Math.min(preferredLineIndex, video.lines.size() - 1));
+        Cms.Line defLine = video.lines.get(safeLineIdx);
+        if (defLine == null || defLine.episodes == null || defLine.episodes.isEmpty()) {
+            return new PrimaryPlayAction(true, RESELECT_BUTTON_TEXT, null, null, -1, 0);
+        }
+        Cms.Episode defEp = defLine.episodes.get(0);
+        String label =
+                formatPlayEpisodeLabel(
+                        defEp == null ? "" : defEp.name, 1, aiUnlocked, storedCleanMode);
+        return new PrimaryPlayAction(false, label, defLine, defEp, 0, 0);
+    }
+
     private static CharSequence buildPlayButtonLabel(
             MainActivity a, int iconColor, String episodeLabel) {
         SpannableStringBuilder ssb = new SpannableStringBuilder("  播放 · " + episodeLabel);
@@ -204,6 +302,65 @@ final class MobileDetailScreen {
         return ssb;
     }
 
+    private static CharSequence buildReselectButtonLabel(
+            MainActivity a, int iconColor, String label) {
+        SpannableStringBuilder ssb = new SpannableStringBuilder("  " + label);
+        MobileIcons.IconDrawable switchIcon =
+                MobileIcons.drawable(a, MobileIcons.IC_SWITCH_SOURCE, 14f, iconColor);
+        ssb.setSpan(
+                new ImageSpan(switchIcon, ImageSpan.ALIGN_BASELINE),
+                0,
+                1,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return ssb;
+    }
+
+    private static void promptReselectLineOrEpisode(MainActivity a) {
+        if (a == null) return;
+        a.resumeAt = 0;
+        a.toast(RESELECT_TOAST_TEXT);
+        if (a.scroll instanceof ScrollView && a.root != null) {
+            View epPanel = a.root.findViewWithTag("detail-episodes");
+            if (epPanel != null && epPanel.getTop() > 0) {
+                ((ScrollView) a.scroll).smoothScrollTo(0, epPanel.getTop());
+            }
+        }
+    }
+
+    private static void bindPrimaryPlayButton(
+            MainActivity a,
+            Cms.Site site,
+            Cms.Video video,
+            Button playBtn,
+            PrimaryPlayAction action) {
+        MobileTheme.Palette p = MobileTheme.of(a);
+        if (action == null
+                || action.requiresReselection
+                || action.line == null
+                || action.episode == null) {
+            String label =
+                    action != null && action.buttonLabel != null && !action.buttonLabel.isEmpty()
+                            ? action.buttonLabel
+                            : RESELECT_BUTTON_TEXT;
+            playBtn.setText(buildReselectButtonLabel(a, p.accentOnFill, label));
+            playBtn.setOnClickListener(view -> promptReselectLineOrEpisode(a));
+            return;
+        }
+        playBtn.setText(buildPlayButtonLabel(a, p.accentOnFill, action.buttonLabel));
+        playBtn.setOnClickListener(
+                view -> {
+                    a.resumeAt = action.resumePositionMs;
+                    handleDetailEpisodeTap(
+                            a,
+                            site,
+                            video,
+                            action.line,
+                            action.episode,
+                            action.episodeIndex + 1,
+                            true);
+                });
+    }
+
     private static void handleDetailEpisodeTap(
             MainActivity a,
             Cms.Site site,
@@ -214,6 +371,7 @@ final class MobileDetailScreen {
             boolean forcePlay) {
         int tapMode = a.mobilePrefs().getInt(Prefs.DETAIL_TAP_MODE, 0);
         if (!forcePlay && tapMode == 2) {
+            userSelectedDetailTarget = true;
             selectedEpisodeLine = line.name == null ? "" : line.name;
             selectedEpisodeIndex = Math.max(0, epNumber - 1);
             refreshSelectedEpisodeHighlight(a, selectedEpisodeLine, selectedEpisodeIndex);
@@ -222,9 +380,13 @@ final class MobileDetailScreen {
                 Button playBtn = (Button) playBtnView;
                 MobileTheme.Palette p = MobileTheme.of(a);
                 EpisodeDisplay d = parseEpisodeDisplay(ep.name, epNumber);
+                final int savedResume = a.resumeAt;
                 playBtn.setText(buildPlayButtonLabel(a, p.accentOnFill, d.cleanTitle));
                 playBtn.setOnClickListener(
-                        v -> handleDetailEpisodeTap(a, site, video, line, ep, epNumber, true));
+                        v -> {
+                            a.resumeAt = savedResume;
+                            handleDetailEpisodeTap(a, site, video, line, ep, epNumber, true);
+                        });
                 MobileMotion.popBounce(playBtn);
             }
             a.toast("已选中：" + ep.name + "（点击上方主播放钮开始播放）");
@@ -817,6 +979,7 @@ final class MobileDetailScreen {
         activeAiEpisodeTitles.clear();
         selectedEpisodeLine = "";
         selectedEpisodeIndex = -1;
+        userSelectedDetailTarget = false;
         activeVideoDescending = defaultEpisodeDescending();
         if (a.inlinePlayer != null) {
             a.inlinePlayer.detach();
@@ -1130,6 +1293,7 @@ final class MobileDetailScreen {
         MainActivity.Done<Cms.Video> present =
                 v -> {
                     final Cms.Site curSite = activeSiteRef[0];
+                    if (v.id == null || v.id.isEmpty()) v.id = listing.id;
                     if (v.poster == null || v.poster.isEmpty()) v.poster = listing.poster;
                     if (v.title == null || v.title.isEmpty()) v.title = listing.title;
                     activeVideoRef[0] = v;
@@ -1257,12 +1421,26 @@ final class MobileDetailScreen {
 
                     WatchHistory.Entry bookmark = null;
                     for (WatchHistory.Entry entry : a.watchHistory()) {
-                        if (entry.site.equals(curSite.key) && entry.id.equals(v.id)) {
+                        if (entry != null
+                                && Objects.equals(entry.site, curSite.key)
+                                && Objects.equals(entry.id, v.id)) {
                             bookmark = entry;
                             break;
                         }
                     }
+                    if (bookmark == null
+                            && a.historyFallbackBookmark != null
+                            && Objects.equals(a.historyFallbackBookmark.site, curSite.key)
+                            && Objects.equals(a.historyFallbackBookmark.id, v.id)) {
+                        bookmark = a.historyFallbackBookmark;
+                    }
                     final WatchHistory.Entry remembered = bookmark;
+
+                    // Reset per-presentation user-selection state so a vanished original drive
+                    // prompts re-selection until the user explicitly chooses another line/episode.
+                    selectedEpisodeLine = "";
+                    selectedEpisodeIndex = -1;
+                    userSelectedDetailTarget = false;
 
                     // Full-Width Accent Stadium Play Button
                     final boolean presentAiUnlocked = !a.isTvDevice() && AiBetaGate.isUnlocked(a);
@@ -1271,44 +1449,28 @@ final class MobileDetailScreen {
                                     ? a.mobilePrefs().getInt(Prefs.EPISODE_CLEAN_MODE, 0)
                                     : 0;
                     SeasonMeta curSeason = parseSeasonMeta(v.title);
-                    final HistoryResumeMatcher.EpisodeMatch rememberedMatch =
-                            remembered != null
-                                    ? HistoryResumeMatcher.matchEpisode(v, remembered)
-                                    : null;
-                    int remEpNum = 1;
+                    final PrimaryPlayAction initialPlayAction =
+                            resolvePrimaryPlayAction(
+                                    v,
+                                    defaultLineIdx,
+                                    remembered,
+                                    false,
+                                    null,
+                                    -1,
+                                    presentAiUnlocked,
+                                    presentStoredCleanMode);
+                    final boolean hasRememberedMatch =
+                            remembered != null && !initialPlayAction.requiresReselection;
+                    int remEpNum =
+                            remembered != null && remembered.index >= 0 ? remembered.index + 1 : 1;
                     String remDisplayLine = remembered != null ? remembered.line : "";
-                    if (rememberedMatch != null) {
-                        int epPos = rememberedMatch.line.episodes.indexOf(rememberedMatch.episode);
-                        if (epPos >= 0) remEpNum = epPos + 1;
-                        if (rememberedMatch.line.name != null
-                                && !rememberedMatch.line.name.isEmpty()) {
-                            remDisplayLine = rememberedMatch.line.name;
+                    if (hasRememberedMatch && initialPlayAction.line != null) {
+                        remEpNum = initialPlayAction.episodeIndex + 1;
+                        if (initialPlayAction.line.name != null
+                                && !initialPlayAction.line.name.isEmpty()) {
+                            remDisplayLine = initialPlayAction.line.name;
                         }
                     }
-                    String playEpLabel =
-                            rememberedMatch != null
-                                    ? formatPlayEpisodeLabel(
-                                            rememberedMatch.episode.name,
-                                            remEpNum,
-                                            presentAiUnlocked,
-                                            presentStoredCleanMode)
-                                    : (remembered != null
-                                            ? formatPlayEpisodeLabel(
-                                                    remembered.episode,
-                                                    remEpNum,
-                                                    presentAiUnlocked,
-                                                    presentStoredCleanMode)
-                                            : formatPlayEpisodeLabel(
-                                                    v.lines
-                                                            .get(
-                                                                    SourcePreferences.lineIndex(
-                                                                            a, curSite, v))
-                                                            .episodes
-                                                            .get(0)
-                                                            .name,
-                                                    1,
-                                                    presentAiUnlocked,
-                                                    presentStoredCleanMode));
 
                     Button playBtn = new Button(a);
                     playBtn.setTag("detail-play");
@@ -1325,47 +1487,14 @@ final class MobileDetailScreen {
                     playBtn.setPadding(a.dp(18), 0, a.dp(18), 0);
                     UiCompat.setElevation(playBtn, a.dp(p.isDark ? 4f : 3f));
                     MobileMotion.bindPress(playBtn, 0.96f);
-                    playBtn.setText(buildPlayButtonLabel(a, p.accentOnFill, playEpLabel));
-                    playBtn.setOnClickListener(
-                            view -> {
-                                int li = SourcePreferences.lineIndex(a, curSite, v);
-                                Cms.Line defLine = v.lines.get(li);
-                                Cms.Episode defEp = defLine.episodes.get(0);
-                                if (remembered != null) {
-                                    HistoryResumeMatcher.EpisodeMatch m =
-                                            HistoryResumeMatcher.matchEpisode(v, remembered);
-                                    if (m != null) {
-                                        defLine = m.line;
-                                        defEp = m.episode;
-                                        int mEpIdx =
-                                                defLine.episodes != null
-                                                        ? defLine.episodes.indexOf(defEp)
-                                                        : -1;
-                                        a.resumeAt =
-                                                HistoryResumeMatcher.resolveResumePositionMs(
-                                                        defLine, defEp, mEpIdx, remembered);
-                                    } else {
-                                        a.resumeAt = 0;
-                                    }
-                                } else {
-                                    a.resumeAt = 0;
-                                }
-                                handleDetailEpisodeTap(
-                                        a,
-                                        curSite,
-                                        v,
-                                        defLine,
-                                        defEp,
-                                        Math.max(1, defLine.episodes.indexOf(defEp) + 1),
-                                        true);
-                            });
+                    bindPrimaryPlayButton(a, curSite, v, playBtn, initialPlayAction);
                     playBtnWrap.addView(playBtn, new LinearLayout.LayoutParams(-1, a.dp(48)));
 
                     if (remembered != null) {
                         String bmEpTitle =
                                 formatPlayEpisodeLabel(
-                                        rememberedMatch != null
-                                                ? rememberedMatch.episode.name
+                                        hasRememberedMatch && initialPlayAction.episode != null
+                                                ? initialPlayAction.episode.name
                                                 : remembered.episode,
                                         remEpNum,
                                         presentAiUnlocked,
@@ -1379,7 +1508,11 @@ final class MobileDetailScreen {
                                                 + " · 线路："
                                                 + remDisplayLine
                                         : "已观看 [" + bmEpTitle + "] · 线路：" + remDisplayLine;
+                        if (!hasRememberedMatch) {
+                            bmSummary = bmSummary + "（原线路或集数已变更，请在下方重选）";
+                        }
                         TextView bmInfo = a.text(bmSummary, 12, p.textSecondary);
+                        bmInfo.setTag("detail-history-summary");
                         bmInfo.setSingleLine(true);
                         bmInfo.setEllipsize(TextUtils.TruncateAt.MIDDLE);
                         bmInfo.setGravity(Gravity.CENTER);
@@ -1387,19 +1520,15 @@ final class MobileDetailScreen {
                         playBtnWrap.addView(bmInfo, new LinearLayout.LayoutParams(-1, -2));
                     }
 
-                    int initLine = SourcePreferences.lineIndex(a, curSite, v), initPage = 0;
-                    if (rememberedMatch != null) {
-                        int matchedIdx = v.lines.indexOf(rememberedMatch.line);
+                    int initLine = defaultLineIdx, initPage = 0;
+                    if (hasRememberedMatch && initialPlayAction.line != null) {
+                        int matchedIdx = v.lines.indexOf(initialPlayAction.line);
                         if (matchedIdx >= 0) {
                             initLine = matchedIdx;
-                            int remIdx =
-                                    Math.max(
-                                            0,
-                                            rememberedMatch.line.episodes.indexOf(
-                                                    rememberedMatch.episode));
+                            int remIdx = Math.max(0, initialPlayAction.episodeIndex);
                             initPage =
                                     (activeVideoDescending
-                                                    ? rememberedMatch.line.episodes.size()
+                                                    ? initialPlayAction.line.episodes.size()
                                                             - 1
                                                             - remIdx
                                                     : remIdx)
@@ -1710,13 +1839,30 @@ final class MobileDetailScreen {
                 !a.isTvDevice() ? a.mobilePrefs().getInt(Prefs.EPISODE_CLEAN_MODE, 0) : 0;
         final boolean lineMatchesBookmark =
                 remembered != null && HistoryResumeMatcher.isSameBookmarkLine(line, remembered);
+        final PrimaryPlayAction renderPlayAction =
+                resolvePrimaryPlayAction(
+                        video,
+                        lineIndex,
+                        remembered,
+                        userSelectedDetailTarget,
+                        line,
+                        (selectedEpisodeIndex >= 0
+                                        && selectedEpisodeIndex < total
+                                        && line.name.equals(selectedEpisodeLine))
+                                ? selectedEpisodeIndex
+                                : (lineMatchesBookmark
+                                        ? HistoryResumeMatcher.findMatchedEpisodeIndex(
+                                                line, remembered)
+                                        : 0),
+                        renderAiUnlocked,
+                        renderStoredCleanMode);
 
-        int activeEpIdx = 0;
+        int activeEpIdx = renderPlayAction.requiresReselection ? -1 : 0;
         if (selectedEpisodeIndex >= 0
                 && selectedEpisodeIndex < total
                 && line.name.equals(selectedEpisodeLine)) {
             activeEpIdx = selectedEpisodeIndex;
-        } else if (lineMatchesBookmark) {
+        } else if (lineMatchesBookmark && !renderPlayAction.requiresReselection) {
             activeEpIdx = HistoryResumeMatcher.findMatchedEpisodeIndex(line, remembered);
         }
 
@@ -1724,33 +1870,7 @@ final class MobileDetailScreen {
         if (a.root != null) {
             View playBtnView = a.root.findViewWithTag("detail-play");
             if (playBtnView instanceof Button && !line.episodes.isEmpty()) {
-                Button playBtn = (Button) playBtnView;
-                final int targetEpIdx = activeEpIdx;
-                playBtn.setText(
-                        buildPlayButtonLabel(
-                                a,
-                                p.accentOnFill,
-                                formatPlayEpisodeLabel(
-                                        line.episodes.get(targetEpIdx).name,
-                                        targetEpIdx + 1,
-                                        renderAiUnlocked,
-                                        renderStoredCleanMode)));
-                playBtn.setOnClickListener(
-                        v -> {
-                            Cms.Episode targetEp = line.episodes.get(targetEpIdx);
-                            a.resumeAt =
-                                    (remembered != null
-                                                    && HistoryResumeMatcher
-                                                            .matchesBookmarkSelection(
-                                                                    line,
-                                                                    targetEp,
-                                                                    targetEpIdx,
-                                                                    remembered))
-                                            ? remembered.resume()
-                                            : 0;
-                            handleDetailEpisodeTap(
-                                    a, site, video, line, targetEp, targetEpIdx + 1, true);
-                        });
+                bindPrimaryPlayButton(a, site, video, (Button) playBtnView, renderPlayAction);
             }
             View topSourceLabelView = a.root.findViewWithTag("detail-source-picker");
             View topSourceChevron = a.root.findViewWithTag("detail-source-chevron");
@@ -1847,6 +1967,9 @@ final class MobileDetailScreen {
                     MobileMotion.bindPress(lPill, 0.94f);
                     lPill.setOnClickListener(
                             v -> {
+                                userSelectedDetailTarget = true;
+                                selectedEpisodeLine = "";
+                                selectedEpisodeIndex = -1;
                                 a.prefs
                                         .edit()
                                         .putString(Prefs.PREFERRED_LINE, candLine.rawName())
@@ -2161,6 +2284,7 @@ final class MobileDetailScreen {
                 MobileMotion.bindPress(numPill, 0.94f);
                 numPill.setOnClickListener(
                         v -> {
+                            userSelectedDetailTarget = true;
                             selectedEpisodeLine = line.name == null ? "" : line.name;
                             selectedEpisodeIndex = posIdx;
                             selectionState.applySelection(a, posIdx);
@@ -2168,31 +2292,18 @@ final class MobileDetailScreen {
                             View playBtnView =
                                     a.root == null ? null : a.root.findViewWithTag("detail-play");
                             if (playBtnView instanceof Button) {
-                                Button playBtn = (Button) playBtnView;
-                                playBtn.setText(
-                                        buildPlayButtonLabel(
-                                                a,
-                                                p.accentOnFill,
-                                                formatPlayEpisodeLabel(
-                                                        ep.name,
-                                                        posIdx + 1,
-                                                        renderAiUnlocked,
-                                                        renderStoredCleanMode)));
-                                playBtn.setOnClickListener(
-                                        pv -> {
-                                            a.resumeAt =
-                                                    (remembered != null
-                                                                    && HistoryResumeMatcher
-                                                                            .matchesBookmarkSelection(
-                                                                                    line,
-                                                                                    ep,
-                                                                                    posIdx,
-                                                                                    remembered))
-                                                            ? remembered.resume()
-                                                            : 0;
-                                            handleDetailEpisodeTap(
-                                                    a, site, video, line, ep, posIdx + 1, true);
-                                        });
+                                PrimaryPlayAction pickedAction =
+                                        resolvePrimaryPlayAction(
+                                                video,
+                                                lineIndex,
+                                                remembered,
+                                                true,
+                                                line,
+                                                posIdx,
+                                                renderAiUnlocked,
+                                                renderStoredCleanMode);
+                                bindPrimaryPlayButton(
+                                        a, site, video, (Button) playBtnView, pickedAction);
                             }
                         });
                 selectionState.numPills.put(posIdx, numPill);
@@ -2227,7 +2338,14 @@ final class MobileDetailScreen {
             MobileMotion.bindPress(cardWrap, 0.97f);
             cardWrap.setOnClickListener(
                     v -> {
-                        a.resumeAt = 0;
+                        userSelectedDetailTarget = true;
+                        selectedEpisodeLine = line.name == null ? "" : line.name;
+                        selectedEpisodeIndex = posIdx;
+                        a.resumeAt =
+                                remembered != null
+                                        ? HistoryResumeMatcher.resolveResumePositionMs(
+                                                line, ep, posIdx, remembered)
+                                        : 0;
                         handleDetailEpisodeTap(a, site, video, line, ep, posIdx + 1, false);
                     });
             cardWrap.setOnLongClickListener(
@@ -2398,7 +2516,7 @@ final class MobileDetailScreen {
             bodyHost.addView(groupScroll, new LinearLayout.LayoutParams(-1, -2));
         }
 
-        if (activeEpIdx > 0 || lineMatchesBookmark) {
+        if (activeEpIdx >= 0 && (activeEpIdx > 0 || lineMatchesBookmark)) {
             selectionState.scrollToEpisode(activeEpIdx, false);
         }
 
@@ -2498,6 +2616,9 @@ final class MobileDetailScreen {
             optRow.setOnClickListener(
                     v -> {
                         if (handleRef[0] != null) handleRef[0].dismiss();
+                        userSelectedDetailTarget = true;
+                        selectedEpisodeLine = "";
+                        selectedEpisodeIndex = -1;
                         a.prefs.edit().putString(Prefs.PREFERRED_LINE, cand.rawName()).apply();
                         renderMobileEpisodes(
                                 a,
@@ -2654,6 +2775,7 @@ final class MobileDetailScreen {
             cell.setOnClickListener(
                     v -> {
                         if (dlgRef[0] != null) dlgRef[0].dismiss();
+                        userSelectedDetailTarget = true;
                         selectedEpisodeLine = line.name == null ? "" : line.name;
                         selectedEpisodeIndex = posIdx;
                         int targetPage = visualIdx / 50;

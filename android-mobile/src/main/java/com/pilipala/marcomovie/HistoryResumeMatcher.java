@@ -976,17 +976,19 @@ final class HistoryResumeMatcher {
         if (best != null) return best;
 
         // Final safe fallback ONLY for single-item movie entries when bookmark has no explicit
-        // episode number, season, or split-part marker.
+        // episode number, season, or split-part marker. Never override a confirmed same-site drive
+        // conflict (e.g. original Quark movie vanished and only Baidu remains).
         if (bmIndex == 0 && bmEpNum <= 0 && bmSeason <= 0 && bmPart == 0 && !bmTrailer) {
             for (Cms.Line line : video.lines) {
-                if (line != null && line.episodes != null && line.episodes.size() == 1) {
-                    Cms.Episode only = line.episodes.get(0);
-                    String onlyName = only == null || only.name == null ? "" : only.name.trim();
-                    if (!isTrailerOrExtraName(onlyName)
-                            && extractPartMarker(onlyName) == 0
-                            && extractEpisodeNumber(onlyName) <= 0) {
-                        return new EpisodeMatch(line, only, 42, videoSeason);
-                    }
+                if (line == null || line.episodes == null || line.episodes.size() != 1) continue;
+                if (!crossSourceFailover && lineMatchStrength(line, bookmark) < 0) continue;
+                Cms.Episode only = line.episodes.get(0);
+                if (only == null) continue;
+                String onlyName = only.name == null ? "" : only.name.trim();
+                if (!isTrailerOrExtraName(onlyName)
+                        && extractPartMarker(onlyName) == 0
+                        && extractEpisodeNumber(onlyName) <= 0) {
+                    return new EpisodeMatch(line, only, 42, videoSeason);
                 }
             }
         }
