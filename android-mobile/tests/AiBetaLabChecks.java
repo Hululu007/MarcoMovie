@@ -2531,6 +2531,122 @@ public final class AiBetaLabChecks {
                                 && "sub-add".equals(mpvSecondAiCmds.get(1)[0])
                                 && aiZhUri.equals(mpvSecondAiCmds.get(1)[1]),
                         "R8 P2-1: plain online subtitle and AI derived output use separate cache files; original bytes untouched; Media3 keeps both switchable; MPV never sub-removes plain SID 5 or same-named source SID 6");
+
+                // 11. Round-9 P2-1: Two distinct online subtitle candidates A & B sharing the EXACT
+                //     same download filename ("movie.srt") MUST get independent cache identities!
+                //     Mounting A, then downloading & AI-translating B (also "movie.srt") MUST keep
+                //     A's original bytes intact when switching back to A, and updating B replaces
+                //     ONLY B's AI track!
+                OnlineSubtitleDanmakuService.SubtitleCandidate candA =
+                        new OnlineSubtitleDanmakuService.SubtitleCandidate(
+                                "assrt", "1001", "候选A (English)", "en", "srt");
+                OnlineSubtitleDanmakuService.SubtitleCandidate candB =
+                        new OnlineSubtitleDanmakuService.SubtitleCandidate(
+                                "assrt", "2002", "候选B (Japanese)", "ja", "srt");
+                File candAOrigFile =
+                        OnlineSubtitleDanmakuService.resolveOriginalSubtitleCacheFile(
+                                subCacheRoot, candA, "movie.srt");
+                File candBOrigFile =
+                        OnlineSubtitleDanmakuService.resolveOriginalSubtitleCacheFile(
+                                subCacheRoot, candB, "movie.srt");
+                File candBAiBiFile =
+                        OnlineSubtitleDanmakuService.resolveAiDerivedSubtitleCacheFile(
+                                subCacheRoot, candB, "movie.srt", true);
+                File candBAiZhFile =
+                        OnlineSubtitleDanmakuService.resolveAiDerivedSubtitleCacheFile(
+                                subCacheRoot, candB, "movie.srt", false);
+                File candBGuarded =
+                        AiSubtitleTranslator.resolveSafeDerivedTargetFile(candBOrigFile, true);
+
+                String bytesA = "1\n00:00:01,000 --> 00:00:04,000\nCandidate A original bytes\n\n";
+                String bytesB = "1\n00:00:01,000 --> 00:00:04,000\nCandidate B different bytes\n\n";
+                String bytesBAiBi =
+                        "1\n00:00:01,000 --> 00:00:04,000\n候选B双语译文\nCandidate B different bytes\n\n";
+                String bytesBAiZh = "1\n00:00:01,000 --> 00:00:04,000\n候选B单语译文\n\n";
+
+                Files.writeString(candAOrigFile.toPath(), bytesA, StandardCharsets.UTF_8);
+                // Now download B (same filename movie.srt!) and generate B's AI bilingual + update
+                Files.writeString(candBOrigFile.toPath(), bytesB, StandardCharsets.UTF_8);
+                Files.writeString(candBAiBiFile.toPath(), bytesBAiBi, StandardCharsets.UTF_8);
+                Files.writeString(candBAiZhFile.toPath(), bytesBAiZh, StandardCharsets.UTF_8);
+
+                String readBackA = Files.readString(candAOrigFile.toPath(), StandardCharsets.UTF_8);
+                String uriA = candAOrigFile.toURI().toString();
+                String uriBAiBi = candBAiBiFile.toURI().toString();
+                String uriBAiZh = candBAiZhFile.toURI().toString();
+
+                // Media3: mount A -> mount B AI bi -> update B AI zh => A stays intact with A bytes
+                JSONObject m3AbOpts = new JSONObject();
+                MoviePlayer.upsertSubtitleTrackJson(
+                        m3AbOpts, uriA, candA.title, "application/x-subrip", "marco_ext_sub_1");
+                MoviePlayer.upsertSubtitleTrackJson(
+                        m3AbOpts,
+                        uriBAiBi,
+                        AiSubtitleTranslator.AI_TRACK_NAME,
+                        "application/x-subrip",
+                        "marco_ai_sub_2");
+                MoviePlayer.upsertSubtitleTrackJson(
+                        m3AbOpts,
+                        uriBAiZh,
+                        AiSubtitleTranslator.AI_TRACK_NAME,
+                        "application/x-subrip",
+                        "marco_ai_sub_3");
+                JSONArray m3AbTracks = m3AbOpts.getJSONArray("subtitles");
+                boolean m3AbOk =
+                        m3AbTracks.length() == 2
+                                && uriA.equals(m3AbTracks.getJSONObject(0).getString("url"))
+                                && uriBAiZh.equals(m3AbTracks.getJSONObject(1).getString("url"));
+
+                // MPV: mount A (SID 5) -> mount B AI bi (0 sub-remove on 5) -> update B AI zh
+                // (sub-remove ONLY 6, SID 5 untouched and reads exact A bytes!)
+                List<JSONObject> mpvAbSubs = new ArrayList<>();
+                mpvAbSubs.add(
+                        new JSONObject()
+                                .put("id", 5)
+                                .put("type", "sub")
+                                .put("external", true)
+                                .put("external-filename", uriA)
+                                .put("title", candA.title));
+                List<String[]> mpvAbFirst =
+                        MpvPlayer.planExternalSubtitleUpsertCommands(
+                                mpvAbSubs,
+                                uriBAiBi,
+                                AiSubtitleTranslator.AI_TRACK_NAME,
+                                -1,
+                                "",
+                                true);
+                mpvAbSubs.add(
+                        new JSONObject()
+                                .put("id", 6)
+                                .put("type", "sub")
+                                .put("external", true)
+                                .put("external-filename", uriBAiBi)
+                                .put("title", AiSubtitleTranslator.AI_TRACK_NAME));
+                List<String[]> mpvAbSecond =
+                        MpvPlayer.planExternalSubtitleUpsertCommands(
+                                mpvAbSubs,
+                                uriBAiZh,
+                                AiSubtitleTranslator.AI_TRACK_NAME,
+                                6,
+                                uriBAiBi,
+                                true);
+
+                check(
+                        !candAOrigFile.getCanonicalPath().equals(candBOrigFile.getCanonicalPath())
+                                && !candAOrigFile
+                                        .getCanonicalPath()
+                                        .equals(candBAiBiFile.getCanonicalPath())
+                                && candBGuarded
+                                        .getCanonicalPath()
+                                        .equals(candBAiBiFile.getCanonicalPath())
+                                && bytesA.equals(readBackA)
+                                && m3AbOk
+                                && mpvAbFirst.size() == 1
+                                && "sub-add".equals(mpvAbFirst.get(0)[0])
+                                && mpvAbSecond.size() == 2
+                                && "sub-remove".equals(mpvAbSecond.get(0)[0])
+                                && "6".equals(mpvAbSecond.get(0)[1]),
+                        "R9 P2-1: two distinct online subtitle candidates sharing filename movie.srt get isolated cache files; switching back to A reads exact A bytes and updating B replaces only B's AI track");
             } finally {
                 deleteRecursive(subCacheRoot);
             }

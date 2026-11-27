@@ -620,6 +620,295 @@ final class WatchHistory {
         return "epk1:" + sha256Hex(canonical).substring(0, 24);
     }
 
+    private static final java.util.regex.Pattern WINDOWS_CANONICAL_MEDIA_ID_PATTERN =
+            java.util.regex.Pattern.compile("^mid:v1:[0-9a-f]{32}$");
+    private static final java.util.regex.Pattern WINDOWS_NON_URI_SECRET_SEG_PATTERN =
+            java.util.regex.Pattern.compile(
+                    "(?i)([?&|;\\s])(token|sign|sig|signature|auth|auth_key|access_token|secret|pass|password|pwd|cookie|session|expires|expire|exp|key|api_key|apikey)=[^&|;\\s]*");
+    private static final Set<String> WINDOWS_SAFE_IDENTITY_QUERY_KEYS =
+            Collections.unmodifiableSet(
+                    new HashSet<>(
+                            Arrays.asList(
+                                    "id",
+                                    "fid",
+                                    "file_id",
+                                    "fileid",
+                                    "vid",
+                                    "item_id",
+                                    "itemid",
+                                    "share_id",
+                                    "shareid",
+                                    "fs_id",
+                                    "fsid",
+                                    "path",
+                                    "name",
+                                    "ep",
+                                    "episode",
+                                    "sid",
+                                    "v",
+                                    "p",
+                                    "cid",
+                                    "bvid",
+                                    "aid",
+                                    "playid",
+                                    "media_id",
+                                    "mediaid",
+                                    "file",
+                                    "dir",
+                                    "folder",
+                                    "drive_id",
+                                    "driveid",
+                                    "pan_id",
+                                    "panid",
+                                    "uk",
+                                    "surl",
+                                    "pwd_id",
+                                    "vod_id",
+                                    "nid",
+                                    "part",
+                                    "part_id",
+                                    "partid",
+                                    "ratingkey",
+                                    "rating_key",
+                                    "episode_id",
+                                    "episodeid",
+                                    "stream_id",
+                                    "streamid",
+                                    "asset_id",
+                                    "assetid",
+                                    "provider",
+                                    "drive",
+                                    "ref",
+                                    "account",
+                                    "fids",
+                                    "channel_id",
+                                    "channelid")));
+
+    static boolean isCanonicalWindowsMediaId(String value) {
+        return value != null && WINDOWS_CANONICAL_MEDIA_ID_PATTERN.matcher(value.trim()).matches();
+    }
+
+    private static String encodeUriQueryComponentUtf8(String value) {
+        if (value == null || value.isEmpty()) return "";
+        try {
+            return java.net.URLEncoder.encode(value, "UTF-8")
+                    .replace("+", "%20")
+                    .replace("%21", "!")
+                    .replace("%27", "'")
+                    .replace("%28", "(")
+                    .replace("%29", ")")
+                    .replace("%7E", "~");
+        } catch (Exception ignored) {
+            return value;
+        }
+    }
+
+    private static String decodeUriQueryComponentUtf8(String value) {
+        if (value == null || value.isEmpty()) return "";
+        try {
+            return java.net.URLDecoder.decode(value, "UTF-8");
+        } catch (Exception ignored) {
+            return value;
+        }
+    }
+
+    /**
+     * Computes a Windows/Flutter 0.7.3-compatible {@code mid:v1:<32hex>} non-streamable media
+     * identity from an upstream episode URL (matching {@code
+     * WatchHistoryEntry.mediaIdentityForUrl}). Returns {@code ""} for empty URLs or ephemeral
+     * loopback proxy leases.
+     */
+    static String windowsMediaIdentityForUrl(String rawUrl) {
+        if (rawUrl == null) return "";
+        String trimmed = rawUrl.trim();
+        if (trimmed.isEmpty()) return "";
+        if (isCanonicalWindowsMediaId(trimmed)) return trimmed;
+        String lowerRaw = trimmed.toLowerCase(Locale.ROOT);
+        if (lowerRaw.startsWith("proxy://")
+                || lowerRaw.contains("127.0.0.1")
+                || lowerRaw.contains("localhost")
+                || lowerRaw.contains("[::1]")
+                || lowerRaw.contains("/proxy/")
+                || lowerRaw.contains("/lease/")) {
+            return "";
+        }
+        String canonical = trimmed;
+        try {
+            java.net.URI uri = java.net.URI.create(trimmed);
+            String scheme = uri.getScheme();
+            if (scheme != null && !scheme.isEmpty()) {
+                String lowerScheme = scheme.toLowerCase(Locale.ROOT);
+                String rawAuth = uri.getRawAuthority();
+                String host = uri.getHost();
+                int port = uri.getPort();
+                boolean hasExplicitPort =
+                        port >= 0
+                                && !(("http".equals(lowerScheme) && port == 80)
+                                        || ("https".equals(lowerScheme) && port == 443));
+                StringBuilder buf = new StringBuilder();
+                buf.append(lowerScheme).append(':');
+                if (rawAuth != null) {
+                    buf.append("//");
+                    if (host != null) {
+                        buf.append(host.toLowerCase(Locale.ROOT));
+                    }
+                    if (hasExplicitPort) {
+                        buf.append(':').append(port);
+                    }
+                }
+                String path = uri.getRawPath();
+                if (path != null) {
+                    buf.append(path);
+                } else if (uri.getRawSchemeSpecificPart() != null && rawAuth == null) {
+                    String ssp = uri.getRawSchemeSpecificPart();
+                    int qIdx = ssp.indexOf('?');
+                    buf.append(qIdx >= 0 ? ssp.substring(0, qIdx) : ssp);
+                }
+                String rawQuery = uri.getRawQuery();
+                if (rawQuery != null && !rawQuery.isEmpty()) {
+                    TreeMap<String, List<String>> kept = new TreeMap<>();
+                    for (String pair : rawQuery.split("&")) {
+                        if (pair.isEmpty()) continue;
+                        int eq = pair.indexOf('=');
+                        String k =
+                                decodeUriQueryComponentUtf8(eq >= 0 ? pair.substring(0, eq) : pair);
+                        String v =
+                                eq >= 0 ? decodeUriQueryComponentUtf8(pair.substring(eq + 1)) : "";
+                        String lowerKey = k.toLowerCase(Locale.ROOT);
+                        if (!WINDOWS_SAFE_IDENTITY_QUERY_KEYS.contains(lowerKey)) continue;
+                        List<String> list = kept.get(lowerKey);
+                        if (list == null) {
+                            list = new ArrayList<>();
+                            kept.put(lowerKey, list);
+                        }
+                        list.add(v);
+                    }
+                    if (!kept.isEmpty()) {
+                        buf.append('?');
+                        boolean first = true;
+                        for (Map.Entry<String, List<String>> e : kept.entrySet()) {
+                            for (String val : e.getValue()) {
+                                if (!first) buf.append('&');
+                                first = false;
+                                buf.append(encodeUriQueryComponentUtf8(e.getKey()))
+                                        .append('=')
+                                        .append(encodeUriQueryComponentUtf8(val));
+                            }
+                        }
+                    }
+                }
+                canonical = buf.toString();
+            } else {
+                canonical = WINDOWS_NON_URI_SECRET_SEG_PATTERN.matcher(trimmed).replaceAll("$1");
+            }
+        } catch (Exception ignored) {
+            canonical = WINDOWS_NON_URI_SECRET_SEG_PATTERN.matcher(trimmed).replaceAll("$1");
+        }
+        String digest = sha256Hex(canonical);
+        return digest.length() >= 32 ? ("mid:v1:" + digest.substring(0, 32)) : "";
+    }
+
+    /**
+     * Resolves {@code episodeMediaId} when Android starts or saves playback for an episode.
+     *
+     * <p>When {@code savedMatchedBookmark} was ALREADY confirmed by {@link HistoryResumeMatcher} to
+     * represent this exact episode/file and carries a non-sensitive Windows {@code episodeMediaId},
+     * preserves it across continued playback unless {@code rawEpisodeUrl} maps to a strictly
+     * different canonical Windows media ID AND {@code savedMatchedBookmark} already carried a
+     * conflicting Android {@code episodeKey}. When switching to a different episode or conflicting
+     * duplicate-named file ({@code savedMatchedBookmark == null}), never inherits an old identity
+     * and derives only this episode's own identity.
+     */
+    static String resolveEpisodeMediaIdForPlayback(
+            String rawEpisodeUrl, Entry savedMatchedBookmark) {
+        String derived = windowsMediaIdentityForUrl(rawEpisodeUrl);
+        if (savedMatchedBookmark != null) {
+            String savedMid = sanitizeEpisodeMediaId(savedMatchedBookmark.episodeMediaId);
+            if (!savedMid.isEmpty()) {
+                if (derived.isEmpty() || savedMid.equals(derived)) {
+                    return savedMid;
+                }
+                // If savedMatchedBookmark came from Windows (no Android episodeKey) and was
+                // confirmed to match this unique episode even though Android's site plugin
+                // represents the upstream URL differently, preserve Windows' episodeMediaId.
+                String savedEpKey = bookmarkEpisodeKey(savedMatchedBookmark);
+                String curEpKey = stableEpisodeKey(rawEpisodeUrl);
+                if (savedEpKey.isEmpty() || (!curEpKey.isEmpty() && savedEpKey.equals(curEpKey))) {
+                    return savedMid;
+                }
+            }
+        }
+        return derived;
+    }
+
+    /**
+     * Pure-JVM playback bookmark builder shared by fullscreen ({@link PlaybackController}) and
+     * inline ({@link MobileInlinePlayer}) players so Windows {@code episodeMediaId} is preserved
+     * when continuing the confirmed same episode and never transferred onto a different episode or
+     * conflicting duplicate-named file.
+     */
+    static Entry buildPlaybackEntry(
+            String siteKey,
+            String vodId,
+            String title,
+            String poster,
+            String lineRawName,
+            String lineId,
+            String driveKey,
+            String episodeName,
+            String rawEpisodeUrl,
+            int episodeIndex,
+            int positionMs,
+            int durationMs,
+            long updatedMs,
+            Entry savedMatchedBookmark) {
+        Entry e = new Entry();
+        e.site = siteKey == null ? "" : siteKey;
+        e.id = vodId == null ? "" : vodId;
+        e.title = title == null ? "" : title;
+        e.poster = poster == null ? "" : poster;
+        e.line = lineRawName == null ? "" : lineRawName;
+        e.lineId = lineId == null ? "" : lineId;
+        e.driveKey = driveKey == null ? "" : driveKey;
+        e.episode = episodeName == null ? "" : episodeName;
+        e.episodeKey = stableEpisodeKey(rawEpisodeUrl);
+        e.episodeMediaId = resolveEpisodeMediaIdForPlayback(rawEpisodeUrl, savedMatchedBookmark);
+        e.episodeUrl = "";
+        e.index = Math.max(0, episodeIndex);
+        e.position = Math.max(0, positionMs);
+        e.duration = Math.max(0, durationMs);
+        e.updated = updatedMs;
+        return e;
+    }
+
+    private static boolean isSameConfirmedEpisodeForMediaIdCarry(Entry prev, Entry next) {
+        if (prev == null || next == null) return false;
+        String prevMid = sanitizeEpisodeMediaId(prev.episodeMediaId);
+        if (prevMid.isEmpty()) return false;
+        String prevEp = prev.episode == null ? "" : prev.episode.trim();
+        String nextEp = next.episode == null ? "" : next.episode.trim();
+        if (prevEp.isEmpty() || !prevEp.equalsIgnoreCase(nextEp)) return false;
+        String prevLineId = prev.lineId == null ? "" : prev.lineId.trim();
+        String nextLineId = next.lineId == null ? "" : next.lineId.trim();
+        String prevLine = prev.line == null ? "" : prev.line.trim();
+        String nextLine = next.line == null ? "" : next.line.trim();
+        boolean sameLine =
+                (!prevLineId.isEmpty() && !nextLineId.isEmpty())
+                        ? prevLineId.equals(nextLineId)
+                        : (!prevLine.isEmpty() && prevLine.equalsIgnoreCase(nextLine));
+        if (!sameLine) return false;
+        String prevDrive = bookmarkDriveKey(prev);
+        String nextDrive = bookmarkDriveKey(next);
+        if (!prevDrive.isEmpty() && !nextDrive.isEmpty() && !prevDrive.equals(nextDrive)) {
+            return false;
+        }
+        // Require BOTH entries to share a confirmed non-empty episodeKey so duplicate-named files
+        // without matching fingerprints NEVER inherit another file's episodeMediaId.
+        String prevEpKey = bookmarkEpisodeKey(prev);
+        String nextEpKey = bookmarkEpisodeKey(next);
+        return !prevEpKey.isEmpty() && prevEpKey.equals(nextEpKey);
+    }
+
     private static boolean isSensitiveHistoryUrlKey(String key) {
         return "episodeUrl".equals(key)
                 || "episode_url".equals(key)
@@ -908,10 +1197,24 @@ final class WatchHistory {
             return text;
         }
         List<Entry> entries = read(text);
+        Entry prev = null;
         for (Iterator<Entry> it = entries.iterator(); it.hasNext(); ) {
-            if (it.next().key().equals(entry.key())) it.remove();
+            Entry cur = it.next();
+            if (cur.key().equals(entry.key())) {
+                prev = cur;
+                it.remove();
+            }
         }
-        entries.add(0, entry);
+        Entry toStore = cloneEntry(entry);
+        if (toStore != null) {
+            String curMid = sanitizeEpisodeMediaId(toStore.episodeMediaId);
+            if (curMid.isEmpty() && isSameConfirmedEpisodeForMediaIdCarry(prev, toStore)) {
+                toStore.episodeMediaId = sanitizeEpisodeMediaId(prev.episodeMediaId);
+            } else {
+                toStore.episodeMediaId = curMid;
+            }
+            entries.add(0, toStore);
+        }
         JSONArray a = new JSONArray();
         for (int i = 0; i < Math.min(LIMIT, entries.size()); i++)
             try {

@@ -23,6 +23,16 @@ final class HistoryResumeMatcher {
     private static final Pattern SEASON_ONLY_PATTERN =
             Pattern.compile(
                     "(?i)(?:第\\s*0*(\\d{1,2})\\s*季|第\\s*([一二三四五六七八九十]{1,3})\\s*季|season\\s*0*(\\d{1,2})|(?:^|[^a-z0-9])s0*(\\d{1,2})(?:$|[^a-z0-9]))");
+
+    /**
+     * Conservative season extractor for line names (e.g. {@code 夸克·第一季}, {@code 百度·第二季},
+     * {@code Season 2}). Intentionally excludes bare {@code S1}/{@code S2} tokens so CDN node names
+     * such as {@code S1高速} are never misclassified as seasons.
+     */
+    private static final Pattern EXPLICIT_LINE_SEASON_PATTERN =
+            Pattern.compile(
+                    "(?i)(?:第\\s*0*(\\d{1,2})\\s*季|第\\s*([一二三四五六七八九十]{1,3})\\s*季|season\\s*0*(\\d{1,2}))");
+
     private static final Pattern NOISE_NUMBERS_PATTERN =
             Pattern.compile(
                     "(?i)(?:\\b(?:2160|1080|720|480|360)p\\b|\\b(?:4k|8k|2k|10bit|8bit|hdr10|dv|h264|h265|x264|x265|hevc|avc|aac|ac3|eac3|dts|ddp5\\.?1|5\\.1|7\\.1)\\b|\\b(?:19|20)\\d{2}\\b)");
@@ -35,11 +45,17 @@ final class HistoryResumeMatcher {
         final Cms.Line line;
         final Cms.Episode episode;
         final int score;
+        final int videoSeason;
 
         EpisodeMatch(Cms.Line line, Cms.Episode episode, int score) {
+            this(line, episode, score, -1);
+        }
+
+        EpisodeMatch(Cms.Line line, Cms.Episode episode, int score, int videoSeason) {
             this.line = line;
             this.episode = episode;
             this.score = score;
+            this.videoSeason = videoSeason;
         }
     }
 
@@ -59,6 +75,27 @@ final class HistoryResumeMatcher {
             if (m.group(4) != null) return parsePositiveInt(m.group(4));
         }
         return -1;
+    }
+
+    static int extractExplicitLineSeasonNumber(String lineName) {
+        if (lineName == null || lineName.trim().isEmpty()) return -1;
+        Matcher m = EXPLICIT_LINE_SEASON_PATTERN.matcher(lineName);
+        if (m.find()) {
+            if (m.group(1) != null) return parsePositiveInt(m.group(1));
+            if (m.group(2) != null) return parseChineseNumeral(m.group(2));
+            if (m.group(3) != null) return parsePositiveInt(m.group(3));
+        }
+        return -1;
+    }
+
+    private static int firstPositive(int a, int b) {
+        return a > 0 ? a : b;
+    }
+
+    private static int firstPositive(int a, int b, int c) {
+        if (a > 0) return a;
+        if (b > 0) return b;
+        return c;
     }
 
     static int extractEpisodeNumber(String name) {
@@ -196,12 +233,41 @@ final class HistoryResumeMatcher {
         int strength = lineMatchStrength(line, bookmark);
         if (strength < 0) return false;
         if (strength > 0) return true;
+        String bmEp = bookmark.episode == null ? "" : bookmark.episode.trim();
         String bmEpKey = bookmarkEpisodeKey(bookmark);
-        if (!bmEpKey.isEmpty() && line.episodes != null) {
-            for (Cms.Episode ep : line.episodes) {
-                if (ep != null && bmEpKey.equals(stableEpisodeKey(ep.url))) {
-                    return true;
-                }
+        String bmEpMediaId = WatchHistory.sanitizeEpisodeMediaId(bookmark.episodeMediaId);
+        if ((bmEpKey.isEmpty() && bmEpMediaId.isEmpty()) || line.episodes == null) {
+            return false;
+        }
+        int lineSize = line.episodes.size();
+        int bmEpNum = extractEpisodeNumber(bmEp);
+        int bmSeason = extractSeasonNumber(bmEp);
+        int bmPart = extractPartMarker(bmEp);
+        boolean bmTrailer = isTrailerOrExtraName(bmEp);
+        int lineSeason = extractExplicitLineSeasonNumber(line.name);
+        for (Cms.Episode ep : line.episodes) {
+            if (ep == null) continue;
+            String candName = ep.name == null ? "" : ep.name.trim();
+            int candNum = extractEpisodeNumber(candName);
+            if (bmEpNum > 0 && candNum > 0 && candNum != bmEpNum) continue;
+            int candSeason = firstPositive(extractSeasonNumber(candName), lineSeason);
+            if (hasEpisodeIdentityConflictParsed(
+                    bmEpNum,
+                    bmSeason,
+                    bmPart,
+                    bmTrailer,
+                    candName,
+                    candNum,
+                    candSeason,
+                    lineSize)) {
+                continue;
+            }
+            if (!bmEpKey.isEmpty() && bmEpKey.equals(stableEpisodeKey(ep.url))) {
+                return true;
+            }
+            if (!bmEpMediaId.isEmpty()
+                    && bmEpMediaId.equals(WatchHistory.windowsMediaIdentityForUrl(ep.url))) {
+                return true;
             }
         }
         return false;
@@ -239,94 +305,59 @@ final class HistoryResumeMatcher {
         return 0;
     }
 
-    private static boolean hasEpisodeIdentityConflict(
-            String bmEp, String candName, int lineEpisodeCount) {
-        boolean bmTrailer = isTrailerOrExtraName(bmEp);
+    private static boolean hasEpisodeIdentityConflictParsed(
+            int bmEpNum,
+            int bmSeason,
+            int bmPart,
+            boolean bmTrailer,
+            String candName,
+            int candEpNum,
+            int candEffSeason,
+            int lineEpisodeCount) {
+        if (bmEpNum > 0 && candEpNum > 0) {
+            if (bmEpNum != candEpNum) return true;
+            if (bmSeason > 0 && candEffSeason > 0 && bmSeason != candEffSeason) return true;
+        } else if (bmSeason > 0 && candEffSeason > 0 && bmSeason != candEffSeason) {
+            return true;
+        }
         boolean candTrailer = isTrailerOrExtraName(candName);
         if (bmTrailer != candTrailer) return true;
-        int bmPart = extractPartMarker(bmEp);
         int candPart = extractPartMarker(candName);
         if (bmPart > 0 && candPart > 0 && bmPart != candPart) return true;
         if (bmPart != candPart && lineEpisodeCount > 1) return true;
-        int bmEpNum = extractEpisodeNumber(bmEp);
-        int candEpNum = extractEpisodeNumber(candName);
-        if (bmEpNum > 0 && candEpNum > 0) {
-            if (bmEpNum != candEpNum) return true;
-            int bmSeason = extractSeasonNumber(bmEp);
-            int candSeason = extractSeasonNumber(candName);
-            if (bmSeason > 0 && candSeason > 0 && bmSeason != candSeason) return true;
-        }
         return false;
-    }
-
-    private static boolean hasDuplicateEpisodeName(Cms.Line line, String candName) {
-        if (line == null || line.episodes == null || candName == null || candName.isEmpty()) {
-            return false;
-        }
-        int count = 0;
-        for (Cms.Episode ep : line.episodes) {
-            if (ep != null && ep.name != null && candName.equalsIgnoreCase(ep.name.trim())) {
-                count++;
-                if (count > 1) return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean lineHasAnotherEpKeyMatch(
-            Cms.Line line, String bmEpKey, Cms.Episode exclude) {
-        if (line == null || line.episodes == null || bmEpKey == null || bmEpKey.isEmpty()) {
-            return false;
-        }
-        for (Cms.Episode ep : line.episodes) {
-            if (ep == null || ep == exclude) continue;
-            if (bmEpKey.equals(stableEpisodeKey(ep.url))) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean isEpKeyUniqueInLine(Cms.Line line, String epKey) {
-        if (line == null || line.episodes == null || epKey == null || epKey.isEmpty()) {
-            return false;
-        }
-        int count = 0;
-        for (Cms.Episode ep : line.episodes) {
-            if (ep != null && epKey.equals(stableEpisodeKey(ep.url))) {
-                count++;
-                if (count > 1) return false;
-            }
-        }
-        return count == 1;
     }
 
     /**
-     * Checks whether two non-empty episode titles are compatible enough to trust an episodeKey
+     * Checks whether two non-empty episode titles are compatible enough to trust a fingerprint
      * match without cross-inheriting progress across distinct titled episodes (e.g. "返航" vs
      * "开端") on a multi-episode line if fingerprints ever collide.
      */
-    private static boolean areTitlesCompatibleForEpKeyMatch(
-            String bmEp, String candName, int lineSize) {
+    private static boolean areTitlesCompatibleForEpKeyMatchParsed(
+            String bmEp,
+            String normBm,
+            int bmNum,
+            int bmSeason,
+            int bmPart,
+            boolean bmMovieLikeTitle,
+            String candName,
+            int candNum,
+            int candEffSeason,
+            int lineSize) {
         if (bmEp == null || bmEp.isEmpty() || candName == null || candName.isEmpty()) {
             return true;
         }
         if (bmEp.equalsIgnoreCase(candName)) return true;
-        int bmNum = extractEpisodeNumber(bmEp);
-        int candNum = extractEpisodeNumber(candName);
         if (bmNum > 0 && candNum > 0) {
             if (bmNum != candNum) return false;
-            int bmSeason = extractSeasonNumber(bmEp);
-            int candSeason = extractSeasonNumber(candName);
-            return bmSeason <= 0 || candSeason <= 0 || bmSeason == candSeason;
+            return bmSeason <= 0 || candEffSeason <= 0 || bmSeason == candEffSeason;
         }
         if (lineSize == 1
-                && looksLikeMovieEpisode(bmEp)
+                && bmMovieLikeTitle
                 && looksLikeMovieEpisode(candName)
-                && extractPartMarker(bmEp) == extractPartMarker(candName)) {
+                && bmPart == extractPartMarker(candName)) {
             return true;
         }
-        String normBm = normalizeTitle(bmEp);
         String normCand = normalizeTitle(candName);
         return !normBm.isEmpty()
                 && !normCand.isEmpty()
@@ -335,54 +366,170 @@ final class HistoryResumeMatcher {
                         || normBm.contains(normCand));
     }
 
-    private static boolean isConfirmedEpKeyMatch(
-            Cms.Line line, Cms.Episode ep, String bmEp, String bmEpKey) {
-        if (line == null || ep == null || bmEpKey == null || bmEpKey.isEmpty()) return false;
-        String candEpKey = stableEpisodeKey(ep.url);
-        if (!bmEpKey.equals(candEpKey)) return false;
-        int lineSize = line.episodes != null ? line.episodes.size() : 0;
-        String candName = ep.name == null ? "" : ep.name.trim();
-        if (hasEpisodeIdentityConflict(bmEp, candName, lineSize)) return false;
-        if (!isEpKeyUniqueInLine(line, bmEpKey)) return false;
-        return areTitlesCompatibleForEpKeyMatch(bmEp, candName, lineSize);
-    }
-
     /**
-     * Checks whether {@code target} is the unique compatible episode-number (and season, when
-     * specified) match for {@code bmEp} within {@code line}. Rejects ambiguous duplicate episode
-     * numbers such as two seasons both labeled "第2集" on one line or two un-fingerprinted proxy
-     * resources sharing "第2集".
+     * Single-pass O(N) per-line summary for a bookmark. Eliminates O(N^2) line scans and repeated
+     * SHA-256 hashing on long-running series (250/500/800+ episodes), while unifying episodeKey,
+     * Windows episodeMediaId, exact title, and season+number disambiguation across Detail, History,
+     * Fullscreen, Inline, and cross-source failover.
      */
-    private static boolean isUniqueEpisodeNumberMatch(
-            Cms.Line line, Cms.Episode target, String bmEp) {
-        if (line == null || line.episodes == null || target == null || bmEp == null) return false;
-        int bmEpNum = extractEpisodeNumber(bmEp);
-        if (bmEpNum <= 0) return false;
-        String targetName = target.name == null ? "" : target.name.trim();
-        if (targetName.isEmpty()) return false;
-        int lineSize = line.episodes.size();
-        if (hasEpisodeIdentityConflict(bmEp, targetName, lineSize)) return false;
-        if (extractEpisodeNumber(targetName) != bmEpNum) return false;
+    private static final class LineScan {
+        final int lineSize;
+        final int fallbackSeason;
+        final int bmEpNum;
+        final int bmSeason;
+        final int bmPart;
+        final boolean bmTrailer;
+        final String bmEp;
+        final String bmEpKey;
+        final String bmEpMediaId;
 
-        int bmSeason = extractSeasonNumber(bmEp);
-        int targetSeason = extractSeasonNumber(targetName);
-        int compatibleCount = 0;
-        int exactSeasonCount = 0;
-        for (Cms.Episode ep : line.episodes) {
-            if (ep == null) continue;
-            String epName = ep.name == null ? "" : ep.name.trim();
-            if (epName.isEmpty()) continue;
-            if (hasEpisodeIdentityConflict(bmEp, epName, lineSize)) continue;
-            if (extractEpisodeNumber(epName) != bmEpNum) continue;
-            compatibleCount++;
-            if (bmSeason > 0 && extractSeasonNumber(epName) == bmSeason) {
-                exactSeasonCount++;
+        int confirmedEpKeyCount;
+        int confirmedEpKeyIdx = -1;
+        int confirmedEpMediaIdCount;
+        int confirmedEpMediaIdIdx = -1;
+        int exactNameCount;
+        int exactNameNonConflictIdx = -1;
+        int exactNameNonConflictCount;
+        int compatibleNumCount;
+        int compatibleNumIdx = -1;
+        int exactSeasonNumCount;
+        int exactSeasonNumIdx = -1;
+
+        LineScan(
+                Cms.Line line,
+                int videoSeason,
+                String bmEp,
+                String bmEpKey,
+                String bmEpMediaId,
+                int bmEpNum,
+                int bmSeason,
+                int bmPart,
+                boolean bmTrailer) {
+            this.lineSize = line != null && line.episodes != null ? line.episodes.size() : 0;
+            int lineSeason = line != null ? extractExplicitLineSeasonNumber(line.name) : -1;
+            this.fallbackSeason = firstPositive(lineSeason, videoSeason);
+            this.bmEp = bmEp == null ? "" : bmEp;
+            this.bmEpKey = bmEpKey == null ? "" : bmEpKey;
+            this.bmEpMediaId = bmEpMediaId == null ? "" : bmEpMediaId;
+            this.bmEpNum = bmEpNum;
+            this.bmSeason = bmSeason;
+            this.bmPart = bmPart;
+            this.bmTrailer = bmTrailer;
+            if (lineSize == 0) return;
+
+            final String normBm = this.bmEp.isEmpty() ? "" : normalizeTitle(this.bmEp);
+            final boolean bmMovieTitle = looksLikeMovieEpisode(this.bmEp);
+            final boolean checkEpKey = !this.bmEpKey.isEmpty();
+            final boolean checkEpMid = !this.bmEpMediaId.isEmpty();
+            final boolean checkExact = !this.bmEp.isEmpty();
+
+            for (int i = 0; i < lineSize; i++) {
+                Cms.Episode ep = line.episodes.get(i);
+                if (ep == null) continue;
+                String candName = ep.name == null ? "" : ep.name.trim();
+                boolean exactMatch = checkExact && this.bmEp.equalsIgnoreCase(candName);
+                if (exactMatch) {
+                    exactNameCount++;
+                }
+
+                // Fast-path O(1) number rejection for 799/800 non-matching numbered episodes before
+                // running trailer/part/season regexes or SHA-256 fingerprint hashing.
+                int candNum = extractEpisodeNumber(candName);
+                if (bmEpNum > 0 && candNum > 0 && candNum != bmEpNum) {
+                    continue;
+                }
+
+                int candEpSeason = extractSeasonNumber(candName);
+                int candEffSeason = firstPositive(candEpSeason, fallbackSeason);
+                if (hasEpisodeIdentityConflictParsed(
+                        bmEpNum,
+                        bmSeason,
+                        bmPart,
+                        bmTrailer,
+                        candName,
+                        candNum,
+                        candEffSeason,
+                        lineSize)) {
+                    continue;
+                }
+
+                if (exactMatch) {
+                    exactNameNonConflictCount++;
+                    exactNameNonConflictIdx = i;
+                }
+
+                if (bmEpNum > 0 && candNum == bmEpNum) {
+                    compatibleNumCount++;
+                    compatibleNumIdx = i;
+                    if (bmSeason > 0 && candEffSeason == bmSeason) {
+                        exactSeasonNumCount++;
+                        exactSeasonNumIdx = i;
+                    }
+                }
+
+                if ((checkEpKey || checkEpMid)
+                        && areTitlesCompatibleForEpKeyMatchParsed(
+                                this.bmEp,
+                                normBm,
+                                bmEpNum,
+                                bmSeason,
+                                bmPart,
+                                bmMovieTitle,
+                                candName,
+                                candNum,
+                                candEffSeason,
+                                lineSize)) {
+                    if (checkEpKey && this.bmEpKey.equals(stableEpisodeKey(ep.url))) {
+                        confirmedEpKeyCount++;
+                        confirmedEpKeyIdx = i;
+                    }
+                    if (checkEpMid
+                            && this.bmEpMediaId.equals(
+                                    WatchHistory.windowsMediaIdentityForUrl(ep.url))) {
+                        confirmedEpMediaIdCount++;
+                        confirmedEpMediaIdIdx = i;
+                    }
+                }
             }
         }
-        if (bmSeason > 0 && exactSeasonCount > 0) {
-            return exactSeasonCount == 1 && targetSeason == bmSeason;
+
+        boolean isUniqueConfirmedFingerprintAt(int idx) {
+            return (confirmedEpKeyCount == 1 && confirmedEpKeyIdx == idx)
+                    || (confirmedEpMediaIdCount == 1 && confirmedEpMediaIdIdx == idx);
         }
-        return compatibleCount == 1;
+
+        boolean hasOtherConfirmedFingerprint(int idx) {
+            boolean otherEpKey = confirmedEpKeyCount == 1 && confirmedEpKeyIdx != idx;
+            boolean otherEpMid = confirmedEpMediaIdCount == 1 && confirmedEpMediaIdIdx != idx;
+            return otherEpKey || otherEpMid;
+        }
+
+        boolean isUniqueExactNameAt(int idx, String candName) {
+            return !bmEp.isEmpty()
+                    && exactNameCount == 1
+                    && exactNameNonConflictCount == 1
+                    && exactNameNonConflictIdx == idx
+                    && bmEp.equalsIgnoreCase(candName);
+        }
+
+        boolean isUniqueEpisodeNumberAt(int idx, int candNum, int candEffSeason) {
+            if (bmEpNum <= 0 || candNum != bmEpNum) return false;
+            if (bmSeason > 0 && exactSeasonNumCount > 0) {
+                return exactSeasonNumCount == 1
+                        && exactSeasonNumIdx == idx
+                        && candEffSeason == bmSeason;
+            }
+            return compatibleNumCount == 1 && compatibleNumIdx == idx;
+        }
+    }
+
+    private static int resolveTargetIndexInLine(Cms.Line line, Cms.Episode ep, int hintIdx) {
+        if (line == null || line.episodes == null || ep == null) return -1;
+        int n = line.episodes.size();
+        if (hintIdx >= 0 && hintIdx < n && line.episodes.get(hintIdx) == ep) {
+            return hintIdx;
+        }
+        return line.episodes.indexOf(ep);
     }
 
     static boolean matchesBookmarkSelection(
@@ -393,14 +540,43 @@ final class HistoryResumeMatcher {
             return false;
         }
         int lineSize = line.episodes != null ? line.episodes.size() : 0;
+        if (lineSize == 0) return false;
+        int targetIdx = resolveTargetIndexInLine(line, ep, epIdx);
+        if (targetIdx < 0) return false;
+
         String bmEp = bookmark.episode == null ? "" : bookmark.episode.trim();
         String candName = ep.name == null ? "" : ep.name.trim();
-        if (hasEpisodeIdentityConflict(bmEp, candName, lineSize)) {
+        int bmEpNum = extractEpisodeNumber(bmEp);
+        int candEpNum = extractEpisodeNumber(candName);
+        // Immediate O(1) rejection for mismatched episode numbers (critical for long series).
+        if (bmEpNum > 0 && candEpNum > 0 && bmEpNum != candEpNum) {
             return false;
         }
+        int bmSeason = extractSeasonNumber(bmEp);
+        int lineSeason = extractExplicitLineSeasonNumber(line.name);
+        int candEffSeason = firstPositive(extractSeasonNumber(candName), lineSeason);
+        int bmPart = extractPartMarker(bmEp);
+        boolean bmTrailer = isTrailerOrExtraName(bmEp);
+        if (hasEpisodeIdentityConflictParsed(
+                bmEpNum,
+                bmSeason,
+                bmPart,
+                bmTrailer,
+                candName,
+                candEpNum,
+                candEffSeason,
+                lineSize)) {
+            return false;
+        }
+
         String bmEpKey = bookmarkEpisodeKey(bookmark);
-        String candEpKey = stableEpisodeKey(ep.url);
-        if (isConfirmedEpKeyMatch(line, ep, bmEp, bmEpKey)) {
+        String bmEpMediaId = WatchHistory.sanitizeEpisodeMediaId(bookmark.episodeMediaId);
+        LineScan scan =
+                new LineScan(
+                        line, -1, bmEp, bmEpKey, bmEpMediaId, bmEpNum, bmSeason, bmPart, bmTrailer);
+
+        // 0. Unique confirmed fingerprint (Android episodeKey OR Windows episodeMediaId)
+        if (scan.isUniqueConfirmedFingerprintAt(targetIdx)) {
             return true;
         }
         String bmLineId = bookmark.lineId == null ? "" : bookmark.lineId.trim();
@@ -409,23 +585,20 @@ final class HistoryResumeMatcher {
         if ((!bmLineId.isEmpty() || !bmLine.isEmpty() || !bmDrive.isEmpty()) && lineStrength <= 0) {
             return false;
         }
-        boolean keysPresentAndDiffer =
-                !bmEpKey.isEmpty() && !candEpKey.isEmpty() && !bmEpKey.equals(candEpKey);
-        if (keysPresentAndDiffer && lineHasAnotherEpKeyMatch(line, bmEpKey, ep)) {
+        // Only block fallback when ANOTHER episode in the line is a VALID, CONFIRMED fingerprint
+        // match (so re-indexed trailers where old ?id=2 moved to "第1集" do NOT block "第2集").
+        if (scan.hasOtherConfirmedFingerprint(targetIdx)) {
             return false;
         }
         if (!bmEp.isEmpty() && !candName.isEmpty()) {
-            // Disambiguation order after unique confirmed episodeKey:
-            // 1. Unique exact title match (rejects duplicate generic or duplicate numbered names)
-            if (candName.equalsIgnoreCase(bmEp) && !hasDuplicateEpisodeName(line, candName)) {
+            // 1. Unique exact episode title match
+            if (scan.isUniqueExactNameAt(targetIdx, candName)) {
                 return true;
             }
-            // 2. Unique compatible episode-number (and season) match within the line
-            if (isUniqueEpisodeNumberMatch(line, ep, bmEp)) {
+            // 2. Unique compatible episode-number (and season) match
+            if (scan.isUniqueEpisodeNumberAt(targetIdx, candEpNum, candEffSeason)) {
                 return true;
             }
-            int bmEpNum = extractEpisodeNumber(bmEp);
-            int candEpNum = extractEpisodeNumber(candName);
             if (bmEpNum > 0 || candEpNum > 0) {
                 return false;
             }
@@ -433,16 +606,22 @@ final class HistoryResumeMatcher {
             if (lineSize == 1
                     && looksLikeMovieEpisode(bmEp)
                     && looksLikeMovieEpisode(candName)
-                    && extractPartMarker(bmEp) == extractPartMarker(candName)) {
+                    && bmPart == extractPartMarker(candName)) {
                 return true;
             }
             return false;
         }
-        // Without episode names/numbers, only allow single-item same-line anonymous match when
-        // episodeKeys do not contradict each other; otherwise cannot confirm identity -> start at
-        // 0.
-        if (keysPresentAndDiffer) return false;
-        return lineSize == 1 && epIdx == 0 && bookmark.index == 0 && lineStrength > 0;
+        // Without episode names/numbers, allow single-item same-line anonymous match only when
+        // fingerprints do not contradict each other.
+        String candEpKey = stableEpisodeKey(ep.url);
+        if (!bmEpKey.isEmpty() && !candEpKey.isEmpty() && !bmEpKey.equals(candEpKey)) {
+            return false;
+        }
+        String candMid = WatchHistory.windowsMediaIdentityForUrl(ep.url);
+        if (!bmEpMediaId.isEmpty() && !candMid.isEmpty() && !bmEpMediaId.equals(candMid)) {
+            return false;
+        }
+        return lineSize == 1 && targetIdx == 0 && bookmark.index == 0 && lineStrength > 0;
     }
 
     /** Unified pure-JVM resume position resolver shared by Detail, History, Fullscreen & Inline. */
@@ -456,46 +635,85 @@ final class HistoryResumeMatcher {
 
     /**
      * Resolves resume position for cross-source failover: carries progress ONLY when the matched
-     * episode on the alternative source has confirmed unique identity with {@code bookmark} (unique
-     * episodeKey, unique exact title/part, unique episode number/season, or both single-item
-     * movies). Never transfers progress onto a different or ambiguous duplicate episode.
+     * episode on the alternative source has confirmed unique identity with {@code bookmark}
+     * (including explicit season confirmation whenever {@code bookmark} carries a season). Never
+     * transfers progress onto a wrong season, season-unverifiable candidate, or ambiguous duplicate.
      */
     static int resolveFailoverResumePositionMs(EpisodeMatch match, WatchHistory.Entry bookmark) {
         if (match == null || match.line == null || match.episode == null || bookmark == null) {
             return 0;
         }
         int lineSize = match.line.episodes != null ? match.line.episodes.size() : 0;
+        if (lineSize == 0) return 0;
+        int targetIdx = resolveTargetIndexInLine(match.line, match.episode, -1);
+        if (targetIdx < 0) return 0;
+
         String bmEp = bookmark.episode == null ? "" : bookmark.episode.trim();
         String candName = match.episode.name == null ? "" : match.episode.name.trim();
-        if (hasEpisodeIdentityConflict(bmEp, candName, lineSize)) {
+        int bmEpNum = extractEpisodeNumber(bmEp);
+        int candEpNum = extractEpisodeNumber(candName);
+        if (bmEpNum > 0 && candEpNum > 0 && bmEpNum != candEpNum) {
             return 0;
         }
+        int bmSeason =
+                firstPositive(extractSeasonNumber(bmEp), extractSeasonNumber(bookmark.title));
+        int lineSeason = extractExplicitLineSeasonNumber(match.line.name);
+        int candEffSeason =
+                firstPositive(extractSeasonNumber(candName), lineSeason, match.videoSeason);
+        int bmPart = extractPartMarker(bmEp);
+        boolean bmTrailer = isTrailerOrExtraName(bmEp);
+        if (hasEpisodeIdentityConflictParsed(
+                bmEpNum,
+                bmSeason,
+                bmPart,
+                bmTrailer,
+                candName,
+                candEpNum,
+                candEffSeason,
+                lineSize)) {
+            return 0;
+        }
+
         String bmEpKey = bookmarkEpisodeKey(bookmark);
-        if (isConfirmedEpKeyMatch(match.line, match.episode, bmEp, bmEpKey)) {
+        String bmEpMediaId = WatchHistory.sanitizeEpisodeMediaId(bookmark.episodeMediaId);
+        LineScan scan =
+                new LineScan(
+                        match.line,
+                        match.videoSeason,
+                        bmEp,
+                        bmEpKey,
+                        bmEpMediaId,
+                        bmEpNum,
+                        bmSeason,
+                        bmPart,
+                        bmTrailer);
+
+        if (scan.isUniqueConfirmedFingerprintAt(targetIdx)) {
             return bookmark.resume();
         }
-        String candEpKey = stableEpisodeKey(match.episode.url);
-        boolean keysPresentAndDiffer =
-                !bmEpKey.isEmpty() && !candEpKey.isEmpty() && !bmEpKey.equals(candEpKey);
-        if (keysPresentAndDiffer && lineHasAnotherEpKeyMatch(match.line, bmEpKey, match.episode)) {
+        if (scan.hasOtherConfirmedFingerprint(targetIdx)) {
+            return 0;
+        }
+        // On cross-source failover, if bookmark explicitly identifies a season (e.g. S02E02) and
+        // the alternative candidate cannot confirm that season via episode, line, or video title,
+        // NEVER auto-transfer the breakpoint.
+        if (bmSeason > 0 && candEffSeason != bmSeason) {
             return 0;
         }
         if (!bmEp.isEmpty() && !candName.isEmpty()) {
-            if (candName.equalsIgnoreCase(bmEp) && !hasDuplicateEpisodeName(match.line, candName)) {
+            if (scan.isUniqueExactNameAt(targetIdx, candName)) {
                 return bookmark.resume();
             }
-            if (isUniqueEpisodeNumberMatch(match.line, match.episode, bmEp)) {
+            if (scan.isUniqueEpisodeNumberAt(targetIdx, candEpNum, candEffSeason)) {
                 return bookmark.resume();
             }
-            int bmEpNum = extractEpisodeNumber(bmEp);
-            int candEpNum = extractEpisodeNumber(candName);
             if (bmEpNum > 0 || candEpNum > 0) {
                 return 0;
             }
             if (lineSize == 1
                     && looksLikeMovieEpisode(bmEp)
                     && looksLikeMovieEpisode(candName)
-                    && extractPartMarker(bmEp) == extractPartMarker(candName)) {
+                    && bmPart == extractPartMarker(candName)) {
                 return bookmark.resume();
             }
             return 0;
@@ -516,41 +734,39 @@ final class HistoryResumeMatcher {
         int lineSize = line.episodes.size();
         String bmEp = bookmark.episode == null ? "" : bookmark.episode.trim();
         String bmEpKey = bookmarkEpisodeKey(bookmark);
-        if (!bmEpKey.isEmpty() && isEpKeyUniqueInLine(line, bmEpKey)) {
-            for (int i = 0; i < lineSize; i++) {
-                Cms.Episode ep = line.episodes.get(i);
-                if (isConfirmedEpKeyMatch(line, ep, bmEp, bmEpKey)) {
-                    return i;
-                }
-            }
-        }
+        String bmEpMediaId = WatchHistory.sanitizeEpisodeMediaId(bookmark.episodeMediaId);
+        int bmEpNum = extractEpisodeNumber(bmEp);
+        int bmSeason = extractSeasonNumber(bmEp);
+        int bmPart = extractPartMarker(bmEp);
+        boolean bmTrailer = isTrailerOrExtraName(bmEp);
+
+        LineScan scan =
+                new LineScan(
+                        line, -1, bmEp, bmEpKey, bmEpMediaId, bmEpNum, bmSeason, bmPart, bmTrailer);
+
+        if (scan.confirmedEpKeyCount == 1) return scan.confirmedEpKeyIdx;
+        if (scan.confirmedEpMediaIdCount == 1) return scan.confirmedEpMediaIdIdx;
         if (!bmEp.isEmpty()) {
-            if (!hasDuplicateEpisodeName(line, bmEp)) {
-                for (int i = 0; i < lineSize; i++) {
-                    Cms.Episode ep = line.episodes.get(i);
-                    if (ep != null
-                            && ep.name != null
-                            && bmEp.equalsIgnoreCase(ep.name.trim())
-                            && !hasEpisodeIdentityConflict(bmEp, ep.name, lineSize)) {
-                        return i;
-                    }
-                }
+            if (scan.exactNameCount == 1 && scan.exactNameNonConflictCount == 1) {
+                return scan.exactNameNonConflictIdx;
             }
-            if (extractEpisodeNumber(bmEp) > 0) {
-                for (int i = 0; i < lineSize; i++) {
-                    Cms.Episode ep = line.episodes.get(i);
-                    if (isUniqueEpisodeNumberMatch(line, ep, bmEp)) {
-                        return i;
-                    }
-                }
+            if (bmSeason > 0 && scan.exactSeasonNumCount == 1) {
+                return scan.exactSeasonNumIdx;
+            }
+            if (scan.compatibleNumCount == 1) {
+                return scan.compatibleNumIdx;
             }
         }
         if (bookmark.index >= 0 && bookmark.index < lineSize) {
             Cms.Episode atIdx = line.episodes.get(bookmark.index);
-            if (atIdx != null
-                    && !hasEpisodeIdentityConflict(
-                            bmEp, atIdx.name == null ? "" : atIdx.name, lineSize)) {
-                return bookmark.index;
+            if (atIdx != null) {
+                String atName = atIdx.name == null ? "" : atIdx.name.trim();
+                int atNum = extractEpisodeNumber(atName);
+                int atSeason = firstPositive(extractSeasonNumber(atName), scan.fallbackSeason);
+                if (!hasEpisodeIdentityConflictParsed(
+                        bmEpNum, bmSeason, bmPart, bmTrailer, atName, atNum, atSeason, lineSize)) {
+                    return bookmark.index;
+                }
             }
         }
         return 0;
@@ -561,10 +777,10 @@ final class HistoryResumeMatcher {
     }
 
     /**
-     * Cross-source failover episode matcher: prefers the same netdisk drive when available on the
-     * alternative source, but allows matching an alternative drive (e.g. original site Quark failed
-     * -> alternative site only carries Baidu with the confirmed same episode) while still strictly
-     * enforcing episode identity.
+     * Cross-source failover episode matcher: strictly confirms season + episode identity FIRST, and
+     * applies same-drive preference ONLY as a secondary tie-breaker among equally confirmed
+     * candidates. Rejects failover when bookmark has an explicit season and no alternative
+     * candidate can confirm that season.
      */
     static EpisodeMatch matchEpisodeForFailover(Cms.Video video, WatchHistory.Entry bookmark) {
         return matchEpisode(video, bookmark, true);
@@ -575,12 +791,22 @@ final class HistoryResumeMatcher {
         if (video == null || video.lines == null || video.lines.isEmpty()) return null;
         String bmEp = bookmark == null || bookmark.episode == null ? "" : bookmark.episode.trim();
         String bmEpKey = bookmarkEpisodeKey(bookmark);
+        String bmEpMediaId =
+                bookmark == null
+                        ? ""
+                        : WatchHistory.sanitizeEpisodeMediaId(bookmark.episodeMediaId);
         int bmIndex = bookmark == null ? 0 : Math.max(0, bookmark.index);
         int bmEpNum = extractEpisodeNumber(bmEp);
-        int bmSeason = extractSeasonNumber(bmEp);
+        int bmSeason =
+                crossSourceFailover && bookmark != null
+                        ? firstPositive(
+                                extractSeasonNumber(bmEp), extractSeasonNumber(bookmark.title))
+                        : extractSeasonNumber(bmEp);
         int bmPart = extractPartMarker(bmEp);
         boolean bmTrailer = isTrailerOrExtraName(bmEp);
         boolean bmMovieLike = looksLikeMovieEpisode(bmEp) && bmPart == 0 && bmIndex == 0;
+        int videoSeason = extractSeasonNumber(video.title);
+        String bmDrive = bookmarkDriveKey(bookmark);
 
         EpisodeMatch best = null;
         for (Cms.Line line : video.lines) {
@@ -593,9 +819,8 @@ final class HistoryResumeMatcher {
             if (driveConflict) {
                 lineBonus = -240;
             } else if (crossSourceFailover) {
-                // On an alternative site, prefer same drive if available, but never reject a
-                // confirmed episode solely because the alternative site hosts another drive.
-                String bmDrive = bookmarkDriveKey(bookmark);
+                // Secondary preference ONLY: identity tier gaps (>= 60) always outrank same-drive
+                // preference (+20) so season+episode confirmation strictly precedes drive matching.
                 String candDrive = NetdiskStore.detectLineDriveKey(line);
                 lineBonus =
                         (!bmDrive.isEmpty() && bmDrive.equals(candDrive))
@@ -619,50 +844,104 @@ final class HistoryResumeMatcher {
                 lineBonus -= 8;
             }
 
-            for (int i = 0; i < lineCount; i++) {
+            // Single O(N) scan of this line (zero nested scans, zero redundant SHA-256 hashing).
+            LineScan scan =
+                    new LineScan(
+                            line,
+                            videoSeason,
+                            bmEp,
+                            bmEpKey,
+                            bmEpMediaId,
+                            bmEpNum,
+                            bmSeason,
+                            bmPart,
+                            bmTrailer);
+
+            // Evaluate only the exact candidate indices identified by the single O(N) pass (or
+            // single-item movie fallback when lineCount == 1).
+            int[] candidateIndices;
+            if (lineCount == 1) {
+                candidateIndices = new int[] {0};
+            } else {
+                int[] raw = new int[5];
+                int nCand = 0;
+                if (scan.confirmedEpKeyCount == 1) raw[nCand++] = scan.confirmedEpKeyIdx;
+                if (scan.confirmedEpMediaIdCount == 1) raw[nCand++] = scan.confirmedEpMediaIdIdx;
+                if (scan.exactNameCount == 1 && scan.exactNameNonConflictCount == 1) {
+                    raw[nCand++] = scan.exactNameNonConflictIdx;
+                }
+                if (bmSeason > 0 && scan.exactSeasonNumCount == 1) {
+                    raw[nCand++] = scan.exactSeasonNumIdx;
+                }
+                if (scan.compatibleNumCount == 1) {
+                    raw[nCand++] = scan.compatibleNumIdx;
+                }
+                candidateIndices = new int[nCand];
+                System.arraycopy(raw, 0, candidateIndices, 0, nCand);
+            }
+
+            for (int cPos = 0; cPos < candidateIndices.length; cPos++) {
+                int i = candidateIndices[cPos];
+                if (i < 0 || i >= lineCount) continue;
+                boolean dupIdx = false;
+                for (int prev = 0; prev < cPos; prev++) {
+                    if (candidateIndices[prev] == i) {
+                        dupIdx = true;
+                        break;
+                    }
+                }
+                if (dupIdx) continue;
+
                 Cms.Episode ep = line.episodes.get(i);
                 if (ep == null) continue;
                 String candName = ep.name == null ? "" : ep.name.trim();
-                String candEpKey = stableEpisodeKey(ep.url);
+                int candNum = extractEpisodeNumber(candName);
+                int candEffSeason =
+                        firstPositive(extractSeasonNumber(candName), scan.fallbackSeason);
+                boolean identityConflict =
+                        hasEpisodeIdentityConflictParsed(
+                                bmEpNum,
+                                bmSeason,
+                                bmPart,
+                                bmTrailer,
+                                candName,
+                                candNum,
+                                candEffSeason,
+                                lineCount);
+                if (identityConflict) continue;
+
                 boolean candTrailer = isTrailerOrExtraName(candName);
                 int candPart = extractPartMarker(candName);
-                int candNum = extractEpisodeNumber(candName);
-                boolean identityConflict = hasEpisodeIdentityConflict(bmEp, candName, lineCount);
+                boolean hasOtherConfirmed = scan.hasOtherConfirmedFingerprint(i);
+                boolean seasonRequiredAndMissing =
+                        crossSourceFailover && bmSeason > 0 && candEffSeason != bmSeason;
                 int score = -1;
 
-                // 0. Confirmed unique non-sensitive canonical episodeKey match (requires uniqueness
-                //    in line and title compatibility so collisions never cross-inherit progress)
-                boolean hasOtherEpKeyMatch =
-                        !bmEpKey.isEmpty()
-                                && !candEpKey.isEmpty()
-                                && !bmEpKey.equals(candEpKey)
-                                && lineHasAnotherEpKeyMatch(line, bmEpKey, ep);
-                if (!driveConflict && isConfirmedEpKeyMatch(line, ep, bmEp, bmEpKey)) {
-                    score = 220 + lineBonus + (bmIndex == i ? 10 : 0);
-                } else if (!identityConflict
-                        && !hasOtherEpKeyMatch
-                        && !bmEp.isEmpty()
-                        && bmEp.equalsIgnoreCase(candName)
-                        && !hasDuplicateEpisodeName(line, candName)) {
-                    // 1. Unique exact episode name match
-                    score = 140 + lineBonus + (sameLine && bmIndex == i ? 10 : 0);
-                } else if (!identityConflict && !hasOtherEpKeyMatch) {
-                    // 2. Unique normalized episode number (and season) match within the line
-                    //    (e.g. 第05集 <-> EP05 <-> S01E05 <-> 05; rejects duplicate "第2集" across
-                    //    multi-season single-line dumps or duplicate proxy items)
-                    if (isUniqueEpisodeNumberMatch(line, ep, bmEp) && bmTrailer == candTrailer) {
-                        score = 100 + lineBonus;
-                        int candSeason = extractSeasonNumber(candName);
-                        if (bmSeason > 0 && candSeason > 0) {
-                            score += (bmSeason == candSeason) ? 10 : -45;
-                        }
+                // Tier 0: Unique confirmed fingerprint (Android episodeKey OR Windows
+                // episodeMediaId)
+                if (!driveConflict && scan.isUniqueConfirmedFingerprintAt(i)) {
+                    score = 400 + lineBonus + (bmIndex == i ? 10 : 0);
+                } else if (!hasOtherConfirmed && !seasonRequiredAndMissing) {
+                    if (scan.isUniqueExactNameAt(i, candName)) {
+                        // Tier 1: Unique exact title match (+ season confirmation bonus)
+                        int seasonTierBonus = (bmSeason > 0 && candEffSeason == bmSeason) ? 60 : 0;
+                        score =
+                                240
+                                        + seasonTierBonus
+                                        + lineBonus
+                                        + (sameLine && bmIndex == i ? 10 : 0);
+                    } else if (scan.isUniqueEpisodeNumberAt(i, candNum, candEffSeason)
+                            && bmTrailer == candTrailer) {
+                        // Tier 2: Unique episode-number (and season) match
+                        int seasonTierBonus = (bmSeason > 0 && candEffSeason == bmSeason) ? 60 : 0;
+                        score = 200 + seasonTierBonus + lineBonus;
                     } else if (lineCount == 1
                             && (bmMovieLike || bmEp.isEmpty())
                             && bmPart == candPart
                             && !candTrailer
                             && bmEpNum <= 0
                             && candNum <= 0) {
-                        // 3. Single-stream movie match across sources
+                        // Tier 3: Single-stream movie match across sources
                         score = 82 + lineBonus;
                     } else if (sameLine
                             && !crossSourceFailover
@@ -674,7 +953,7 @@ final class HistoryResumeMatcher {
                             && bmPart == candPart
                             && bmTrailer == candTrailer
                             && (bmEp.isEmpty() || candName.isEmpty())) {
-                        // 4. Single-item anonymous stream fallback on the same line only
+                        // Tier 4: Single-item anonymous stream fallback on the same line only
                         score = 72 + lineBonus;
                     }
                 }
@@ -683,7 +962,7 @@ final class HistoryResumeMatcher {
                 }
 
                 if (score >= 40 && (best == null || score > best.score)) {
-                    best = new EpisodeMatch(line, ep, score);
+                    best = new EpisodeMatch(line, ep, score, videoSeason);
                 }
             }
         }
@@ -691,9 +970,8 @@ final class HistoryResumeMatcher {
         if (best != null) return best;
 
         // Final safe fallback ONLY for single-item movie entries when bookmark has no explicit
-        // episode number or split-part marker (e.g. never map "第2集" or "正片下" onto an unrelated
-        // single stream).
-        if (bmIndex == 0 && bmEpNum <= 0 && bmPart == 0 && !bmTrailer) {
+        // episode number, season, or split-part marker.
+        if (bmIndex == 0 && bmEpNum <= 0 && bmSeason <= 0 && bmPart == 0 && !bmTrailer) {
             for (Cms.Line line : video.lines) {
                 if (line != null && line.episodes != null && line.episodes.size() == 1) {
                     Cms.Episode only = line.episodes.get(0);
@@ -701,7 +979,7 @@ final class HistoryResumeMatcher {
                     if (!isTrailerOrExtraName(onlyName)
                             && extractPartMarker(onlyName) == 0
                             && extractEpisodeNumber(onlyName) <= 0) {
-                        return new EpisodeMatch(line, only, 42);
+                        return new EpisodeMatch(line, only, 42, videoSeason);
                     }
                 }
             }

@@ -901,13 +901,7 @@ final class CloudSync {
             WatchHistory.Entry cur = histMap.get(key);
             if (cur == null
                     || r.updated > cur.updated
-                    || (r.updated == cur.updated && r.position > cur.position)
-                    || (r.updated == cur.updated
-                            && r.position == cur.position
-                            && safeTrim(cur.episode).equals(safeTrim(r.episode))
-                            && safeTrim(cur.line).equals(safeTrim(r.line))
-                            && safeTrim(cur.episodeMediaId).isEmpty()
-                            && !safeTrim(r.episodeMediaId).isEmpty())) {
+                    || (r.updated == cur.updated && r.position > cur.position)) {
                 histMap.put(key, r);
             }
         }

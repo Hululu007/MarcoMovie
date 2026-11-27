@@ -1214,23 +1214,24 @@ final class PlaybackController {
                     a.resumeAt > 0
                             ? a.resumeAt
                             : (a.resumeAt < 0 ? 0 : (saved != null ? saved.resume() : 0));
-            a.playingBookmark = new WatchHistory.Entry();
-            a.playingBookmark.site = s.key;
-            a.playingBookmark.id = bookmarkId;
-            a.playingBookmark.title = v.title;
-            a.playingBookmark.poster = v.poster;
-            a.playingBookmark.line = a.activeLine.rawName();
-            a.playingBookmark.lineId = a.activeLine.lineId();
-            a.playingBookmark.driveKey = NetdiskStore.detectLineDriveKey(a.activeLine);
-            a.playingBookmark.episode = a.activeEpisode.name;
-            a.playingBookmark.episodeKey =
-                    HistoryResumeMatcher.stableEpisodeKey(a.activeEpisode.url);
-            a.playingBookmark.episodeUrl = "";
-            a.playingBookmark.index = a.activeLine.episodes.indexOf(a.activeEpisode);
-            a.playingBookmark.position = Math.max(0, initialResume);
-            a.playingBookmark.duration = saved != null ? Math.max(0, saved.duration) : 0;
-            a.playingBookmark.updated = System.currentTimeMillis();
-            a.lastBookmarkSave = a.playingBookmark.updated;
+            long nowMs = System.currentTimeMillis();
+            a.playingBookmark =
+                    WatchHistory.buildPlaybackEntry(
+                            s.key,
+                            bookmarkId,
+                            v.title,
+                            v.poster,
+                            a.activeLine.rawName(),
+                            a.activeLine.lineId(),
+                            NetdiskStore.detectLineDriveKey(a.activeLine),
+                            a.activeEpisode.name,
+                            a.activeEpisode.url,
+                            a.activeLine.episodes.indexOf(a.activeEpisode),
+                            initialResume,
+                            saved != null ? saved.duration : 0,
+                            nowMs,
+                            saved);
+            a.lastBookmarkSave = nowMs;
             final WatchHistory.Entry snapshot = cloneBookmark(a.playingBookmark);
             if (a.prefs != null && snapshot != null) {
                 WatchHistory.enqueueUpsert(a.historyPersistence(), snapshot);

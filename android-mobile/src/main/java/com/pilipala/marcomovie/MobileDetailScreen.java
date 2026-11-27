@@ -2614,6 +2614,22 @@ final class MobileDetailScreen {
             }
         }
         int cols = hasLongTitles ? 1 : 3;
+        final int precomputedGridMatchedIdx;
+        if (selectedEpisodeIndex >= 0 && line.name.equals(selectedEpisodeLine)) {
+            precomputedGridMatchedIdx = selectedEpisodeIndex;
+        } else if (remembered != null
+                && HistoryResumeMatcher.isSameBookmarkLine(line, remembered)) {
+            int candIdx = HistoryResumeMatcher.findMatchedEpisodeIndex(line, remembered);
+            precomputedGridMatchedIdx =
+                    (candIdx >= 0
+                                    && candIdx < total
+                                    && HistoryResumeMatcher.matchesBookmarkSelection(
+                                            line, line.episodes.get(candIdx), candIdx, remembered))
+                            ? candIdx
+                            : -1;
+        } else {
+            precomputedGridMatchedIdx = -1;
+        }
         LinearLayout currentRow = null;
         for (int i = 0; i < total; i++) {
             if (i % cols == 0) {
@@ -2623,12 +2639,7 @@ final class MobileDetailScreen {
             final int visualIdx = i;
             final int posIdx = descending ? (total - 1 - i) : i;
             final Cms.Episode ep = line.episodes.get(posIdx);
-            boolean isCurrent =
-                    selectedEpisodeIndex >= 0 && line.name.equals(selectedEpisodeLine)
-                            ? (posIdx == selectedEpisodeIndex)
-                            : (remembered != null
-                                    && HistoryResumeMatcher.matchesBookmarkSelection(
-                                            line, ep, posIdx, remembered));
+            boolean isCurrent = (posIdx == precomputedGridMatchedIdx);
             EpisodeDisplay disp =
                     parseEpisodeDisplay(ep.name, posIdx + 1, gridAiUnlocked, gridStoredCleanMode);
             TextView cell = a.text(disp.cleanTitle, 13, isCurrent ? p.accentOnFill : p.textPrimary);

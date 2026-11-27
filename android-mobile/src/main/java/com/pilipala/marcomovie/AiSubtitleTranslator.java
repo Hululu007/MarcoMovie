@@ -607,8 +607,12 @@ final class AiSubtitleTranslator {
                         parent.getName())) {
             File cacheRoot = parent.getParentFile();
             if (cacheRoot != null) {
-                return OnlineSubtitleDanmakuService.resolveAiDerivedSubtitleCacheFile(
-                        cacheRoot, requestedTarget.getName(), bilingual);
+                File aiDir =
+                        new File(
+                                cacheRoot,
+                                OnlineSubtitleDanmakuService.AI_DERIVED_SUBTITLE_CACHE_DIR);
+                return OnlineSubtitleDanmakuService.buildDerivedAiFileFromSafeName(
+                        aiDir, requestedTarget.getName(), bilingual);
             }
         }
         return requestedTarget;

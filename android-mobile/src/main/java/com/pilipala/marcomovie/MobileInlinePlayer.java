@@ -103,6 +103,7 @@ final class MobileInlinePlayer {
     private Cms.Line activeLine;
     private Cms.Episode rawEpisode;
     private Cms.Episode resolvedEpisode;
+    private WatchHistory.Entry matchedSavedBookmark;
     private int tmdbId;
     private boolean isTv = true;
     private int seasonNum = 1;
@@ -791,11 +792,10 @@ final class MobileInlinePlayer {
 
         a.activeLine = line;
         a.activeEpisode = ep;
-        if (a.resumeAt == 0) {
-            WatchHistory.Entry saved = PlaybackController.lookupSavedBookmark(a, s, v, line, ep);
-            if (saved != null) {
-                a.resumeAt = saved.resume();
-            }
+        WatchHistory.Entry saved = PlaybackController.lookupSavedBookmark(a, s, v, line, ep);
+        this.matchedSavedBookmark = saved != null ? WatchHistory.cloneEntry(saved) : null;
+        if (a.resumeAt == 0 && saved != null) {
+            a.resumeAt = saved.resume();
         }
         a.inlinePlayer = this;
         a.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -1160,21 +1160,22 @@ final class MobileInlinePlayer {
         if (!checkpointPolicy.shouldWrite(now, pos, dur, epKey, force)) {
             return;
         }
-        WatchHistory.Entry entry = new WatchHistory.Entry();
-        entry.site = site.key;
-        entry.id = video.id;
-        entry.title = video.title;
-        entry.poster = video.poster;
-        entry.line = lineKey;
-        entry.lineId = lineId;
-        entry.driveKey = NetdiskStore.detectLineDriveKey(activeLine);
-        entry.episode = rawEpisode.name;
-        entry.episodeKey = HistoryResumeMatcher.stableEpisodeKey(epUrl);
-        entry.episodeUrl = "";
-        entry.index = activeLine.episodes.indexOf(rawEpisode);
-        entry.position = pos;
-        entry.duration = dur;
-        entry.updated = now;
+        WatchHistory.Entry entry =
+                WatchHistory.buildPlaybackEntry(
+                        site.key,
+                        video.id,
+                        video.title,
+                        video.poster,
+                        lineKey,
+                        lineId,
+                        NetdiskStore.detectLineDriveKey(activeLine),
+                        rawEpisode.name,
+                        epUrl,
+                        activeLine.episodes.indexOf(rawEpisode),
+                        pos,
+                        dur,
+                        now,
+                        matchedSavedBookmark);
         WatchHistory.enqueueUpsert(a.historyPersistence(), entry);
         CloudSyncDialog.scheduleAutoPush(a, force);
     }
