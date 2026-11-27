@@ -222,14 +222,14 @@ void main() {
         expect(site.supported, isTrue, reason: '$api should be browsable');
       }
 
-      // WoggSource supports plain HTTP(S) URL or JSON site/url/domain/host ext
+      // WoggSource supports structured JSON siteUrl/site/url/domain/host ext
       expect(
         WoggSource.supports(const CmsSite(
-          key: 'wogg_plain',
+          key: 'wogg_site_json',
           name: '玩偶哥哥',
           type: 3,
           api: 'csp_WoGG',
-          ext: 'https://wogg.example/',
+          ext: '{"site":"https://wogg.example/"}',
         )),
         isTrue,
       );
@@ -243,7 +243,17 @@ void main() {
         )),
         isTrue,
       );
-      // Empty ext without pluginReference still rejected
+      // Bare URL ext without spider JAR or empty ext stays rejected (source integrity contract)
+      expect(
+        WoggSource.supports(const CmsSite(
+          key: 'wogg_bare_no_jar',
+          name: '玩偶哥哥',
+          type: 3,
+          api: 'csp_WoGGGuard',
+          ext: 'https://wogg.example/',
+        )),
+        isFalse,
+      );
       expect(
         WoggSource.supports(const CmsSite(
           key: 'wogg_empty',

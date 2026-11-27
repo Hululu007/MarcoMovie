@@ -42,17 +42,9 @@ class WoggSource {
           final val = (ext[key] ?? '').toString().trim();
           if (val.isNotEmpty) return val;
         }
-        return null;
-      }
-      if (ext is String) {
-        final s = ext.trim();
-        if (s.startsWith('http://') || s.startsWith('https://')) return s;
       }
       return null;
     } catch (_) {
-      if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
-        return trimmed;
-      }
       return null;
     }
   }
