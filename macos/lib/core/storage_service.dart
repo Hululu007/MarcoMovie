@@ -540,7 +540,19 @@ class StorageService {
     final seq = ++_tmpWriteSequence;
     final tmpFileName =
         '$fileName.${DateTime.now().microsecondsSinceEpoch}_$seq.tmp';
-    await _fileStore.writeStringAndFlush(tmpFileName, content);
+    try {
+      await _fileStore.writeStringAndFlush(tmpFileName, content);
+    } on Object {
+      // Interrupted write before atomic swap: remove any truncated .tmp file
+      // so the live target file stays untouched and disk does not accumulate
+      // half-written temp files.
+      try {
+        if (await _fileStore.exists(tmpFileName)) {
+          await _fileStore.deleteFile(tmpFileName);
+        }
+      } on Object catch (_) {}
+      rethrow;
+    }
     Object? lastError;
     StackTrace? lastStack;
     for (var attempt = 0; attempt <= _atomicRenameRetryDelays.length; attempt++) {
@@ -1572,6 +1584,130 @@ class StorageService {
       } else if (merged.sites.any((s) => s.key == selectedSiteKey)) {
         await _prefs.setString(keySelectedSite, '');
       }
+    }
+    return merged;
+  }
+
+  /// Atomically commits pre-fetched, pre-validated subscription updates.
+  ///
+  /// Validation of every staged entry and JSON round-trip serialization run
+  /// completely BEFORE writing to disk or mutating [SharedPreferences]. If any
+  /// entry is invalid or if the atomic file write/rename is interrupted, the
+  /// previous valid subscriptions and [loadSavedConfig] remain completely
+  /// intact and usable.
+  Future<CmsConfig?> commitStagedSubscriptionUpdates(
+    List<SubscriptionEntry> stagedUpdates,
+  ) => _editSubscriptions(() => _commitStagedSubscriptionUpdates(stagedUpdates));
+
+  Future<CmsConfig?> _commitStagedSubscriptionUpdates(
+    List<SubscriptionEntry> stagedUpdates,
+  ) async {
+    if (stagedUpdates.isEmpty) return loadSavedConfig();
+    final current = getSubscriptions();
+    if (current.isEmpty) {
+      throw StateError('当前无本地订阅可更新');
+    }
+    final byId = <String, int>{
+      for (var i = 0; i < current.length; i++) current[i].id: i,
+    };
+    final next = List<SubscriptionEntry>.of(current);
+    final updatedIds = <String>[];
+    var touchedPublic = false;
+
+    // Stage-validate EVERY candidate before touching disk or prefs.
+    for (final candidate in stagedUpdates) {
+      final idx = byId[candidate.id];
+      if (idx == null) {
+        throw StateError('订阅 ${candidate.id} 不存在或已被删除');
+      }
+      final existing = current[idx];
+      final trimmedRaw = candidate.rawContent.trim();
+      if (trimmedRaw.isEmpty) {
+        throw FormatException('订阅「${existing.name}」校验失败：配置内容为空');
+      }
+      final parsed = CmsParser.parseConfig(
+        trimmedRaw,
+        origin: candidate.url,
+        defaultGroup: existing.group,
+        isPrivate: existing.isEffectivelyPrivate,
+        subscriptionId: existing.id,
+        defaultName: existing.name,
+      );
+      if (parsed.sites.isEmpty &&
+          parsed.lives.isEmpty &&
+          parsed.depots.isEmpty) {
+        throw FormatException(
+          '订阅「${existing.name}」校验失败：未解析出有效片源、直播或子仓库',
+        );
+      }
+      final committed = existing.copyWith(
+        url: candidate.url.trim().isNotEmpty ? candidate.url.trim() : existing.url,
+        warehouseUrl: candidate.warehouseUrl.trim().isNotEmpty
+            ? candidate.warehouseUrl.trim()
+            : existing.warehouseUrl,
+        activeDepotName: candidate.activeDepotName.trim().isNotEmpty
+            ? candidate.activeDepotName.trim()
+            : existing.activeDepotName,
+        depots: candidate.depots.isNotEmpty ? candidate.depots : existing.depots,
+        format: candidate.format.trim().isNotEmpty
+            ? candidate.format.trim()
+            : existing.format,
+        rawContent: trimmedRaw,
+        siteCount: parsed.supportedSites.length,
+        liveCount: parsed.lives.length,
+        updatedAt: candidate.updatedAt > 0
+            ? candidate.updatedAt
+            : DateTime.now().millisecondsSinceEpoch,
+      );
+      next[idx] = committed;
+      updatedIds.add(existing.id);
+      if (!committed.isEffectivelyPrivate) {
+        touchedPublic = true;
+      }
+    }
+
+    // Verify full registry round-trip serialization before touching storage.
+    final serialized = jsonEncode(next.map((s) => s.toJson()).toList());
+    final decoded = jsonDecode(serialized);
+    if (decoded is! List || decoded.length != next.length) {
+      throw const FormatException('暂存订阅序列化校验失败');
+    }
+
+    // Atomic swap: tmp write + flush + atomic rename + prefs mirror (rolls back on failure).
+    await saveSubscriptions(next);
+
+    // Only mutate derived caches & mirrors AFTER atomic commit succeeded.
+    final nowSync = DateTime.now().millisecondsSinceEpoch;
+    final primaryPublic = next.where((s) => !s.isEffectivelyPrivate).toList();
+    if (primaryPublic.isNotEmpty) {
+      final primary = primaryPublic.first;
+      if (primary.rawContent.isNotEmpty) {
+        await _prefs.setString(keyRawConfig, primary.rawContent);
+        await _prefs.setString(keyOrigin, primary.url);
+        await _prefs.setString(keyActiveDepotName, primary.activeDepotName);
+      }
+    }
+    for (final id in updatedIds) {
+      await clearCachedSiteHomes(subscriptionId: id);
+    }
+    _invalidateConfigCache();
+    final merged = loadSavedConfig();
+    await _persistSniffAndAdsCache(merged);
+    if (merged != null &&
+        !merged.availableSites.any((s) => s.key == selectedSiteKey)) {
+      final availPublic = merged.publicAvailableSites;
+      if (availPublic.isNotEmpty) {
+        final preferredDefault = availPublic.firstWhere(
+          (s) => !CspBridge.isBannerNoticeSite(s),
+          orElse: () => availPublic.first,
+        );
+        await _prefs.setString(keySelectedSite, preferredDefault.key);
+      } else if (merged.sites.any((s) => s.key == selectedSiteKey)) {
+        await _prefs.setString(keySelectedSite, '');
+      }
+    }
+    if (touchedPublic && webdavSyncSubs) {
+      scheduleAutoWebdavSync(immediate: true, nowMs: nowSync);
     }
     return merged;
   }

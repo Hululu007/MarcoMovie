@@ -33,6 +33,7 @@ import '../core/models.dart';
 import '../core/netdisk_service.dart';
 import '../core/python_source_host.dart';
 import '../core/storage_service.dart';
+import '../core/subscription_refresh_service.dart';
 import '../core/ohos_runtime.dart';
 import '../core/spider_plugin_registry.dart';
 import '../core/app_log.dart';
@@ -1064,7 +1065,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _liveGroupsScrollController.dispose();
     super.dispose();
   }
-  void _reloadSavedConfig({bool bypassHomeSnapshot = false}) {
+  void _reloadSavedConfig({
+    bool bypassHomeSnapshot = false,
+    bool preserveActivePlayback = false,
+  }) {
     // A deleted source may still have catalogue/live/search requests in flight.
     // Invalidate them before exposing the new registry, including an empty one.
     _cancelCatalogue();
@@ -1083,7 +1087,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _searchVerificationSites.clear();
     _searchPerformed = false;
     _searching = false;
-    _windowsLiveChannel = null;
+    if (!preserveActivePlayback) {
+      _windowsLiveChannel = null;
+    }
     final saved = widget.storage.loadSavedConfig();
     _config = saved;
     _cachedWatchHistory = widget.storage.getWatchHistory();
@@ -1091,6 +1097,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     unawaited(CmsClient.retainScriptSessions(
       (saved?.scriptOwners ?? const <CmsSite>[]).where((site) =>
         _privateSessionUnlocked || !site.isEffectivelyPrivate),
+      preservePinned: preserveActivePlayback,
     ));
     final availableSites = saved == null
         ? const <CmsSite>[]
@@ -1130,7 +1137,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     final lives = _visibleLives;
     if (lives.isNotEmpty) {
-      _loadLivePlaylist(0);
+      _loadLivePlaylist(0, preserveActiveLiveChannel: preserveActivePlayback);
     } else {
       _liveGroups = const [];
       _liveLoading = false;
@@ -1894,6 +1901,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     int sourceIndex, {
     bool forceRefresh = false,
     bool autoProbeAfterLoad = false,
+    bool preserveActiveLiveChannel = false,
   }) async {
     final lives = _visibleLives;
     if (sourceIndex < 0 || sourceIndex >= lives.length) return;
@@ -1910,7 +1918,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     if (cached != null && cached.isNotEmpty) {
       setState(() {
         _selectedLiveSource = sourceIndex;
-        _windowsLiveChannel = null;
+        if (!preserveActiveLiveChannel) {
+          _windowsLiveChannel = null;
+        }
         _selectedLiveGroup = 0;
         _liveGroups = cached;
         _liveLoading = false;
@@ -1924,7 +1934,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
 
     setState(() {
       _selectedLiveSource = sourceIndex;
-      _windowsLiveChannel = null;
+      if (!preserveActiveLiveChannel) {
+        _windowsLiveChannel = null;
+      }
       _selectedLiveGroup = 0;
       _liveGroups = const [];
       _liveLoading = true;
@@ -13552,6 +13564,47 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }) async {
     final isIos = defaultTargetPlatform == TargetPlatform.iOS;
     StateSetter? refreshSubPage;
+    var refreshingAll = false;
+    final refreshingIds = <String>{};
+    String? refreshBanner;
+    var refreshBannerError = false;
+    final refreshService = StagedSubscriptionRefreshService(
+      storage: widget.storage,
+      client: widget.client,
+    );
+
+    Future<void> runRefresh(List<SubscriptionEntry> targets, {bool all = false}) async {
+      if (refreshingAll || targets.isEmpty) return;
+      if (all) {
+        refreshingAll = true;
+      } else {
+        for (final t in targets) {
+          refreshingIds.add(t.id);
+        }
+      }
+      refreshBanner = null;
+      refreshBannerError = false;
+      refreshSubPage?.call(() {});
+      try {
+        final summary = await refreshService.refreshAll(targets: targets);
+        if (!mounted) return;
+        refreshBanner = summary.summaryText;
+        refreshBannerError = summary.hasFailures && !summary.hasUpdates;
+        if (summary.hasUpdates) {
+          _reloadSavedConfig(
+            bypassHomeSnapshot: true,
+            preserveActivePlayback: true,
+          );
+        }
+      } finally {
+        refreshingAll = false;
+        for (final t in targets) {
+          refreshingIds.remove(t.id);
+        }
+        refreshSubPage?.call(() {});
+      }
+    }
+
     await _openIosOrModalPage<void>(
       title: isIos ? '订阅管理' : '订阅源与分组管理中心',
       backLabel: iosBackLabel,
@@ -13572,8 +13625,38 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               mainAxisSize: MainAxisSize.min,
               children: [
                 CupertinoButton(
+                  key: const Key('subscriptions-refresh-all'),
                   padding: const EdgeInsets.symmetric(horizontal: 6),
-                  minSize: 28,
+                  minimumSize: const Size(28, 28),
+                  onPressed: () {
+                    final targets = widget.storage
+                        .getSubscriptions()
+                        .where(
+                          (s) =>
+                              !s.isEffectivelyPrivate &&
+                              StagedSubscriptionRefreshService.isRefreshable(s),
+                        )
+                        .toList();
+                    if (targets.isEmpty) {
+                      refreshBanner = '当前没有可刷新的网络订阅';
+                      refreshBannerError = false;
+                      refreshSubPage?.call(() {});
+                      return;
+                    }
+                    unawaited(runRefresh(targets, all: true));
+                  },
+                  child: Text(
+                    '刷新全部',
+                    style: TextStyle(
+                      color: AppleColors.systemBlue,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                CupertinoButton(
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  minimumSize: const Size(28, 28),
                   onPressed: () {
                     Navigator.of(context).pop();
                     _quickImportFromClipboard();
@@ -13588,7 +13671,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 ),
                 CupertinoButton(
                   padding: const EdgeInsets.symmetric(horizontal: 6),
-                  minSize: 28,
+                  minimumSize: const Size(28, 28),
                   onPressed: () {
                     Navigator.of(context).pop();
                     _showImportConfigDialog();
@@ -13691,6 +13774,51 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             shrinkWrap: true,
             padding: const EdgeInsets.all(16),
             children: [
+              if (refreshingAll) ...[
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Row(
+                    children: [
+                      const CupertinoActivityIndicator(radius: 8),
+                      const SizedBox(width: 8),
+                      Text(
+                        '正在安全暂存并校验远端订阅…',
+                        style: TextStyle(
+                          color: ApplePalette.of(context).labelSecondary,
+                          fontSize: 12.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              if (refreshBanner != null && refreshBanner!.isNotEmpty) ...[
+                Container(
+                  key: const Key('subscriptions-refresh-status'),
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 9,
+                  ),
+                  decoration: BoxDecoration(
+                    color: (refreshBannerError
+                            ? AppleColors.systemOrange
+                            : AppleColors.systemGreen)
+                        .withValues(alpha: 0.14),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    refreshBanner!,
+                    style: TextStyle(
+                      color: refreshBannerError
+                          ? AppleColors.systemOrange
+                          : AppleColors.systemGreen,
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
               if (isIos) ...[
                 IosSettingsGroup(
                   header: '快捷导入',
@@ -13749,6 +13877,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 AppleGroupedSection(
                   header: '${entry.key} (${entry.value.length})',
                   children: entry.value.map((sub) {
+                    final canRefresh =
+                        StagedSubscriptionRefreshService.isRefreshable(sub);
+                    final isBusy =
+                        refreshingAll || refreshingIds.contains(sub.id);
                     return AppleGroupedTile(
                       icon: sub.isPrivate
                           ? CupertinoIcons.lock_shield_fill
@@ -13762,6 +13894,22 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
+                          if (canRefresh)
+                            CupertinoButton(
+                              key: Key('subscription-refresh-${sub.id}'),
+                              padding: const EdgeInsets.only(right: 6),
+                              minimumSize: const Size(28, 28),
+                              onPressed: isBusy
+                                  ? null
+                                  : () => unawaited(runRefresh([sub])),
+                              child: isBusy
+                                  ? const CupertinoActivityIndicator(radius: 7)
+                                  : const Icon(
+                                      CupertinoIcons.refresh,
+                                      color: AppleColors.systemBlue,
+                                      size: 17,
+                                    ),
+                            ),
                           CupertinoSwitch(
                             value: sub.enabled,
                             activeTrackColor: AppleColors.systemGreen,
@@ -13776,7 +13924,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           ),
                           CupertinoButton(
                             padding: const EdgeInsets.only(left: 6),
-                            minSize: 28,
+                            minimumSize: const Size(28, 28),
                             onPressed: () async {
                               final nextGroup = await _promptGroupSelection(
                                 ctx,
@@ -13801,7 +13949,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           ),
                           CupertinoButton(
                             padding: const EdgeInsets.only(left: 6),
-                            minSize: 28,
+                            minimumSize: const Size(28, 28),
                             onPressed: () async {
                               try {
                                 await widget.storage.removeSubscription(sub.id);

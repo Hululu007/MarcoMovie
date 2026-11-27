@@ -1153,10 +1153,19 @@ class CmsClient {
   ]))).toString();
 
   /// Shared by catalogue, detail, and the player's separate CmsClient instance.
-  static Future<void> retainScriptSessions(Iterable<CmsSite> sites) {
+  static Future<void> retainScriptSessions(
+    Iterable<CmsSite> sites, {
+    bool preservePinned = false,
+  }) {
     final keys = sites.map(_scriptSessionKey).toSet();
-    PythonSourceHost.instance.retainSessions(keys);
-    return JsSourceHost.retainSessions(keys);
+    PythonSourceHost.instance.retainSessions(
+      keys,
+      preservePinned: preservePinned,
+    );
+    return JsSourceHost.retainSessions(
+      keys,
+      preservePinned: preservePinned,
+    );
   }
 
   static Future<void> closeScriptSessions() {

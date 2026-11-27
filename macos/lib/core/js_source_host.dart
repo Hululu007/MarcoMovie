@@ -41,6 +41,7 @@ class JsSourceHost {
   static final _webViewJsSessions = <String, _WebViewJsSessionSpec>{};
   static Future<List<String>>? _catvodAssets;
   static final _playbackPins = <String, Set<Object>>{};
+  static final _evictOnUnpin = <String>{};
   static ScriptProxyServer? _proxyServer;
   static int _generation = 0;
   static int get generation => _generation;
@@ -74,6 +75,15 @@ class JsSourceHost {
       if (!pins.remove(token)) return;
       if (pins.isEmpty && identical(_playbackPins[sessionKey], pins)) {
         _playbackPins.remove(sessionKey);
+        if (_evictOnUnpin.remove(sessionKey)) {
+          final retiredWorker = _sessions.remove(sessionKey);
+          if (retiredWorker != null) {
+            unawaited(retiredWorker.close());
+          }
+          if (_webViewJsSessions.remove(sessionKey) != null) {
+            unawaited(_disposeWebViewJs(sessionKey: sessionKey));
+          }
+        }
       }
       _notifyCapacity();
     };
@@ -116,21 +126,48 @@ class JsSourceHost {
 
   /// Removal is synchronous; teardown follows on each runtime's owning isolate.
   /// A loader started before this boundary cannot recreate a deleted session.
-  static Future<void> retainSessions(Set<String> keys) {
+  ///
+  /// When [preservePinned] is true (e.g. background subscription refresh while
+  /// playback is active), sessions currently pinned by an active player stay
+  /// alive until their last playback pin releases, at which point they are
+  /// automatically evicted.
+  static Future<void> retainSessions(
+    Set<String> keys, {
+    bool preservePinned = false,
+  }) {
     _generation++;
-    _playbackPins.removeWhere((key, _) => !keys.contains(key));
-    final removed = _sessions.keys.where((key) => !keys.contains(key)).toList();
+    final effectiveKeys = Set<String>.of(keys);
+    _evictOnUnpin.removeWhere(keys.contains);
+    if (preservePinned) {
+      for (final entry in _playbackPins.entries) {
+        if (entry.value.isNotEmpty && !keys.contains(entry.key)) {
+          effectiveKeys.add(entry.key);
+          _evictOnUnpin.add(entry.key);
+        }
+      }
+    } else {
+      _evictOnUnpin.removeWhere((key) => !keys.contains(key));
+    }
+    _playbackPins.removeWhere((key, _) => !effectiveKeys.contains(key));
+    final removed =
+        _sessions.keys.where((key) => !effectiveKeys.contains(key)).toList();
     final closing = <Future<void>>[];
     for (final key in removed) {
       closing.add(_sessions.remove(key)!.close());
     }
-    final removedWebView =
-        _webViewJsSessions.keys.where((key) => !keys.contains(key)).toList();
+    final removedWebView = _webViewJsSessions.keys
+        .where((key) => !effectiveKeys.contains(key))
+        .toList();
     for (final key in removedWebView) {
       _webViewJsSessions.remove(key);
       closing.add(_disposeWebViewJs(sessionKey: key));
     }
-    closing.add(DesktopWebViewJsBridge.instance.retainSessions(keys));
+    closing.add(
+      DesktopWebViewJsBridge.instance.retainSessions(
+        keys,
+        preservePinned: preservePinned,
+      ),
+    );
     _notifyCapacity();
     return Future.wait(closing);
   }
