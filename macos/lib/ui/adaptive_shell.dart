@@ -26,6 +26,7 @@ import '../core/download_service.dart';
 import '../core/ios_avplayer_controller.dart';
 import '../core/live_channel_organizer.dart';
 import '../core/local_media_proxy.dart';
+import '../core/macos_video_sync.dart';
 import '../core/mdk_platform_player.dart';
 import '../core/models.dart';
 import '../core/netdisk_service.dart';
@@ -11986,12 +11987,115 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             ),
           ],
         ),
+        if (defaultTargetPlatform == TargetPlatform.macOS) ...[
+          const SizedBox(height: 22),
+          _buildMacosVideoSyncSettingsSection(context, refreshBoth),
+        ],
         if (!OhosRuntime.isOhos) ...[
           const SizedBox(height: 22),
           IosDanmuSettingsSection(onChanged: refreshBoth),
           const SizedBox(height: 22),
           IosPlayerHudSettingsSection(onChanged: refreshBoth),
         ],
+      ],
+    );
+  }
+
+  Widget _buildMacosVideoSyncSettingsSection(
+    BuildContext context,
+    VoidCallback refreshBoth,
+  ) {
+    final mode = widget.storage.macosVideoSyncMode;
+    final tscale = widget.storage.macosVideoSyncTscale;
+    final isDefault = mode == MacosVideoSyncMode.defaultMode &&
+        tscale == MacosVideoSyncTscale.defaultTscale;
+    return AppleGroupedSection(
+      header: 'macOS 帧率同步与防抖动',
+      footer:
+          '点播视频将在检测到 CVDisplayLink 垂直同步后自动按显示器真实刷新率对齐帧节拍；直播流与未启用垂直同步路径始终安全回退音频同步。',
+      children: [
+        FutureBuilder<MacosDisplayRefreshInfo>(
+          future: MacosDisplayRefreshBridge.query(),
+          builder: (context, snapshot) {
+            final info = snapshot.data ?? MacosDisplayRefreshInfo.unavailable;
+            final plan = MacosVideoSyncPolicy.resolve(
+              mode: mode,
+              tscale: tscale,
+              display: info,
+              isLive: false,
+            );
+            final statusTitle = info.effectiveDisplayFps > 0
+                ? '${info.formattedRefreshRate} · ${info.vsyncPaced ? 'CVDisplayLink 已就绪' : '未启用垂直同步（自动回退）'}'
+                : '等待显示器刷新率检测';
+            final subtitle = plan.appliedDisplaySync
+                ? '当前点播生效：video-sync=display-resample${plan.appliedInterpolation ? ' + interpolation (${tscale.mpvValue})' : ''}'
+                : '当前点播生效：video-sync=audio（安全音频同步）';
+            return AppleGroupedTile(
+              key: const ValueKey('macos-video-sync-status'),
+              icon: CupertinoIcons.desktopcomputer,
+              iconBgColor: plan.appliedDisplaySync
+                  ? AppleColors.systemGreen
+                  : AppleColors.systemIndigo,
+              title: statusTitle,
+              subtitle: subtitle,
+            );
+          },
+        ),
+        _buildExpandableChoiceDrawerTile<MacosVideoSyncMode>(
+          settingKey: 'macos_video_sync_mode',
+          icon: CupertinoIcons.film,
+          iconBgColor: AppleColors.systemBlue,
+          title: '24p / 电影帧率同步策略',
+          subtitle: '改善 23.976 / 24 fps 电影在 60 Hz / 120 Hz 屏幕上的横移抖动',
+          trailingText: mode.shortLabelZh,
+          currentValue: mode,
+          onStateChanged: refreshBoth,
+          options: [
+            for (final item in MacosVideoSyncMode.values)
+              (item, item.labelZh, item.descriptionZh),
+          ],
+          onSelected: (val) async {
+            await widget.storage.setMacosVideoSyncMode(val);
+            refreshBoth();
+          },
+        ),
+        if (mode == MacosVideoSyncMode.smoothInterpolation)
+          _buildExpandableChoiceDrawerTile<MacosVideoSyncTscale>(
+            settingKey: 'macos_video_sync_tscale',
+            icon: CupertinoIcons.waveform_path_ecg,
+            iconBgColor: AppleColors.systemPurple,
+            title: '平滑插帧算法（tscale）',
+            subtitle: '仅在开启“显示器同步 + 平滑插帧”时生效',
+            trailingText: tscale.mpvValue,
+            currentValue: tscale,
+            onStateChanged: refreshBoth,
+            options: [
+              for (final item in MacosVideoSyncTscale.values)
+                (item, item.labelZh, item.descriptionZh),
+            ],
+            onSelected: (val) async {
+              await widget.storage.setMacosVideoSyncTscale(val);
+              refreshBoth();
+            },
+          ),
+        AppleGroupedTile(
+          key: const ValueKey('macos-video-sync-reset'),
+          icon: CupertinoIcons.arrow_counterclockwise,
+          iconBgColor: isDefault
+              ? CupertinoColors.systemGrey
+              : AppleColors.systemOrange,
+          title: '恢复默认帧率同步设置',
+          subtitle: isDefault
+              ? '当前已为默认配置（自动帧率同步 / oversample）'
+              : '一键恢复为默认配置（自动帧率同步 / oversample）',
+          trailingText: isDefault ? '已默认' : '恢复默认',
+          onTap: isDefault
+              ? null
+              : () async {
+                  await widget.storage.resetMacosVideoSyncSettings();
+                  refreshBoth();
+                },
+        ),
       ],
     );
   }

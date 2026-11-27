@@ -28,6 +28,7 @@ import '../core/cloud_media_proxy.dart';
 import '../core/ios_avplayer_controller.dart';
 import '../core/ios_mpv_profile.dart';
 import '../core/local_media_proxy.dart';
+import '../core/macos_video_sync.dart';
 import '../core/models.dart';
 import '../core/playback_recovery_policy.dart';
 import '../core/playback_startup.dart';
@@ -1282,11 +1283,36 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
 
     _attachPlayerStreams();
+    if (_isMacosPlayerPlatform) {
+      _macosDisplayRefreshSub = MacosDisplayRefreshBridge.changes.listen((info) {
+        if (!mounted || _playerDisposed) return;
+        _macosDisplayRefresh = info;
+        unawaited(_applyMacosVideoSync(info));
+      });
+    }
 
     _openCurrentEpisode(resumeMs: widget.initialPositionMs);
     _historyTimer = Timer.periodic(
       const Duration(seconds: 15),
       (_) => _saveProgress(immediate: false),
+    );
+  }
+
+  StreamSubscription<MacosDisplayRefreshInfo>? _macosDisplayRefreshSub;
+  MacosDisplayRefreshInfo _macosDisplayRefresh =
+      MacosDisplayRefreshInfo.unavailable;
+
+  Future<void> _applyMacosVideoSync([MacosDisplayRefreshInfo? override]) async {
+    if (!_isMacosPlayerPlatform || _playerDisposed) return;
+    final info = override ?? await MacosDisplayRefreshBridge.query();
+    if (!mounted || _playerDisposed) return;
+    _macosDisplayRefresh = info;
+    await MacosVideoSyncPolicy.applyToPlayer(
+      _player,
+      mode: widget.storage.macosVideoSyncMode,
+      tscale: widget.storage.macosVideoSyncTscale,
+      display: info,
+      isLive: _isLiveStream,
     );
   }
 
@@ -4191,6 +4217,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         await dyn.setProperty('sub-ass-override', 'yes');
         await dyn.setProperty('sub-pos', '$_lastAppliedMpvSubPos');
         _mpvSubtitleAssInitialized = true;
+        await _applyMacosVideoSync(
+          _macosDisplayRefresh.effectiveDisplayFps > 0
+              ? _macosDisplayRefresh
+              : null,
+        );
       }
       if (_isIosPlayerPlatform) {
         await IosMpvProfile.applyToPlayer(
@@ -4388,6 +4419,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       unawaited(IosLiquidGlassBridge.dismissActiveSheets());
     }
     _lockHideTimer?.cancel();
+    _macosDisplayRefreshSub?.cancel();
+    _macosDisplayRefreshSub = null;
     _hudTimer?.cancel();
     _gestureTickTimer?.cancel();
     _desktopKeyTickTimer?.cancel();

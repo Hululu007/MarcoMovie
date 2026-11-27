@@ -715,6 +715,7 @@ MACOS_WEB_SNIFFER_CHANNEL_SNIPPET = r'''
 
 MACOS_WINDOW_CHANNEL_SNIPPET = r'''
     let macosWindowChannel = FlutterMethodChannel(name: "marco_movie/macos_window", binaryMessenger: flutterViewController.engine.binaryMessenger)
+    self.marcoWindowChannel = macosWindowChannel
     macosWindowChannel.setMethodCallHandler { [weak self] call, result in
       DispatchQueue.main.async {
         guard let self = self else {
@@ -732,6 +733,7 @@ extension MainFlutterWindow {
   private static let marcoDefaultWindowSize = NSSize(width: 1280, height: 760)
   private static let marcoMinVisibleWidth: CGFloat = 180
   private static let marcoMinVisibleHeight: CGFloat = 80
+  private static let marcoDisplayChangedNotification = Notification.Name("MarcoMovieDisplayChanged")
 
   private static func marcoIsValidFrame(_ frame: NSRect) -> Bool {
     return frame.origin.x.isFinite
@@ -852,6 +854,90 @@ extension MainFlutterWindow {
     return marcoDecodeFrame(raw)
   }
 
+  func marcoCurrentDisplayID() -> CGDirectDisplayID {
+    let screen = self.screen ?? NSScreen.main ?? NSScreen.screens.first
+    if let num = screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+      return CGDirectDisplayID(num.uint32Value)
+    }
+    return CGMainDisplayID()
+  }
+
+  func marcoBuildDisplayRefreshInfo() -> [String: Any] {
+    let screen = self.screen ?? NSScreen.main ?? NSScreen.screens.first
+    let displayID = self.marcoCurrentDisplayID()
+    var refreshHz: Double = 0
+    var source = "unknown"
+    var isVariableRefresh = false
+    var cgModeRate: Double = 0
+    if let mode = CGDisplayCopyDisplayMode(displayID) {
+      cgModeRate = mode.refreshRate
+    }
+    if #available(macOS 12.0, *), let sc = screen {
+      let maxFps = Double(sc.maximumFramesPerSecond)
+      if maxFps >= 23.0 && maxFps <= 480.0 {
+        if cgModeRate >= 23.0 && cgModeRate <= 480.0 && abs(cgModeRate - maxFps) <= 1.0 {
+          refreshHz = cgModeRate
+          source = "cg_display_mode"
+        } else {
+          refreshHz = maxFps
+          source = "nsscreen_max_fps"
+        }
+        if maxFps >= 120.0 && cgModeRate == 0 {
+          isVariableRefresh = true
+        }
+      }
+    }
+    if refreshHz <= 0 && cgModeRate >= 23.0 && cgModeRate <= 480.0 {
+      refreshHz = cgModeRate
+      source = "cg_display_mode"
+    }
+    var probeLink: CVDisplayLink?
+    let canCreateDisplayLink = (CVDisplayLinkCreateWithCGDisplay(displayID, &probeLink) == kCVReturnSuccess && probeLink != nil)
+    if refreshHz <= 0, let link = probeLink {
+      let period = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(link)
+      if (period.flags & Int32(CVTimeFlags.isIndefinite.rawValue)) == 0 && period.timeValue > 0 {
+        let hz = Double(period.timeScale) / Double(period.timeValue)
+        if hz >= 23.0 && hz <= 480.0 {
+          refreshHz = hz
+          source = "cv_display_link"
+        }
+      }
+    }
+    let envFlag = getenv("MARCO_MPV_VSYNC_PACED").map { String(cString: $0) }
+    let vsyncPaced: Bool
+    if envFlag == "1" {
+      vsyncPaced = true
+    } else if envFlag == "0" {
+      vsyncPaced = false
+    } else {
+      vsyncPaced = canCreateDisplayLink
+    }
+    var screenName = ""
+    if #available(macOS 10.15, *), let sc = screen {
+      screenName = sc.localizedName
+    }
+    return [
+      "refreshRateHz": refreshHz,
+      "vsyncPaced": vsyncPaced,
+      "isVariableRefresh": isVariableRefresh,
+      "source": source,
+      "screenName": screenName,
+    ]
+  }
+
+  func marcoNotifyDisplayChanged() {
+    let displayID = self.marcoCurrentDisplayID()
+    NotificationCenter.default.post(
+      name: Self.marcoDisplayChangedNotification,
+      object: nil,
+      userInfo: ["displayID": NSNumber(value: displayID)]
+    )
+    self.marcoWindowChannel?.invokeMethod(
+      "onDisplayRefreshRateChanged",
+      arguments: self.marcoBuildDisplayRefreshInfo()
+    )
+  }
+
   func marcoRestoreInitialFrame() {
     let screens = NSScreen.screens
     let visibleFrames = screens.map { $0.visibleFrame }
@@ -946,12 +1032,16 @@ extension MainFlutterWindow {
     add(NSWindow.didEndLiveResizeNotification, self) { win in
       win.marcoPersistNormalFrame(forceSynchronize: true)
     }
+    add(NSWindow.didChangeScreenNotification, self) { win in
+      win.marcoNotifyDisplayChanged()
+    }
     add(NSWindow.willEnterFullScreenNotification, self) { win in
       win.marcoPersistNormalFrame(forceSynchronize: true)
       win.marcoInFullscreenTransition = true
     }
     add(NSWindow.didEnterFullScreenNotification, self) { win in
       win.marcoInFullscreenTransition = false
+      win.marcoNotifyDisplayChanged()
     }
     add(NSWindow.willExitFullScreenNotification, self) { win in
       win.marcoInFullscreenTransition = true
@@ -961,6 +1051,7 @@ extension MainFlutterWindow {
       win.marcoEnsureWindowChromeVisible()
       win.marcoClampVisibleIfNeeded()
       win.marcoPersistNormalFrame(forceSynchronize: true)
+      win.marcoNotifyDisplayChanged()
     }
     add(NSWindow.willMiniaturizeNotification, self) { win in
       win.marcoPersistNormalFrame(forceSynchronize: true)
@@ -981,6 +1072,7 @@ extension MainFlutterWindow {
     add(NSApplication.didChangeScreenParametersNotification, nil) { win in
       win.marcoClampVisibleIfNeeded()
       win.marcoEnsureWindowChromeVisible()
+      win.marcoNotifyDisplayChanged()
     }
   }
 
@@ -999,6 +1091,8 @@ extension MainFlutterWindow {
         payload["savedFrame"] = Self.marcoEncodeFrame(saved)
       }
       result(payload)
+    case "getDisplayRefreshInfo":
+      result(self.marcoBuildDisplayRefreshInfo())
     case "saveNormalBounds":
       self.marcoPersistNormalFrame(forceSynchronize: true)
       result(true)
@@ -1502,6 +1596,594 @@ def _upgrade_macos_media_kit_mpv_v073() -> None:
         return
 
 
+MACOS_MEDIA_KIT_VSYNC_PATCH_MARKER = "// MARCO_MOVIE_VSYNC_PACED_V1"
+MACOS_VIDEO_OUTPUT_VSYNC_MARKER = "// MARCO_MOVIE_VSYNC_VIDEO_OUTPUT_V1"
+
+MACOS_TEXTURE_HW_VSYNC_SWIFT = r'''// MARCO_MOVIE_VSYNC_PACED_V1
+import Cocoa
+import CoreVideo
+import FlutterMacOS
+import OpenGL.GL
+import OpenGL.GL3
+
+public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
+  public typealias UpdateCallback = () -> Void
+
+  private static let displayChangedNotification = Notification.Name(
+    "MarcoMovieDisplayChanged"
+  )
+  private static let maxIdleTicksBeforeStop = 180
+
+  private let handle: OpaquePointer
+  private let updateCallback: UpdateCallback
+  private let pixelFormat: CGLPixelFormatObj
+  private let context: CGLContextObj
+  private let textureCache: CVOpenGLTextureCache
+  private var renderContext: OpaquePointer?
+  private var textureContexts = SwappableObjectManager<TextureGLContext>(
+    objects: [],
+    skipCheckArgs: true
+  )
+
+  private let vsyncLock = NSLock()
+  private var displayLink: CVDisplayLink?
+  private var displayObserver: NSObjectProtocol?
+  private var vsyncPaced: Bool = false
+  private var hasPendingUpdate: Bool = false
+  private var tickInFlight: Bool = false
+  private var idleTickCount: Int = 0
+  private var disposed: Bool = false
+  public private(set) var lastRenderProducedFrame: Bool = true
+
+  init(
+    handle: OpaquePointer,
+    updateCallback: @escaping UpdateCallback
+  ) {
+    self.handle = handle
+    self.updateCallback = updateCallback
+    self.pixelFormat = OpenGLHelpers.createPixelFormat()
+    self.context = OpenGLHelpers.createContext(pixelFormat)
+    self.textureCache = OpenGLHelpers.createTextureCache(context, pixelFormat)
+
+    super.init()
+
+    self.initMPV()
+  }
+
+  deinit {
+    stopAndReleaseDisplayLink()
+    disposePixelBuffer()
+    disposeMPV()
+    OpenGLHelpers.deleteTextureCache(textureCache)
+    OpenGLHelpers.deletePixelFormat(pixelFormat)
+
+    // Deleting the context may cause potential RAM or VRAM memory leaks, as it
+    // is used in the `deinit` method of the `TextureGLContext`.
+    OpenGLHelpers.deleteContext(context)
+  }
+
+  public func copyPixelBuffer() -> Unmanaged<CVPixelBuffer>? {
+    let textureContext = textureContexts.current
+    if textureContext == nil {
+      return nil
+    }
+
+    return Unmanaged.passRetained(textureContext!.pixelBuffer)
+  }
+
+  private func setupDisplayLink() -> Bool {
+    var link: CVDisplayLink?
+    var status: CVReturn = kCVReturnError
+    if let screen = NSScreen.main ?? NSScreen.screens.first,
+       let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+      let displayID = CGDirectDisplayID(num.uint32Value)
+      status = CVDisplayLinkCreateWithCGDisplay(displayID, &link)
+    }
+    if status != kCVReturnSuccess || link == nil {
+      status = CVDisplayLinkCreateWithActiveCGDisplays(&link)
+    }
+    guard status == kCVReturnSuccess, let created = link else {
+      return false
+    }
+
+    let cbStatus = CVDisplayLinkSetOutputCallback(
+      created,
+      { (_, _, _, _, _, userInfo) -> CVReturn in
+        guard let userInfo = userInfo else {
+          return kCVReturnSuccess
+        }
+        let that = Unmanaged<TextureHW>.fromOpaque(userInfo).takeUnretainedValue()
+        that.handleDisplayLinkTick()
+        return kCVReturnSuccess
+      },
+      Unmanaged.passUnretained(self).toOpaque()
+    )
+    guard cbStatus == kCVReturnSuccess else {
+      return false
+    }
+
+    vsyncLock.lock()
+    self.displayLink = created
+    self.vsyncPaced = true
+    vsyncLock.unlock()
+
+    displayObserver = NotificationCenter.default.addObserver(
+      forName: Self.displayChangedNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] note in
+      guard let self = self,
+            let num = note.userInfo?["displayID"] as? NSNumber else {
+        return
+      }
+      self.updateDisplayLinkDisplay(CGDirectDisplayID(num.uint32Value))
+    }
+    return true
+  }
+
+  private func updateDisplayLinkDisplay(_ displayID: CGDirectDisplayID) {
+    vsyncLock.lock()
+    let link = displayLink
+    let isDisposed = disposed
+    vsyncLock.unlock()
+    guard !isDisposed, let link = link else { return }
+    CVDisplayLinkSetCurrentCGDisplay(link, displayID)
+  }
+
+  private func stopAndReleaseDisplayLink() {
+    vsyncLock.lock()
+    disposed = true
+    let link = displayLink
+    displayLink = nil
+    let observer = displayObserver
+    displayObserver = nil
+    vsyncLock.unlock()
+
+    if let observer = observer {
+      NotificationCenter.default.removeObserver(observer)
+    }
+    if let link = link {
+      if CVDisplayLinkIsRunning(link) {
+        CVDisplayLinkStop(link)
+      }
+    }
+  }
+
+  private func scheduleVsyncWake() {
+    vsyncLock.lock()
+    if disposed {
+      vsyncLock.unlock()
+      return
+    }
+    hasPendingUpdate = true
+    idleTickCount = 0
+    let link = displayLink
+    vsyncLock.unlock()
+
+    if let link = link, !CVDisplayLinkIsRunning(link) {
+      CVDisplayLinkStart(link)
+    }
+  }
+
+  private func handleDisplayLinkTick() {
+    vsyncLock.lock()
+    if disposed {
+      let link = displayLink
+      vsyncLock.unlock()
+      if let link = link, CVDisplayLinkIsRunning(link) {
+        CVDisplayLinkStop(link)
+      }
+      return
+    }
+    if tickInFlight {
+      vsyncLock.unlock()
+      return
+    }
+    if !hasPendingUpdate && idleTickCount >= Self.maxIdleTicksBeforeStop {
+      let link = displayLink
+      vsyncLock.unlock()
+      if let link = link, CVDisplayLinkIsRunning(link) {
+        CVDisplayLinkStop(link)
+      }
+      return
+    }
+    tickInFlight = true
+    hasPendingUpdate = false
+    vsyncLock.unlock()
+
+    updateCallback()
+  }
+
+  public func endVsyncTick() {
+    vsyncLock.lock()
+    tickInFlight = false
+    vsyncLock.unlock()
+  }
+
+  public func drainPendingUpdateWithoutRender() {
+    guard vsyncPaced, let rc = renderContext else {
+      return
+    }
+    CGLSetCurrentContext(context)
+    defer {
+      CGLSetCurrentContext(nil)
+    }
+    let flags = mpv_render_context_update(rc)
+    vsyncLock.lock()
+    if (flags & UInt64(MPV_RENDER_UPDATE_FRAME.rawValue)) != 0 {
+      idleTickCount = 0
+    } else {
+      idleTickCount += 1
+    }
+    vsyncLock.unlock()
+    lastRenderProducedFrame = false
+  }
+
+  private func initMPV() {
+    CGLSetCurrentContext(context)
+    defer {
+      OpenGLHelpers.checkError("initMPV")
+      CGLSetCurrentContext(nil)
+    }
+
+    let api = UnsafeMutableRawPointer(
+      mutating: (MPV_RENDER_API_TYPE_OPENGL as NSString).utf8String
+    )
+    var procAddress = mpv_opengl_init_params(
+      get_proc_address: {
+        (ctx, name) in
+        return TextureHW.getProcAddress(ctx, name)
+      },
+      get_proc_address_ctx: nil
+    )
+
+    let enableVsync = setupDisplayLink()
+    setenv("MARCO_MPV_VSYNC_PACED", enableVsync ? "1" : "0", 1)
+
+    if enableVsync {
+      var advancedControl: Int32 = 1
+      withUnsafeMutableBytes(of: &procAddress) { procBytes in
+        withUnsafeMutablePointer(to: &advancedControl) { advPtr in
+          var params: [mpv_render_param] = [
+            mpv_render_param(type: MPV_RENDER_PARAM_API_TYPE, data: api),
+            mpv_render_param(
+              type: MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,
+              data: procBytes.baseAddress.map { UnsafeMutableRawPointer($0) }
+            ),
+            mpv_render_param(
+              type: MPV_RENDER_PARAM_ADVANCED_CONTROL,
+              data: UnsafeMutableRawPointer(advPtr)
+            ),
+            mpv_render_param(),
+          ]
+          MPVHelpers.checkError(
+            mpv_render_context_create(&renderContext, handle, &params)
+          )
+        }
+      }
+
+      mpv_render_context_set_update_callback(
+        renderContext,
+        { (ctx) in
+          guard let ctx = ctx else { return }
+          let that = Unmanaged<TextureHW>.fromOpaque(ctx).takeUnretainedValue()
+          that.scheduleVsyncWake()
+        },
+        UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+      )
+      scheduleVsyncWake()
+    } else {
+      var params: [mpv_render_param] = withUnsafeMutableBytes(of: &procAddress) {
+        procBytes in
+        return [
+          mpv_render_param(type: MPV_RENDER_PARAM_API_TYPE, data: api),
+          mpv_render_param(
+            type: MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,
+            data: procBytes.baseAddress.map {
+              UnsafeMutableRawPointer($0)
+            }
+          ),
+          mpv_render_param(),
+        ]
+      }
+
+      MPVHelpers.checkError(
+        mpv_render_context_create(&renderContext, handle, &params)
+      )
+
+      mpv_render_context_set_update_callback(
+        renderContext,
+        { (ctx) in
+          let that = unsafeBitCast(ctx, to: TextureHW.self)
+          DispatchQueue.main.async {
+            that.updateCallback()
+          }
+        },
+        UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+      )
+    }
+  }
+
+  private func disposeMPV() {
+    CGLSetCurrentContext(context)
+    defer {
+      OpenGLHelpers.checkError("disposeMPV")
+      CGLSetCurrentContext(nil)
+    }
+
+    mpv_render_context_set_update_callback(renderContext, nil, nil)
+    mpv_render_context_free(renderContext)
+    renderContext = nil
+  }
+
+  public func resize(_ size: CGSize) {
+    if size.width == 0 || size.height == 0 {
+      return
+    }
+
+    NSLog("TextureGL: resize: \(size.width)x\(size.height)")
+    createPixelBuffer(size)
+  }
+
+  private func createPixelBuffer(_ size: CGSize) {
+    disposePixelBuffer()
+
+    textureContexts.reinit(
+      objects: [
+        TextureGLContext(
+          context: context,
+          textureCache: textureCache,
+          size: size
+        ),
+        TextureGLContext(
+          context: context,
+          textureCache: textureCache,
+          size: size
+        ),
+        TextureGLContext(
+          context: context,
+          textureCache: textureCache,
+          size: size
+        ),
+      ],
+      skipCheckArgs: true
+    )
+  }
+
+  private func disposePixelBuffer() {
+    textureContexts.reinit(objects: [], skipCheckArgs: true)
+  }
+
+  public func render(_ size: CGSize) {
+    guard let rc = renderContext else {
+      lastRenderProducedFrame = false
+      return
+    }
+
+    CGLSetCurrentContext(context)
+    defer {
+      OpenGLHelpers.checkError("render")
+      CGLSetCurrentContext(nil)
+    }
+
+    if vsyncPaced {
+      let flags = mpv_render_context_update(rc)
+      if (flags & UInt64(MPV_RENDER_UPDATE_FRAME.rawValue)) == 0 {
+        vsyncLock.lock()
+        idleTickCount += 1
+        vsyncLock.unlock()
+        lastRenderProducedFrame = false
+        return
+      }
+      vsyncLock.lock()
+      idleTickCount = 0
+      vsyncLock.unlock()
+    }
+
+    let textureContext = textureContexts.nextAvailable()
+    if textureContext == nil {
+      lastRenderProducedFrame = false
+      return
+    }
+
+    glBindFramebuffer(GLenum(GL_FRAMEBUFFER), textureContext!.frameBuffer)
+    defer {
+      glBindFramebuffer(GLenum(GL_FRAMEBUFFER), 0)
+    }
+
+    var fbo = mpv_opengl_fbo(
+      fbo: Int32(textureContext!.frameBuffer),
+      w: Int32(size.width),
+      h: Int32(size.height),
+      internal_format: 0
+    )
+
+    if vsyncPaced {
+      var blockForTargetTime: Int32 = 0
+      withUnsafeMutablePointer(to: &fbo) { fboPtr in
+        withUnsafeMutablePointer(to: &blockForTargetTime) { blockPtr in
+          var params: [mpv_render_param] = [
+            mpv_render_param(
+              type: MPV_RENDER_PARAM_OPENGL_FBO,
+              data: UnsafeMutableRawPointer(fboPtr)
+            ),
+            mpv_render_param(
+              type: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME,
+              data: UnsafeMutableRawPointer(blockPtr)
+            ),
+            mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil),
+          ]
+          mpv_render_context_render(rc, &params)
+        }
+      }
+    } else {
+      withUnsafeMutablePointer(to: &fbo) { fboPtr in
+        var params: [mpv_render_param] = [
+          mpv_render_param(
+            type: MPV_RENDER_PARAM_OPENGL_FBO,
+            data: UnsafeMutableRawPointer(fboPtr)
+          ),
+          mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil),
+        ]
+        mpv_render_context_render(rc, &params)
+      }
+    }
+
+    glFlush()
+
+    textureContexts.pushAsReady(textureContext!)
+    if vsyncPaced {
+      mpv_render_context_report_swap(rc)
+    }
+    lastRenderProducedFrame = true
+  }
+
+  static private func getProcAddress(
+    _ ctx: UnsafeMutableRawPointer?,
+    _ name: UnsafePointer<Int8>?
+  ) -> UnsafeMutableRawPointer? {
+    let symbol: CFString = CFStringCreateWithCString(
+      kCFAllocatorDefault,
+      name,
+      kCFStringEncodingASCII
+    )
+    let indentifier = CFBundleGetBundleWithIdentifier(
+      "com.apple.opengl" as CFString
+    )
+    let addr = CFBundleGetFunctionPointerForName(indentifier, symbol)
+
+    if addr == nil {
+      NSLog("Cannot get OpenGL function pointer!")
+    }
+    return addr
+  }
+}
+'''
+
+
+def patch_macos_media_kit_video_vsync(plugin_macos_dir: Path) -> bool:
+    """Idempotently patch media_kit_video's macOS TextureHW & VideoOutput to use
+    CVDisplayLink + MPV_RENDER_PARAM_ADVANCED_CONTROL + mpv_render_context_update
+    + mpv_render_context_report_swap for tear-free, judder-free display sync.
+    """
+    texture_hw = plugin_macos_dir / "Classes" / "plugin" / "TextureHW.swift"
+    video_output = plugin_macos_dir / "Classes" / "plugin" / "common" / "VideoOutput.swift"
+    if not texture_hw.is_file() or not video_output.is_file():
+        return False
+
+    changed = False
+    hw_src = texture_hw.read_text(encoding="utf-8")
+    if MACOS_MEDIA_KIT_VSYNC_PATCH_MARKER not in hw_src or hw_src != MACOS_TEXTURE_HW_VSYNC_SWIFT:
+        texture_hw.write_text(MACOS_TEXTURE_HW_VSYNC_SWIFT, encoding="utf-8")
+        changed = True
+
+    vo_src = video_output.read_text(encoding="utf-8")
+    if MACOS_VIDEO_OUTPUT_VSYNC_MARKER not in vo_src:
+        patched_vo = f"{MACOS_VIDEO_OUTPUT_VSYNC_MARKER}\n{vo_src}"
+        patched_vo = patched_vo.replace(
+            "  private var texture: ResizableTextureProtocol!",
+            "  private var texture: ResizableTextureProtocol!\n  private weak var hwTexture: TextureHW?",
+            1,
+        )
+        patched_vo = patched_vo.replace(
+            "    if enableHardwareAcceleration {\n"
+            "      texture = SafeResizableTexture(\n"
+            "        TextureHW(\n"
+            "          handle: handle,\n"
+            "          // Use `weak self` to prevent memory leaks\n"
+            "          updateCallback: { [weak self]() in\n"
+            "            guard let that = self else {\n"
+            "              return\n"
+            "            }\n"
+            "            that.updateCallback()\n"
+            "          }\n"
+            "        )\n"
+            "      )\n"
+            "    }",
+            "    if enableHardwareAcceleration {\n"
+            "      let hw = TextureHW(\n"
+            "        handle: handle,\n"
+            "        // Use `weak self` to prevent memory leaks\n"
+            "        updateCallback: { [weak self]() in\n"
+            "          guard let that = self else {\n"
+            "            return\n"
+            "          }\n"
+            "          that.updateCallback()\n"
+            "        }\n"
+            "      )\n"
+            "      self.hwTexture = hw\n"
+            "      texture = SafeResizableTexture(hw)\n"
+            "    }",
+            1,
+        )
+        patched_vo = patched_vo.replace(
+            "  private func _updateCallback() {\n"
+            "    let size = videoSize\n\n"
+            "    if size.width == 0 || size.height == 0 {\n"
+            "      return\n"
+            "    }",
+            "  private func _updateCallback() {\n"
+            "    defer {\n"
+            "      hwTexture?.endVsyncTick()\n"
+            "    }\n"
+            "    let size = videoSize\n\n"
+            "    if size.width == 0 || size.height == 0 {\n"
+            "      hwTexture?.drainPendingUpdateWithoutRender()\n"
+            "      return\n"
+            "    }",
+            1,
+        )
+        patched_vo = patched_vo.replace(
+            "    texture.render(size)\n"
+            "    DispatchQueue.main.sync { [weak self] in",
+            "    texture.render(size)\n"
+            "    if let hw = hwTexture, !hw.lastRenderProducedFrame {\n"
+            "      return\n"
+            "    }\n"
+            "    if disposed {\n"
+            "      return\n"
+            "    }\n"
+            "    DispatchQueue.main.sync { [weak self] in",
+            1,
+        )
+        if "hwTexture?.endVsyncTick()" not in patched_vo or "lastRenderProducedFrame" not in patched_vo:
+            raise RuntimeError(f"Failed to patch media_kit_video VideoOutput.swift cleanly: {video_output}")
+        video_output.write_text(patched_vo, encoding="utf-8")
+        changed = True
+    return changed
+
+
+def _upgrade_macos_media_kit_video_vsync() -> None:
+    if sys.platform != "darwin":
+        return
+    candidates: list[Path] = []
+    symlink_dir = ROOT / "macos" / "Flutter" / "ephemeral" / ".symlinks" / "plugins" / "media_kit_video" / "macos"
+    if symlink_dir.is_dir():
+        candidates.append(symlink_dir.resolve())
+    pkg_cfg = ROOT / ".dart_tool" / "package_config.json"
+    if pkg_cfg.is_file():
+        try:
+            cfg = json.loads(pkg_cfg.read_text(encoding="utf-8"))
+            for pkg in cfg.get("packages", []):
+                if pkg.get("name") != "media_kit_video":
+                    continue
+                root_uri = pkg.get("rootUri", "")
+                if not root_uri:
+                    continue
+                if root_uri.startswith("file://"):
+                    pkg_root = Path(unquote(urlparse(root_uri).path))
+                else:
+                    pkg_root = (pkg_cfg.parent / root_uri).resolve()
+                macos_dir = (pkg_root / "macos").resolve()
+                if macos_dir.is_dir() and macos_dir not in candidates:
+                    candidates.append(macos_dir)
+        except Exception:
+            pass
+    for macos_dir in candidates:
+        if patch_macos_media_kit_video_vsync(macos_dir):
+            print(f"Patched media_kit_video macOS CVDisplayLink vsync render loop: {macos_dir}", flush=True)
+
+
 def main() -> None:
     subprocess.run([sys.executable, str(REPO_ROOT / 'scripts/prepare_python_html.py'), '--check'], check=True)
     subprocess.run([sys.executable, str(REPO_ROOT / 'scripts/prepare_python_modules.py'), '--check'], check=True)
@@ -1590,6 +2272,8 @@ def main() -> None:
             swift_text = window_swift.read_text(encoding="utf-8")
             if "import WebKit" not in swift_text and "import FlutterMacOS" in swift_text:
                 swift_text = swift_text.replace("import FlutterMacOS", "import FlutterMacOS\nimport WebKit", 1)
+            if "import CoreVideo" not in swift_text and "import FlutterMacOS" in swift_text:
+                swift_text = swift_text.replace("import FlutterMacOS", "import FlutterMacOS\nimport CoreVideo", 1)
             if "playbackActivity" not in swift_text:
                 swift_text = swift_text.replace(
                     "class MainFlutterWindow: NSWindow {",
@@ -1618,6 +2302,13 @@ def main() -> None:
                     "    }\n"
                     "    marcoWindowObservers.removeAll()\n"
                     "  }",
+                    1,
+                )
+            if "private var marcoWindowChannel:" not in swift_text and "private var marcoLastNormalFrame: NSRect?" in swift_text:
+                swift_text = swift_text.replace(
+                    "  private var marcoLastNormalFrame: NSRect?",
+                    "  private var marcoLastNormalFrame: NSRect?\n"
+                    "  private var marcoWindowChannel: FlutterMethodChannel?",
                     1,
                 )
             if "marco_movie/wakelock" not in swift_text and "RegisterGeneratedPlugins(registry: flutterViewController)" in swift_text:
@@ -1732,6 +2423,26 @@ def main() -> None:
                 count=1,
                 flags=re.MULTILINE,
             )
+        vsync_patch_marker = "# MarcoMovie: enable CVDisplayLink vsync-paced vo=libmpv rendering for media_kit_video"
+        if vsync_patch_marker not in text and "flutter_install_all_macos_pods" in text:
+            vsync_patch_ruby = (
+                f"  {vsync_patch_marker}\n"
+                "  begin\n"
+                "    prep = File.expand_path('../prepare_platform.py', __dir__)\n"
+                "    if File.exist?(prep)\n"
+                "      system('python3', prep, '--patch-media-kit-vsync')\n"
+                "    end\n"
+                "  rescue => e\n"
+                "    Pod::UI.warn(\"MarcoMovie: skipped media_kit_video vsync patch: #{e}\")\n"
+                "  end\n\n"
+            )
+            text = re.sub(
+                r"(^\s*flutter_install_all_macos_pods\b)",
+                lambda m: vsync_patch_ruby + m.group(1),
+                text,
+                count=1,
+                flags=re.MULTILINE,
+            )
         macos_podfile.write_text(text, encoding="utf-8")
     macos_pbx = ROOT / "macos" / "Runner.xcodeproj" / "project.pbxproj"
     if macos_pbx.exists():
@@ -1743,6 +2454,7 @@ def main() -> None:
         )
         macos_pbx.write_text(text, encoding="utf-8")
     _upgrade_macos_media_kit_mpv_v073()
+    _upgrade_macos_media_kit_video_vsync()
     # iOS Info.plist, deployment target, and opaque AppIcon set
     ios_runner = ROOT / "ios" / "Runner"
     if ios_runner.exists():
@@ -2435,4 +3147,7 @@ def main() -> None:
             win_runner_cmake.write_text(cmake_text, encoding="utf-8")
 
 if __name__ == "__main__":
-    main()
+    if "--patch-media-kit-vsync" in sys.argv[1:]:
+        _upgrade_macos_media_kit_video_vsync()
+    else:
+        main()

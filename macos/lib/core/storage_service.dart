@@ -18,6 +18,7 @@ import 'danmu/danmu_source_sync.dart';
 import 'ios_avplayer_controller.dart';
 import 'ios_mpv_profile.dart';
 import 'local_media_proxy.dart';
+import 'macos_video_sync.dart';
 import 'macos_window_bounds.dart';
 import 'mdk_platform_player.dart';
 import 'models.dart';
@@ -6154,5 +6155,27 @@ class StorageService {
 
   Future<void> clearMacosWindowBounds() async {
     await _prefs.remove(MacosWindowBounds.prefKey);
+  }
+
+  static const String keyMacosVideoSyncMode = 'macos_video_sync_mode_v1';
+  static const String keyMacosVideoSyncTscale = 'macos_video_sync_tscale_v1';
+
+  MacosVideoSyncMode get macosVideoSyncMode =>
+      MacosVideoSyncMode.fromId(_prefs.getString(keyMacosVideoSyncMode));
+
+  Future<void> setMacosVideoSyncMode(MacosVideoSyncMode mode) async {
+    await _prefs.setString(keyMacosVideoSyncMode, mode.id);
+  }
+
+  MacosVideoSyncTscale get macosVideoSyncTscale =>
+      MacosVideoSyncTscale.fromId(_prefs.getString(keyMacosVideoSyncTscale));
+
+  Future<void> setMacosVideoSyncTscale(MacosVideoSyncTscale tscale) async {
+    await _prefs.setString(keyMacosVideoSyncTscale, tscale.id);
+  }
+
+  Future<void> resetMacosVideoSyncSettings() async {
+    await _prefs.remove(keyMacosVideoSyncMode);
+    await _prefs.remove(keyMacosVideoSyncTscale);
   }
 }
