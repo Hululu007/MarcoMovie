@@ -608,6 +608,21 @@ class DiskBlockCache {
     return mime.contains('mpegurl') || mime.contains('x-mpegurl');
   }
 
+  final StreamController<int> _upstreamBytesController =
+      StreamController<int>.broadcast();
+  int _upstreamBytesReceived = 0;
+
+  int get upstreamBytesReceived => _upstreamBytesReceived;
+  Stream<int> get upstreamByteChunks => _upstreamBytesController.stream;
+
+  void _recordUpstreamBytes(int bytes) {
+    if (bytes <= 0) return;
+    _upstreamBytesReceived += bytes;
+    if (!_upstreamBytesController.isClosed) {
+      _upstreamBytesController.add(bytes);
+    }
+  }
+
   Future<Uint8List> _readStreamBytes(
     Stream<List<int>> stream, {
     int? maxBytes,
@@ -617,6 +632,7 @@ class DiskBlockCache {
       if (maxBytes != null && builder.length + chunk.length > maxBytes) {
         throw const FormatException('缓存响应超出单次读取上限');
       }
+      _recordUpstreamBytes(chunk.length);
       builder.add(chunk);
     }
     return builder.takeBytes();
@@ -632,6 +648,7 @@ class DiskBlockCache {
       if (!hasNext) break;
       final chunk = iter.current;
       if (chunk.isEmpty) continue;
+      _recordUpstreamBytes(chunk.length);
       builder.add(chunk);
       final current = builder.toBytes();
       if (LocalMediaLease._startsWithM3u8Magic(current) ||
@@ -1897,6 +1914,9 @@ class LocalMediaLease {
   Object? _lastUpstreamError;
   int _removedHlsAdSegments = 0;
   double _removedHlsAdDurationSec = 0.0;
+  int _upstreamBytesReceived = 0;
+  final StreamController<int> _upstreamBytesController =
+      StreamController<int>.broadcast();
 
   Uri get url => _initialUrl;
   bool get isClosed => _closed;
@@ -1905,7 +1925,17 @@ class LocalMediaLease {
   Object? get lastUpstreamError => _lastUpstreamError;
   int get removedHlsAdSegments => _removedHlsAdSegments;
   double get removedHlsAdDurationSec => _removedHlsAdDurationSec;
+  int get upstreamBytesReceived => _upstreamBytesReceived;
+  Stream<int> get upstreamByteChunks => _upstreamBytesController.stream;
   DiskBlockCache get diskCache => _diskCache;
+
+  void _recordUpstreamBytes(int bytes) {
+    if (bytes <= 0 || _closed) return;
+    _upstreamBytesReceived += bytes;
+    if (!_upstreamBytesController.isClosed) {
+      _upstreamBytesController.add(bytes);
+    }
+  }
 
   /// Registers a companion stream (e.g. separate DASH `.m4s` audio track) onto
   /// this session's loopback gateway so it receives the same anti-leech headers.
@@ -3080,6 +3110,7 @@ class LocalMediaLease {
           return;
         }
         resetIdleTimer();
+        _recordUpstreamBytes(chunk.length);
         try {
           if (phase == 0) {
             prefixBuilder.add(chunk);
@@ -3358,6 +3389,9 @@ class LocalMediaLease {
       _client.close();
       _directOnlyClient?.close();
       _directOnlyClient = null;
+    }
+    if (!_upstreamBytesController.isClosed) {
+      unawaited(_upstreamBytesController.close());
     }
     await _server.close(force: true);
   }

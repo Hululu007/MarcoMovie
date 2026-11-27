@@ -32,6 +32,7 @@ import '../core/macos_video_sync.dart';
 import '../core/models.dart';
 import '../core/playback_recovery_policy.dart';
 import '../core/playback_startup.dart';
+import '../core/playback_status_telemetry.dart';
 import '../core/playback_wakelock.dart';
 import '../core/ohos_runtime.dart';
 import '../core/series_scraper.dart';
@@ -136,6 +137,12 @@ class PlayerScreen extends StatefulWidget {
   final Anime4kController? debugAnime4kController;
   @visibleForTesting
   final Stream<bool>? debugLiveVideoOutputStream;
+  @visibleForTesting
+  final CmsClient? debugClient;
+  @visibleForTesting
+  final Stream<int>? debugUpstreamBytesStream;
+  @visibleForTesting
+  final Stream<double>? debugCacheSpeedStream;
 
   const PlayerScreen({
     super.key,
@@ -167,6 +174,9 @@ class PlayerScreen extends StatefulWidget {
     this.debugOnboardingPrefs,
     this.debugAnime4kController,
     this.debugLiveVideoOutputStream,
+    this.debugClient,
+    this.debugUpstreamBytesStream,
+    this.debugCacheSpeedStream,
   });
 
   /// The resolver already applies origin rules and explicit playback headers.
@@ -363,7 +373,93 @@ class _PlayerScreenState extends State<PlayerScreen>
   WindowsPlaybackEngine _windowsEngine = WindowsPlaybackEngine.mpv;
   bool _mdkAutoFallbackTriggered = false;
   bool _switchingWindowsEngine = false;
-  final CmsClient _client = CmsClient();
+  late final CmsClient _client = widget.debugClient ?? CmsClient();
+  final PlaybackStatusController _playbackStatus = PlaybackStatusController();
+  final List<StreamSubscription<dynamic>> _throughputSubs = [];
+  Timer? _loadingUiRefreshTimer;
+
+  void _syncLoadingUiRefreshTimer() {
+    final active = mounted &&
+        !_playerDisposed &&
+        (_loading || _buffering || _playbackStatus.isVisible);
+    if (active) {
+      _loadingUiRefreshTimer ??= Timer.periodic(
+        const Duration(milliseconds: 400),
+        (_) {
+          if (!mounted || _playerDisposed) {
+            _loadingUiRefreshTimer?.cancel();
+            _loadingUiRefreshTimer = null;
+            return;
+          }
+          if (!_loading && !_buffering && !_playbackStatus.isVisible) {
+            _loadingUiRefreshTimer?.cancel();
+            _loadingUiRefreshTimer = null;
+            return;
+          }
+          setState(() {});
+        },
+      );
+    } else {
+      _loadingUiRefreshTimer?.cancel();
+      _loadingUiRefreshTimer = null;
+    }
+  }
+
+  void _unbindLeaseThroughput() {
+    for (final sub in _throughputSubs) {
+      unawaited(sub.cancel());
+    }
+    _throughputSubs.clear();
+  }
+
+  void _bindLeaseThroughput({
+    LocalMediaLease? localLease,
+    CloudMediaLease? cloudLease,
+  }) {
+    _unbindLeaseThroughput();
+    void onChunk(int bytes) {
+      if (!mounted || _playerDisposed) return;
+      final before = _playbackStatus.snapshot;
+      _playbackStatus.onNetworkBytesReceived(bytes);
+      final after = _playbackStatus.snapshot;
+      if ((_loading || _buffering || _playbackStatus.isVisible) &&
+          before != after) {
+        setState(() {});
+      }
+    }
+
+    if (localLease != null) {
+      _throughputSubs.add(localLease.upstreamByteChunks.listen(onChunk));
+      _throughputSubs.add(localLease.diskCache.upstreamByteChunks.listen(onChunk));
+    }
+    if (cloudLease != null) {
+      _throughputSubs.add(cloudLease.upstreamByteChunks.listen(onChunk));
+    }
+    if (widget.debugUpstreamBytesStream != null) {
+      _throughputSubs.add(widget.debugUpstreamBytesStream!.listen(onChunk));
+    }
+    if (widget.debugCacheSpeedStream != null) {
+      _throughputSubs.add(widget.debugCacheSpeedStream!.listen((bps) {
+        if (!mounted || _playerDisposed) return;
+        final before = _playbackStatus.snapshot;
+        _playbackStatus.onMpvCacheSpeed(bps);
+        if ((_loading || _buffering || _playbackStatus.isVisible) &&
+            before != _playbackStatus.snapshot) {
+          setState(() {});
+        }
+      }));
+    }
+  }
+
+  String get _activeLoadingStatusLabel {
+    final label = _playbackStatus.snapshot.formatLabel(
+      episodeName: _currentEpisode.name,
+    );
+    if (label.isNotEmpty) return label;
+    return _loading
+        ? '正在连接 ${_currentEpisode.name}…'
+        : '正在缓冲 ${_currentEpisode.name}…';
+  }
   final List<StreamSubscription<dynamic>> _playerSubscriptions = [];
 
   late List<CmsLine> _lines;
@@ -1530,25 +1626,51 @@ class _PlayerScreenState extends State<PlayerScreen>
       _ohosTextureListener = onOhosTexture;
       ohos.textureIdListenable.addListener(onOhosTexture);
     }
-    if (_isLiveStream) {
-      final platform = _player.platform;
-      if (platform is NativePlayer) {
-        Future<void> observe(
-          String prop,
-          void Function(String val) handler,
-        ) async {
-          if (!mounted || _playerDisposed) return;
-          try {
-            await platform.observeProperty(prop, (String val) async {
-              if (!mounted || _playerDisposed) return;
-              handler(val);
-            });
-            if (mounted && !_playerDisposed) {
-              _observedMpvVideoProps.add(prop);
-            }
-          } catch (_) {}
-        }
+    final platform = _player.platform;
+    if (platform is NativePlayer) {
+      Future<void> observe(
+        String prop,
+        void Function(String val) handler,
+      ) async {
+        if (!mounted || _playerDisposed) return;
+        try {
+          await platform.observeProperty(prop, (String val) async {
+            if (!mounted || _playerDisposed) return;
+            handler(val);
+          });
+          if (mounted && !_playerDisposed) {
+            _observedMpvVideoProps.add(prop);
+          }
+        } catch (_) {}
+      }
 
+      // Observe non-built-in mpv properties (`cache-speed`, `seeking`) on both
+      // VOD and Live. Built-in properties (`paused-for-cache`, `core-idle`,
+      // `demuxer-cache-time`, `cache-buffering-state`) are already observed by
+      // media_kit itself and read through `player.stream.buffering*`.
+      unawaited(observe('cache-speed', (val) {
+        if (!_allowEvents || !_matchesActiveMedia) return;
+        final speed = double.tryParse(val.trim()) ?? 0;
+        final before = _playbackStatus.snapshot;
+        _playbackStatus.onMpvCacheSpeed(speed);
+        if ((_loading || _buffering || _playbackStatus.isVisible) &&
+            before != _playbackStatus.snapshot &&
+            mounted) {
+          setState(() {});
+        }
+      }));
+      unawaited(observe('seeking', (val) {
+        if (!_allowEvents || !_matchesActiveMedia) return;
+        final seeking = val.trim().toLowerCase() == 'yes';
+        final before = _playbackStatus.snapshot;
+        _playbackStatus.onMpvSeekingChanged(seeking, isBuffering: _buffering);
+        _syncLoadingUiRefreshTimer();
+        if (before != _playbackStatus.snapshot && mounted) {
+          setState(() {});
+        }
+      }));
+
+      if (_isLiveStream) {
         unawaited(observe('vo-configured', (val) {
           if (!_allowEvents || !_matchesActiveMedia) return;
           final configured = val.trim().toLowerCase() == 'yes';
@@ -1798,9 +1920,16 @@ class _PlayerScreenState extends State<PlayerScreen>
           (_duration.inMilliseconds > 0 || _lastKnownDurationMs > 0);
       final hudNeedsPositionTick =
           (_controlsVisible && !_screenLocked) || slimBarVisible;
+      final shouldClearLoadingPhase =
+          !_buffering &&
+          (_playing || nextPos > Duration.zero) &&
+          _playbackStatus.isVisible &&
+          (_playbackStatus.phase != PlaybackLoadPhase.resolving) &&
+          (!_isLiveStream || _liveSessionReadyForDisplay);
       final shouldRebuildUi =
           shouldClearLoading ||
           shouldClearStaleLiveBuffering ||
+          shouldClearLoadingPhase ||
           (hudNeedsPositionTick &&
               !_isDraggingSeek &&
               !_isSliderDragging &&
@@ -1815,7 +1944,13 @@ class _PlayerScreenState extends State<PlayerScreen>
           if (shouldClearStaleLiveBuffering) {
             _buffering = false;
           }
+          if (shouldClearLoading ||
+              shouldClearStaleLiveBuffering ||
+              shouldClearLoadingPhase) {
+            _playbackStatus.onPlaybackRecovered();
+          }
         });
+        _syncLoadingUiRefreshTimer();
         if ((shouldClearLoading || shouldClearStaleLiveBuffering) &&
             _playing &&
             !_buffering &&
@@ -1973,7 +2108,15 @@ class _PlayerScreenState extends State<PlayerScreen>
           buffering: buffering,
           userPaused: _userPausedPlayback,
         );
+        final playbackActive = !buffering &&
+            (!_isLiveStream || _liveSessionReadyForDisplay) &&
+            (_playing || _position > Duration.zero || !_loading);
+        _playbackStatus.onBufferingStateChanged(
+          buffering,
+          playbackActive: playbackActive,
+        );
         setState(() => _buffering = buffering);
+        _syncLoadingUiRefreshTimer();
         if (!buffering) {
           _midPlaybackStallTimer?.cancel();
           if (_playing && _liveSessionReadyForDisplay) {
@@ -2863,6 +3006,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       context:
           'live=$_isLiveStream site=${widget.site.key} api=${widget.site.api} ep=${_currentEpisode.name}',
     );
+    _playbackStatus.reset();
+    _unbindLeaseThroughput();
+    _syncLoadingUiRefreshTimer();
     setState(() {
       _allowEvents = false;
       _allowHistory = false;
@@ -3034,6 +3180,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
 
     if (mounted) {
+      _unbindLeaseThroughput();
+      if (quality != null || _currentEpisode.isLocalFile) {
+        _playbackStatus.beginConnecting(
+          isLocalFile: _currentEpisode.isLocalFile,
+        );
+      } else {
+        _playbackStatus.beginResolving(isLocalFile: false);
+      }
       setState(() {
         _loading = true;
         _videoWidth = 0;
@@ -3047,6 +3201,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             : Duration.zero;
         _duration = Duration.zero;
       });
+      _syncLoadingUiRefreshTimer();
     }
 
     CloudMediaLease? pendingLease;
@@ -3234,6 +3389,17 @@ class _PlayerScreenState extends State<PlayerScreen>
         _blurayIsoLease = pendingBlurayLease;
         _offlineHlsLease = pendingOfflineHlsLease;
         _blurayChapters = pendingBlurayChapters;
+        _playbackStatus.beginConnecting(
+          isLocalFile: _currentEpisode.isLocalFile,
+        );
+        _bindLeaseThroughput(
+          localLease: pendingLocalLease,
+          cloudLease: pendingLease,
+        );
+        if (mounted) {
+          setState(() {});
+          _syncLoadingUiRefreshTimer();
+        }
         _allowEvents = true;
         _armStartupWatchdog(session);
         _activeResolvedMediaUrl = effectiveOpenUrl;
@@ -4421,6 +4587,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     _lockHideTimer?.cancel();
     _macosDisplayRefreshSub?.cancel();
     _macosDisplayRefreshSub = null;
+    _loadingUiRefreshTimer?.cancel();
+    _loadingUiRefreshTimer = null;
+    _unbindLeaseThroughput();
     _hudTimer?.cancel();
     _gestureTickTimer?.cancel();
     _desktopKeyTickTimer?.cancel();
@@ -4878,6 +5047,13 @@ class _PlayerScreenState extends State<PlayerScreen>
   void _seekPlayer(Duration target) {
     final clampedMs = math.max(0, target.inMilliseconds);
     final clamped = Duration(milliseconds: clampedMs);
+    if (!_isLiveStream && !_currentEpisode.isLocalFile) {
+      _playbackStatus.beginSeek(isLocalFile: false);
+      if (mounted) {
+        setState(() {});
+        _syncLoadingUiRefreshTimer();
+      }
+    }
     if (_usingAvPlayer) {
       unawaited(_iosAvPlayerController?.seek(clamped));
     } else {
@@ -6320,7 +6496,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                     ),
             ),
           ),
-        if (_loading || _buffering)
+        if (_loading || _buffering || _playbackStatus.isVisible)
           Center(
             child: Padding(
               padding: EdgeInsets.fromLTRB(
@@ -6365,7 +6541,8 @@ class _PlayerScreenState extends State<PlayerScreen>
                           const SizedBox(width: 12),
                           Flexible(
                             child: Text(
-                              '正在加载 ${_currentEpisode.name}…',
+                              _activeLoadingStatusLabel,
+                              key: const Key('player-loading-phase-text'),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
@@ -6399,7 +6576,8 @@ class _PlayerScreenState extends State<PlayerScreen>
                           const SizedBox(width: 12),
                           Flexible(
                             child: Text(
-                              '正在加载 ${_currentEpisode.name}…',
+                              _activeLoadingStatusLabel,
+                              key: const Key('player-loading-phase-text'),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
