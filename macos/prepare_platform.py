@@ -941,8 +941,8 @@ extension MainFlutterWindow {
   func marcoRestoreInitialFrame() {
     let screens = NSScreen.screens
     let visibleFrames = screens.map { $0.visibleFrame }
-    let primary = NSScreen.main?.visibleFrame
-      ?? screens.first?.visibleFrame
+    let primary = screens.first?.visibleFrame
+      ?? NSScreen.main?.visibleFrame
       ?? NSRect(x: 0, y: 0, width: 1440, height: 875)
     let saved = Self.marcoLoadSavedFrame()
     let resolved = Self.marcoResolveFrame(
@@ -977,7 +977,7 @@ extension MainFlutterWindow {
     let screens = NSScreen.screens
     guard !screens.isEmpty else { return }
     let visibleFrames = screens.map { $0.visibleFrame }
-    let primary = NSScreen.main?.visibleFrame ?? screens[0].visibleFrame
+    let primary = screens[0].visibleFrame
     let current = self.frame
     let clamped = Self.marcoResolveFrame(
       saved: current,
@@ -1007,6 +1007,17 @@ extension MainFlutterWindow {
     self.marcoLastNormalFrame = current
     UserDefaults.standard.set(Self.marcoEncodeFrame(current), forKey: Self.marcoWindowFrameDefaultsKey)
     if forceSynchronize {
+      UserDefaults.standard.synchronize()
+    }
+  }
+
+  func marcoFlushLastNormalFrameOnTerminate() {
+    if self.isVisible {
+      self.marcoPersistNormalFrame(forceSynchronize: true)
+      return
+    }
+    if let last = self.marcoLastNormalFrame, Self.marcoIsValidFrame(last) {
+      UserDefaults.standard.set(Self.marcoEncodeFrame(last), forKey: Self.marcoWindowFrameDefaultsKey)
       UserDefaults.standard.synchronize()
     }
   }
@@ -1067,7 +1078,7 @@ extension MainFlutterWindow {
       win.marcoIsClosing = true
     }
     add(NSApplication.willTerminateNotification, nil) { win in
-      win.marcoPersistNormalFrame(forceSynchronize: true)
+      win.marcoFlushLastNormalFrameOnTerminate()
     }
     add(NSApplication.didChangeScreenParametersNotification, nil) { win in
       win.marcoClampVisibleIfNeeded()
@@ -1106,8 +1117,8 @@ extension MainFlutterWindow {
       }
       let screens = NSScreen.screens
       let visibleFrames = screens.map { $0.visibleFrame }
-      let primary = NSScreen.main?.visibleFrame
-        ?? screens.first?.visibleFrame
+      let primary = screens.first?.visibleFrame
+        ?? NSScreen.main?.visibleFrame
         ?? NSRect(x: 0, y: 0, width: 1440, height: 875)
       let resolved = Self.marcoResolveFrame(
         saved: requested,
@@ -1116,8 +1127,10 @@ extension MainFlutterWindow {
       )
       self.setFrame(resolved, display: true)
       self.marcoEnsureWindowChromeVisible()
+      self.marcoRestoredFromSaved = true
       self.marcoLastNormalFrame = resolved
       UserDefaults.standard.set(Self.marcoEncodeFrame(resolved), forKey: Self.marcoWindowFrameDefaultsKey)
+      UserDefaults.standard.synchronize()
       result(true)
     case "setAppearance":
       let mode = (call.arguments as? String)?.lowercased() ?? "system"
@@ -1141,6 +1154,57 @@ extension MainFlutterWindow {
       }
       NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
       result(true)
+    case "pickLocalFile":
+      let args = call.arguments as? [String: Any]
+      let maxBytes = (args?["maxBytes"] as? NSNumber)?.intValue ?? (16 * 1024 * 1024)
+      let panel = NSOpenPanel()
+      panel.canChooseFiles = true
+      panel.canChooseDirectories = false
+      panel.allowsMultipleSelection = false
+      panel.canCreateDirectories = false
+      panel.resolvesAliases = true
+      if let title = args?["title"] as? String, !title.isEmpty {
+        panel.message = title
+      }
+      NSApp.activate(ignoringOtherApps: true)
+      let handleSelection: (NSApplication.ModalResponse) -> Void = { response in
+        guard response == .OK, let url = panel.url else {
+          result(nil)
+          return
+        }
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer {
+          if accessed {
+            url.stopAccessingSecurityScopedResource()
+          }
+        }
+        do {
+          let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+          if let size = (attrs[.size] as? NSNumber)?.intValue, size > maxBytes {
+            let maxMb = max(1, (maxBytes + 1024 * 1024 - 1) / (1024 * 1024))
+            result(["error": "文件超过 \(maxMb) MB"])
+            return
+          }
+          let data = try Data(contentsOf: url)
+          if data.count > maxBytes {
+            let maxMb = max(1, (maxBytes + 1024 * 1024 - 1) / (1024 * 1024))
+            result(["error": "文件超过 \(maxMb) MB"])
+            return
+          }
+          result([
+            "name": url.lastPathComponent,
+            "path": url.path,
+            "bytes": FlutterStandardTypedData(bytes: data),
+          ])
+        } catch {
+          result(["error": error.localizedDescription])
+        }
+      }
+      if self.isVisible {
+        panel.beginSheetModal(for: self, completionHandler: handleSelection)
+      } else {
+        handleSelection(panel.runModal())
+      }
     default:
       result(FlutterMethodNotImplemented)
     }

@@ -613,6 +613,19 @@ class CmsClient {
     return {'entry': entry, 'files': data};
   }
 
+  static bool _isMacosZipMetadataPath(String rawName) {
+    final normalized = rawName.replaceAll('\\', '/');
+    final segments =
+        normalized.split('/').where((part) => part.isNotEmpty).toList();
+    if (segments.isEmpty) return true;
+    for (final seg in segments) {
+      if (seg == '__MACOSX' || seg == '.DS_Store' || seg.startsWith('._')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   static String readSubscriptionFile(List<int> bytes, String name) {
     if (bytes.length > maxResponseBytes) throw const FormatException('订阅文件超过 16 MB');
     if (bytes.length >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4b && bytes[2] == 3 && bytes[3] == 4) {
@@ -621,6 +634,9 @@ class CmsClient {
       final files = <String, ArchiveFile>{};
       var unpackedSize = 0;
       for (final item in archive.files.where((f) => f.isFile)) {
+        if (_isMacosZipMetadataPath(item.name)) {
+          continue;
+        }
         // Check before any .content access: archive entries decompress lazily.
         unpackedSize += item.size;
         if (item.size < 0 || unpackedSize > maxZipExpandedBytes) {
@@ -719,8 +735,41 @@ class CmsClient {
         if (sites.isNotEmpty) {
           final scripts = <String, String>{};
           final scriptFile = RegExp(r'\.(?:m?js|py)$', caseSensitive: false);
+          final extResourceFile = RegExp(r'\.(?:json|txt|m3u8?)$', caseSensitive: false);
           var expanded = file.size;
           for (final site in sites.whereType<Map>()) {
+            // Inline relative .json/.txt/.m3u ext files bundled inside the ZIP
+            final rawExt = site['ext'];
+            if (rawExt is String && rawExt.trim().isNotEmpty) {
+              final extRef = Uri.tryParse(rawExt.trim());
+              if (extRef != null &&
+                  !extRef.hasScheme &&
+                  !extRef.hasAuthority &&
+                  !extRef.path.startsWith('/') &&
+                  !extRef.pathSegments.contains('..') &&
+                  extResourceFile.hasMatch(extRef.path)) {
+                final resolvedKey =
+                    base.resolveUri(extRef).pathSegments.join('/');
+                final extTarget = files[resolvedKey];
+                if (extTarget != null) {
+                  if (extTarget.size > maxZipExpandedBytes - total) {
+                    throw const FormatException('ZIP 内的扩展资源过大');
+                  }
+                  total += extTarget.size;
+                  final extText = CmsParser.decodeTextDocument(extTarget.content);
+                  if (resolvedKey.toLowerCase().endsWith('.json')) {
+                    try {
+                      site['ext'] =
+                          jsonDecode(CmsParser.stripJsonComments(extText));
+                    } on FormatException {
+                      site['ext'] = extText;
+                    }
+                  } else {
+                    site['ext'] = extText;
+                  }
+                }
+              }
+            }
             final explicitRule = (site['api'] ?? '').toString().toLowerCase() == 'csp_drpy';
             final reference = explicitRule && site['ext'] is String ? site['ext'] : site['api'];
             final ref = Uri.tryParse((reference ?? '').toString());

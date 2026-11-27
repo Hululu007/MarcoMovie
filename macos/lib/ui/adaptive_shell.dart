@@ -27,6 +27,7 @@ import '../core/ios_avplayer_controller.dart';
 import '../core/live_channel_organizer.dart';
 import '../core/local_media_proxy.dart';
 import '../core/macos_video_sync.dart';
+import '../core/macos_window_bounds.dart';
 import '../core/mdk_platform_player.dart';
 import '../core/models.dart';
 import '../core/netdisk_service.dart';
@@ -116,6 +117,7 @@ class AdaptiveShell extends StatefulWidget {
     required Future<void> Function() closeHost,
     required Future<void> Function() closeScripts,
     required Future<void> Function() destroyWindow,
+    Future<void> Function()? captureWindowBounds,
     Future<void> Function()? hideWindow,
     Duration totalBudget = defaultWindowCloseBudget,
   }) async {
@@ -150,6 +152,13 @@ class AdaptiveShell extends StatefulWidget {
           const Duration(milliseconds: 150),
           (_) => setPreventClose(true),
         );
+        if (captureWindowBounds != null) {
+          await runBounded(
+            'captureWindowBounds',
+            const Duration(milliseconds: 150),
+            (_) => captureWindowBounds(),
+          );
+        }
         if (hideWindow != null) {
           await runBounded(
             'hideWindow',
@@ -844,6 +853,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       setPreventClose: (prevent) => widget.onSetPreventCloseForTest != null
           ? widget.onSetPreventCloseForTest!(prevent)
           : windowManager.setPreventClose(prevent),
+      captureWindowBounds: () async {
+        await MacosWindowBoundsController.shared?.captureNow();
+      },
       hideWindow: widget.onDestroyWindowForTest != null
           ? null
           : () => windowManager.hide(),
@@ -15855,6 +15867,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     bool isPrivate = initialIsPrivate;
     bool submitting = false;
     String? errorText = initialError;
+    String? loadedLocalPayload;
+    String? loadedLocalSummary;
     final showPrivacyToggle =
         initialIsPrivate || !widget.storage.hasPrivacyConfigured;
     const presetGroups = ['默认分组', '主力影视', '超清专线', '电视直播', '动漫番剧'];
@@ -15873,7 +15887,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             });
             try {
               final urlText = urlCtrl.text.trim();
-              final jsonText = jsonCtrl.text.trim();
+              final jsonText = (loadedLocalPayload ?? jsonCtrl.text).trim();
               final selectedGroup = groupCtrl.text.trim().isEmpty
                   ? '默认分组'
                   : groupCtrl.text.trim();
@@ -15953,23 +15967,32 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         if (picked == null || !ctx.mounted) return;
                         rawBytes = picked.bytes;
                         pickedName = picked.name;
+                      } else if (MacosLocalFilePicker.isAvailable) {
+                        final picked = await MacosLocalFilePicker.pickFile(
+                          title: '选择本地订阅 JSON 或 ZIP 配置包',
+                          maxBytes: CmsClient.maxResponseBytes,
+                        );
+                        if (picked == null || !ctx.mounted) return;
+                        rawBytes = picked.bytes;
+                        pickedName = picked.name;
                       } else {
                         final picked = await FilePicker.platform.pickFiles(
                           type: FileType.any,
                           withData: false,
                         );
-                        final entry = picked?.files.single;
-                        if (entry == null || !ctx.mounted) return;
+                        final files = picked?.files ?? const <PlatformFile>[];
+                        if (files.isEmpty || !ctx.mounted) return;
+                        final entry = files.first;
                         pickedName = entry.name;
                         if (entry.path != null && entry.path!.isNotEmpty) {
                           final file = File(entry.path!);
                           if (await file.length() > CmsClient.maxResponseBytes) {
-                            throw const FormatException('文件超过 6 MB');
+                            throw const FormatException('文件超过 16 MB');
                           }
                           rawBytes = await file.readAsBytes();
                         } else if (entry.bytes != null) {
                           if (entry.bytes!.length > CmsClient.maxResponseBytes) {
-                            throw const FormatException('文件超过 6 MB');
+                            throw const FormatException('文件超过 16 MB');
                           }
                           rawBytes = entry.bytes!;
                         } else {
@@ -15979,8 +16002,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       final body =
                           CmsClient.readSubscriptionFile(rawBytes, pickedName);
                       if (!ctx.mounted) return;
+                      final kb = (utf8.encode(body).length / 1024).toStringAsFixed(1);
                       setModalState(() {
-                        jsonCtrl.text = body;
+                        if (body.length > 32768) {
+                          loadedLocalPayload = body;
+                          loadedLocalSummary =
+                              '已载入本地配置：$pickedName（约 $kb KB），点击导入生效';
+                          jsonCtrl.clear();
+                        } else {
+                          loadedLocalPayload = null;
+                          loadedLocalSummary = '已载入本地文件：$pickedName（$kb KB）';
+                          jsonCtrl.text = body;
+                        }
                         urlCtrl.clear();
                         errorText = null;
                       });
@@ -15996,6 +16029,29 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   },
                   child: const Text('选择本地订阅或 ZIP 配置包'),
                 ),
+                if (loadedLocalSummary != null) ...[
+                  Container(
+                    key: const ValueKey('subscription-local-file-summary'),
+                    width: double.infinity,
+                    margin: const EdgeInsets.only(bottom: 10),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AppleColors.systemBlue.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      loadedLocalSummary!,
+                      style: const TextStyle(
+                        color: AppleColors.systemBlue,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
                 // 1. Group Selector
                 Text(
                   '订阅分组（可选择预设或直接输入自定义分组名）',
@@ -16203,8 +16259,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 TextSelectionMouseGuard(
                   child: CupertinoTextField(
                     controller: jsonCtrl,
-                    placeholder:
-                        '{"sites": [...]} 或 #EXTM3U 播放列表 或 频道名,https://live.example/tv.m3u8',
+                    onChanged: (_) {
+                      if (loadedLocalPayload != null || loadedLocalSummary != null) {
+                        setModalState(() {
+                          loadedLocalPayload = null;
+                          loadedLocalSummary = null;
+                        });
+                      }
+                    },
+                    placeholder: loadedLocalSummary != null
+                        ? '已载入本地配置（直接点击下方导入，或在此粘贴覆盖）'
+                        : '{"sites": [...]} 或 #EXTM3U 播放列表 或 频道名,https://live.example/tv.m3u8',
                     maxLines: 4,
                     minLines: 2,
                     autocorrect: false,
@@ -16438,7 +16503,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             fileName: 'marco-movie-backup.json',
                             type: FileType.custom,
                             allowedExtensions: const ['json'],
-                            bytes: bytes,
+                            bytes: (Platform.isIOS || Platform.isAndroid)
+                                ? bytes
+                                : null,
                           );
                           if (outputPath == null || !ctx.mounted) return;
                           if (!Platform.isIOS && !Platform.isAndroid && outputPath.isNotEmpty) {
@@ -16479,13 +16546,22 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             );
                             byteLength = picked.bytes.length;
                             text = picked.decodeUtf8(allowMalformed: false);
+                          } else if (MacosLocalFilePicker.isAvailable) {
+                            final picked = await MacosLocalFilePicker.pickFile(
+                              title: '选择 Marco Movie 备份 JSON 文件',
+                              maxBytes: StorageService.maxSyncPayloadBytes,
+                            );
+                            if (picked == null || !ctx.mounted) return;
+                            byteLength = picked.bytes.length;
+                            text = utf8.decode(picked.bytes);
                           } else {
                             final picked = await FilePicker.platform.pickFiles(
                               type: FileType.any,
                               withData: false,
                             );
-                            final entry = picked?.files.single;
-                            if (entry == null || !ctx.mounted) return;
+                            final files = picked?.files ?? const <PlatformFile>[];
+                            if (files.isEmpty || !ctx.mounted) return;
+                            final entry = files.first;
                             if (entry.path != null && entry.path!.isNotEmpty) {
                               final file = File(entry.path!);
                               final len = await file.length();

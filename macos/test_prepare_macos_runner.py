@@ -213,6 +213,11 @@ class MainFlutterWindow: NSWindow {
                 "onDisplayRefreshRateChanged",
                 "didChangeScreenNotification",
                 "MarcoMovieDisplayChanged",
+                "pickLocalFile",
+                "NSOpenPanel",
+                "startAccessingSecurityScopedResource",
+                "marcoFlushLastNormalFrameOnTerminate",
+                "screens.first?.visibleFrame",
             ):
                 self.assertIn(required, second_pass)
             self.assertNotIn("NSSize(width: 900, height: 600)", second_pass)
