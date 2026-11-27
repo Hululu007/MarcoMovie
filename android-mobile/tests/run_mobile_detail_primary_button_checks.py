@@ -1516,6 +1516,228 @@ public final class MobileDetailPrimaryButtonChecks {
                     "R13-2d-click: clicking prompt after hiding active 夸克 triggers 0 plays");
         }
 
+        // =====================================================================
+        // Round-14 P2: Hiding the currently hand-selected line MUST hold awaiting-reselection
+        //   (0 plays, resumeAt=0, re-selection prompt) across ALL 3 history states (history on
+        //   other remaining line 夸克, no history, history on hidden 百度), via BOTH long-press
+        //   pill & top picker 「管理」, persisting across page flips & delayed related-seasons
+        //   refresh, until user explicitly picks a line/episode!
+        // =====================================================================
+        WatchHistory.Entry bmBaiduEp2 = bookmark(
+                "site_main", "vod_r13", "青岚", "百度", NetdiskStore.DRIVE_BAIDU,
+                "第2集", "https://pan.baidu.com/s/ql_bd_e2", 1, 42_000);
+
+        // R14-1: 2 entry modes (long-press pill & top picker 「管理」) × 3 history states
+        //   (0 = history on 夸克, 1 = no history, 2 = history on 百度) -> hide hand-selected 百度
+        for (int entryMode = 0; entryMode < 2; entryMode++) {
+            String entryTag = entryMode == 0 ? "longpress" : "toppicker";
+            for (int histCase = 0; histCase < 3; histCase++) {
+                String histTag = histCase == 0 ? "histQuark" : (histCase == 1 ? "noHist" : "histBaidu");
+                String tag = "R14-1-" + entryTag + "-" + histTag;
+                MobileBottomSheet.resetForTest();
+                Cms.Line qk = numberedLine("夸克", "https://pan.quark.cn/s/ql_qk_e", 10);
+                Cms.Line bd = numberedLine("百度", "https://pan.baidu.com/s/ql_bd_e", 10);
+                Cms.Video v = video("vod_r13", "青岚", qk, bd);
+                List<WatchHistory.Entry> histList =
+                        histCase == 0
+                                ? Collections.singletonList(bmQuarkEp1)
+                                : (histCase == 1
+                                        ? Collections.<WatchHistory.Entry>emptyList()
+                                        : Collections.singletonList(bmBaiduEp2));
+                MainActivity act = new MainActivity();
+                act.setupForTest(site, histList, v, 0);
+                if (histCase == 0) {
+                    CatalogScreen.resumeHistory(act, bmQuarkEp1);
+                } else if (histCase == 1) {
+                    act.detail(site, v);
+                } else {
+                    CatalogScreen.resumeHistory(act, bmBaiduEp2);
+                }
+                Button btn = (Button) act.root.findViewWithTag("detail-play");
+                // Explicitly hand-select 百度 line and 百度 第2集
+                act.root.findViewWithTag("detail-line-pill:百度").performClick();
+                act.root.findViewWithTag("episode:百度:1").performClick();
+                // Pre-seed a non-zero resumeAt to prove hide itself clears resumeAt back to 0!
+                act.resumeAt = 42_000;
+                if (entryMode == 0) {
+                    act.root.findViewWithTag("detail-line-pill:百度").performLongClick();
+                } else {
+                    act.root.findViewWithTag("detail-source-pill").performClick();
+                    MobileBottomSheet.lastContent.findViewWithTag("line-picker-manage:百度").performClick();
+                }
+                MobileBottomSheet.pickOptionContaining("删除（隐藏）此线路");
+                MobileBottomSheet.confirmPending();
+                check(
+                        act.playCalls.isEmpty()
+                                && act.resumeAt == 0
+                                && v.lines.size() == 1
+                                && "夸克".equals(v.lines.get(0).lineId())
+                                && btn.getText().toString().contains("原线路已变更")
+                                && btn.getText().toString().contains("重选"),
+                        tag + "-hidden: hiding hand-selected 百度 holds awaiting-reselect (0 plays, resumeAt=0, label='" + btn.getText() + "')");
+                int toastsBefore = act.toasts.size();
+                btn.performClick();
+                check(
+                        act.playCalls.isEmpty()
+                                && act.resumeAt == 0
+                                && act.toasts.size() == toastsBefore + 1
+                                && MobileDetailScreen.RESELECT_TOAST_TEXT.equals(
+                                        act.toasts.get(act.toasts.size() - 1)),
+                        tag + "-click: clicking main button after hiding 百度 triggers 0 plays, resumeAt=0 & re-select prompt");
+            }
+        }
+
+        // R14-2: 3-line [夸克(60), 百度(60), 阿里(60)] and [百度(60), 夸克(60), 阿里(60)] with history
+        //   on 夸克 & pending related seasons: hide hand-selected 百度 (BOTH entry modes) -> flip
+        //   page (51·60) -> deliver related seasons -> still awaiting re-select (0 plays,
+        //   resumeAt=0) -> explicitly pick 阿里 第3集 -> click main button -> strictly 1 play:
+        //   阿里 / 第3集 / 0 ms!
+        SourceController.nextSearchJson =
+                "{\"list\":[{\"vod_id\":\"vod_r14_s1\",\"vod_name\":\"星途 第一季\"},{\"vod_id\":\"vod_r14_s2\",\"vod_name\":\"星途 第二季\"}]}";
+        WatchHistory.Entry bmR14Quark = bookmark(
+                "site_main", "vod_r14_s2", "星途 第二季", "夸克", NetdiskStore.DRIVE_QUARK,
+                "第1集", "https://pan.quark.cn/s/r14_qk_e1", 0, 42_000);
+        for (int entryMode = 0; entryMode < 2; entryMode++) {
+            String tag = entryMode == 0 ? "R14-2-longpress" : "R14-2-toppicker";
+            MobileBottomSheet.resetForTest();
+            Cms.Line qk = numberedLine("夸克", "https://pan.quark.cn/s/r14_qk_e", 60);
+            Cms.Line bd = numberedLine("百度", "https://pan.baidu.com/s/r14_bd_e", 60);
+            Cms.Line ali = numberedLine("阿里", "https://www.alipan.com/s/r14_ali_e", 60);
+            Cms.Video v =
+                    entryMode == 0
+                            ? video("vod_r14_s2", "星途 第二季", qk, bd, ali)
+                            : video("vod_r14_s2", "星途 第二季", bd, qk, ali);
+            MainActivity act = new MainActivity();
+            act.setupForTest(site, Collections.singletonList(bmR14Quark), v, 0);
+            CatalogScreen.resumeHistory(act, bmR14Quark);
+            check(!act.deferredPageTasks.isEmpty(), tag + ": related-seasons task queued");
+            Button btn = (Button) act.root.findViewWithTag("detail-play");
+
+            // Hand-select 百度 第2集 then hide 百度
+            act.root.findViewWithTag("detail-line-pill:百度").performClick();
+            act.root.findViewWithTag("episode:百度:1").performClick();
+            if (entryMode == 0) {
+                act.root.findViewWithTag("detail-line-pill:百度").performLongClick();
+            } else {
+                act.root.findViewWithTag("detail-source-pill").performClick();
+                MobileBottomSheet.lastContent.findViewWithTag("line-picker-manage:百度").performClick();
+            }
+            MobileBottomSheet.pickOptionContaining("删除（隐藏）此线路");
+            MobileBottomSheet.confirmPending();
+            check(
+                    act.playCalls.isEmpty()
+                            && act.resumeAt == 0
+                            && v.lines.size() == 2
+                            && "夸克".equals(v.lines.get(0).lineId())
+                            && "阿里".equals(v.lines.get(1).lineId())
+                            && btn.getText().toString().contains("原线路已变更")
+                            && btn.getText().toString().contains("重选"),
+                    tag + "-hidden: 3-line hide 百度 leaves [夸克,阿里] awaiting re-select (0 plays, resumeAt=0)");
+
+            // Flip page to 51 · 60 while awaiting re-select -> MUST remain awaiting re-select!
+            View p2Tab = findTextViewContaining(act.root, "51 · 60");
+            check(p2Tab != null, tag + ": page tab '51 · 60' exists");
+            p2Tab.performClick();
+            int toastsBeforePageClick = act.toasts.size();
+            btn.performClick();
+            check(
+                    act.playCalls.isEmpty()
+                            && act.resumeAt == 0
+                            && btn.getText().toString().contains("重选")
+                            && act.toasts.size() == toastsBeforePageClick + 1
+                            && MobileDetailScreen.RESELECT_TOAST_TEXT.equals(
+                                    act.toasts.get(act.toasts.size() - 1)),
+                    tag + "-after-page: page flip keeps awaiting re-select (0 plays, resumeAt=0)");
+
+            // Deliver delayed related-seasons result -> MUST STILL remain awaiting re-select!
+            act.runDeferredPageTasksAndFlushUi();
+            int toastsBeforeSeasonClick = act.toasts.size();
+            btn.performClick();
+            check(
+                    act.playCalls.isEmpty()
+                            && act.resumeAt == 0
+                            && act.root.findViewWithTag("detail-season:1") != null
+                            && act.root.findViewWithTag("detail-season:2") != null
+                            && btn.getText().toString().contains("重选")
+                            && act.toasts.size() == toastsBeforeSeasonClick + 1
+                            && MobileDetailScreen.RESELECT_TOAST_TEXT.equals(
+                                    act.toasts.get(act.toasts.size() - 1)),
+                    tag + "-after-seasons: related-seasons refresh keeps awaiting re-select (0 plays, resumeAt=0)");
+
+            // Explicitly switch to 阿里 and select 第3集 -> main button updates; click dispatches 阿里/第3集/0ms ONCE!
+            act.root.findViewWithTag("detail-line-pill:阿里").performClick();
+            act.root.findViewWithTag("episode:阿里:2").performClick();
+            check(
+                    act.playCalls.isEmpty() && btn.getText().toString().contains("播放 · 第 3 集"),
+                    tag + "-select-ali3: selecting 阿里 第3集 updates main button without auto-playing");
+            btn.performClick();
+            check(
+                    act.playCalls.size() == 1
+                            && "阿里".equals(act.playCalls.get(0).line.name)
+                            && "第3集".equals(act.playCalls.get(0).ep.name)
+                            && act.playCalls.get(0).epNum == 3
+                            && act.playCalls.get(0).resumeAt == 0,
+                    tag + "-play-ali3: clicking main button dispatches 阿里 / 第3集 / 0 ms strictly once");
+        }
+
+        // R14-3a: Normal first open of a video with NO history still plays Ep 1 @ 0ms directly!
+        {
+            MobileBottomSheet.resetForTest();
+            Cms.Line qk = numberedLine("夸克", "https://pan.quark.cn/s/fresh_qk_e", 10);
+            Cms.Line bd = numberedLine("百度", "https://pan.baidu.com/s/fresh_bd_e", 10);
+            Cms.Video v = video("vod_fresh", "清风", qk, bd);
+            MainActivity act = new MainActivity();
+            act.setupForTest(site, Collections.<WatchHistory.Entry>emptyList(), v, 0);
+            act.detail(site, v);
+            Button btn = (Button) act.root.findViewWithTag("detail-play");
+            check(
+                    act.playCalls.isEmpty()
+                            && btn != null
+                            && btn.getText().toString().contains("播放 · 第 1 集")
+                            && !btn.getText().toString().contains("重选"),
+                    "R14-3a-open: fresh no-history open shows '播放 · 第 1 集' directly (0 plays)");
+            btn.performClick();
+            check(
+                    act.playCalls.size() == 1
+                            && "夸克".equals(act.playCalls.get(0).line.name)
+                            && "第1集".equals(act.playCalls.get(0).ep.name)
+                            && act.playCalls.get(0).epNum == 1
+                            && act.playCalls.get(0).resumeAt == 0,
+                    "R14-3a-play: clicking main button on fresh no-history video plays 夸克 / 第1集 / 0 ms directly");
+        }
+
+        // R14-3b: Hiding a NON-CURRENT line while on page 1 (51·60) preserves hand-selected target & page!
+        {
+            MobileBottomSheet.resetForTest();
+            Cms.Line qk = numberedLine("夸克", "https://pan.quark.cn/s/r14_page_qk_e", 60);
+            Cms.Line bd = numberedLine("百度", "https://pan.baidu.com/s/r14_page_bd_e", 60);
+            Cms.Video v = video("vod_r14_page", "山海", qk, bd);
+            MainActivity act = new MainActivity();
+            act.setupForTest(site, Collections.<WatchHistory.Entry>emptyList(), v, 0);
+            act.detail(site, v);
+            Button btn = (Button) act.root.findViewWithTag("detail-play");
+            findTextViewContaining(act.root, "51 · 60").performClick();
+            act.root.findViewWithTag("episode:夸克:51").performClick();
+            act.root.findViewWithTag("detail-line-pill:百度").performLongClick();
+            MobileBottomSheet.pickOptionContaining("删除（隐藏）此线路");
+            MobileBottomSheet.confirmPending();
+            check(
+                    act.playCalls.isEmpty()
+                            && v.lines.size() == 1
+                            && "夸克".equals(v.lines.get(0).lineId())
+                            && act.root.findViewWithTag("episode:夸克:51") != null
+                            && btn.getText().toString().contains("播放 · 第 52 集"),
+                    "R14-3b-hide-other-page: hiding non-current 百度 preserves 夸克, page 1 (51·60) & 第52集 (0 plays)");
+            btn.performClick();
+            check(
+                    act.playCalls.size() == 1
+                            && "夸克".equals(act.playCalls.get(0).line.name)
+                            && "第52集".equals(act.playCalls.get(0).ep.name)
+                            && act.playCalls.get(0).epNum == 52
+                            && act.playCalls.get(0).resumeAt == 0,
+                    "R14-3b-play: clicking main button plays 夸克 / 第52集 / 0 ms");
+        }
+
         System.out.println("MobileDetailPrimaryButtonChecks OK (" + passed + " checks passed)");
     }
 }

@@ -60,6 +60,7 @@ final class MobileDetailScreen {
     private static int selectedEpisodeLineIndex = -1;
     private static int selectedEpisodeIndex = -1;
     private static boolean userSelectedDetailTarget = false;
+    private static boolean awaitingExplicitReselection = false;
     private static int activeDetailLineIndex = -1;
     private static int activeDetailPage = 0;
     private static boolean activeVideoDescending = false;
@@ -70,6 +71,7 @@ final class MobileDetailScreen {
         selectedEpisodeLineIndex = -1;
         selectedEpisodeIndex = -1;
         userSelectedDetailTarget = false;
+        awaitingExplicitReselection = false;
         activeDetailLineIndex = -1;
         activeDetailPage = 0;
     }
@@ -222,9 +224,12 @@ final class MobileDetailScreen {
                             prevPage,
                             reboundLine.episodes != null ? reboundLine.episodes.size() : 0);
         } else {
-            // The previously active line itself was hidden/removed: never transfer its manual
-            // episode selection onto a different remaining line.
+            // The previously active line itself was hidden/removed: never transfer its selection
+            // onto a remaining line, nor silently fall back to another line's history or Ep 1.
+            // Keep the screen awaiting explicit user re-selection until they pick a line/episode.
             resetDetailSelectionState();
+            awaitingExplicitReselection = true;
+            if (a != null) a.resumeAt = 0;
             targetLineIdx = Math.max(0, Math.min(prevFallbackLineIdx, video.lines.size() - 1));
             Cms.Line fallbackLine = video.lines.get(targetLineIdx);
             targetPage =
@@ -462,6 +467,28 @@ final class MobileDetailScreen {
             int userSelectedEpIndex,
             boolean aiUnlocked,
             int storedCleanMode) {
+        return resolvePrimaryPlayAction(
+                video,
+                preferredLineIndex,
+                remembered,
+                userSelected,
+                userSelectedLine,
+                userSelectedEpIndex,
+                false,
+                aiUnlocked,
+                storedCleanMode);
+    }
+
+    static PrimaryPlayAction resolvePrimaryPlayAction(
+            Cms.Video video,
+            int preferredLineIndex,
+            WatchHistory.Entry remembered,
+            boolean userSelected,
+            Cms.Line userSelectedLine,
+            int userSelectedEpIndex,
+            boolean awaitingReselection,
+            boolean aiUnlocked,
+            int storedCleanMode) {
         if (video == null || video.lines == null || video.lines.isEmpty()) {
             return new PrimaryPlayAction(true, RESELECT_BUTTON_TEXT, null, null, -1, 0);
         }
@@ -482,6 +509,9 @@ final class MobileDetailScreen {
                     formatPlayEpisodeLabel(
                             ep == null ? "" : ep.name, epIdx + 1, aiUnlocked, storedCleanMode);
             return new PrimaryPlayAction(false, label, userSelectedLine, ep, epIdx, resumePos);
+        }
+        if (awaitingReselection) {
+            return new PrimaryPlayAction(true, RESELECT_BUTTON_TEXT, null, null, -1, 0);
         }
         if (remembered != null) {
             HistoryResumeMatcher.EpisodeMatch matched =
@@ -564,6 +594,7 @@ final class MobileDetailScreen {
                 || action.requiresReselection
                 || action.line == null
                 || action.episode == null) {
+            if (a != null) a.resumeAt = 0;
             String label =
                     action != null && action.buttonLabel != null && !action.buttonLabel.isEmpty()
                             ? action.buttonLabel
@@ -597,6 +628,7 @@ final class MobileDetailScreen {
             boolean forcePlay) {
         int tapMode = a.mobilePrefs().getInt(Prefs.DETAIL_TAP_MODE, 0);
         if (!forcePlay && tapMode == 2) {
+            awaitingExplicitReselection = false;
             userSelectedDetailTarget = true;
             selectedEpisodeLine = line.name == null ? "" : line.name;
             selectedEpisodeLineId = line.lineId();
@@ -2087,6 +2119,7 @@ final class MobileDetailScreen {
                                         ? HistoryResumeMatcher.findMatchedEpisodeIndex(
                                                 line, remembered)
                                         : 0),
+                        awaitingExplicitReselection,
                         renderAiUnlocked,
                         renderStoredCleanMode);
 
@@ -2136,7 +2169,7 @@ final class MobileDetailScreen {
             View topDownView = a.root.findViewWithTag("episodes-download");
             if (topDownView != null) {
                 String pickFrom = "";
-                if (lineMatchesBookmark) {
+                if (lineMatchesBookmark && !renderPlayAction.requiresReselection) {
                     pickFrom =
                             line.episodes.get(
                                             HistoryResumeMatcher.findMatchedEpisodeIndex(
@@ -2199,6 +2232,7 @@ final class MobileDetailScreen {
                     MobileMotion.bindPress(lPill, 0.94f);
                     lPill.setOnClickListener(
                             v -> {
+                                awaitingExplicitReselection = false;
                                 userSelectedDetailTarget = true;
                                 selectedEpisodeLine = candLine.name == null ? "" : candLine.name;
                                 selectedEpisodeLineId = candLine.lineId();
@@ -2517,6 +2551,7 @@ final class MobileDetailScreen {
                 MobileMotion.bindPress(numPill, 0.94f);
                 numPill.setOnClickListener(
                         v -> {
+                            awaitingExplicitReselection = false;
                             userSelectedDetailTarget = true;
                             selectedEpisodeLine = line.name == null ? "" : line.name;
                             selectedEpisodeLineId = line.lineId();
@@ -2575,6 +2610,7 @@ final class MobileDetailScreen {
             MobileMotion.bindPress(cardWrap, 0.97f);
             cardWrap.setOnClickListener(
                     v -> {
+                        awaitingExplicitReselection = false;
                         userSelectedDetailTarget = true;
                         selectedEpisodeLine = line.name == null ? "" : line.name;
                         selectedEpisodeLineId = line.lineId();
@@ -2856,6 +2892,7 @@ final class MobileDetailScreen {
             optRow.setOnClickListener(
                     v -> {
                         if (handleRef[0] != null) handleRef[0].dismiss();
+                        awaitingExplicitReselection = false;
                         userSelectedDetailTarget = true;
                         selectedEpisodeLine = cand.name == null ? "" : cand.name;
                         selectedEpisodeLineId = cand.lineId();
@@ -2980,7 +3017,8 @@ final class MobileDetailScreen {
         final int precomputedGridMatchedIdx;
         if (selectedEpisodeIndex >= 0 && matchesSelectedEpisodeLine(lineIndex, line)) {
             precomputedGridMatchedIdx = selectedEpisodeIndex;
-        } else if (remembered != null
+        } else if (!awaitingExplicitReselection
+                && remembered != null
                 && HistoryResumeMatcher.isSameBookmarkLine(line, remembered)) {
             int candIdx = HistoryResumeMatcher.findMatchedEpisodeIndex(line, remembered);
             precomputedGridMatchedIdx =
@@ -3017,6 +3055,7 @@ final class MobileDetailScreen {
             cell.setOnClickListener(
                     v -> {
                         if (dlgRef[0] != null) dlgRef[0].dismiss();
+                        awaitingExplicitReselection = false;
                         userSelectedDetailTarget = true;
                         selectedEpisodeLine = line.name == null ? "" : line.name;
                         selectedEpisodeLineId = line.lineId();

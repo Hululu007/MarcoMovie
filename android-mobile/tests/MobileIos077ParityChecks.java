@@ -5437,8 +5437,45 @@ public final class MobileIos077ParityChecks {
                                 == -1,
                 "R13 P2: findLineIndexByStableIdentity rebinds reordered/renamed lines by stable lineId and returns -1 when active line was hidden");
 
+        // 33. Round-14 P2: Hiding the active line holds awaiting-reselection regardless of
+        //     whether watch history is on another remaining line, absent, or on the hidden line;
+        //     normal first open with no history still resolves directly to Ep 1 @ 0ms.
+        MobileDetailScreen.PrimaryPlayAction awaitOtherHist =
+                MobileDetailScreen.resolvePrimaryPlayAction(
+                        r11SeriesHasQuark, 0, bmR11SeriesQuark, false, null, -1, true, false, 0);
+        MobileDetailScreen.PrimaryPlayAction awaitNoHist =
+                MobileDetailScreen.resolvePrimaryPlayAction(
+                        r11SeriesHasQuark, 0, null, false, null, -1, true, false, 0);
+        MobileDetailScreen.PrimaryPlayAction awaitMissingHist =
+                MobileDetailScreen.resolvePrimaryPlayAction(
+                        r11SeriesOnlyBaidu, 0, bmR11SeriesQuark, false, null, -1, true, false, 0);
+        MobileDetailScreen.PrimaryPlayAction freshNoHist =
+                MobileDetailScreen.resolvePrimaryPlayAction(
+                        r11SeriesHasQuark, 0, null, false, null, -1, false, false, 0);
+        check(
+                awaitOtherHist.requiresReselection
+                        && MobileDetailScreen.RESELECT_BUTTON_TEXT.equals(
+                                awaitOtherHist.buttonLabel)
+                        && awaitOtherHist.line == null
+                        && awaitOtherHist.episode == null
+                        && awaitOtherHist.resumePositionMs == 0
+                        && awaitNoHist.requiresReselection
+                        && MobileDetailScreen.RESELECT_BUTTON_TEXT.equals(awaitNoHist.buttonLabel)
+                        && awaitNoHist.line == null
+                        && awaitNoHist.episode == null
+                        && awaitNoHist.resumePositionMs == 0
+                        && awaitMissingHist.requiresReselection
+                        && MobileDetailScreen.RESELECT_BUTTON_TEXT.equals(
+                                awaitMissingHist.buttonLabel)
+                        && awaitMissingHist.resumePositionMs == 0
+                        && !freshNoHist.requiresReselection
+                        && freshNoHist.line == r11BaiduS2
+                        && freshNoHist.episode == r11BdE1
+                        && freshNoHist.resumePositionMs == 0,
+                "R14 P2: awaitingReselection blocks fallback to another line's history or default Ep 1 while fresh no-history open still plays Ep 1 directly");
+
         pass(
-                "DriveOrder + R4..R13 P1-1..P2: line-season failover, Dart-aligned episodeMediaId, same-site drive conflict, direct-card & line-management stable rebind, and O(N) perf verified");
+                "DriveOrder + R4..R14 P1-1..P2: line-season failover, Dart-aligned episodeMediaId, same-site drive conflict, direct-card, line-management rebind & awaiting-reselection verified");
     }
 
     private static String computeWindowsV073MediaId(String canonicalUrl) throws Exception {
