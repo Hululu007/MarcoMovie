@@ -388,7 +388,7 @@ void main() {
 
       // Redaction check on playback resolution error logged to AppLog
       final sensitiveError = FormatException(
-        '插件解析失败 https://user:supersecret@vod.example/play?token=abc123xyz&pwd=9876 Authorization: Bearer topsecret_jwt Cookie: __pus=my_secret_cookie',
+        '插件解析失败 https://demo.example:supersecret@vod.example/play?token=abc123xyz&pwd=9876 Authorization: Bearer topsecret_jwt Cookie: __pus=my_secret_cookie',
       );
       final formatted = PlayerScreen.formatActionablePlaybackError(
         site,

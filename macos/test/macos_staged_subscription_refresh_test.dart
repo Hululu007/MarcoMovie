@@ -71,7 +71,7 @@ const String _validV1Json = '''
       "key": "vod_v1",
       "name": "稳定影院 V1",
       "type": 1,
-      "api": "https://v1.example.com/api.php/provide/vod"
+      "api": "https://v1.example/api.php/provide/vod"
     }
   ]
 }
@@ -84,13 +84,13 @@ const String _validV2Json = '''
       "key": "vod_v2",
       "name": "升级影院 V2",
       "type": 1,
-      "api": "https://v2.example.com/api.php/provide/vod"
+      "api": "https://v2.example/api.php/provide/vod"
     },
     {
       "key": "vod_4k",
       "name": "4K 专线 V2",
       "type": 1,
-      "api": "https://4k.example.com/api.php/provide/vod"
+      "api": "https://4k.example/api.php/provide/vod"
     }
   ]
 }
@@ -103,7 +103,7 @@ const String _subBValidV1Json = '''
       "key": "sub_b_v1",
       "name": "备用影院 B1",
       "type": 1,
-      "api": "https://b1.example.com/api.php/provide/vod"
+      "api": "https://b1.example/api.php/provide/vod"
     }
   ]
 }
@@ -130,7 +130,7 @@ Future<StorageService> _createSeededStorage({
           SubscriptionEntry(
             id: 'sub_a',
             name: '主订阅 A',
-            url: 'https://sub.example.com/a.json',
+            url: 'https://sub.example/a.json',
             group: '常用秒播',
             format: 'JSON',
             enabled: true,
@@ -382,7 +382,7 @@ void main() {
           SubscriptionEntry(
             id: 'sub_a',
             name: '主订阅 A',
-            url: 'https://sub.example.com/a.json',
+            url: 'https://sub.example/a.json',
             group: '4K网盘',
             format: 'JSON',
             enabled: true,
@@ -394,7 +394,7 @@ void main() {
           SubscriptionEntry(
             id: 'sub_b',
             name: '备用订阅 B',
-            url: 'https://sub.example.com/b.json',
+            url: 'https://sub.example/b.json',
             group: '备用线路',
             format: 'JSON',
             enabled: true,
