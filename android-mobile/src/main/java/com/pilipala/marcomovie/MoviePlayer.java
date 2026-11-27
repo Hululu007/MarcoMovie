@@ -254,9 +254,12 @@ public class MoviePlayer {
 
     /**
      * Pure-JVM Media3 subtitle mount state machine: never clears the live AI overlay merely because
-     * another pre-existing external track is selected. Explicitly requests selection of the target
-     * AI track and confirms {@link MountDecision#CONFIRMED_CLEAR_OVERLAY} ONLY once Media3 reports
-     * that exact target track as {@code selected == true}.
+     * another pre-existing external track or an older same-label track is selected. When {@code
+     * targetId} is set, matches EXCLUSIVELY by exact {@code targetId} (never falling back to label)
+     * so stale same-label tracks stay in {@link MountDecision#WAIT}, requests {@link
+     * MountDecision#SELECT_TARGET} when the target appears unselected, and fires {@link
+     * MountDecision#CONFIRMED_CLEAR_OVERLAY} strictly once after Media3 confirms {@code
+     * selected == true} for that exact target.
      */
     static MountReconcileResult reconcilePendingSubtitleMount(
             PendingSubtitleMount pending, java.util.List<SubtitleTrackProbe> textTracks) {
@@ -275,8 +278,7 @@ public class MoviePlayer {
                     break;
                 }
             }
-        }
-        if (matched == null && !pending.targetLabel.isEmpty()) {
+        } else if (!pending.targetLabel.isEmpty()) {
             for (SubtitleTrackProbe p : textTracks) {
                 if (p != null && pending.targetLabel.equals(p.label)) {
                     matched = p;

@@ -393,6 +393,9 @@ const els = {
   unlockPwd: makeEl("unlockPwd"),
   importPane: makeEl("importPane"),
   vaultFile: vaultFileEl,
+  pendingVaultBox: makeEl("pendingVaultBox", { classList: makeClassList(["hidden"]) }),
+  pendingVaultLbl: makeEl("pendingVaultLbl"),
+  pendingVaultPwd: makeEl("pendingVaultPwd"),
   rawPwdBox: makeEl("rawPwdBox", { classList: makeClassList(["hidden"]) }),
   newVaultPwd: makeEl("newVaultPwd"),
   issueCard: makeEl("issueCard", { classList: makeClassList(["hidden"]) }),
@@ -542,17 +545,17 @@ if (!staleCancelReader.aborted || vm.runInContext("pendingRawSeed !== null", ctx
   throw new Error("R4 P1-6: stale FileReader after cancelRawImport restored pendingRawSeed!");
 }
 
-// Step G (Round-4 P1-6): Stale FileReader (File A) arriving LAST after user selects newer Vault B MUST NOT overwrite Vault B!
-const vaultBJson = JSON.stringify({
-  format: "marco-ai-ed25519-vault-v1",
-  kdf: "pbkdf2-sha256",
-  iterations: 210000,
-  salt_b64: "AAAAAAAAAAAAAAAAAAAAAA==",
-  nonce_b64: "AAAAAAAAAAAAAAAA",
-  ct_b64: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
-  mac_b64: "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=",
-  pub_hex: "11".repeat(32),
-});
+// Step G (Round-4 P1-6 + Round-5 P2-3): Stale FileReader (File A) arriving LAST after user selects
+// newer Vault B MUST NOT overwrite Vault B, AND Vault B MUST NOT overwrite persisted Vault A in
+// localStorage until Vault B passes password + MAC + pubkey verification!
+const vaultAJson = lsMap.get("marco_ai_ed25519_vault_v1");
+if (!vaultAJson) throw new Error("R5 P2-3: expected persisted Vault A before replacement test");
+const seedB = new Uint8Array(32);
+for (let i = 0; i < 32; i++) seedB[i] = (i * 11 + 5) & 0xff;
+const pubB = edMod.publicKeyFromSeed(seedB);
+const vaultBObj = edMod.encryptVault(seedB, pubB, "vaultB-pass-777");
+const vaultBJson = JSON.stringify(vaultBObj);
+
 vaultFileVal = "C:\\fakepath\\old-file-A.key";
 vaultFileList = [{ name: "old-file-A.key", content: seedHex, defer: true }];
 vm.runInContext("handleImportFile({ target: document.getElementById('vaultFile') });", ctx);
@@ -560,17 +563,73 @@ const staleFileAReader = deferredReaders.shift();
 vaultFileVal = "C:\\fakepath\\new-vault-B.json";
 vaultFileList = [{ name: "new-vault-B.json", content: vaultBJson }];
 vm.runInContext("handleImportFile({ target: document.getElementById('vaultFile') });", ctx);
-// Now deliver stale File A callback LAST!
+// Deliver stale File A callback LAST!
 staleFileAReader._deliver({ name: "old-file-A.key", content: seedHex });
-const savedVaultAfterRace = lsMap.get("marco_ai_ed25519_vault_v1");
 if (
   !staleFileAReader.aborted ||
   vm.runInContext("pendingRawSeed !== null", ctx) ||
   !els.rawPwdBox.classList.contains("hidden") ||
-  savedVaultAfterRace !== vaultBJson
+  els.pendingVaultBox.classList.contains("hidden") ||
+  lsMap.get("marco_ai_ed25519_vault_v1") !== vaultAJson
 ) {
-  throw new Error("R4 P1-6: stale FileReader from File A overwrote newer Vault B or restored pendingRawSeed!");
+  throw new Error("R5 P1-6/P2-3: Vault B overwrote Vault A prematurely or stale FileReader corrupted state!");
 }
+
+// Wrong password on Vault B -> MUST reject & keep Vault A intact in localStorage!
+els.pendingVaultPwd.value = "wrong-pass-000";
+vm.runInContext("confirmPendingVaultImport();", ctx);
+if (lsMap.get("marco_ai_ed25519_vault_v1") !== vaultAJson || vm.runInContext("activeSeed !== null", ctx)) {
+  throw new Error("R5 P2-3: failed password check on Vault B corrupted Vault A or unlocked!");
+}
+
+// Tampered MAC on Vault B -> MUST reject & keep Vault A intact in localStorage!
+const badMacVault = { ...vaultBObj, mac_hex: (vaultBObj.mac_hex[0] === "a" ? "b" : "a") + vaultBObj.mac_hex.slice(1) };
+vaultFileVal = "C:\\fakepath\\bad-mac.json";
+vaultFileList = [{ name: "bad-mac.json", content: JSON.stringify(badMacVault) }];
+vm.runInContext("handleImportFile({ target: document.getElementById('vaultFile') });", ctx);
+els.pendingVaultPwd.value = "vaultB-pass-777";
+vm.runInContext("confirmPendingVaultImport();", ctx);
+if (lsMap.get("marco_ai_ed25519_vault_v1") !== vaultAJson || vm.runInContext("activeSeed !== null", ctx)) {
+  throw new Error("R5 P2-3: tampered MAC vault overwrote Vault A or unlocked!");
+}
+
+// Mismatched pub_hex on Vault B (valid MAC + password, wrong pub_hex) -> MUST reject & keep Vault A intact!
+const badPubVault = { ...vaultBObj, pub_hex: (vaultBObj.pub_hex[0] === "1" ? "2" : "1") + vaultBObj.pub_hex.slice(1) };
+vaultFileVal = "C:\\fakepath\\bad-pub.json";
+vaultFileList = [{ name: "bad-pub.json", content: JSON.stringify(badPubVault) }];
+vm.runInContext("handleImportFile({ target: document.getElementById('vaultFile') });", ctx);
+els.pendingVaultPwd.value = "vaultB-pass-777";
+vm.runInContext("confirmPendingVaultImport();", ctx);
+if (lsMap.get("marco_ai_ed25519_vault_v1") !== vaultAJson || vm.runInContext("activeSeed !== null", ctx)) {
+  throw new Error("R5 P2-3: mismatched pubkey vault overwrote Vault A or unlocked!");
+}
+
+// Cancel Vault B -> Vault A still intact and unlockable with Vault A's password ("ephem-pass-999")!
+vm.runInContext("cancelPendingVaultImport();", ctx);
+if (!els.pendingVaultBox.classList.contains("hidden") || lsMap.get("marco_ai_ed25519_vault_v1") !== vaultAJson) {
+  throw new Error("R5 P2-3: cancelPendingVaultImport failed to preserve Vault A");
+}
+els.unlockPwd.value = "ephem-pass-999";
+vm.runInContext("unlockStoredVault();", ctx);
+if (vm.runInContext("activeSeed === null", ctx)) {
+  throw new Error("R5 P2-3: Vault A could not be unlocked after cancelling Vault B");
+}
+vm.runInContext("lockVault();", ctx);
+
+// Now import Vault B again and confirm with valid password -> commits Vault B & unlocks!
+vaultFileVal = "C:\\fakepath\\new-vault-B.json";
+vaultFileList = [{ name: "new-vault-B.json", content: vaultBJson }];
+vm.runInContext("handleImportFile({ target: document.getElementById('vaultFile') });", ctx);
+els.pendingVaultPwd.value = "vaultB-pass-777";
+vm.runInContext("confirmPendingVaultImport();", ctx);
+if (
+  lsMap.get("marco_ai_ed25519_vault_v1") !== vaultBJson ||
+  vm.runInContext("activeSeed === null", ctx) ||
+  vm.runInContext("activePubHex", ctx) !== edMod.bytesToHex(pubB)
+) {
+  throw new Error("R5 P2-3: verified Vault B failed to replace Vault A and unlock");
+}
+vm.runInContext("lockVault();", ctx);
 
 console.log(JSON.stringify({ nodeExecuted: true, jsAllPlatCode, jsIosOnlyCode, jsWinOnlyCode, reVault }));
 """,

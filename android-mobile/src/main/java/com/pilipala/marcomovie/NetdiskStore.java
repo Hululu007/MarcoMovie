@@ -699,72 +699,13 @@ final class NetdiskStore {
         return list;
     }
 
-    private static boolean isAsciiLetter(char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-    }
-
-    private static boolean containsAsciiWord(String lower, String word) {
-        int wlen = word.length();
-        int idx = lower.indexOf(word);
-        while (idx >= 0) {
-            boolean leftOk = idx == 0 || !isAsciiLetter(lower.charAt(idx - 1));
-            int end = idx + wlen;
-            boolean rightOk = end >= lower.length() || !isAsciiLetter(lower.charAt(end));
-            if (leftOk && rightOk) return true;
-            idx = lower.indexOf(word, idx + 1);
-        }
-        return false;
-    }
-
     /** Recognizes one of the 4 core netdisk keys from a line title (with ASCII boundary guards). */
     static String detectDriveKeyFromLineName(String raw) {
-        if (raw == null || raw.trim().isEmpty()) return "";
-        String lower = raw.trim().toLowerCase(Locale.ROOT);
-        if (lower.contains("夸克")
-                || lower.contains("夸父")
-                || lower.contains("kuake")
-                || lower.contains("quark")
-                || lower.contains("pan.quark.cn")
-                || lower.contains("qk原画")
-                || lower.contains("qk4k")
-                || lower.contains("qk智")) {
-            return DRIVE_QUARK;
-        }
-        if (lower.contains("优汐")
-                || lower.contains("drive.uc.cn")
-                || lower.contains("fast.uc.cn")
-                || containsAsciiWord(lower, "uc")) {
-            return DRIVE_UC;
-        }
-        if (lower.contains("百度")
-                || lower.contains("摆渡")
-                || lower.contains("嘟嘟")
-                || lower.contains("baidu")
-                || lower.contains("baidupan")
-                || lower.contains("pan.baidu.com")
-                || lower.contains("yun.baidu.com")
-                || lower.contains("bdwp")) {
-            return DRIVE_BAIDU;
-        }
-        if (lower.contains("阿里")
-                || lower.contains("阿狸")
-                || lower.contains("alipan")
-                || lower.contains("aliyundrive")
-                || lower.contains("aliyun")
-                || containsAsciiWord(lower, "ali")) {
-            return DRIVE_ALI;
-        }
-        return "";
+        return WatchHistory.detectDriveKeyFromLineName(raw);
     }
 
-    private static String detectDriveKeyFromEpisodeUrl(String rawUrl) {
-        if (rawUrl == null || rawUrl.trim().isEmpty()) return "";
-        String lower = rawUrl.trim().toLowerCase(Locale.ROOT);
-        if (lower.contains("pan.quark.cn")) return DRIVE_QUARK;
-        if (lower.contains("drive.uc.cn") || lower.contains("fast.uc.cn")) return DRIVE_UC;
-        if (lower.contains("pan.baidu.com") || lower.contains("yun.baidu.com")) return DRIVE_BAIDU;
-        if (lower.contains("alipan.com") || lower.contains("aliyundrive.com")) return DRIVE_ALI;
-        return "";
+    static String detectDriveKeyFromEpisodeUrl(String rawUrl) {
+        return WatchHistory.detectDriveKeyFromUrl(rawUrl);
     }
 
     private static boolean isNetdiskShareUrl(String rawUrl) {
@@ -783,14 +724,16 @@ final class NetdiskStore {
                 || lower.contains("yun.139.com")
                 || lower.contains("123pan.com")
                 || lower.contains("123684.com")
-                || lower.contains("pan.xunlei.com");
+                || lower.contains("pan.xunlei.com")
+                || lower.contains("mypikpak.com");
     }
 
     /**
-     * Returns {@code true} when a line already carries explicit direct playable media URLs (e.g.
-     * {@code .m3u8} / {@code .mp4} / {@code .mkv} on non-netdisk-share hosts). Such direct-stream
-     * lines MUST keep their original slot even if their display title contains vendor names,
-     * numbers, or aliases such as "阿里云 CDN 直连" or "线路115".
+     * Returns {@code true} ONLY when a line carries explicit direct playable stream URLs (e.g.
+     * {@code .m3u8} / {@code .mp4} / {@code .mkv} / {@code rtsp://} on non-netdisk-share hosts).
+     * Ordinary HTTP redirect/interstitial pages (e.g. {@code https://site.example/play/123} or
+     * {@code /proxy?...}) MUST return {@code false} so netdisk lines named after Quark/Baidu/UC/Ali
+     * or supported extended drives obey user drive ordering.
      */
     static boolean hasExplicitDirectMediaUrl(Cms.Line line) {
         if (line == null || line.episodes == null || line.episodes.isEmpty()) return false;
@@ -802,11 +745,37 @@ final class NetdiskStore {
             if (url.isEmpty()) continue;
             checked++;
             if (isNetdiskShareUrl(url)) return false;
-            if (Cms.isDirectStreamUrl(url)) return true;
             String lower = url.toLowerCase(Locale.ROOT);
-            if ((lower.startsWith("http://") || lower.startsWith("https://"))
-                    && !lower.contains("/share/")
-                    && Cms.isMedia(url)) {
+            if (lower.startsWith("rtsp://")
+                    || lower.startsWith("rtsps://")
+                    || lower.startsWith("rtmp://")
+                    || lower.startsWith("rtmps://")
+                    || lower.startsWith("rtmpt://")
+                    || lower.startsWith("rtmpe://")
+                    || lower.startsWith("rtmfp://")
+                    || lower.startsWith("udp://")
+                    || lower.startsWith("rtp://")
+                    || lower.startsWith("mms://")
+                    || lower.startsWith("mmsh://")
+                    || lower.startsWith("mmst://")
+                    || lower.startsWith("srt://")
+                    || lower.startsWith("rist://")
+                    || lower.startsWith("webrtc://")
+                    || lower.startsWith("file://")
+                    || lower.startsWith("content://")) {
+                return true;
+            }
+            if (!Cms.isHttp(url)) continue;
+            String path = url.split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
+            if (path.endsWith(".m3u8")
+                    || path.endsWith(".mp4")
+                    || path.endsWith(".flv")
+                    || path.endsWith(".mkv")
+                    || path.endsWith(".ts")
+                    || path.endsWith(".webm")
+                    || path.endsWith(".mpd")
+                    || path.endsWith(".mov")
+                    || path.endsWith(".avi")) {
                 return true;
             }
         }

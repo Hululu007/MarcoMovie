@@ -52,7 +52,9 @@ final class WatchHistory {
         e.poster = src.poster;
         e.line = src.line;
         e.lineId = src.lineId;
+        e.driveKey = src.driveKey;
         e.episode = src.episode;
+        e.episodeKey = src.episodeKey;
         e.episodeUrl = src.episodeUrl;
         e.index = src.index;
         e.position = src.position;
@@ -247,8 +249,199 @@ final class WatchHistory {
         }
     }
 
+    private static boolean isAsciiLetter(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    }
+
+    private static boolean containsAsciiWord(String lower, String word) {
+        int wlen = word.length();
+        int idx = lower.indexOf(word);
+        while (idx >= 0) {
+            boolean leftOk = idx == 0 || !isAsciiLetter(lower.charAt(idx - 1));
+            int end = idx + wlen;
+            boolean rightOk = end >= lower.length() || !isAsciiLetter(lower.charAt(end));
+            if (leftOk && rightOk) return true;
+            idx = lower.indexOf(word, idx + 1);
+        }
+        return false;
+    }
+
+    static String sha256Hex(String input) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] dig =
+                    md.digest(
+                            (input == null ? "" : input)
+                                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(dig.length * 2);
+            for (byte b : dig) {
+                sb.append(Character.forDigit((b >>> 4) & 0x0f, 16));
+                sb.append(Character.forDigit(b & 0x0f, 16));
+            }
+            return sb.toString();
+        } catch (Exception ignored) {
+            return Integer.toHexString(input == null ? 0 : input.hashCode());
+        }
+    }
+
+    /** Recognizes one of the 4 core netdisk keys from a line title (with ASCII boundary guards). */
+    static String detectDriveKeyFromLineName(String raw) {
+        if (raw == null || raw.trim().isEmpty()) return "";
+        String lower = raw.trim().toLowerCase(Locale.ROOT);
+        if (lower.contains("夸克")
+                || lower.contains("夸父")
+                || lower.contains("kuake")
+                || lower.contains("quark")
+                || lower.contains("pan.quark.cn")
+                || lower.contains("qk原画")
+                || lower.contains("qk4k")
+                || lower.contains("qk智")) {
+            return "quark";
+        }
+        if (lower.contains("优汐")
+                || lower.contains("drive.uc.cn")
+                || lower.contains("fast.uc.cn")
+                || containsAsciiWord(lower, "uc")) {
+            return "uc";
+        }
+        if (lower.contains("百度")
+                || lower.contains("摆渡")
+                || lower.contains("嘟嘟")
+                || lower.contains("baidu")
+                || lower.contains("baidupan")
+                || lower.contains("pan.baidu.com")
+                || lower.contains("yun.baidu.com")
+                || lower.contains("bdwp")) {
+            return "baidu";
+        }
+        if (lower.contains("阿里")
+                || lower.contains("阿狸")
+                || lower.contains("alipan")
+                || lower.contains("aliyundrive")
+                || lower.contains("aliyun")
+                || containsAsciiWord(lower, "ali")) {
+            return "ali";
+        }
+        return "";
+    }
+
+    static String detectDriveKeyFromUrl(String rawUrl) {
+        if (rawUrl == null || rawUrl.trim().isEmpty()) return "";
+        String lower = rawUrl.trim().toLowerCase(Locale.ROOT);
+        if (lower.contains("pan.quark.cn")) return "quark";
+        if (lower.contains("drive.uc.cn") || lower.contains("fast.uc.cn")) return "uc";
+        if (lower.contains("pan.baidu.com") || lower.contains("yun.baidu.com")) return "baidu";
+        if (lower.contains("alipan.com") || lower.contains("aliyundrive.com")) return "ali";
+        return "";
+    }
+
+    /**
+     * Returns {@code true} for local proxy leases or resolved temporary netdisk download URLs that
+     * must NEVER be persisted or synced.
+     */
+    static boolean isSensitiveOrEphemeralUrl(String rawUrl) {
+        if (rawUrl == null || rawUrl.trim().isEmpty()) return true;
+        String trimmed = rawUrl.trim();
+        String lower = trimmed.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("proxy://")
+                || lower.startsWith("file://")
+                || lower.startsWith("content://")) {
+            return true;
+        }
+        if (lower.startsWith("http://") || lower.startsWith("https://")) {
+            try {
+                java.net.URL u = new java.net.URL(trimmed);
+                String host = u.getHost() == null ? "" : u.getHost().toLowerCase(Locale.ROOT);
+                String path = u.getPath() == null ? "" : u.getPath().toLowerCase(Locale.ROOT);
+                if ("127.0.0.1".equals(host)
+                        || "localhost".equals(host)
+                        || "::1".equals(host)
+                        || "[::1]".equals(host)
+                        || host.startsWith("127.")
+                        || path.contains("/proxy")
+                        || path.contains("/lease/")) {
+                    return true;
+                }
+                if (host.contains("baidupcs.com")
+                        || host.contains("pcs.baidu.com")
+                        || host.contains("aliyundrive.net")
+                        || host.contains("alipan.net")
+                        || host.contains("dl-pc")
+                        || host.contains("pds-")
+                        || host.contains("115cdn.com")
+                        || (host.contains("quark.cn") && !host.equals("pan.quark.cn"))
+                        || (host.contains("uc.cn")
+                                && !host.equals("drive.uc.cn")
+                                && !host.equals("fast.uc.cn"))) {
+                    return true;
+                }
+            } catch (Exception ignored) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Computes a non-sensitive stable episode fingerprint from an upstream episode identifier/URL
+     * after stripping query parameters, fragments, and userinfo. Returns {@code ""} for local proxy
+     * leases or temporary signed netdisk download URLs so sensitive/ephemeral URLs never enter
+     * local bookmarks or CloudSync payloads.
+     */
+    static String stableEpisodeKey(String rawUrl) {
+        if (rawUrl == null || rawUrl.trim().isEmpty()) return "";
+        if (isSensitiveOrEphemeralUrl(rawUrl)) return "";
+        String trimmed = rawUrl.trim();
+        String canonical;
+        int qIdx = trimmed.indexOf('?');
+        int hIdx = trimmed.indexOf('#');
+        int cut = qIdx >= 0 && hIdx >= 0 ? Math.min(qIdx, hIdx) : (qIdx >= 0 ? qIdx : hIdx);
+        String noQuery = cut >= 0 ? trimmed.substring(0, cut) : trimmed;
+        if (noQuery.toLowerCase(Locale.ROOT).startsWith("http://")
+                || noQuery.toLowerCase(Locale.ROOT).startsWith("https://")) {
+            try {
+                java.net.URL u = new java.net.URL(noQuery);
+                String proto = u.getProtocol().toLowerCase(Locale.ROOT);
+                String host = u.getHost() == null ? "" : u.getHost().toLowerCase(Locale.ROOT);
+                int port = u.getPort();
+                String portPart =
+                        (port > 0
+                                        && !(("http".equals(proto) && port == 80)
+                                                || ("https".equals(proto) && port == 443)))
+                                ? (":" + port)
+                                : "";
+                String path = u.getPath() == null ? "" : u.getPath();
+                canonical = proto + "://" + host + portPart + path;
+            } catch (Exception ignored) {
+                return "";
+            }
+        } else {
+            canonical = noQuery;
+        }
+        if (canonical.isEmpty()) return "";
+        return "epk1:" + sha256Hex(canonical).substring(0, 24);
+    }
+
+    static String bookmarkDriveKey(Entry bookmark) {
+        if (bookmark == null) return "";
+        if (bookmark.driveKey != null && !bookmark.driveKey.trim().isEmpty()) {
+            return bookmark.driveKey.trim().toLowerCase(Locale.ROOT);
+        }
+        String byUrl = detectDriveKeyFromUrl(bookmark.episodeUrl);
+        if (!byUrl.isEmpty()) return byUrl;
+        return detectDriveKeyFromLineName(bookmark.line);
+    }
+
+    static String bookmarkEpisodeKey(Entry bookmark) {
+        if (bookmark == null) return "";
+        if (bookmark.episodeKey != null && !bookmark.episodeKey.trim().isEmpty()) {
+            return bookmark.episodeKey.trim();
+        }
+        return stableEpisodeKey(bookmark.episodeUrl);
+    }
+
     static final class Entry {
-        String site, id, title, poster, line, lineId, episode, episodeUrl;
+        String site, id, title, poster, line, lineId, driveKey, episode, episodeKey, episodeUrl;
         int index, position, duration;
         long updated;
 
@@ -264,6 +457,10 @@ final class WatchHistory {
             return complete() ? 0 : Math.max(0, position);
         }
 
+        /**
+         * Serializes non-sensitive stable resume identity. Never persists or exports temporary
+         * download URLs, query parameters, signed tokens, or local proxy leases.
+         */
         JSONObject json() throws JSONException {
             JSONObject obj =
                     new JSONObject()
@@ -277,13 +474,24 @@ final class WatchHistory {
                             .put("position", position)
                             .put("duration", duration)
                             .put("updated", updated);
-            if (lineId != null && !lineId.isEmpty()) {
-                obj.put("lineId", lineId);
+            String effLineId = lineId != null ? lineId.trim() : "";
+            if (!effLineId.isEmpty()) {
+                obj.put("lineId", effLineId);
             }
-            if (episodeUrl != null && !episodeUrl.isEmpty()) {
-                obj.put("episodeUrl", episodeUrl);
+            String effDrive = bookmarkDriveKey(this);
+            if (!effDrive.isEmpty()) {
+                obj.put("driveKey", effDrive);
+            }
+            String effEpKey = bookmarkEpisodeKey(this);
+            if (!effEpKey.isEmpty()) {
+                obj.put("episodeKey", effEpKey);
             }
             return obj;
+        }
+
+        /** Explicit CloudSync serialization — strictly non-sensitive stable identity only. */
+        JSONObject syncJson() throws JSONException {
+            return json();
         }
     }
 
@@ -309,8 +517,17 @@ final class WatchHistory {
                 e.poster = Cms.optSafeString(o, "poster");
                 e.line = Cms.optSafeString(o, "line");
                 e.lineId = Cms.optSafeString(o, "lineId");
+                e.driveKey = Cms.optSafeString(o, "driveKey");
                 e.episode = Cms.optSafeString(o, "episode");
-                e.episodeUrl = Cms.optSafeString(o, "episodeUrl");
+                e.episodeKey = Cms.optSafeString(o, "episodeKey");
+                String legacyUrl = Cms.optSafeString(o, "episodeUrl");
+                if (e.episodeKey.isEmpty() && !legacyUrl.isEmpty()) {
+                    e.episodeKey = stableEpisodeKey(legacyUrl);
+                }
+                if (e.driveKey.isEmpty() && !legacyUrl.isEmpty()) {
+                    e.driveKey = detectDriveKeyFromUrl(legacyUrl);
+                }
+                e.episodeUrl = "";
                 e.index = Math.max(0, o.optInt("index"));
                 e.position = Math.max(0, o.optInt("position"));
                 e.duration = Math.max(0, o.optInt("duration"));

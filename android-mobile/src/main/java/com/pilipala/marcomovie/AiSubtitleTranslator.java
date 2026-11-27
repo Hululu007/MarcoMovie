@@ -581,18 +581,46 @@ final class AiSubtitleTranslator {
             final File targetFile,
             final long currentPositionMs,
             final ProgressListener listener) {
+        if (a == null) return;
+        translateAndMountFullEpisodeAsync(
+                a,
+                showTitle,
+                rawSrtText,
+                targetFile,
+                currentPositionMs,
+                listener,
+                beginActiveTranslationSession(),
+                a.generation,
+                OnlineSubtitleDanmakuService.captureEpisodeIdentity(a));
+    }
+
+    static void translateAndMountFullEpisodeAsync(
+            final MainActivity a,
+            final String showTitle,
+            final String rawSrtText,
+            final File targetFile,
+            final long currentPositionMs,
+            final ProgressListener listener,
+            final long preBoundSessionId,
+            final int preBoundTicket,
+            final String preBoundEpisodeIdentity) {
         if (a == null
                 || !AiBetaGate.isUnlocked(a)
                 || !AiAssistantService.isConfigured(a)
                 || targetFile == null) {
             return;
         }
+        final long sessionId =
+                preBoundSessionId > 0L ? preBoundSessionId : beginActiveTranslationSession();
+        final int ticket = preBoundTicket >= 0 ? preBoundTicket : a.generation;
+        final String boundEpId = preBoundEpisodeIdentity == null ? "" : preBoundEpisodeIdentity;
+        if (!isTranslationSessionActive(sessionId) || ticket != a.generation) {
+            return;
+        }
         final List<SrtCue> cues = parseSrt(rawSrtText);
         if (cues.isEmpty()) return;
 
         final boolean bilingual = a.mobilePrefs().getBoolean(Prefs.SUBTITLE_BILINGUAL, true);
-        final int ticket = a.generation;
-        final long sessionId = beginActiveTranslationSession();
         final String fullCacheKey =
                 COMPLETION_CACHE_PREFIX
                         + AiAssistantService.sha256((bilingual ? "bi|" : "zh|") + rawSrtText);
@@ -600,18 +628,19 @@ final class AiSubtitleTranslator {
         a.worker.execute(
                 () -> {
                     try {
-                        if (!isTranslationSessionActive(sessionId)) return;
+                        if (!isSessionStillBound(a, sessionId, ticket, boundEpId)) return;
                         String rawCache = AiAssistantService.readDiskCache(a, fullCacheKey);
                         String cachedSrt =
                                 decodeVerifiedCompletionCache(rawCache, cues.size(), bilingual);
                         if (cachedSrt != null) {
-                            if (!isTranslationSessionActive(sessionId)) return;
+                            if (!isSessionStillBound(a, sessionId, ticket, boundEpId)) return;
                             writeUtf8(targetFile, cachedSrt);
                             List<SrtCue> cachedCues = parseSrt(cachedSrt);
                             updateOverlayAndSingleTrackOnUi(
                                     a,
                                     ticket,
                                     sessionId,
+                                    boundEpId,
                                     targetFile,
                                     cachedCues,
                                     null,
@@ -632,9 +661,7 @@ final class AiSubtitleTranslator {
                                 planSlidingChunks(cues.size(), focusIdx, DEFAULT_CHUNK_SIZE);
 
                         for (int cIdx = 0; cIdx < chunks.size(); cIdx++) {
-                            if (a.isFinishing()
-                                    || ticket != a.generation
-                                    || !isTranslationSessionActive(sessionId)) return;
+                            if (!isSessionStillBound(a, sessionId, ticket, boundEpId)) return;
                             if (!AiBetaGate.isUnlocked(a)) return;
                             int[] range = chunks.get(cIdx);
                             List<String> lines = new ArrayList<>(range[1] - range[0]);
@@ -643,9 +670,7 @@ final class AiSubtitleTranslator {
                             }
                             ChunkTranslation res = null;
                             for (int attempt = 1; attempt <= MAX_CHUNK_ATTEMPTS; attempt++) {
-                                if (a.isFinishing()
-                                        || ticket != a.generation
-                                        || !isTranslationSessionActive(sessionId)) return;
+                                if (!isSessionStillBound(a, sessionId, ticket, boundEpId)) return;
                                 try {
                                     ChunkTranslation cand =
                                             requestChunkFromModel(a, showTitle, lines, glossary);
@@ -668,7 +693,7 @@ final class AiSubtitleTranslator {
                                     }
                                 }
                             }
-                            if (!isTranslationSessionActive(sessionId)) return;
+                            if (!isSessionStillBound(a, sessionId, ticket, boundEpId)) return;
                             if (res != null) {
                                 for (int i = 0; i < lines.size(); i++) {
                                     translations[range[0] + i] = res.zhLines.get(i).trim();
@@ -686,6 +711,7 @@ final class AiSubtitleTranslator {
                             boolean isMilestone = (cIdx > 0 && cIdx % 4 == 0);
                             if (isFirst || isMilestone || isLast) {
                                 String rendered = renderSrt(cues, translations, bilingual);
+                                if (!isSessionStillBound(a, sessionId, ticket, boundEpId)) return;
                                 writeUtf8(targetFile, rendered);
                                 boolean fullyDone =
                                         isLast
@@ -703,7 +729,7 @@ final class AiSubtitleTranslator {
                                                 a, fullCacheKey, envelope);
                                     }
                                 }
-                                if (!isTranslationSessionActive(sessionId)) return;
+                                if (!isSessionStillBound(a, sessionId, ticket, boundEpId)) return;
                                 String toastMsg =
                                         isLast
                                                 ? (fullyDone
@@ -724,6 +750,7 @@ final class AiSubtitleTranslator {
                                         a,
                                         ticket,
                                         sessionId,
+                                        boundEpId,
                                         targetFile,
                                         cues,
                                         translations.clone(),
@@ -740,9 +767,8 @@ final class AiSubtitleTranslator {
                                 final String[] snap = translations.clone();
                                 a.ui.post(
                                         () -> {
-                                            if (a.isFinishing()
-                                                    || ticket != a.generation
-                                                    || !isTranslationSessionActive(sessionId)) {
+                                            if (!isSessionStillBound(
+                                                    a, sessionId, ticket, boundEpId)) {
                                                 return;
                                             }
                                             if (a.playbackControls != null) {
@@ -756,6 +782,21 @@ final class AiSubtitleTranslator {
                         AppLog.w("AiSubtitleTranslator", "Full-episode translation failed", e);
                     }
                 });
+    }
+
+    private static boolean isSessionStillBound(
+            MainActivity a, long sessionId, int ticket, String boundEpId) {
+        if (a == null
+                || a.isFinishing()
+                || ticket != a.generation
+                || !isTranslationSessionActive(sessionId)) {
+            return false;
+        }
+        if (boundEpId != null && !boundEpId.isEmpty()) {
+            String curEp = OnlineSubtitleDanmakuService.captureEpisodeIdentity(a);
+            return boundEpId.equals(curEp);
+        }
+        return true;
     }
 
     private static ChunkTranslation requestChunkFromModel(
@@ -785,6 +826,7 @@ final class AiSubtitleTranslator {
             final MainActivity a,
             final int ticket,
             final long sessionId,
+            final String boundEpId,
             final File targetFile,
             final List<SrtCue> cues,
             final String[] translations,
@@ -797,9 +839,7 @@ final class AiSubtitleTranslator {
             final boolean completed) {
         a.ui.post(
                 () -> {
-                    if (a.isFinishing()
-                            || ticket != a.generation
-                            || !isTranslationSessionActive(sessionId)) {
+                    if (!isSessionStillBound(a, sessionId, ticket, boundEpId)) {
                         return;
                     }
                     if (a.playbackControls != null) {
@@ -809,10 +849,7 @@ final class AiSubtitleTranslator {
                             reloadPlayerMediaSource
                                     || (completed && a.player instanceof SystemPlayer);
                     final ActivityCheck stillActive =
-                            () ->
-                                    !a.isFinishing()
-                                            && ticket == a.generation
-                                            && isTranslationSessionActive(sessionId);
+                            () -> isSessionStillBound(a, sessionId, ticket, boundEpId);
                     if (a.player != null && a.prepared) {
                         final Uri subUri = Uri.fromFile(targetFile);
                         final String mime = MediaOptions.subtitleMime(targetFile.getName(), "");

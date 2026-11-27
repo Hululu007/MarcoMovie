@@ -702,7 +702,7 @@ final class CloudSync {
         JSONArray histArr = new JSONArray();
         for (WatchHistory.Entry e : history) {
             try {
-                histArr.put(e.json());
+                histArr.put(e.syncJson());
             } catch (JSONException ex) {
                 AppLog.w("CloudSync", "Failed to serialize history entry", ex);
             }
@@ -1153,9 +1153,20 @@ final class CloudSync {
             e.title = o.optString("title", "").trim();
             e.poster = o.optString("poster", "");
             e.line = o.optString("line", o.optString("routeName", ""));
+            e.lineId = o.optString("lineId", o.optString("routeId", "")).trim();
+            e.driveKey = o.optString("driveKey", "").trim();
             e.episode =
                     o.optString(
                             "episode", o.optString("episodeName", o.optString("episodeTitle", "")));
+            e.episodeKey = o.optString("episodeKey", "").trim();
+            String legacyRemoteUrl = o.optString("episodeUrl", "").trim();
+            if (e.episodeKey.isEmpty() && !legacyRemoteUrl.isEmpty()) {
+                e.episodeKey = HistoryResumeMatcher.stableEpisodeKey(legacyRemoteUrl);
+            }
+            if (e.driveKey.isEmpty() && !legacyRemoteUrl.isEmpty()) {
+                e.driveKey = NetdiskStore.detectDriveKeyFromEpisodeUrl(legacyRemoteUrl);
+            }
+            e.episodeUrl = "";
             e.index = Math.max(0, o.optInt("index", o.optInt("episodeIndex", 0)));
             long pos = o.has("position") ? o.optLong("position", 0L) : o.optLong("positionMs", 0L);
             long dur = o.has("duration") ? o.optLong("duration", 0L) : o.optLong("durationMs", 0L);
@@ -1185,6 +1196,10 @@ final class CloudSync {
         }
     }
 
+    private static String safeTrim(String s) {
+        return s == null ? "" : s.trim();
+    }
+
     private static boolean sameHistory(List<WatchHistory.Entry> a, List<WatchHistory.Entry> b) {
         if (a.size() != b.size()) return false;
         for (int i = 0; i < a.size(); i++) {
@@ -1194,7 +1209,10 @@ final class CloudSync {
                     || x.duration != y.duration
                     || x.updated != y.updated
                     || !String.valueOf(x.episode).equals(String.valueOf(y.episode))
-                    || !String.valueOf(x.line).equals(String.valueOf(y.line))) {
+                    || !String.valueOf(x.line).equals(String.valueOf(y.line))
+                    || !safeTrim(x.lineId).equals(safeTrim(y.lineId))
+                    || !safeTrim(x.driveKey).equals(safeTrim(y.driveKey))
+                    || !safeTrim(x.episodeKey).equals(safeTrim(y.episodeKey))) {
                 return false;
             }
         }

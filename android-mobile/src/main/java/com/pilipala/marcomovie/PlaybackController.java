@@ -1221,8 +1221,11 @@ final class PlaybackController {
             a.playingBookmark.poster = v.poster;
             a.playingBookmark.line = a.activeLine.rawName();
             a.playingBookmark.lineId = a.activeLine.lineId();
+            a.playingBookmark.driveKey = NetdiskStore.detectLineDriveKey(a.activeLine);
             a.playingBookmark.episode = a.activeEpisode.name;
-            a.playingBookmark.episodeUrl = a.activeEpisode.url != null ? a.activeEpisode.url : "";
+            a.playingBookmark.episodeKey =
+                    HistoryResumeMatcher.stableEpisodeKey(a.activeEpisode.url);
+            a.playingBookmark.episodeUrl = "";
             a.playingBookmark.index = a.activeLine.episodes.indexOf(a.activeEpisode);
             a.playingBookmark.position = Math.max(0, initialResume);
             a.playingBookmark.duration = saved != null ? Math.max(0, saved.duration) : 0;
@@ -1235,6 +1238,7 @@ final class PlaybackController {
             CloudSyncDialog.scheduleAutoPush(a, false);
         }
         a.generation++;
+        AiSubtitleTranslator.cancelActiveTranslation();
         final int ticket = a.generation;
         final int sessionId = ++a.fullscreenPlaybackSession;
         a.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -3246,6 +3250,7 @@ final class PlaybackController {
         // Immediately revoke any in-flight fullscreen PLAYER_INIT session before releasing active
         // resources so delayed background init can never create or start a player after exit.
         a.fullscreenPlaybackSession++;
+        AiSubtitleTranslator.cancelActiveTranslation();
         PersonalNetdiskBrowser.releaseActiveLeaseExcept(keepCloudLeaseId);
         SeekCommitGuard guard = SeekCommitGuard.forHost(a);
         guard.onSeekFailedOrCancelled();

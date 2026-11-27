@@ -589,7 +589,11 @@ final class CatalogScreen {
         }
         a.historyFallbackBookmark = WatchHistory.cloneEntry(bookmark);
         a.historyFallbackInFlight = false;
-        a.resumeAt = bookmark.resume();
+        int matchedEpIdx =
+                matched.line.episodes != null ? matched.line.episodes.indexOf(matched.episode) : -1;
+        a.resumeAt =
+                HistoryResumeMatcher.resolveResumePositionMs(
+                        matched.line, matched.episode, matchedEpIdx, bookmark);
         a.resolvePlayer(site, video, matched.line, matched.episode);
     }
 

@@ -2211,27 +2211,81 @@ public final class MobileUiRedesignChecks {
                                 == -1,
                 "Pillar 10 dock (P2-3): same-orientation fold relayout preserves active tab and scroll position");
 
-        // Round-4 P2-2a: Same-orientation fold on Live TV preserves source, group, filter query,
-        // and left/right scroll positions!
+        // Round-4 P2-2a + Round-5 P2-2: Same-orientation fold (including TWO consecutive width
+        // changes before slow catalog load returns!) preserves Live TV source, group, filter query,
+        // left/right scroll offsets, AND non-first preview channel + stream!
         MobileLivePage.clearRelayoutState();
         MobileLivePage.recordRelayoutState(
                 new MobileLivePage.LiveRelayoutState(
-                        "https://live.example/backup.m3u", 1, 3, "CCTV", 180, 920));
-        MobileLivePage.LiveRelayoutState liveRestored = MobileLivePage.consumeRelayoutState();
+                        "https://live.example/backup.m3u",
+                        1,
+                        3,
+                        "CCTV",
+                        180,
+                        920,
+                        "CCTV-5+",
+                        "https://live.example/cctv5p_hd.m3u8",
+                        1));
+        MobileLivePage.LiveRelayoutState liveRestored1 = MobileLivePage.consumeRelayoutState();
+        // Second consecutive split-screen resize happens BEFORE slow catalog returns (live views
+        // still report scrollY = 0 and curChannel == null): must preserve unapplied 180/920 &
+        // CCTV-5+ stream 1!
+        MobileLivePage.LiveRelayoutState liveAfterSecondResize =
+                MobileLivePage.buildConsecutiveRelayoutSnapshot(
+                        "https://live.example/backup.m3u",
+                        2,
+                        3,
+                        "CCTV",
+                        0,
+                        0,
+                        true,
+                        liveRestored1,
+                        "",
+                        "",
+                        0);
+        MobileLivePage.recordRelayoutState(liveAfterSecondResize);
+        MobileLivePage.LiveRelayoutState liveRestored2 = MobileLivePage.consumeRelayoutState();
+
+        LiveCatalog.Catalog mockLiveCat = new LiveCatalog.Catalog();
+        LiveCatalog.Group mockGroup = new LiveCatalog.Group();
+        mockGroup.name = "体育";
+        LiveCatalog.Channel chFirst = new LiveCatalog.Channel();
+        chFirst.name = "CCTV-1";
+        LiveCatalog.Stream stFirst = new LiveCatalog.Stream();
+        stFirst.url = "https://live.example/cctv1.m3u8";
+        chFirst.streams.add(stFirst);
+        LiveCatalog.Channel chNonFirst = new LiveCatalog.Channel();
+        chNonFirst.name = "CCTV-5+";
+        LiveCatalog.Stream st5a = new LiveCatalog.Stream();
+        st5a.url = "https://live.example/cctv5p_sd.m3u8";
+        LiveCatalog.Stream st5b = new LiveCatalog.Stream();
+        st5b.url = "https://live.example/cctv5p_hd.m3u8";
+        chNonFirst.streams.add(st5a);
+        chNonFirst.streams.add(st5b);
+        mockGroup.channels.add(chFirst);
+        mockGroup.channels.add(chNonFirst);
+        mockLiveCat.groups.add(mockGroup);
+
+        LiveCatalog.Channel restoredCh =
+                MobileLivePage.resolveRestoredChannel(mockLiveCat, 0, liveRestored2);
+        LiveCatalog.Stream restoredSt =
+                MobileLivePage.resolveRestoredStream(restoredCh, liveRestored2);
         List<String> liveUrls =
                 Arrays.asList(
                         "https://live.example/main.m3u",
                         "https://live.example/extra.m3u",
                         "https://live.example/backup.m3u");
         check(
-                liveRestored != null
-                        && MobileLivePage.resolveRestoredSourceIndex(liveRestored, liveUrls) == 2
-                        && MobileLivePage.resolveRestoredGroupIndex(liveRestored, 5) == 3
-                        && "CCTV".equals(liveRestored.filterQuery)
-                        && liveRestored.groupScrollY == 180
-                        && liveRestored.channelScrollY == 920
+                liveRestored2 != null
+                        && MobileLivePage.resolveRestoredSourceIndex(liveRestored2, liveUrls) == 2
+                        && MobileLivePage.resolveRestoredGroupIndex(liveRestored2, 5) == 3
+                        && "CCTV".equals(liveRestored2.filterQuery)
+                        && liveRestored2.groupScrollY == 180
+                        && liveRestored2.channelScrollY == 920
+                        && restoredCh == chNonFirst
+                        && restoredSt == st5b
                         && MobileLivePage.consumeRelayoutState() == null,
-                "R4 P2-2: same-orientation fold preserves Live TV source, group, filter query, and left/right scroll offsets");
+                "R5 P2-2: two consecutive resizes before slow catalog returns preserve both column scroll offsets and non-first preview channel/stream");
 
         // Round-4 P2-2b: Short scrollable Dock quick menu rejects finger release outside viewport
         // OR over rows scrolled outside the visible viewport!

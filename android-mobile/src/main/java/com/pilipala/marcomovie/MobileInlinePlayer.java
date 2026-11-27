@@ -1167,8 +1167,10 @@ final class MobileInlinePlayer {
         entry.poster = video.poster;
         entry.line = lineKey;
         entry.lineId = lineId;
+        entry.driveKey = NetdiskStore.detectLineDriveKey(activeLine);
         entry.episode = rawEpisode.name;
-        entry.episodeUrl = epUrl;
+        entry.episodeKey = HistoryResumeMatcher.stableEpisodeKey(epUrl);
+        entry.episodeUrl = "";
         entry.index = activeLine.episodes.indexOf(rawEpisode);
         entry.position = pos;
         entry.duration = dur;

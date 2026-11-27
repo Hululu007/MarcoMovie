@@ -322,16 +322,134 @@ final class OnlineSubtitleDanmakuService {
                 });
     }
 
+    /** Immutable selection token captured synchronously the moment the user picks an online sub. */
+    static final class SubtitleSelectionToken {
+        final long sessionId;
+        final int playbackGeneration;
+        final String episodeIdentity;
+
+        SubtitleSelectionToken(long sessionId, int playbackGeneration, String episodeIdentity) {
+            this.sessionId = sessionId;
+            this.playbackGeneration = playbackGeneration;
+            this.episodeIdentity = episodeIdentity == null ? "" : episodeIdentity;
+        }
+    }
+
+    /** API-23-safe live playback state reader for validating async online subtitle deliveries. */
+    interface PlaybackStateProbe {
+        boolean isExiting();
+
+        int currentGeneration();
+
+        String currentEpisodeIdentity();
+    }
+
+    /** Pure-JVM downloader + delivery callbacks for testing delayed online subtitle invalidation. */
+    interface SubtitleDownloadExecutor {
+        String downloadSrt() throws Exception;
+    }
+
+    interface SubtitleDeliverySink {
+        void runAiTranslation(String srtText, SubtitleSelectionToken token) throws Exception;
+
+        void mountPlainSubtitle(String srtText, SubtitleSelectionToken token) throws Exception;
+    }
+
+    static String captureEpisodeIdentity(MainActivity a) {
+        if (a == null) return "";
+        String siteKey =
+                a.playbackControls != null && a.playbackControls.site != null
+                        ? String.valueOf(a.playbackControls.site.key)
+                        : "";
+        String vidId =
+                a.playbackControls != null && a.playbackControls.video != null
+                        ? String.valueOf(a.playbackControls.video.id)
+                        : "";
+        String lineId = a.activeLine != null ? a.activeLine.lineId() : "";
+        String epName =
+                a.activeEpisode != null && a.activeEpisode.name != null ? a.activeEpisode.name : "";
+        String epUrl =
+                a.activeEpisode != null && a.activeEpisode.url != null ? a.activeEpisode.url : "";
+        return siteKey + "|" + vidId + "|" + lineId + "|" + epName + "|" + epUrl;
+    }
+
+    static SubtitleSelectionToken beginSubtitleSelection(
+            int playbackGeneration, String episodeIdentity) {
+        return new SubtitleSelectionToken(
+                AiSubtitleTranslator.beginActiveTranslationSession(),
+                playbackGeneration,
+                episodeIdentity);
+    }
+
+    static boolean isSelectionStillActive(SubtitleSelectionToken token, PlaybackStateProbe probe) {
+        if (token == null || probe == null) return false;
+        if (probe.isExiting()) return false;
+        if (!AiSubtitleTranslator.isTranslationSessionActive(token.sessionId)) return false;
+        if (probe.currentGeneration() != token.playbackGeneration) return false;
+        String curEp = probe.currentEpisodeIdentity();
+        return token.episodeIdentity.equals(curEp == null ? "" : curEp);
+    }
+
+    /**
+     * Pure-JVM delayed download coordinator: binds {@code token} BEFORE downloading and re-checks
+     * it before/after network fetch so turning off subtitles, switching tracks, switching episodes,
+     * or exiting playback while downloading produces 0 model calls, 0 overlay writes, and 0 mounts.
+     */
+    static boolean completeSubtitleSelectionAfterDownload(
+            SubtitleSelectionToken token,
+            PlaybackStateProbe probe,
+            boolean bilingualAiTranslate,
+            SubtitleDownloadExecutor downloader,
+            SubtitleDeliverySink sink)
+            throws Exception {
+        if (!isSelectionStillActive(token, probe) || downloader == null || sink == null) {
+            return false;
+        }
+        String srt = downloader.downloadSrt();
+        if (!isSelectionStillActive(token, probe)) {
+            return false;
+        }
+        if (bilingualAiTranslate) {
+            sink.runAiTranslation(srt, token);
+        } else {
+            sink.mountPlainSubtitle(srt, token);
+        }
+        return true;
+    }
+
     /** Downloads a selected online subtitle candidate, optionally AI-translates it, and attaches. */
     static void downloadAndAttachSubtitleAsync(
             final MainActivity a,
             final SubtitleCandidate cand,
             final boolean bilingualAiTranslate) {
         if (a == null || cand == null) return;
+        // Bind selection session, playback generation, and episode identity SYNCHRONOUSLY at tap
+        // time BEFORE submitting background work so subtitle-off / track-switch / episode-switch /
+        // exit during slow download strictly invalidates this request.
+        final SubtitleSelectionToken selection =
+                beginSubtitleSelection(a.generation, captureEpisodeIdentity(a));
+        final PlaybackStateProbe stateProbe =
+                new PlaybackStateProbe() {
+                    @Override
+                    public boolean isExiting() {
+                        return a.isFinishing() || a.player == null || a.playbackControls == null;
+                    }
+
+                    @Override
+                    public int currentGeneration() {
+                        return a.generation;
+                    }
+
+                    @Override
+                    public String currentEpisodeIdentity() {
+                        return captureEpisodeIdentity(a);
+                    }
+                };
         a.toast("正在下载字幕：" + cand.title);
         a.worker.execute(
                 () -> {
                     try {
+                        if (!isSelectionStillActive(selection, stateProbe)) return;
                         String downloadUrl = "";
                         String fileName = "subtitle_" + cand.id + ".srt";
                         if ("assrt".equals(cand.provider)) {
@@ -401,6 +519,7 @@ final class OnlineSubtitleDanmakuService {
                             }
                         }
 
+                        if (!isSelectionStillActive(selection, stateProbe)) return;
                         if (downloadUrl.isEmpty()) throw new java.io.IOException("未获取到直链字幕文件");
 
                         HttpURLConnection dl =
@@ -414,6 +533,7 @@ final class OnlineSubtitleDanmakuService {
                             byte[] buf = new byte[8192];
                             int n;
                             while ((n = in.read(buf)) != -1) {
+                                if (!isSelectionStillActive(selection, stateProbe)) return;
                                 if (bos.size() + n > 6 * 1024 * 1024) break;
                                 bos.write(buf, 0, n);
                             }
@@ -421,6 +541,8 @@ final class OnlineSubtitleDanmakuService {
                         } finally {
                             dl.disconnect();
                         }
+
+                        if (!isSelectionStillActive(selection, stateProbe)) return;
 
                         File subDir = new File(a.getCacheDir(), "online_subs_v1");
                         if (!subDir.exists()) subDir.mkdirs();
@@ -430,6 +552,8 @@ final class OnlineSubtitleDanmakuService {
                         try (OutputStream out = new FileOutputStream(outFile)) {
                             out.write(bytes);
                         }
+
+                        if (!isSelectionStillActive(selection, stateProbe)) return;
 
                         final boolean runAiBilingual =
                                 bilingualAiTranslate
@@ -448,14 +572,28 @@ final class OnlineSubtitleDanmakuService {
                                             ? Math.max(0L, a.player.getCurrentPosition())
                                             : 0L;
                             AiSubtitleTranslator.translateAndMountFullEpisodeAsync(
-                                    a, showTitle, new String(bytes, "UTF-8"), outFile, posMs, null);
-                            a.ui.post(() -> a.toast("正在后台生成全片 AI 双语字幕，首段就绪后自动无打断呈现…"));
+                                    a,
+                                    showTitle,
+                                    new String(bytes, "UTF-8"),
+                                    outFile,
+                                    posMs,
+                                    null,
+                                    selection.sessionId,
+                                    selection.playbackGeneration,
+                                    selection.episodeIdentity);
+                            a.ui.post(
+                                    () -> {
+                                        if (isSelectionStillActive(selection, stateProbe)) {
+                                            a.toast("正在后台生成全片 AI 双语字幕，首段就绪后自动无打断呈现…");
+                                        }
+                                    });
                             return;
                         }
 
                         final String display = cand.title;
                         a.ui.post(
                                 () -> {
+                                    if (!isSelectionStillActive(selection, stateProbe)) return;
                                     if (a.playbackControls != null) {
                                         a.playbackControls.clearLiveAiSubtitles();
                                         a.playbackControls.setActiveSubtitleFile(outFile);
@@ -476,7 +614,14 @@ final class OnlineSubtitleDanmakuService {
                                     }
                                 });
                     } catch (Exception e) {
-                        a.ui.post(() -> a.toast("在线字幕下载失败：" + a.message(e)));
+                        if (isSelectionStillActive(selection, stateProbe)) {
+                            a.ui.post(
+                                    () -> {
+                                        if (isSelectionStillActive(selection, stateProbe)) {
+                                            a.toast("在线字幕下载失败：" + a.message(e));
+                                        }
+                                    });
+                        }
                     }
                 });
     }

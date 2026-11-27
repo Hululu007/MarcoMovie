@@ -1337,7 +1337,13 @@ final class MobileDetailScreen {
                                     if (m != null) {
                                         defLine = m.line;
                                         defEp = m.episode;
-                                        a.resumeAt = remembered.resume();
+                                        int mEpIdx =
+                                                defLine.episodes != null
+                                                        ? defLine.episodes.indexOf(defEp)
+                                                        : -1;
+                                        a.resumeAt =
+                                                HistoryResumeMatcher.resolveResumePositionMs(
+                                                        defLine, defEp, mEpIdx, remembered);
                                     } else {
                                         a.resumeAt = 0;
                                     }

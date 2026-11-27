@@ -3106,19 +3106,23 @@ public final class MobileIos077ParityChecks {
         savedQuarkEp2.id = "v100";
         savedQuarkEp2.line = twinQuark.name;
         savedQuarkEp2.lineId = twinQuark.lineId();
+        savedQuarkEp2.driveKey = NetdiskStore.detectLineDriveKey(twinQuark);
         savedQuarkEp2.index = 1;
         savedQuarkEp2.episode = qEp2.name;
-        savedQuarkEp2.episodeUrl = qEp2.url;
+        savedQuarkEp2.episodeKey = HistoryResumeMatcher.stableEpisodeKey(qEp2.url);
         savedQuarkEp2.position = 62_000;
         savedQuarkEp2.duration = 240_000;
-        // Roundtrip JSON persistence of lineId + episodeUrl
+        // Roundtrip JSON persistence of non-sensitive lineId + driveKey + episodeKey (zero raw URL)
+        org.json.JSONObject savedJson = savedQuarkEp2.json();
         List<WatchHistory.Entry> roundtrippedHist =
-                WatchHistory.read(new org.json.JSONArray().put(savedQuarkEp2.json()).toString());
+                WatchHistory.read(new org.json.JSONArray().put(savedJson).toString());
         WatchHistory.Entry restoredQuarkEp2 = roundtrippedHist.get(0);
         check(
                 "原画".equals(restoredQuarkEp2.lineId)
-                        && qEp2.url.equals(restoredQuarkEp2.episodeUrl),
-                "R4 P1-2: WatchHistory persists and restores stable lineId and episodeUrl");
+                        && NetdiskStore.DRIVE_QUARK.equals(restoredQuarkEp2.driveKey)
+                        && savedQuarkEp2.episodeKey.equals(restoredQuarkEp2.episodeKey)
+                        && !savedJson.has("episodeUrl"),
+                "R4/R5 P1-1/P1-2: WatchHistory persists non-sensitive lineId/driveKey/episodeKey without raw episodeUrl");
 
         // Pin Baidu #1 -> Baidu moves to slot 0, Quark moves to slot 1
         List<Cms.Line> twinsBaiduFirst =
@@ -3235,7 +3239,265 @@ public final class MobileIos077ParityChecks {
                         "R4 P1-2 static: " + rel + " uses unified HistoryResumeMatcher");
             }
         }
+        // 11. Round-5 P1-1: CloudSync two-device roundtrip exports ONLY non-sensitive stable
+        //     identity (ZERO temp netdisk download URLs, query signatures, or loopback proxy
+        //     leases) and restores Baidu twin line #2 Ep2 with exact 42,000 ms (never applied to
+        //     Quark!)
+        WatchHistory.Entry baiduTwinEp2 = new WatchHistory.Entry();
+        baiduTwinEp2.site = "demo";
+        baiduTwinEp2.id = "v200";
+        baiduTwinEp2.title = "同步双盘测试";
+        baiduTwinEp2.line = "原画";
+        baiduTwinEp2.lineId = "原画#2";
+        baiduTwinEp2.driveKey = NetdiskStore.DRIVE_BAIDU;
+        baiduTwinEp2.episode = "第2集";
+        baiduTwinEp2.episodeUrl =
+                "https://dl-pc.example/file/ep2.mkv?sign=SECRET_TOKEN_9988&expires=1799999999";
+        baiduTwinEp2.episodeKey = HistoryResumeMatcher.stableEpisodeKey(baiduTwinEp2.episodeUrl);
+        baiduTwinEp2.index = 1;
+        baiduTwinEp2.position = 42_000;
+        baiduTwinEp2.duration = 240_000;
+        baiduTwinEp2.updated = 1_768_000_500_000L;
+
+        WatchHistory.Entry proxyLeakProbe = new WatchHistory.Entry();
+        proxyLeakProbe.site = "demo";
+        proxyLeakProbe.id = "v201";
+        proxyLeakProbe.title = "本地代理测试";
+        proxyLeakProbe.line = "夸父原画";
+        proxyLeakProbe.lineId = "夸父原画";
+        proxyLeakProbe.driveKey = NetdiskStore.DRIVE_QUARK;
+        proxyLeakProbe.episode = "第1集";
+        proxyLeakProbe.episodeUrl = "http://127.0.0.1:45678/lease/LOCAL_LEASE_SECRET/stream.mkv";
+        proxyLeakProbe.episodeKey =
+                HistoryResumeMatcher.stableEpisodeKey(proxyLeakProbe.episodeUrl);
+        proxyLeakProbe.index = 0;
+        proxyLeakProbe.position = 15_000;
+        proxyLeakProbe.duration = 120_000;
+        proxyLeakProbe.updated = 1_768_000_400_000L;
+
+        String devAHistory =
+                new org.json.JSONArray()
+                        .put(baiduTwinEp2.json())
+                        .put(proxyLeakProbe.json())
+                        .toString();
+        String exportedSyncPayload =
+                CloudSync.exportPayload(
+                        devAHistory,
+                        "[]",
+                        "{}",
+                        Collections.emptyList(),
+                        false,
+                        1_768_000_600_000L);
+        check(
+                !exportedSyncPayload.contains("dl-pc.example")
+                        && !exportedSyncPayload.contains("SECRET_TOKEN_9988")
+                        && !exportedSyncPayload.contains("expires=")
+                        && !exportedSyncPayload.contains("127.0.0.1")
+                        && !exportedSyncPayload.contains("LOCAL_LEASE_SECRET")
+                        && !exportedSyncPayload.contains("episodeUrl")
+                        && exportedSyncPayload.contains("\"lineId\":\"原画#2\"")
+                        && exportedSyncPayload.contains("\"driveKey\":\"baidu\""),
+                "R5 P1-1: CloudSync export strips temp download URLs, query params & local proxy leases while keeping lineId & driveKey");
+
+        CloudSync.MergeResult devBMerged =
+                CloudSync.merge(
+                        "[]",
+                        "[]",
+                        "{}",
+                        Collections.emptyList(),
+                        false,
+                        exportedSyncPayload,
+                        1_768_000_700_000L);
+        List<WatchHistory.Entry> devBHist = WatchHistory.read(devBMerged.historyJson);
+        WatchHistory.Entry syncedBaidu = null;
+        for (WatchHistory.Entry e : devBHist) {
+            if ("v200".equals(e.id)) syncedBaidu = e;
+        }
+        Cms.Video devBVideo = new Cms.Video();
+        devBVideo.id = "v200";
+        devBVideo.title = "同步双盘测试";
+        devBVideo.lines.addAll(Arrays.asList(twinQuark, twinBaidu));
+        HistoryResumeMatcher.EpisodeMatch syncedMatch =
+                HistoryResumeMatcher.matchEpisode(devBVideo, syncedBaidu);
+        check(
+                syncedBaidu != null
+                        && "原画#2".equals(syncedBaidu.lineId)
+                        && NetdiskStore.DRIVE_BAIDU.equals(syncedBaidu.driveKey)
+                        && syncedMatch != null
+                        && syncedMatch.line == twinBaidu
+                        && syncedMatch.episode == bEp2
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        twinBaidu, bEp2, 1, syncedBaidu)
+                                == 42_000
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        twinQuark, qEp2, 1, syncedBaidu)
+                                == 0,
+                "R5 P1-1: CloudSync receiver restores Baidu twin #2, Ep2, and exact 42000ms (never applied to Quark)");
+
+        // 12. Round-5 P1-2: Detail, History, Fullscreen & Inline ALL preserve drive, episode, and
+        //     exact 42,000ms across: (A) temp URL query refresh, (B) upstream twin-line swap,
+        //     (C) inserted trailer shifting Ep2 index 1 -> 2, and (D) legacy bookmark without IDs!
+        Cms.Line bdOrig = new Cms.Line();
+        bdOrig.lineId = "原画#2";
+        bdOrig.name = "原画";
+        bdOrig.rawName = "原画";
+        Cms.Episode bdOrigE1 = new Cms.Episode();
+        bdOrigE1.name = "第1集";
+        bdOrigE1.url = "https://pan.baidu.com/s/show_bd_e1?token=old1";
+        Cms.Episode bdOrigE2 = new Cms.Episode();
+        bdOrigE2.name = "第2集";
+        bdOrigE2.url = "https://pan.baidu.com/s/show_bd_e2?token=old2";
+        bdOrig.episodes.add(bdOrigE1);
+        bdOrig.episodes.add(bdOrigE2);
+
+        WatchHistory.Entry bm42s = new WatchHistory.Entry();
+        bm42s.site = "demo";
+        bm42s.id = "v300";
+        bm42s.line = "原画";
+        bm42s.lineId = "原画#2";
+        bm42s.driveKey = NetdiskStore.detectLineDriveKey(bdOrig);
+        bm42s.episode = "第2集";
+        bm42s.episodeKey = HistoryResumeMatcher.stableEpisodeKey(bdOrigE2.url);
+        bm42s.index = 1;
+        bm42s.position = 42_000;
+        bm42s.duration = 240_000;
+
+        // Case 2A: Query params refreshed on temp URL (?token=old2 -> ?token=refreshed999)
+        Cms.Line bdRefreshed = new Cms.Line();
+        bdRefreshed.lineId = "原画#2";
+        bdRefreshed.name = "原画";
+        bdRefreshed.rawName = "原画";
+        Cms.Episode bdRefE1 = new Cms.Episode();
+        bdRefE1.name = "第1集";
+        bdRefE1.url = "https://pan.baidu.com/s/show_bd_e1?token=refreshed1";
+        Cms.Episode bdRefE2 = new Cms.Episode();
+        bdRefE2.name = "第2集";
+        bdRefE2.url = "https://pan.baidu.com/s/show_bd_e2?token=refreshed999&ts=888";
+        bdRefreshed.episodes.add(bdRefE1);
+        bdRefreshed.episodes.add(bdRefE2);
+        Cms.Video vRefreshed = new Cms.Video();
+        vRefreshed.id = "v300";
+        vRefreshed.lines.addAll(Arrays.asList(twinQuark, bdRefreshed));
+        HistoryResumeMatcher.EpisodeMatch mRef =
+                HistoryResumeMatcher.matchEpisode(vRefreshed, bm42s);
+        check(
+                mRef != null
+                        && mRef.line == bdRefreshed
+                        && mRef.episode == bdRefE2
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        bdRefreshed, bdRefE2, 1, bm42s)
+                                == 42_000
+                        && HistoryResumeMatcher.resolveResumePositionMs(twinQuark, qEp2, 1, bm42s)
+                                == 0,
+                "R5 P1-2A: refreshed URL query params preserve Baidu, Ep2, and exact 42000ms across Detail/History/Fullscreen/Inline");
+
+        // Case 2B & 2C: Upstream SWAPS the two duplicate-named lines (Baidu becomes positional
+        // "原画", Quark becomes positional "原画#2"), rotates URL path completely, AND inserts
+        // "预告片" at index 0 of Baidu shifting "第2集" to index 2!
+        Cms.Line bdSwappedTrailer = new Cms.Line();
+        bdSwappedTrailer.lineId = "原画";
+        bdSwappedTrailer.name = "原画";
+        bdSwappedTrailer.rawName = "原画";
+        Cms.Episode bdTrailer = new Cms.Episode();
+        bdTrailer.name = "预告片";
+        bdTrailer.url = "https://pan.baidu.com/s/new_trailer_0";
+        Cms.Episode bdSwapE1 = new Cms.Episode();
+        bdSwapE1.name = "第1集";
+        bdSwapE1.url = "https://pan.baidu.com/s/new_path_e1?sig=1";
+        Cms.Episode bdSwapE2 = new Cms.Episode();
+        bdSwapE2.name = "第2集";
+        bdSwapE2.url = "https://pan.baidu.com/s/new_path_e2?sig=2";
+        bdSwappedTrailer.episodes.add(bdTrailer);
+        bdSwappedTrailer.episodes.add(bdSwapE1);
+        bdSwappedTrailer.episodes.add(bdSwapE2);
+
+        Cms.Line qSwapped = new Cms.Line();
+        qSwapped.lineId = "原画#2";
+        qSwapped.name = "原画";
+        qSwapped.rawName = "原画";
+        qSwapped.episodes.add(qEp1);
+        qSwapped.episodes.add(qEp2);
+
+        Cms.Video vSwapped = new Cms.Video();
+        vSwapped.id = "v300";
+        vSwapped.lines.addAll(Arrays.asList(bdSwappedTrailer, qSwapped));
+        HistoryResumeMatcher.EpisodeMatch mSwapped =
+                HistoryResumeMatcher.matchEpisode(vSwapped, bm42s);
+        check(
+                mSwapped != null
+                        && mSwapped.line == bdSwappedTrailer
+                        && mSwapped.episode == bdSwapE2
+                        && HistoryResumeMatcher.findMatchedEpisodeIndex(bdSwappedTrailer, bm42s)
+                                == 2
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        bdSwappedTrailer, bdSwapE2, 2, bm42s)
+                                == 42_000
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        bdSwappedTrailer, bdTrailer, 0, bm42s)
+                                == 0
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        bdSwappedTrailer, bdSwapE1, 1, bm42s)
+                                == 0
+                        && HistoryResumeMatcher.resolveResumePositionMs(qSwapped, qEp2, 1, bm42s)
+                                == 0,
+                "R5 P1-2B/2C: upstream twin-line swap + rotated URL + inserted trailer keeps Baidu Ep2 at index 2 with 42000ms (never Quark or trailer)");
+
+        // Case 2D: Legacy bookmark lacking lineId/driveKey/episodeKey with inserted trailer
+        WatchHistory.Entry legacy42s = new WatchHistory.Entry();
+        legacy42s.site = "demo";
+        legacy42s.id = "v300";
+        legacy42s.line = "原画";
+        legacy42s.episode = "第2集";
+        legacy42s.index = 1;
+        legacy42s.position = 42_000;
+        legacy42s.duration = 240_000;
+        HistoryResumeMatcher.EpisodeMatch mLeg =
+                HistoryResumeMatcher.matchEpisode(vSwapped, legacy42s);
+        check(
+                mLeg != null
+                        && mLeg.line == bdSwappedTrailer
+                        && mLeg.episode == bdSwapE2
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        bdSwappedTrailer, bdSwapE2, 2, legacy42s)
+                                == 42_000,
+                "R5 P1-2D: legacy bookmark without lineId/episodeKey still resolves primary line Ep2 and 42000ms across trailer shift");
+
+        // 13. Round-5 P1-3: Ordinary HTTP interstitial/redirect pages MUST NOT be mistaken for
+        //     direct media streams! Real .m3u8/.mp4 keep their direct slots while redirect-page
+        //     Quark/Baidu/extended netdisk lines strictly follow user drive order.
+        Cms.Line directHls =
+                mkLineWithUrl("阿里云 CDN 直连", "https://cdn.example/live/master.m3u8?k=1");
+        Cms.Line directMp4 = mkLineWithUrl("线路115", "https://cdn.example/media/ep1.mp4?t=2");
+        Cms.Line quarkRedirect =
+                mkLineWithUrl("夸父原画", "https://jump.example/play?flag=quark&id=10");
+        Cms.Line baiduRedirect = mkLineWithUrl("嘟嘟原画", "https://jump.example/play/baidu/20.html");
+        Cms.Line ext115Redirect = mkLineWithUrl("115原画", "https://jump.example/proxy?id=30");
+        check(
+                NetdiskStore.hasExplicitDirectMediaUrl(directHls)
+                        && NetdiskStore.hasExplicitDirectMediaUrl(directMp4)
+                        && !NetdiskStore.hasExplicitDirectMediaUrl(quarkRedirect)
+                        && !NetdiskStore.hasExplicitDirectMediaUrl(baiduRedirect)
+                        && !NetdiskStore.hasExplicitDirectMediaUrl(ext115Redirect),
+                "R5 P1-3: only real .m3u8/.mp4 direct streams qualify; HTTP redirect/interstitial pages are never misclassified as direct");
+        List<Cms.Line> redirectSortOut =
+                PlaybackLineRules.applyToLines(
+                        Arrays.asList(
+                                directHls, quarkRedirect, directMp4, ext115Redirect, baiduRedirect),
+                        new JSONObject(),
+                        Arrays.asList(
+                                NetdiskStore.DRIVE_BAIDU,
+                                NetdiskStore.DRIVE_QUARK,
+                                NetdiskStore.DRIVE_UC,
+                                NetdiskStore.DRIVE_ALI));
+        check(
+                "阿里云 CDN 直连".equals(redirectSortOut.get(0).name)
+                        && "嘟嘟原画".equals(redirectSortOut.get(1).name)
+                        && "线路115".equals(redirectSortOut.get(2).name)
+                        && "夸父原画".equals(redirectSortOut.get(3).name)
+                        && "115原画".equals(redirectSortOut.get(4).name),
+                "R5 P1-3: pinning Baidu places Baidu HTTP-redirect line ahead of Quark & 115 while keeping real .m3u8/.mp4 slots pinned");
+
         pass(
-                "DriveOrder + R4 P1-1/P1-2/P2-1: direct-URL protection, twin-line resume & manual+preferred verified");
+                "DriveOrder + R4/R5 P1-1/P1-2/P1-3/P2-1: CloudSync identity, URL-refresh/swap/trailer resume & HTTP-redirect drive order verified");
     }
 }

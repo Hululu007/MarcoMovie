@@ -35,8 +35,10 @@ import java.util.Locale;
  */
 final class MobileLivePage {
     /**
-     * Pure-JVM snapshot preserving Live TV source, group, search filter, and left/right scroll
-     * offsets across same-direction foldable/split-screen relayouts.
+     * Pure-JVM snapshot preserving Live TV source, group, search filter, left/right scroll offsets,
+     * AND active preview channel + stream across single or consecutive same-direction
+     * foldable/split-screen relayouts (including consecutive resizes before a slow catalog load
+     * completes).
      */
     static final class LiveRelayoutState {
         final String sourceUrl;
@@ -45,6 +47,9 @@ final class MobileLivePage {
         final String filterQuery;
         final int groupScrollY;
         final int channelScrollY;
+        final String channelName;
+        final String streamUrl;
+        final int streamIndex;
 
         LiveRelayoutState(
                 String sourceUrl,
@@ -53,12 +58,37 @@ final class MobileLivePage {
                 String filterQuery,
                 int groupScrollY,
                 int channelScrollY) {
+            this(
+                    sourceUrl,
+                    sourceIndex,
+                    groupIndex,
+                    filterQuery,
+                    groupScrollY,
+                    channelScrollY,
+                    "",
+                    "",
+                    0);
+        }
+
+        LiveRelayoutState(
+                String sourceUrl,
+                int sourceIndex,
+                int groupIndex,
+                String filterQuery,
+                int groupScrollY,
+                int channelScrollY,
+                String channelName,
+                String streamUrl,
+                int streamIndex) {
             this.sourceUrl = sourceUrl == null ? "" : sourceUrl;
             this.sourceIndex = Math.max(0, sourceIndex);
             this.groupIndex = Math.max(0, groupIndex);
             this.filterQuery = filterQuery == null ? "" : filterQuery;
             this.groupScrollY = Math.max(0, groupScrollY);
             this.channelScrollY = Math.max(0, channelScrollY);
+            this.channelName = channelName == null ? "" : channelName;
+            this.streamUrl = streamUrl == null ? "" : streamUrl;
+            this.streamIndex = Math.max(0, streamIndex);
         }
     }
 
@@ -90,6 +120,55 @@ final class MobileLivePage {
         activeCaptureHook = null;
     }
 
+    /**
+     * Captures the next relayout snapshot without zeroing scroll offsets or losing the active
+     * preview channel/stream when consecutive split-screen resizes occur before a slow catalog
+     * finishes loading and applying the prior {@code unapplied} snapshot.
+     */
+    static LiveRelayoutState buildConsecutiveRelayoutSnapshot(
+            String sourceUrl,
+            int sourceIndex,
+            int groupIndex,
+            String filterQuery,
+            int liveGroupScrollY,
+            int liveChannelScrollY,
+            boolean scrollRestorePending,
+            LiveRelayoutState unapplied,
+            String activeChannelName,
+            String activeStreamUrl,
+            int activeStreamIndex) {
+        int effectiveGroupScrollY =
+                (scrollRestorePending && liveGroupScrollY == 0 && unapplied != null)
+                        ? unapplied.groupScrollY
+                        : Math.max(0, liveGroupScrollY);
+        int effectiveChannelScrollY =
+                (scrollRestorePending && liveChannelScrollY == 0 && unapplied != null)
+                        ? unapplied.channelScrollY
+                        : Math.max(0, liveChannelScrollY);
+        String effChan =
+                activeChannelName != null && !activeChannelName.isEmpty()
+                        ? activeChannelName
+                        : (unapplied != null ? unapplied.channelName : "");
+        String effStreamUrl =
+                activeStreamUrl != null && !activeStreamUrl.isEmpty()
+                        ? activeStreamUrl
+                        : (unapplied != null ? unapplied.streamUrl : "");
+        int effStreamIdx =
+                activeChannelName != null && !activeChannelName.isEmpty()
+                        ? Math.max(0, activeStreamIndex)
+                        : (unapplied != null ? unapplied.streamIndex : 0);
+        return new LiveRelayoutState(
+                sourceUrl,
+                sourceIndex,
+                groupIndex,
+                filterQuery,
+                effectiveGroupScrollY,
+                effectiveChannelScrollY,
+                effChan,
+                effStreamUrl,
+                effStreamIdx);
+    }
+
     static int resolveRestoredSourceIndex(LiveRelayoutState saved, List<String> sourceUrls) {
         if (saved == null || sourceUrls == null || sourceUrls.isEmpty()) return 0;
         if (!saved.sourceUrl.isEmpty()) {
@@ -103,6 +182,69 @@ final class MobileLivePage {
     static int resolveRestoredGroupIndex(LiveRelayoutState saved, int groupCount) {
         if (saved == null || groupCount <= 0) return 0;
         return Math.min(saved.groupIndex, groupCount - 1);
+    }
+
+    static LiveCatalog.Channel resolveRestoredChannel(
+            LiveCatalog.Catalog catalog, int groupIndex, LiveRelayoutState saved) {
+        if (catalog == null || catalog.groups == null || catalog.groups.isEmpty()) return null;
+        if (saved != null) {
+            if (!saved.streamUrl.isEmpty()) {
+                for (LiveCatalog.Group g : catalog.groups) {
+                    if (g == null || g.channels == null) continue;
+                    for (LiveCatalog.Channel ch : g.channels) {
+                        if (ch == null || ch.streams == null) continue;
+                        for (LiveCatalog.Stream st : ch.streams) {
+                            if (st != null && saved.streamUrl.equals(st.url)) {
+                                return ch;
+                            }
+                        }
+                    }
+                }
+            }
+            if (!saved.channelName.isEmpty()) {
+                int clampedG = Math.max(0, Math.min(catalog.groups.size() - 1, groupIndex));
+                LiveCatalog.Group prefGroup = catalog.groups.get(clampedG);
+                if (prefGroup != null && prefGroup.channels != null) {
+                    for (LiveCatalog.Channel ch : prefGroup.channels) {
+                        if (ch != null && saved.channelName.equals(ch.name)) {
+                            return ch;
+                        }
+                    }
+                }
+                for (LiveCatalog.Group g : catalog.groups) {
+                    if (g == null || g.channels == null) continue;
+                    for (LiveCatalog.Channel ch : g.channels) {
+                        if (ch != null && saved.channelName.equals(ch.name)) {
+                            return ch;
+                        }
+                    }
+                }
+            }
+        }
+        int clampedG = Math.max(0, Math.min(catalog.groups.size() - 1, groupIndex));
+        LiveCatalog.Group g = catalog.groups.get(clampedG);
+        if (g != null && g.channels != null && !g.channels.isEmpty()) {
+            return g.channels.get(0);
+        }
+        return null;
+    }
+
+    static LiveCatalog.Stream resolveRestoredStream(
+            LiveCatalog.Channel ch, LiveRelayoutState saved) {
+        if (ch == null || ch.streams == null || ch.streams.isEmpty()) return null;
+        if (saved != null) {
+            if (!saved.streamUrl.isEmpty()) {
+                for (LiveCatalog.Stream st : ch.streams) {
+                    if (st != null && saved.streamUrl.equals(st.url)) {
+                        return st;
+                    }
+                }
+            }
+            if (saved.streamIndex >= 0 && saved.streamIndex < ch.streams.size()) {
+                return ch.streams.get(saved.streamIndex);
+            }
+        }
+        return ch.streams.get(0);
     }
 
     private MobileLivePage() {}
@@ -488,16 +630,14 @@ final class MobileLivePage {
         dualPane.addView(chanSv, new LinearLayout.LayoutParams(0, -1, 1f));
 
         final LiveRelayoutState restoredState = consumeRelayoutState();
+        final LiveRelayoutState[] unappliedRelayout = {restoredState};
         List<String> sourceUrls = new ArrayList<>(sources.size());
         for (LiveCatalog.Source s : sources) {
             sourceUrls.add(s != null && s.url != null ? s.url : "");
         }
         final int[] srcIdx = {resolveRestoredSourceIndex(restoredState, sourceUrls)};
         final int[] grpIdx = {restoredState != null ? restoredState.groupIndex : 0};
-        final int[] pendingScrollRestore =
-                restoredState != null
-                        ? new int[] {restoredState.groupScrollY, restoredState.channelScrollY, 1}
-                        : new int[] {0, 0, 0};
+        final boolean[] scrollRestorePending = {restoredState != null};
         final LiveCatalog.Catalog[] catHolder = {null};
         final int[] reqSeq = {0};
         final Runnable[] loadCatalog = new Runnable[1];
@@ -511,14 +651,31 @@ final class MobileLivePage {
                             srcIdx[0] >= 0 && srcIdx[0] < sources.size()
                                     ? sources.get(srcIdx[0]).url
                                     : "";
+                    String chName =
+                            curChannel[0] != null && curChannel[0].name != null
+                                    ? curChannel[0].name
+                                    : "";
+                    String stUrl =
+                            curStream[0] != null && curStream[0].url != null
+                                    ? curStream[0].url
+                                    : "";
+                    int stIdx =
+                            curChannel[0] != null && curStream[0] != null
+                                    ? Math.max(0, curChannel[0].streams.indexOf(curStream[0]))
+                                    : 0;
                     recordRelayoutState(
-                            new LiveRelayoutState(
+                            buildConsecutiveRelayoutSnapshot(
                                     sUrl,
                                     srcIdx[0],
                                     grpIdx[0],
                                     filterInput.getText().toString(),
                                     groupSv.getScrollY(),
-                                    chanSv.getScrollY()));
+                                    chanSv.getScrollY(),
+                                    scrollRestorePending[0],
+                                    unappliedRelayout[0],
+                                    chName,
+                                    stUrl,
+                                    stIdx));
                 };
 
         final Runnable syncActiveChannelInPlace =
@@ -790,31 +947,44 @@ final class MobileLivePage {
                                                                         "", 0, grpIdx[0], "", 0, 0),
                                                                 catalog.groups.size());
                                                 a.liveSession = new LiveSession(selSrc, catalog);
+                                                LiveRelayoutState pendingRestore =
+                                                        unappliedRelayout[0];
                                                 if (curChannel[0] == null
-                                                        && !catalog.groups.isEmpty()
-                                                        && !catalog.groups
-                                                                .get(grpIdx[0])
-                                                                .channels
-                                                                .isEmpty()) {
-                                                    LiveCatalog.Channel first =
-                                                            catalog.groups
-                                                                    .get(grpIdx[0])
-                                                                    .channels
-                                                                    .get(0);
-                                                    if (!first.streams.isEmpty()) {
+                                                        && !catalog.groups.isEmpty()) {
+                                                    LiveCatalog.Channel targetCh =
+                                                            resolveRestoredChannel(
+                                                                    catalog,
+                                                                    grpIdx[0],
+                                                                    pendingRestore);
+                                                    LiveCatalog.Stream targetSt =
+                                                            resolveRestoredStream(
+                                                                    targetCh, pendingRestore);
+                                                    if (targetCh != null && targetSt != null) {
                                                         curSource[0] = selSrc;
-                                                        curChannel[0] = first;
-                                                        curStream[0] = first.streams.get(0);
+                                                        curChannel[0] = targetCh;
+                                                        curStream[0] = targetSt;
                                                         startPreview.run();
                                                     }
                                                 }
                                                 rebuildColumns.run();
-                                                if (pendingScrollRestore[2] == 1) {
-                                                    pendingScrollRestore[2] = 0;
-                                                    final int gY = pendingScrollRestore[0];
-                                                    final int cY = pendingScrollRestore[1];
-                                                    groupSv.post(() -> groupSv.scrollTo(0, gY));
-                                                    chanSv.post(() -> chanSv.scrollTo(0, cY));
+                                                if (scrollRestorePending[0]
+                                                        && pendingRestore != null) {
+                                                    final int gY = pendingRestore.groupScrollY;
+                                                    final int cY = pendingRestore.channelScrollY;
+                                                    groupSv.post(
+                                                            () -> {
+                                                                groupSv.scrollTo(0, gY);
+                                                                scrollRestorePending[0] = false;
+                                                            });
+                                                    chanSv.post(
+                                                            () -> {
+                                                                chanSv.scrollTo(0, cY);
+                                                                scrollRestorePending[0] = false;
+                                                                unappliedRelayout[0] = null;
+                                                            });
+                                                } else {
+                                                    scrollRestorePending[0] = false;
+                                                    unappliedRelayout[0] = null;
                                                 }
                                             });
                                 } catch (Exception e) {

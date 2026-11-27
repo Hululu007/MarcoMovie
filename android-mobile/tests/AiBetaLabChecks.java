@@ -1833,6 +1833,165 @@ public final class AiBetaLabChecks {
                         && recCancelled.decision == MoviePlayer.MountDecision.WAIT,
                 "R4 P1-4: Media3 keeps overlay when another external track is selected and clears ONLY once target AI track is confirmed selected");
 
+        // 7b. Round-5 P1-5: Media3 MUST NOT mistake an older same-label track (ID 1) for the new
+        //     target track (ID 2)! Old same-label selected -> WAIT; new target appears unselected
+        //     -> SELECT_TARGET (overlay stays); new target confirmed selected -> clears STRICTLY
+        //     ONCE even across repeated onTracksChanged!
+        final AtomicInteger r5ClearCalls = new AtomicInteger(0);
+        MoviePlayer.PendingSubtitleMount pmNew2 =
+                new MoviePlayer.PendingSubtitleMount(
+                        "marco_ai_sub_2",
+                        AiSubtitleTranslator.AI_TRACK_NAME,
+                        r5ClearCalls::incrementAndGet);
+        List<MoviePlayer.SubtitleTrackProbe> onlyOldSameLabelSelected =
+                Arrays.asList(
+                        new MoviePlayer.SubtitleTrackProbe(
+                                0,
+                                0,
+                                "marco_ai_sub_1",
+                                AiSubtitleTranslator.AI_TRACK_NAME,
+                                true,
+                                true));
+        MoviePlayer.MountReconcileResult r5Step1 =
+                MoviePlayer.reconcilePendingSubtitleMount(pmNew2, onlyOldSameLabelSelected);
+        boolean completedAfterStep1 = pmNew2.completed;
+        List<MoviePlayer.SubtitleTrackProbe> bothSameLabelNewUnselected =
+                Arrays.asList(
+                        new MoviePlayer.SubtitleTrackProbe(
+                                0,
+                                0,
+                                "marco_ai_sub_1",
+                                AiSubtitleTranslator.AI_TRACK_NAME,
+                                true,
+                                true),
+                        new MoviePlayer.SubtitleTrackProbe(
+                                1,
+                                0,
+                                "marco_ai_sub_2",
+                                AiSubtitleTranslator.AI_TRACK_NAME,
+                                true,
+                                false));
+        MoviePlayer.MountReconcileResult r5Step2 =
+                MoviePlayer.reconcilePendingSubtitleMount(pmNew2, bothSameLabelNewUnselected);
+        boolean completedAfterStep2 = pmNew2.completed;
+        List<MoviePlayer.SubtitleTrackProbe> bothSameLabelNewSelected =
+                Arrays.asList(
+                        new MoviePlayer.SubtitleTrackProbe(
+                                0,
+                                0,
+                                "marco_ai_sub_1",
+                                AiSubtitleTranslator.AI_TRACK_NAME,
+                                true,
+                                false),
+                        new MoviePlayer.SubtitleTrackProbe(
+                                1,
+                                0,
+                                "marco_ai_sub_2",
+                                AiSubtitleTranslator.AI_TRACK_NAME,
+                                true,
+                                true));
+        MoviePlayer.MountReconcileResult r5Step3 =
+                MoviePlayer.reconcilePendingSubtitleMount(pmNew2, bothSameLabelNewSelected);
+        if (r5Step3.decision == MoviePlayer.MountDecision.CONFIRMED_CLEAR_OVERLAY
+                && pmNew2.onMounted != null) {
+            pmNew2.onMounted.run();
+        }
+        MoviePlayer.MountReconcileResult r5Step4Repeat =
+                MoviePlayer.reconcilePendingSubtitleMount(pmNew2, bothSameLabelNewSelected);
+        if (r5Step4Repeat.decision == MoviePlayer.MountDecision.CONFIRMED_CLEAR_OVERLAY
+                && pmNew2.onMounted != null) {
+            pmNew2.onMounted.run();
+        }
+        check(
+                r5Step1.decision == MoviePlayer.MountDecision.WAIT
+                        && !completedAfterStep1
+                        && r5Step2.decision == MoviePlayer.MountDecision.SELECT_TARGET
+                        && !completedAfterStep2
+                        && r5Step2.groupIndex == 1
+                        && r5Step2.trackIndex == 0
+                        && r5Step3.decision == MoviePlayer.MountDecision.CONFIRMED_CLEAR_OVERLAY
+                        && pmNew2.completed
+                        && r5Step4Repeat.decision == MoviePlayer.MountDecision.WAIT
+                        && r5ClearCalls.get() == 1,
+                "R5 P1-5: Media3 ignores stale same-label track (ID 1), waits for ID 2 selection, and clears overlay strictly once");
+
+        // 7c. Round-5 P1-4: Online subtitle selection bound at tap time — delayed download followed
+        //     by (1) subtitle-off, (2) track-switch, (3) episode-switch, or (4) player-exit yields
+        //     0 model calls, 0 overlay writes, and 0 mounts!
+        String[] cancelModes = {"subtitle_off", "track_switch", "episode_switch", "exit_player"};
+        for (String mode : cancelModes) {
+            final AtomicBoolean exiting = new AtomicBoolean(false);
+            final AtomicInteger gen = new AtomicInteger(10);
+            final AtomicReference<String> epId = new AtomicReference<>("demo|v1|line1|第1集|u1");
+            OnlineSubtitleDanmakuService.PlaybackStateProbe probe =
+                    new OnlineSubtitleDanmakuService.PlaybackStateProbe() {
+                        @Override
+                        public boolean isExiting() {
+                            return exiting.get();
+                        }
+
+                        @Override
+                        public int currentGeneration() {
+                            return gen.get();
+                        }
+
+                        @Override
+                        public String currentEpisodeIdentity() {
+                            return epId.get();
+                        }
+                    };
+            OnlineSubtitleDanmakuService.SubtitleSelectionToken tok =
+                    OnlineSubtitleDanmakuService.beginSubtitleSelection(gen.get(), epId.get());
+            final AtomicInteger modelCalls = new AtomicInteger(0);
+            final AtomicInteger overlayWrites = new AtomicInteger(0);
+            final AtomicInteger mountCalls = new AtomicInteger(0);
+            boolean delivered =
+                    OnlineSubtitleDanmakuService.completeSubtitleSelectionAfterDownload(
+                            tok,
+                            probe,
+                            true,
+                            () -> {
+                                // Simulate user action arriving while network download is in flight
+                                if ("subtitle_off".equals(mode)) {
+                                    AiSubtitleTranslator.cancelActiveTranslation();
+                                } else if ("track_switch".equals(mode)) {
+                                    OnlineSubtitleDanmakuService.beginSubtitleSelection(
+                                            gen.get(), epId.get());
+                                } else if ("episode_switch".equals(mode)) {
+                                    gen.incrementAndGet();
+                                    epId.set("demo|v1|line1|第2集|u2");
+                                } else if ("exit_player".equals(mode)) {
+                                    exiting.set(true);
+                                }
+                                return completeTwoCueSrt;
+                            },
+                            new OnlineSubtitleDanmakuService.SubtitleDeliverySink() {
+                                @Override
+                                public void runAiTranslation(
+                                        String srt,
+                                        OnlineSubtitleDanmakuService.SubtitleSelectionToken t) {
+                                    modelCalls.incrementAndGet();
+                                    overlayWrites.incrementAndGet();
+                                    mountCalls.incrementAndGet();
+                                }
+
+                                @Override
+                                public void mountPlainSubtitle(
+                                        String srt,
+                                        OnlineSubtitleDanmakuService.SubtitleSelectionToken t) {
+                                    mountCalls.incrementAndGet();
+                                }
+                            });
+            check(
+                    !delivered
+                            && modelCalls.get() == 0
+                            && overlayWrites.get() == 0
+                            && mountCalls.get() == 0,
+                    "R5 P1-4: delayed online subtitle download aborted cleanly on "
+                            + mode
+                            + " (0 model/overlay/mount)");
+        }
+
         // 8. Round-4 P1-5: Unified 4 MiB subtitle completion disk cache write/read limit — verify
         //    742,995-byte complete full-episode sample hits disk cache on 2nd open with 0 model
         //    requests, oversize payload is symmetrically rejected, and legacy half-baked rejected!
@@ -1908,6 +2067,119 @@ public final class AiBetaLabChecks {
                             && !new File(tmpCacheDir, "oversize_entry.json").exists()
                             && readOversize == null,
                     "R4 P1-5: 742,995B+ full-episode cache roundtrips cleanly with 0 model calls on 2nd open; >4MiB rejected symmetrically");
+
+            // 9. Round-5 P2-1: Concurrent atomic same-key AI disk cache replacement (4 writers x
+            //    16 commits = 64 writes + concurrent readers + swap-failure old-value rollback!)
+            final String raceKey = "r5_concurrent_atomic_key";
+            final String seedPayload =
+                    new JSONObject()
+                            .put("writer", 0)
+                            .put("seq", 0)
+                            .put("body", "SEED_".repeat(512))
+                            .toString();
+            check(
+                    AiAssistantService.writeDiskCacheFile(tmpCacheDir, raceKey, seedPayload),
+                    "R5 P2-1: seeded initial atomic disk cache payload");
+
+            final int numWriters = 4;
+            final int commitsPerWriter = 16;
+            final AtomicInteger writeSuccesses = new AtomicInteger(0);
+            final AtomicInteger writeFailures = new AtomicInteger(0);
+            final AtomicInteger corruptReads = new AtomicInteger(0);
+            final AtomicInteger totalReads = new AtomicInteger(0);
+            final AtomicBoolean stopReaders = new AtomicBoolean(false);
+            final CountDownLatch startGate = new CountDownLatch(1);
+            List<Thread> workers = new ArrayList<>();
+            for (int w = 1; w <= numWriters; w++) {
+                final int wid = w;
+                Thread wt =
+                        new Thread(
+                                () -> {
+                                    try {
+                                        startGate.await(3, TimeUnit.SECONDS);
+                                        for (int seq = 1; seq <= commitsPerWriter; seq++) {
+                                            String tag = "W" + wid + "_S" + seq + "_";
+                                            String payload =
+                                                    new JSONObject()
+                                                            .put("writer", wid)
+                                                            .put("seq", seq)
+                                                            .put("body", tag.repeat(600))
+                                                            .toString();
+                                            if (AiAssistantService.writeDiskCacheFile(
+                                                    tmpCacheDir, raceKey, payload)) {
+                                                writeSuccesses.incrementAndGet();
+                                            } else {
+                                                writeFailures.incrementAndGet();
+                                            }
+                                        }
+                                    } catch (Exception e) {
+                                        writeFailures.incrementAndGet();
+                                    }
+                                });
+                workers.add(wt);
+                wt.start();
+            }
+            List<Thread> readers = new ArrayList<>();
+            for (int r = 0; r < 4; r++) {
+                Thread rt =
+                        new Thread(
+                                () -> {
+                                    try {
+                                        startGate.await(3, TimeUnit.SECONDS);
+                                    } catch (InterruptedException ignored) {
+                                    }
+                                    while (!stopReaders.get()) {
+                                        String got =
+                                                AiAssistantService.readDiskCacheFile(
+                                                        tmpCacheDir, raceKey);
+                                        totalReads.incrementAndGet();
+                                        if (got == null || got.isEmpty()) {
+                                            corruptReads.incrementAndGet();
+                                            continue;
+                                        }
+                                        try {
+                                            JSONObject obj = new JSONObject(got);
+                                            int w = obj.getInt("writer");
+                                            int seq = obj.getInt("seq");
+                                            String body = obj.getString("body");
+                                            String expected =
+                                                    w == 0
+                                                            ? "SEED_".repeat(512)
+                                                            : ("W" + w + "_S" + seq + "_")
+                                                                    .repeat(600);
+                                            if (!expected.equals(body)) {
+                                                corruptReads.incrementAndGet();
+                                            }
+                                        } catch (Exception ex) {
+                                            corruptReads.incrementAndGet();
+                                        }
+                                    }
+                                });
+                readers.add(rt);
+                rt.start();
+            }
+            startGate.countDown();
+            for (Thread wt : workers) wt.join(15_000L);
+            stopReaders.set(true);
+            for (Thread rt : readers) rt.join(5_000L);
+
+            String beforeFailedSwap = AiAssistantService.readDiskCacheFile(tmpCacheDir, raceKey);
+            boolean failedSwapResult =
+                    AiAssistantService.writeDiskCacheFile(
+                            tmpCacheDir,
+                            raceKey,
+                            "{\"writer\":99,\"seq\":99,\"body\":\"BROKEN\"}",
+                            (tmp, target) -> false);
+            String afterFailedSwap = AiAssistantService.readDiskCacheFile(tmpCacheDir, raceKey);
+            check(
+                    writeSuccesses.get() == numWriters * commitsPerWriter
+                            && writeFailures.get() == 0
+                            && totalReads.get() > 0
+                            && corruptReads.get() == 0
+                            && !failedSwapResult
+                            && beforeFailedSwap != null
+                            && beforeFailedSwap.equals(afterFailedSwap),
+                    "R5 P2-1: 4 writers x 16 commits (64/64) + concurrent readers observe 0 failures / 0 partial reads & failed swap preserves old value");
         } finally {
             File[] files = tmpCacheDir.listFiles();
             if (files != null) for (File f : files) f.delete();

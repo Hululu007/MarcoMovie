@@ -298,6 +298,37 @@ final class AiAssistantService {
     }
 
     static final int MAX_DISK_CACHE_BYTES = 4 * 1024 * 1024;
+    private static final java.util.concurrent.ConcurrentHashMap<
+                    String, java.util.concurrent.locks.ReentrantReadWriteLock>
+            DISK_CACHE_LOCKS = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final java.util.concurrent.atomic.AtomicLong DISK_CACHE_TMP_SEQ =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+
+    /** API-23-safe test hook for simulating atomic swap failure and verifying old-value rollback. */
+    interface DiskSwapStrategy {
+        boolean swapIntoPlace(File tmpFile, File targetFile);
+    }
+
+    private static final DiskSwapStrategy DEFAULT_SWAP_STRATEGY =
+            (tmp, target) -> tmp.renameTo(target);
+
+    private static java.util.concurrent.locks.ReentrantReadWriteLock diskCacheLockFor(
+            File dir, String key) {
+        String dirPath;
+        try {
+            dirPath = dir.getCanonicalPath();
+        } catch (Exception ignored) {
+            dirPath = dir.getAbsolutePath();
+        }
+        String lockKey = dirPath + "\n" + key;
+        java.util.concurrent.locks.ReentrantReadWriteLock existing = DISK_CACHE_LOCKS.get(lockKey);
+        if (existing != null) return existing;
+        java.util.concurrent.locks.ReentrantReadWriteLock created =
+                new java.util.concurrent.locks.ReentrantReadWriteLock();
+        java.util.concurrent.locks.ReentrantReadWriteLock prev =
+                DISK_CACHE_LOCKS.putIfAbsent(lockKey, created);
+        return prev != null ? prev : created;
+    }
 
     static String readDiskCache(MainActivity a, String key) {
         return readDiskCacheFile(cacheDir(a), key);
@@ -305,17 +336,24 @@ final class AiAssistantService {
 
     static String readDiskCacheFile(File dir, String key) {
         if (dir == null || key == null || key.isEmpty()) return null;
-        File f = new File(dir, key + ".json");
-        if (!f.exists() || System.currentTimeMillis() - f.lastModified() > 14L * 86400_000L) {
-            return null;
-        }
-        if (f.length() > MAX_DISK_CACHE_BYTES) {
-            return null;
-        }
-        try (InputStream in = new FileInputStream(f)) {
-            return Cms.read(in, MAX_DISK_CACHE_BYTES);
-        } catch (Exception ignored) {
-            return null;
+        java.util.concurrent.locks.ReentrantReadWriteLock.ReadLock readLock =
+                diskCacheLockFor(dir, key).readLock();
+        readLock.lock();
+        try {
+            File f = new File(dir, key + ".json");
+            if (!f.exists() || System.currentTimeMillis() - f.lastModified() > 14L * 86400_000L) {
+                return null;
+            }
+            if (f.length() > MAX_DISK_CACHE_BYTES) {
+                return null;
+            }
+            try (InputStream in = new FileInputStream(f)) {
+                return Cms.read(in, MAX_DISK_CACHE_BYTES);
+            } catch (Exception ignored) {
+                return null;
+            }
+        } finally {
+            readLock.unlock();
         }
     }
 
@@ -324,6 +362,18 @@ final class AiAssistantService {
     }
 
     static boolean writeDiskCacheFile(File dir, String key, String json) {
+        return writeDiskCacheFile(dir, key, json, DEFAULT_SWAP_STRATEGY);
+    }
+
+    /**
+     * Atomically replaces the same-key cache entry under a per-key write lock using a unique temp
+     * file (never sharing {@code key.json.tmp} across concurrent writers and never truncating
+     * {@code target} in place). On Windows where {@link File#renameTo} cannot replace an existing
+     * destination directly, stages a rollback backup under the write lock and restores the complete
+     * old file if replacement fails. 100% API 23 compatible.
+     */
+    static boolean writeDiskCacheFile(
+            File dir, String key, String json, DiskSwapStrategy swapStrategy) {
         if (dir == null || key == null || key.isEmpty() || json == null) return false;
         byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
         if (bytes.length > MAX_DISK_CACHE_BYTES) {
@@ -336,33 +386,50 @@ final class AiAssistantService {
                             + ")");
             return false;
         }
-        if (!dir.exists() && !dir.mkdirs()) return false;
-        File target = new File(dir, key + ".json");
-        File tmp = new File(dir, key + ".json.tmp");
-        try (OutputStream out = new FileOutputStream(tmp)) {
+        if (!dir.exists() && !dir.mkdirs() && !dir.isDirectory()) return false;
+        DiskSwapStrategy strategy = swapStrategy == null ? DEFAULT_SWAP_STRATEGY : swapStrategy;
+        long seq = DISK_CACHE_TMP_SEQ.incrementAndGet();
+        File tmp = new File(dir, key + "." + seq + ".tmp");
+        try (FileOutputStream out = new FileOutputStream(tmp)) {
             out.write(bytes);
             out.flush();
         } catch (Exception ignored) {
             tmp.delete();
             return false;
         }
-        if (target.exists() && !target.delete()) {
-            // Fallback direct overwrite if rename cannot replace
-            try (OutputStream out = new FileOutputStream(target)) {
-                out.write(bytes);
-                out.flush();
-                tmp.delete();
+
+        java.util.concurrent.locks.ReentrantReadWriteLock.WriteLock writeLock =
+                diskCacheLockFor(dir, key).writeLock();
+        writeLock.lock();
+        File backup = null;
+        try {
+            File target = new File(dir, key + ".json");
+            // POSIX/Android atomic replace directly via rename(2)
+            if (strategy.swapIntoPlace(tmp, target)) {
                 return true;
-            } catch (Exception ignored) {
-                tmp.delete();
+            }
+            // Fallback for platforms (e.g. Windows) where renameTo does not overwrite existing file
+            if (target.exists()) {
+                backup = new File(dir, key + "." + seq + ".bak");
+                if (!target.renameTo(backup)) {
+                    return false;
+                }
+                if (strategy.swapIntoPlace(tmp, target)) {
+                    backup.delete();
+                    backup = null;
+                    return true;
+                }
+                // Replacement failed: restore complete old value before releasing write lock!
+                backup.renameTo(target);
+                backup = null;
                 return false;
             }
-        }
-        if (!tmp.renameTo(target)) {
-            tmp.delete();
             return false;
+        } finally {
+            if (tmp.exists()) tmp.delete();
+            if (backup != null && backup.exists()) backup.delete();
+            writeLock.unlock();
         }
-        return true;
     }
 
     static long cacheBytes(MainActivity a) {

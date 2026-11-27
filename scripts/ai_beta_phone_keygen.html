@@ -66,6 +66,14 @@ input[type=checkbox]{width:20px;height:20px;flex:0 0 auto;accent-color:var(--acc
     <div id="importPane" style="margin-top:12px">
       <label class="lbl">首次导入密钥（支持 ai_lab_mobile_vault.json 或原始 64 位 hex 私钥 ai-lab-ed25519.key）</label>
       <input id="vaultFile" type="file" accept=".json,.key,.txt,application/json,text/plain" onchange="handleImportFile(event)">
+      <div id="pendingVaultBox" class="hidden" style="margin-top:8px">
+        <label id="pendingVaultLbl" class="lbl">输入待导入密钥库的主密码（校验密码、MAC 与公钥通过后才替换本机原密钥库）</label>
+        <div class="row">
+          <input id="pendingVaultPwd" type="password" placeholder="输入新密钥库主密码">
+          <button type="button" class="btn" style="flex:0 0 104px" onclick="confirmPendingVaultImport()">验证并替换</button>
+          <button type="button" class="btn sec" style="flex:0 0 68px" onclick="cancelPendingVaultImport()">取消</button>
+        </div>
+      </div>
       <div id="rawPwdBox" class="hidden" style="margin-top:8px">
         <label class="lbl">为导入的 Ed25519 私钥设置本机加密主密码（至少 6 位）</label>
         <div class="row">
@@ -768,6 +776,7 @@ const LS_LEDGER = "marco_ai_ed25519_ledger_v2";
 let activeSeed = null;
 let activePubHex = MarcoEd25519.DEFAULT_PUB_HEX;
 let pendingRawSeed = null;
+let pendingVaultObj = null;
 let importSessionId = 0;
 let activeFileReader = null;
 let selectedPlats = new Set(["all"]);
@@ -842,10 +851,15 @@ function scrubPendingImport() {
   invalidateActiveFileReader();
   if (pendingRawSeed && pendingRawSeed.fill) pendingRawSeed.fill(0);
   pendingRawSeed = null;
+  pendingVaultObj = null;
   const np = document.getElementById("newVaultPwd");
   const rb = document.getElementById("rawPwdBox");
+  const pp = document.getElementById("pendingVaultPwd");
+  const pb = document.getElementById("pendingVaultBox");
   if (np) np.value = "";
   if (rb) rb.classList.add("hidden");
+  if (pp) pp.value = "";
+  if (pb) pb.classList.add("hidden");
   clearFileInput();
 }
 function clearVisibleOutputs() {
@@ -916,6 +930,55 @@ function syncUnlockedUi(on) {
     if (ll) ll.textContent = "";
   }
 }
+function cancelPendingVaultImport() {
+  scrubPendingImport();
+  const stored = getStoredVault();
+  if (stored && stored.pub_hex) {
+    activePubHex = stored.pub_hex;
+  }
+  toast("已取消导入，保留本机原有密钥库");
+}
+function isStructurallyValidVault(obj) {
+  return !!(
+    obj &&
+    obj.format === "marco-ai-ed25519-vault-v1" &&
+    typeof obj.salt_hex === "string" && /^[0-9a-fA-F]{32}$/.test(obj.salt_hex) &&
+    typeof obj.nonce_hex === "string" && /^[0-9a-fA-F]{32}$/.test(obj.nonce_hex) &&
+    typeof obj.ciphertext_hex === "string" && /^[0-9a-fA-F]{64}$/.test(obj.ciphertext_hex) &&
+    typeof obj.mac_hex === "string" && /^[0-9a-fA-F]{64}$/.test(obj.mac_hex) &&
+    typeof obj.pub_hex === "string" && /^[0-9a-fA-F]{64}$/.test(obj.pub_hex)
+  );
+}
+function confirmPendingVaultImport() {
+  if (!pendingVaultObj) return toast("当前没有待验证的密钥库");
+  const pp = document.getElementById("pendingVaultPwd");
+  const pwd = pp ? pp.value : "";
+  if (!pwd) return toast("请输入待导入密钥库的主密码");
+  try {
+    // Verify PBKDF2 password derivation, HMAC-SHA256 MAC, AND Ed25519 pubkey match BEFORE
+    // overwriting the persisted vault in localStorage!
+    const candidate = pendingVaultObj;
+    const res = MarcoEd25519.decryptVault(candidate, pwd);
+    localStorage.setItem(LS_VAULT, JSON.stringify(candidate));
+    if (activeSeed && activeSeed.fill) activeSeed.fill(0);
+    activeSeed = res.seed;
+    activePubHex = MarcoEd25519.bytesToHex(res.pub);
+    scrubPendingImport();
+    const vh = document.getElementById("vaultHint");
+    if (vh) {
+      vh.textContent = MarcoEd25519.isOfficialPublicKey(activePubHex)
+        ? "已载入官方加密 Ed25519 密钥库，输入主密码解锁即可离线签发三端统一 MMAILAB1 口令。"
+        : "已载入非正式测试密钥库（公钥与官方钉住公钥不匹配），仅可用于本地测试。";
+    }
+    syncUnlockedUi(true);
+    toast(MarcoEd25519.isOfficialPublicKey(activePubHex)
+      ? "新官方密钥库校验通过，已替换本机密钥库并解锁"
+      : "新测试密钥库校验通过（非正式公钥），已替换并解锁");
+  } catch (e) {
+    if (pp) pp.value = "";
+    toast("校验失败（本机原密钥库未改动）：" + (e && e.message ? e.message : "密码或 MAC 错误"));
+  }
+}
 function handleImportFile(ev) {
   const f = ev && ev.target && ev.target.files && ev.target.files[0];
   clearFileInput();
@@ -947,14 +1010,28 @@ function handleImportFile(ev) {
     const text = String(reader.result || "").trim();
     try {
       const obj = JSON.parse(text);
-      if (obj.format === "marco-ai-ed25519-vault-v1") {
-        scrubPendingImport();
-        localStorage.setItem(LS_VAULT, JSON.stringify(obj));
-        activePubHex = obj.pub_hex || MarcoEd25519.DEFAULT_PUB_HEX;
-        document.getElementById("unlockPane").classList.remove("hidden");
-        return toast(MarcoEd25519.isOfficialPublicKey(activePubHex)
-          ? "已导入官方加密密钥库，请输入主密码解锁"
-          : "已导入密钥库（注意：非官方钉住公钥），请输入主密码解锁");
+      if (obj && obj.format === "marco-ai-ed25519-vault-v1") {
+        if (!isStructurallyValidVault(obj)) {
+          scrubPendingImport();
+          return toast("密钥库字段不完整，已拒绝导入（本机原密钥库未改动）");
+        }
+        // Stage in memory ONLY; NEVER overwrite localStorage before password, MAC & pubkey verify!
+        if (pendingRawSeed && pendingRawSeed.fill) pendingRawSeed.fill(0);
+        pendingRawSeed = null;
+        const rb = document.getElementById("rawPwdBox");
+        if (rb) rb.classList.add("hidden");
+        pendingVaultObj = obj;
+        const pp = document.getElementById("pendingVaultPwd");
+        const pb = document.getElementById("pendingVaultBox");
+        const pl = document.getElementById("pendingVaultLbl");
+        if (pp) pp.value = "";
+        if (pl) {
+          pl.textContent = MarcoEd25519.isOfficialPublicKey(obj.pub_hex)
+            ? "输入待导入官方密钥库的主密码（校验通过后才替换本机原密钥库）"
+            : "输入待导入测试密钥库的主密码（非官方公钥，校验通过后才替换本机原密钥库）";
+        }
+        if (pb) pb.classList.remove("hidden");
+        return toast("已暂存新密钥库（尚未覆盖原库），请输入主密码验证后替换");
       }
     } catch (_) {}
     const hex = text.split(/\r?\n/).filter(l => l.trim() && !l.trim().startsWith("#")).join("").trim();
