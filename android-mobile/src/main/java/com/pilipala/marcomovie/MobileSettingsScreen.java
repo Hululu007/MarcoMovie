@@ -1992,7 +1992,7 @@ final class MobileSettingsScreen {
                     a,
                     body,
                     "AI 观影实验室 (内测已开启)",
-                    "支持 API Key（DeepSeek / 通义 / 硅基流动 / Kimi / GLM / OpenAI / Claude / Gemini / OpenRouter / Ollama）及订阅账号 OAuth 登录；播放页「更多工具」可使用防剧透剧情与台词问答。",
+                    "支持 11 家服务商 API Key（DeepSeek / 通义 / 硅基流动 / Moonshot Kimi / GLM / OpenAI / Claude / Gemini / OpenRouter / 本地 Ollama / 自定义网关）及 OpenRouter 官方 PKCE 账号登录；播放页「更多工具」可使用防剧透剧情与台词问答。",
                     aiRows);
         }
     }
@@ -2673,7 +2673,9 @@ final class MobileSettingsScreen {
         LinearLayout form = a.vertical();
         form.setPadding(a.dp(2), a.dp(4), a.dp(2), a.dp(4));
 
-        // Dual-mode segmented switch: API Key (BYOK) vs Subscription / OAuth Sign-In
+        // Dual-mode segmented switch: API Key (BYOK) vs OpenRouter Official OAuth Sign-In
+        final AiAuthManager.Store secStore = new AiAuthManager.SharedPrefsStore(a.secretsPrefs());
+        final AiAuthManager.Store authStore = AiAuthManager.store(a);
         final String[] curMode = {AiAuthManager.authMode(a)};
         LinearLayout segRow = a.row();
         segRow.setPadding(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
@@ -2682,7 +2684,7 @@ final class MobileSettingsScreen {
         apiTabBtn.setTypeface(null, Typeface.BOLD);
         apiTabBtn.setGravity(Gravity.CENTER);
         apiTabBtn.setPadding(a.dp(8), a.dp(9), a.dp(8), a.dp(9));
-        final TextView oauthTabBtn = a.text("订阅账号登录 (OAuth)", 13f, p.textPrimary);
+        final TextView oauthTabBtn = a.text("账号登录 (OpenRouter)", 13f, p.textPrimary);
         oauthTabBtn.setTypeface(null, Typeface.BOLD);
         oauthTabBtn.setGravity(Gravity.CENTER);
         oauthTabBtn.setPadding(a.dp(8), a.dp(9), a.dp(8), a.dp(9));
@@ -2691,23 +2693,35 @@ final class MobileSettingsScreen {
         form.addView(segRow, new LinearLayout.LayoutParams(-1, -2));
         a.gap(form, 12);
 
-        // --- Pane A: API Key Mode ---
+        // --- Pane A: API Key Mode (Origin-Bound Form State) ---
         final LinearLayout apiPane = a.vertical();
-        final String[] curProv = {mp.getString(Prefs.AI_PROVIDER, "deepseek")};
+        final String initProv = mp.getString(Prefs.AI_PROVIDER, "deepseek");
+        final String initCustomBase = mp.getString(Prefs.AI_BASE_URL, "").trim();
+        final AiAuthManager.ByokFormState byokState =
+                new AiAuthManager.ByokFormState(secStore, initProv, initCustomBase);
         final TextView[] provTextHolder = new TextView[1];
         final EditText[] keyHolder = new EditText[1];
         final EditText[] baseHolder = new EditText[1];
         final EditText[] modelHolder = new EditText[1];
+        final TextView[] legacyNoticeHolder = new TextView[1];
+        final boolean[] suppressInputSync = {false};
+
+        final Runnable syncLegacyNotice =
+                () -> {
+                    if (legacyNoticeHolder[0] == null) return;
+                    boolean showNotice = byokState.needsLegacyReentryNotice(secStore);
+                    legacyNoticeHolder[0].setVisibility(showNotice ? View.VISIBLE : View.GONE);
+                };
 
         LinearLayout provBtn =
                 buildDropdownButton(
                         a,
-                        "服务商：" + AiAssistantService.providerLabel(curProv[0]),
+                        "服务商：" + AiAssistantService.providerLabel(byokState.provider),
                         provTextHolder,
                         () -> {
                             int idx =
                                     Arrays.asList(AiAssistantService.PROVIDER_IDS)
-                                            .indexOf(curProv[0]);
+                                            .indexOf(byokState.provider);
                             MobileBottomSheet.showPicker(
                                     a,
                                     "选择 AI 大模型服务商",
@@ -2715,69 +2729,126 @@ final class MobileSettingsScreen {
                                     AiAssistantService.PROVIDER_LABELS,
                                     Math.max(0, idx),
                                     sel -> {
-                                        curProv[0] = AiAssistantService.PROVIDER_IDS[sel];
+                                        byokState.onProviderChanged(
+                                                secStore, AiAssistantService.PROVIDER_IDS[sel]);
                                         provTextHolder[0].setText(
                                                 "服务商："
                                                         + AiAssistantService.providerLabel(
-                                                                curProv[0]));
-                                        if (baseHolder[0] != null) {
-                                            baseHolder[0].setHint(
-                                                    AiAssistantService.defaultBaseUrl(curProv[0]));
-                                            baseHolder[0].setText("");
+                                                                byokState.provider));
+                                        suppressInputSync[0] = true;
+                                        try {
+                                            if (baseHolder[0] != null) {
+                                                baseHolder[0].setHint(
+                                                        AiAssistantService.defaultBaseUrl(
+                                                                byokState.provider));
+                                                baseHolder[0].setText("");
+                                            }
+                                            if (modelHolder[0] != null) {
+                                                modelHolder[0].setHint(
+                                                        AiAssistantService.defaultModel(
+                                                                byokState.provider));
+                                                modelHolder[0].setText("");
+                                            }
+                                            if (keyHolder[0] != null) {
+                                                keyHolder[0].setText(byokState.keyText);
+                                            }
+                                        } finally {
+                                            suppressInputSync[0] = false;
                                         }
-                                        if (modelHolder[0] != null) {
-                                            modelHolder[0].setHint(
-                                                    AiAssistantService.defaultModel(curProv[0]));
-                                            modelHolder[0].setText("");
-                                        }
-                                        if (keyHolder[0] != null) {
-                                            String effBase =
-                                                    AiAssistantService.defaultBaseUrl(curProv[0]);
-                                            keyHolder[0].setText(
-                                                    AiAuthManager.loadScopedApiKey(
-                                                            a, curProv[0], effBase));
-                                        }
+                                        syncLegacyNotice.run();
                                     });
                         });
         apiPane.addView(provBtn, new LinearLayout.LayoutParams(-1, -2));
-        a.gap(apiPane, 12);
+        a.gap(apiPane, 10);
 
-        String initCustomBase = mp.getString(Prefs.AI_BASE_URL, "").trim();
-        String initEffBase = AiAssistantService.resolveBaseUrl(curProv[0], initCustomBase);
+        final TextView legacyNoticeTv =
+                a.text(AiAuthManager.legacyUnboundApiKeyNotice(), 12f, 0xFFF59E0B);
+        legacyNoticeTv.setLineSpacing(a.dp(2f), 1f);
+        legacyNoticeTv.setPadding(a.dp(10), a.dp(8), a.dp(10), a.dp(8));
+        legacyNoticeTv.setBackground(
+                a.bg(MobileTheme.withAlpha(0xFFF59E0B, p.isDark ? 0x24 : 0x18), 10));
+        legacyNoticeHolder[0] = legacyNoticeTv;
+        LinearLayout.LayoutParams lnLp = new LinearLayout.LayoutParams(-1, -2);
+        lnLp.bottomMargin = a.dp(10);
+        apiPane.addView(legacyNoticeTv, lnLp);
+
         final EditText keyInput =
                 formField(
                         a,
                         apiPane,
-                        "API Key（按当前服务商与接口域名独立绑定；携带 Key 时强制 HTTPS，无 Key 本地 Ollama 可用 HTTP）",
+                        "API Key（按当前服务商与接口域名独立绑定；更改网关地址将立即切换或清空对应 Key）",
                         "sk-…",
-                        AiAuthManager.loadScopedApiKey(a, curProv[0], initEffBase),
+                        byokState.keyText,
                         true);
         final EditText baseInput =
                 formField(
                         a,
                         apiPane,
-                        "接口地址 Base URL（留空使用官方默认 HTTPS 端点，切换网关需重新确认对应 Key）",
-                        AiAssistantService.defaultBaseUrl(curProv[0]),
-                        initCustomBase,
+                        "接口地址 Base URL（留空使用官方默认 HTTPS 端点；修改来源域后需确认或重填该域名 Key）",
+                        AiAssistantService.defaultBaseUrl(byokState.provider),
+                        byokState.customBaseUrl,
                         false);
         final EditText modelInput =
                 formField(
                         a,
                         apiPane,
                         "模型名称 Model（留空使用推荐默认模型）",
-                        AiAssistantService.defaultModel(curProv[0]),
+                        AiAssistantService.defaultModel(byokState.provider),
                         mp.getString(Prefs.AI_MODEL, ""),
                         false);
         keyHolder[0] = keyInput;
         baseHolder[0] = baseInput;
         modelHolder[0] = modelInput;
+
+        keyInput.addTextChangedListener(
+                new TextWatcher() {
+                    @Override
+                    public void beforeTextChanged(
+                            CharSequence s, int start, int count, int after) {}
+
+                    @Override
+                    public void onTextChanged(CharSequence s, int start, int before, int count) {}
+
+                    @Override
+                    public void afterTextChanged(Editable s) {
+                        if (suppressInputSync[0]) return;
+                        byokState.onKeyEdited(s == null ? "" : s.toString());
+                        syncLegacyNotice.run();
+                    }
+                });
+        baseInput.addTextChangedListener(
+                new TextWatcher() {
+                    @Override
+                    public void beforeTextChanged(
+                            CharSequence s, int start, int count, int after) {}
+
+                    @Override
+                    public void onTextChanged(CharSequence s, int start, int before, int count) {}
+
+                    @Override
+                    public void afterTextChanged(Editable s) {
+                        if (suppressInputSync[0]) return;
+                        boolean originChanged =
+                                byokState.onBaseUrlChanged(secStore, s == null ? "" : s.toString());
+                        if (originChanged && keyHolder[0] != null) {
+                            suppressInputSync[0] = true;
+                            try {
+                                keyHolder[0].setText(byokState.keyText);
+                                keyHolder[0].setSelection(byokState.keyText.length());
+                            } finally {
+                                suppressInputSync[0] = false;
+                            }
+                        }
+                        syncLegacyNotice.run();
+                    }
+                });
+        syncLegacyNotice.run();
         form.addView(apiPane, new LinearLayout.LayoutParams(-1, -2));
 
-        // --- Pane B: OAuth / Subscription Sign-In Mode ---
+        // --- Pane B: Shipped 0.7.3 OAuth Mode (OpenRouter Official PKCE only) ---
         final LinearLayout oauthPane = a.vertical();
-        final String[] curOAuthProv = {AiAuthManager.activeOAuthProvider(a)};
+        final String[] curOAuthProv = {AiAuthManager.OAUTH_OPENROUTER};
         final EditText[] oauthModelHolder = new EditText[1];
-        final EditText[] oauthClientIdHolder = new EditText[1];
         final MobileBottomSheet.SheetHandle[] hRef = new MobileBottomSheet.SheetHandle[1];
 
         final Runnable[] rebuildOAuthCards = new Runnable[1];
@@ -2785,34 +2856,30 @@ final class MobileSettingsScreen {
         oauthPane.addView(oauthCardsBox, new LinearLayout.LayoutParams(-1, -2));
         a.gap(oauthPane, 10);
 
-        final EditText oauthClientIdInput =
-                formField(
-                        a,
-                        oauthPane,
-                        "自备 OAuth Client ID（仅 Kimi Code / 实验性 OpenAI 需要；OpenRouter 官方 PKCE 无需填写）",
-                        "仅在拥有已注册 OAuth Client ID 时填写",
-                        AiAuthManager.oauthClientId(a, curOAuthProv[0]),
-                        false);
-        oauthClientIdHolder[0] = oauthClientIdInput;
         final EditText oauthModelInput =
                 formField(
                         a,
                         oauthPane,
-                        "当前订阅账号使用的模型名（留空使用推荐默认模型）",
-                        AiAuthManager.defaultOAuthModel(curOAuthProv[0]),
-                        AiAuthManager.resolveOAuthModel(a, curOAuthProv[0]),
+                        "OpenRouter 使用的模型名（留空使用推荐默认模型）",
+                        AiAuthManager.defaultOAuthModel(AiAuthManager.OAUTH_OPENROUTER),
+                        AiAuthManager.resolveOAuthModel(a, AiAuthManager.OAUTH_OPENROUTER),
                         false);
         oauthModelHolder[0] = oauthModelInput;
+
+        TextView oauthScopeNote =
+                a.text(
+                        "当前版本仅开放已实证标准的 OpenRouter 官方 PKCE 登录（无需自备 Client ID）。如需使用 OpenAI / Claude / Gemini / DeepSeek / Moonshot Kimi，请切换上方「API 密钥 (BYOK)」标签接入。",
+                        11.5f,
+                        p.textSecondary);
+        oauthScopeNote.setLineSpacing(a.dp(2f), 1f);
+        oauthPane.addView(oauthScopeNote, new LinearLayout.LayoutParams(-1, -2));
 
         rebuildOAuthCards[0] =
                 () -> {
                     oauthCardsBox.removeAllViews();
-                    boolean allowExp = AiBetaGate.isExperimentalOAuthAllowed(a);
-                    for (int i = 0; i < AiAuthManager.OAUTH_PROVIDER_IDS.length; i++) {
-                        final String provId = AiAuthManager.OAUTH_PROVIDER_IDS[i];
-                        final String label = AiAuthManager.OAUTH_PROVIDER_LABELS[i];
-                        final boolean isExp =
-                                AiAuthManager.OAUTH_OPENAI_EXPERIMENTAL.equals(provId);
+                    for (int i = 0; i < AiAuthManager.SHIPPED_OAUTH_PROVIDER_IDS.length; i++) {
+                        final String provId = AiAuthManager.SHIPPED_OAUTH_PROVIDER_IDS[i];
+                        final String label = AiAuthManager.SHIPPED_OAUTH_PROVIDER_LABELS[i];
                         final boolean selected = provId.equals(curOAuthProv[0]);
                         final AiAuthManager.OAuthBundle bundle =
                                 AiAuthManager.loadBundle(a, provId);
@@ -2844,110 +2911,77 @@ final class MobileSettingsScreen {
 
                         String subStr;
                         int subColor = p.textSecondary;
-                        if (isExp && !allowExp) {
-                            subStr = "当前内测口令未包含实验性 OAuth 权限";
-                        } else if (bundle != null && bundle.hasCredential()) {
+                        if (bundle != null && bundle.hasCredential()) {
                             subStr = bundle.statusSummary();
                             if (bundle.needsReauth) subColor = p.danger;
-                        } else if (AiAuthManager.OAUTH_OPENROUTER.equals(provId)) {
-                            subStr = "未登录 · 官方 PKCE 浏览器一键授权，无需 Client ID，推荐首选";
-                        } else if (AiAuthManager.OAUTH_KIMI_CODE.equals(provId)) {
-                            subStr =
-                                    "未登录 · Kimi Code 未公开第三方 Client ID（本应用不冒用 CLI 身份）；推荐改用 Moonshot API Key 或先填入自备 Client ID";
                         } else {
-                            subStr =
-                                    "未登录 · 官方订阅额度推理（Responses API + plan scopes），需填入自备 OAuth Client ID 并确认实验风险";
+                            subStr = "未登录 · 官方 PKCE 浏览器一键授权，无需 Client ID，授权后直接获得个人密钥";
                         }
                         TextView stTv = a.text(subStr, 12f, subColor);
                         stTv.setLineSpacing(a.dp(2f), 1f);
                         card.addView(stTv);
 
-                        if (!isExp || allowExp) {
-                            a.gap(card, 8);
-                            LinearLayout btnRow = a.row();
-                            TextView loginBtn =
-                                    a.text(
-                                            bundle != null && bundle.hasCredential()
-                                                    ? (bundle.needsReauth ? "重新登录" : "切换为当前")
-                                                    : "立即登录",
-                                            12f,
-                                            p.accentOnFill);
-                            loginBtn.setTypeface(null, Typeface.BOLD);
-                            loginBtn.setGravity(Gravity.CENTER);
-                            loginBtn.setPadding(a.dp(12), a.dp(7), a.dp(12), a.dp(7));
-                            loginBtn.setBackground(MobileTheme.accentPillBg(a, 10));
-                            MobileMotion.bindPress(loginBtn, 0.94f);
-                            loginBtn.setOnClickListener(
+                        a.gap(card, 8);
+                        LinearLayout btnRow = a.row();
+                        TextView loginBtn =
+                                a.text(
+                                        bundle != null && bundle.hasCredential()
+                                                ? (bundle.needsReauth ? "重新登录" : "切换为当前")
+                                                : "立即登录",
+                                        12f,
+                                        p.accentOnFill);
+                        loginBtn.setTypeface(null, Typeface.BOLD);
+                        loginBtn.setGravity(Gravity.CENTER);
+                        loginBtn.setPadding(a.dp(12), a.dp(7), a.dp(12), a.dp(7));
+                        loginBtn.setBackground(MobileTheme.accentPillBg(a, 10));
+                        MobileMotion.bindPress(loginBtn, 0.94f);
+                        loginBtn.setOnClickListener(
+                                v -> {
+                                    curOAuthProv[0] = provId;
+                                    AiAuthManager.setActiveOAuthProvider(a, provId);
+                                    if (oauthModelHolder[0] != null) {
+                                        oauthModelHolder[0].setHint(
+                                                AiAuthManager.defaultOAuthModel(provId));
+                                        oauthModelHolder[0].setText(
+                                                AiAuthManager.resolveOAuthModel(a, provId));
+                                    }
+                                    if (bundle != null
+                                            && bundle.hasCredential()
+                                            && !bundle.needsReauth) {
+                                        AiAuthManager.setAuthMode(a, AiAuthManager.AUTH_MODE_OAUTH);
+                                        rebuildOAuthCards[0].run();
+                                        a.toast("已切换为：" + label);
+                                        return;
+                                    }
+                                    AiAssistantService.ResultCallback<AiAuthManager.OAuthBundle>
+                                            doneCb =
+                                                    b -> {
+                                                        curOAuthProv[0] = provId;
+                                                        curMode[0] = AiAuthManager.AUTH_MODE_OAUTH;
+                                                        rebuildOAuthCards[0].run();
+                                                        reloadPreservingScroll(shell, sv);
+                                                    };
+                                    AiAuthManager.startOpenRouterSignIn(a, doneCb);
+                                });
+                        btnRow.addView(loginBtn, new LinearLayout.LayoutParams(-2, -2));
+
+                        if (bundle != null && bundle.hasCredential()) {
+                            TextView signOutBtn = a.text("退出登录", 12f, p.danger);
+                            signOutBtn.setTypeface(null, Typeface.BOLD);
+                            signOutBtn.setPadding(a.dp(12), a.dp(7), a.dp(12), a.dp(7));
+                            MobileMotion.bindPress(signOutBtn, 0.94f);
+                            signOutBtn.setOnClickListener(
                                     v -> {
-                                        curOAuthProv[0] = provId;
-                                        AiAuthManager.setActiveOAuthProvider(a, provId);
-                                        if (oauthClientIdHolder[0] != null) {
-                                            String typedCid =
-                                                    oauthClientIdHolder[0]
-                                                            .getText()
-                                                            .toString()
-                                                            .trim();
-                                            if (!typedCid.isEmpty()
-                                                    && !AiAuthManager.OAUTH_OPENROUTER.equals(
-                                                            provId)) {
-                                                AiAuthManager.saveOAuthClientId(
-                                                        a, provId, typedCid);
-                                            }
-                                            oauthClientIdHolder[0].setText(
-                                                    AiAuthManager.oauthClientId(a, provId));
-                                        }
-                                        if (oauthModelHolder[0] != null) {
-                                            oauthModelHolder[0].setHint(
-                                                    AiAuthManager.defaultOAuthModel(provId));
-                                            oauthModelHolder[0].setText(
-                                                    AiAuthManager.resolveOAuthModel(a, provId));
-                                        }
-                                        if (bundle != null
-                                                && bundle.hasCredential()
-                                                && !bundle.needsReauth) {
-                                            rebuildOAuthCards[0].run();
-                                            a.toast("已切换为：" + label);
-                                            return;
-                                        }
-                                        AiAssistantService.ResultCallback<AiAuthManager.OAuthBundle>
-                                                doneCb =
-                                                        b -> {
-                                                            curOAuthProv[0] = provId;
-                                                            curMode[0] =
-                                                                    AiAuthManager.AUTH_MODE_OAUTH;
-                                                            rebuildOAuthCards[0].run();
-                                                            reloadPreservingScroll(shell, sv);
-                                                        };
-                                        if (AiAuthManager.OAUTH_OPENROUTER.equals(provId)) {
-                                            AiAuthManager.startOpenRouterSignIn(a, doneCb);
-                                        } else if (AiAuthManager.OAUTH_KIMI_CODE.equals(provId)) {
-                                            AiAuthManager.startKimiCodeDeviceSignIn(a, doneCb);
-                                        } else {
-                                            AiAuthManager.startOpenAiExperimentalSignIn(a, doneCb);
-                                        }
+                                        AiAuthManager.signOutOAuth(a, provId);
+                                        a.toast("已退出 " + label);
+                                        rebuildOAuthCards[0].run();
+                                        reloadPreservingScroll(shell, sv);
                                     });
-                            btnRow.addView(loginBtn, new LinearLayout.LayoutParams(-2, -2));
-
-                            if (bundle != null && bundle.hasCredential()) {
-                                TextView signOutBtn = a.text("退出登录", 12f, p.danger);
-                                signOutBtn.setTypeface(null, Typeface.BOLD);
-                                signOutBtn.setPadding(a.dp(12), a.dp(7), a.dp(12), a.dp(7));
-                                MobileMotion.bindPress(signOutBtn, 0.94f);
-                                signOutBtn.setOnClickListener(
-                                        v -> {
-                                            AiAuthManager.signOutOAuth(a, provId);
-                                            a.toast("已退出 " + label);
-                                            rebuildOAuthCards[0].run();
-                                            reloadPreservingScroll(shell, sv);
-                                        });
-                                LinearLayout.LayoutParams soLp =
-                                        new LinearLayout.LayoutParams(-2, -2);
-                                soLp.leftMargin = a.dp(8);
-                                btnRow.addView(signOutBtn, soLp);
-                            }
-                            card.addView(btnRow);
+                            LinearLayout.LayoutParams soLp = new LinearLayout.LayoutParams(-2, -2);
+                            soLp.leftMargin = a.dp(8);
+                            btnRow.addView(signOutBtn, soLp);
                         }
-
+                        card.addView(btnRow);
                         oauthCardsBox.addView(card, clp);
                     }
                 };
@@ -2967,7 +3001,9 @@ final class MobileSettingsScreen {
         apiTabBtn.setOnClickListener(
                 v -> {
                     curMode[0] = AiAuthManager.AUTH_MODE_API_KEY;
+                    AiAuthManager.setAuthMode(a, AiAuthManager.AUTH_MODE_API_KEY);
                     syncModeUi.run();
+                    syncLegacyNotice.run();
                 });
         oauthTabBtn.setOnClickListener(
                 v -> {
@@ -2985,8 +3021,6 @@ final class MobileSettingsScreen {
                     if (AiAuthManager.AUTH_MODE_OAUTH.equals(curMode[0])) {
                         AiAuthManager.setAuthMode(a, AiAuthManager.AUTH_MODE_OAUTH);
                         AiAuthManager.setActiveOAuthProvider(a, curOAuthProv[0]);
-                        AiAuthManager.saveOAuthClientId(
-                                a, curOAuthProv[0], oauthClientIdInput.getText().toString().trim());
                         AiAuthManager.saveOAuthModel(
                                 a, curOAuthProv[0], oauthModelInput.getText().toString().trim());
                         AiAuthManager.OAuthBundle b = AiAuthManager.loadBundle(a, curOAuthProv[0]);
@@ -2997,35 +3031,38 @@ final class MobileSettingsScreen {
                                 .apply();
                         persistOk.set(true);
                     } else {
-                        String keyVal = keyInput.getText().toString().trim();
                         String rawBase = baseInput.getText().toString().trim();
-                        String safeCustomBase =
-                                rawBase.isEmpty()
-                                        ? ""
-                                        : (Prefs.sanitizeHttpUrl(rawBase) == null ? "" : rawBase);
-                        String effBase =
-                                AiAssistantService.resolveBaseUrl(curProv[0], safeCustomBase);
-                        if (!rawBase.isEmpty() && safeCustomBase.isEmpty()) {
-                            a.toast("接口地址格式无效，请输入规范的 HTTP/HTTPS URL");
-                            return;
+                        if (byokState.onBaseUrlChanged(secStore, rawBase)) {
+                            suppressInputSync[0] = true;
+                            try {
+                                keyInput.setText(byokState.keyText);
+                            } finally {
+                                suppressInputSync[0] = false;
+                            }
+                        } else {
+                            byokState.onKeyEdited(keyInput.getText().toString().trim());
                         }
-                        if (!keyVal.isEmpty() && !AiAuthManager.isHttpsUrl(effBase)) {
-                            a.toast("携带 API Key 时必须使用 HTTPS 安全地址（无 Key 本地 Ollama 可用 HTTP）");
-                            return;
+                        try {
+                            String safeCustomBase = byokState.commitToStore(secStore, authStore);
+                            String effBase = byokState.effectiveBaseUrl();
+                            String keyVal =
+                                    byokState.keyText == null ? "" : byokState.keyText.trim();
+                            mp.edit()
+                                    .putBoolean(
+                                            Prefs.AI_ENABLED,
+                                            !keyVal.isEmpty()
+                                                    || ("ollama".equals(byokState.provider)
+                                                            && !effBase.isEmpty()))
+                                    .putString(Prefs.AI_PROVIDER, byokState.provider)
+                                    .putString(Prefs.AI_BASE_URL, safeCustomBase)
+                                    .putString(
+                                            Prefs.AI_MODEL, modelInput.getText().toString().trim())
+                                    .apply();
+                            syncLegacyNotice.run();
+                            persistOk.set(true);
+                        } catch (Exception ex) {
+                            a.toast(AiAuthManager.sanitizeLogBody(a.message(ex)));
                         }
-                        AiAuthManager.setAuthMode(a, AiAuthManager.AUTH_MODE_API_KEY);
-                        AiAuthManager.saveScopedApiKey(a, curProv[0], effBase, keyVal);
-                        mp.edit()
-                                .putBoolean(
-                                        Prefs.AI_ENABLED,
-                                        !keyVal.isEmpty()
-                                                || ("ollama".equals(curProv[0])
-                                                        && !effBase.isEmpty()))
-                                .putString(Prefs.AI_PROVIDER, curProv[0])
-                                .putString(Prefs.AI_BASE_URL, safeCustomBase)
-                                .putString(Prefs.AI_MODEL, modelInput.getText().toString().trim())
-                                .apply();
-                        persistOk.set(true);
                     }
                 };
 
@@ -3388,16 +3425,59 @@ final class MobileSettingsScreen {
                         a, "播放页右上角状态信息", content, () -> reloadPreservingScroll(shell, sv));
     }
 
+    /**
+     * Pure-JVM filter for player toolbar button-order tokens: hides {@code ai-sub} while AI Lab is
+     * locked without mutating the underlying saved preference.
+     */
+    static List<String> visiblePlayerButtonOrderTokens(String savedOrder, boolean aiUnlocked) {
+        String raw = Prefs.sanitizeButtonOrder(savedOrder);
+        List<String> out = new ArrayList<>();
+        for (String tk : raw.split(",")) {
+            if (!aiUnlocked && "ai-sub".equals(tk)) continue;
+            if (!tk.isEmpty()) out.add(tk);
+        }
+        return out;
+    }
+
+    /**
+     * Pure-JVM merger preserving the user's hidden {@code ai-sub} relative slot when reordering
+     * toolbar buttons in locked state so re-unlocking AI Lab restores their prior button order.
+     */
+    static String mergePlayerButtonOrderPreservingHidden(
+            String previousSavedOrder, List<String> visibleReordered, boolean aiUnlocked) {
+        List<String> merged = new ArrayList<>(visibleReordered);
+        if (!aiUnlocked && !merged.contains("ai-sub")) {
+            String prev = Prefs.sanitizeButtonOrder(previousSavedOrder);
+            List<String> prevTokens = Arrays.asList(prev.split(","));
+            int oldIdx = prevTokens.indexOf("ai-sub");
+            if (oldIdx >= 0) {
+                int insertAt = merged.size();
+                for (int j = oldIdx + 1; j < prevTokens.size(); j++) {
+                    int pos = merged.indexOf(prevTokens.get(j));
+                    if (pos >= 0) {
+                        insertAt = pos;
+                        break;
+                    }
+                }
+                merged.add(Math.max(0, Math.min(merged.size(), insertAt)), "ai-sub");
+            }
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < merged.size(); i++) {
+            if (i > 0) sb.append(',');
+            sb.append(merged.get(i));
+        }
+        return Prefs.sanitizeButtonOrder(sb.toString());
+    }
+
     private static void showPlayerButtonOrderDialog(final MobileRootShell shell) {
         final MainActivity a = shell.a;
         final MobileTheme.Palette p = MobileTheme.of(a);
-        String raw =
-                Prefs.sanitizeButtonOrder(
-                        a.mobilePrefs()
-                                .getString(
-                                        Prefs.PLAYER_BUTTON_ORDER,
-                                        Prefs.DEFAULT_PLAYER_BUTTON_ORDER));
-        final List<String> tokens = new ArrayList<>(Arrays.asList(raw.split(",")));
+        final boolean aiUnlocked = AiBetaGate.isUnlocked(a);
+        final String savedRaw =
+                a.mobilePrefs()
+                        .getString(Prefs.PLAYER_BUTTON_ORDER, Prefs.DEFAULT_PLAYER_BUTTON_ORDER);
+        final List<String> tokens = visiblePlayerButtonOrderTokens(savedRaw, aiUnlocked);
 
         LinearLayout rootBox = a.vertical();
         rootBox.setPadding(a.dp(2), a.dp(4), a.dp(2), a.dp(4));
@@ -3467,16 +3547,11 @@ final class MobileSettingsScreen {
                 };
         Runnable onSave =
                 () -> {
-                    StringBuilder sb = new StringBuilder();
-                    for (int i = 0; i < tokens.size(); i++) {
-                        if (i > 0) sb.append(',');
-                        sb.append(tokens.get(i));
-                    }
+                    String mergedOrder =
+                            mergePlayerButtonOrderPreservingHidden(savedRaw, tokens, aiUnlocked);
                     a.mobilePrefs()
                             .edit()
-                            .putString(
-                                    Prefs.PLAYER_BUTTON_ORDER,
-                                    Prefs.sanitizeButtonOrder(sb.toString()))
+                            .putString(Prefs.PLAYER_BUTTON_ORDER, mergedOrder)
                             .apply();
                     if (hRef[0] != null) hRef[0].dismiss();
                     a.toast("已更新播放器按钮顺序");

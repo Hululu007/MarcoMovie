@@ -28,6 +28,9 @@ public final class SystemPlayer extends MoviePlayer {
     private final AudioManager audio;
     private final List<File> captionFiles = new ArrayList<>();
     private final Set<Integer> externalTracks = new HashSet<>();
+    private final Map<Integer, String> externalTrackLabels = new HashMap<>();
+    private final Set<Integer> replacedExternalTracks = new HashSet<>();
+    private int activeAiTrackIndex = -1;
     private MediaPlayer nativePlayer;
     private OnPreparedListener preparedListener;
     private OnCompletionListener completionListener;
@@ -594,6 +597,19 @@ public final class SystemPlayer extends MoviePlayer {
                 });
     }
 
+    /** Pure-JVM helper hiding replaced AI subtitle indices so MediaPlayer never shows dupes. */
+    static List<Integer> filterVisibleTrackIndices(
+            List<Integer> rawIndices, Set<Integer> replacedIndices) {
+        List<Integer> out = new ArrayList<>();
+        if (rawIndices == null) return out;
+        for (Integer idx : rawIndices) {
+            if (idx != null && (replacedIndices == null || !replacedIndices.contains(idx))) {
+                out.add(idx);
+            }
+        }
+        return out;
+    }
+
     private List<Integer> tracks(int type) {
         List<Integer> matching = new ArrayList<>();
         if (!prepared) return matching;
@@ -607,7 +623,7 @@ public final class SystemPlayer extends MoviePlayer {
                             || nativeType == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE)
                     && textMime(mime(info[i]))) matching.add(i);
         }
-        return matching;
+        return type == 3 ? filterVisibleTrackIndices(matching, replacedExternalTracks) : matching;
     }
 
     private static String mime(MediaPlayer.TrackInfo track) {
@@ -641,7 +657,13 @@ public final class SystemPlayer extends MoviePlayer {
                         if (language == null || language.equals("und"))
                             language = type == 1 ? "音轨" : "字幕";
                         String label = language + " " + (labels.size() + 1);
-                        if (externalTracks.contains(index)) label = "外挂SRT · " + language;
+                        if (externalTracks.contains(index)) {
+                            String custom = externalTrackLabels.get(index);
+                            label =
+                                    custom != null && !custom.trim().isEmpty()
+                                            ? custom.trim()
+                                            : ("外挂SRT · " + language);
+                        }
                         int selected = nativePlayer.getSelectedTrack(track.getTrackType());
                         labels.add((selected == index ? "✓ " : "") + label);
                     }
@@ -676,6 +698,49 @@ public final class SystemPlayer extends MoviePlayer {
 
     @Override
     public void addExternalSubtitle(Uri uri, String name, String declaredMime) {
+        addExternalSubtitleInternal(uri, name, declaredMime, false, null);
+    }
+
+    @Override
+    public boolean upsertExternalSubtitle(
+            Uri uri,
+            String name,
+            String declaredMime,
+            boolean reloadMediaSource,
+            Runnable onMounted) {
+        if (!reloadMediaSource) {
+            // Progressive non-final updates render smoothly via SubtitleOverlayView without
+            // bloating MediaPlayer's append-only timed-text track table or interrupting playback.
+            onMain(
+                    () -> {
+                        check();
+                        if (prepared) {
+                            for (int nativeType :
+                                    new int[] {
+                                        MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT,
+                                        MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE
+                                    }) {
+                                int selected = nativePlayer.getSelectedTrack(nativeType);
+                                if (selected >= 0) nativePlayer.deselectTrack(selected);
+                            }
+                            caption("");
+                        }
+                        return null;
+                    });
+            return false;
+        }
+        addExternalSubtitleInternal(uri, name, declaredMime, true, onMounted);
+        // Async load: keep live SubtitleOverlayView active until onMounted fires after
+        // addTimedTextSource + selectTrack succeed on the main thread.
+        return false;
+    }
+
+    private void addExternalSubtitleInternal(
+            Uri uri,
+            String name,
+            String declaredMime,
+            boolean replacePriorAiTrack,
+            Runnable onMounted) {
         String type = MediaOptions.subtitleMime(uri.toString(), declaredMime);
         if (!"application/x-subrip".equals(type))
             throw new IllegalArgumentException("系统播放器仅支持外挂SRT字幕；请选择Media3播放其他字幕格式");
@@ -685,6 +750,7 @@ public final class SystemPlayer extends MoviePlayer {
                     if (!prepared) throw new IllegalStateException("请等待视频开始播放");
                     return null;
                 });
+        final String safeName = name == null ? "" : name.trim();
         Thread load =
                 new Thread(
                         () -> {
@@ -716,6 +782,16 @@ public final class SystemPlayer extends MoviePlayer {
                                                         return;
                                                     }
                                                     try {
+                                                        if (replacePriorAiTrack
+                                                                && activeAiTrackIndex >= 0) {
+                                                            replacedExternalTracks.add(
+                                                                    activeAiTrackIndex);
+                                                            try {
+                                                                nativePlayer.deselectTrack(
+                                                                        activeAiTrackIndex);
+                                                            } catch (Exception ignored) {
+                                                            }
+                                                        }
                                                         int before =
                                                                 nativePlayer.getTrackInfo().length;
                                                         nativePlayer.addTimedTextSource(
@@ -725,14 +801,28 @@ public final class SystemPlayer extends MoviePlayer {
                                                         captionFiles.add(ready);
                                                         MediaPlayer.TrackInfo[] tracks =
                                                                 nativePlayer.getTrackInfo();
+                                                        boolean selectedNew = false;
                                                         for (int i = before; i < tracks.length; i++)
                                                             if (tracks[i].getTrackType()
                                                                     == MediaPlayer.TrackInfo
                                                                             .MEDIA_TRACK_TYPE_TIMEDTEXT) {
                                                                 externalTracks.add(i);
+                                                                if (!safeName.isEmpty()) {
+                                                                    externalTrackLabels.put(
+                                                                            i, safeName);
+                                                                }
+                                                                if (replacePriorAiTrack
+                                                                        || safeName.startsWith(
+                                                                                "AI ")) {
+                                                                    activeAiTrackIndex = i;
+                                                                }
                                                                 nativePlayer.selectTrack(i);
+                                                                selectedNew = true;
                                                                 break;
                                                             }
+                                                        if (selectedNew && onMounted != null) {
+                                                            onMounted.run();
+                                                        }
                                                     } catch (Exception unsupported) {
                                                         ready.delete();
                                                         lastError =
@@ -740,10 +830,15 @@ public final class SystemPlayer extends MoviePlayer {
                                                                         + unsupported
                                                                                 .getClass()
                                                                                 .getSimpleName();
+                                                        AppLog.w(
+                                                                "SystemPlayer",
+                                                                "addTimedTextSource failed",
+                                                                unsupported);
                                                     }
                                                 });
                             } catch (Exception error) {
                                 lastError = "外挂SRT字幕读取失败：" + error.getClass().getSimpleName();
+                                AppLog.w("SystemPlayer", "subtitle load failed", error);
                             } finally {
                                 if (!posted && file != null) file.delete();
                             }

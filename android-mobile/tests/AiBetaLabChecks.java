@@ -386,7 +386,109 @@ public final class AiBetaLabChecks {
                 httpResolverBlocked && httpTransportBlocked && transportCalls.get() == 0,
                 "P1-2: credentialed plaintext HTTP URL is blocked before reaching transport (0 requests sent)");
 
-        // 5. Keyless local Ollama over HTTP MUST succeed cleanly with ZERO Authorization header
+        // 5. P1-1: Manual Base URL origin change immediately clears/reloads key in ByokFormState
+        //    (save/test on new origin NEVER carries prefilled old key; switching back reloads old)
+        MemoryOAuthStore authSt = new MemoryOAuthStore();
+        AiAuthManager.ByokFormState form = new AiAuthManager.ByokFormState(sec, "deepseek", "");
+        check(
+                fakeDeepSeekKey.equals(form.keyText)
+                        && "https://api.deepseek.com".equals(form.boundOrigin),
+                "P1-1: ByokFormState initially loads bound DeepSeek key");
+        boolean changedToNewOrigin = form.onBaseUrlChanged(sec, "https://other-gateway.example/v1");
+        check(
+                changedToNewOrigin
+                        && form.keyText.isEmpty()
+                        && "https://other-gateway.example".equals(form.boundOrigin),
+                "P1-1: editing Base URL to new origin immediately clears prefilled old key");
+        form.commitToStore(sec, authSt);
+        check(
+                AiAuthManager.loadScopedApiKey(sec, "deepseek", "https://other-gateway.example/v1")
+                                .isEmpty()
+                        && fakeDeepSeekKey.equals(
+                                AiAuthManager.loadScopedApiKey(
+                                        sec, "deepseek", "https://api.deepseek.com/v1")),
+                "P1-1: saving after changing Base URL NEVER writes old key to new origin and preserves original gateway key");
+        form.onKeyEdited("sk-fake-new-gateway-5544");
+        form.commitToStore(sec, authSt);
+        boolean switchedBack = form.onBaseUrlChanged(sec, "");
+        check(
+                switchedBack && fakeDeepSeekKey.equals(form.keyText),
+                "P1-1: switching Base URL back to original gateway immediately reloads original bound key");
+
+        // 6. P2-6: Legacy unbound key upgrade notice & automatic cleanup upon re-entry
+        MemoryOAuthStore upgradeSec = new MemoryOAuthStore();
+        upgradeSec.putString(Prefs.SECRET_AI_API_KEY, "sk-legacy-unbound-072");
+        AiAuthManager.ByokFormState upgradeForm =
+                new AiAuthManager.ByokFormState(upgradeSec, "deepseek", "");
+        boolean legacyErrClear = false;
+        try {
+            AiAuthManager.resolveByokRequest(upgradeSec, "deepseek", "", "");
+        } catch (IOException expected) {
+            legacyErrClear = expected.getMessage().contains("旧版未绑定");
+        }
+        check(
+                AiAuthManager.hasLegacyUnboundApiKey(upgradeSec)
+                        && upgradeForm.needsLegacyReentryNotice(upgradeSec)
+                        && upgradeForm.keyText.isEmpty()
+                        && legacyErrClear,
+                "P2-6: legacy unbound key triggers explicit upgrade re-entry prompt and is never auto-sent");
+        upgradeForm.onKeyEdited("sk-reentered-scoped-073");
+        upgradeForm.commitToStore(upgradeSec, authSt);
+        check(
+                !AiAuthManager.hasLegacyUnboundApiKey(upgradeSec)
+                        && !upgradeForm.needsLegacyReentryNotice(upgradeSec),
+                "P2-6: saving scoped key clears legacy unbound key and dismisses upgrade prompt");
+
+        // 7. P1-1: Real HttpURLConnection redirect test — 302/307 MUST NOT follow to another origin
+        //    so Android 6 never forwards native auth headers
+        // (Authorization/x-api-key/x-goog-api-key)
+        final AtomicInteger redirectTargetHits = new AtomicInteger(0);
+        HttpServer targetSrv =
+                HttpServer.create(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0), 0);
+        targetSrv.createContext(
+                "/capture",
+                ex -> {
+                    redirectTargetHits.incrementAndGet();
+                    writeJson(ex, 200, "{\"leaked\":true}");
+                });
+        targetSrv.start();
+        HttpServer redirectSrv =
+                HttpServer.create(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0), 0);
+        final String targetUrl =
+                "http://127.0.0.1:" + targetSrv.getAddress().getPort() + "/capture";
+        redirectSrv.createContext(
+                "/v1/chat/completions",
+                ex -> {
+                    ex.getResponseHeaders().set("Location", targetUrl);
+                    ex.sendResponseHeaders(302, -1);
+                    ex.close();
+                });
+        redirectSrv.start();
+        try {
+            String redirUrl =
+                    "http://127.0.0.1:"
+                            + redirectSrv.getAddress().getPort()
+                            + "/v1/chat/completions";
+            Map<String, String> fakeAuthHdrs = new HashMap<>();
+            fakeAuthHdrs.put("Authorization", "Bearer sk-fake-redirect-guard");
+            fakeAuthHdrs.put("x-api-key", "sk-ant-redirect-guard");
+            fakeAuthHdrs.put("x-goog-api-key", "AIzaSyRedirectGuard12345");
+            boolean redirBlocked = false;
+            try {
+                AiAuthManager.postRawDirect(
+                        redirUrl, "application/json; charset=UTF-8", "{}", fakeAuthHdrs);
+            } catch (IOException expected) {
+                redirBlocked = expected.getMessage().contains("重定向");
+            }
+            check(
+                    redirBlocked && redirectTargetHits.get() == 0,
+                    "P1-1: postRawDirect disables auto-redirects and rejects 302 with 0 hits to redirect target");
+        } finally {
+            redirectSrv.stop(0);
+            targetSrv.stop(0);
+        }
+
+        // 8. Keyless local Ollama over HTTP MUST succeed cleanly with ZERO Authorization header
         final AtomicReference<String> ollamaAuthHdr = new AtomicReference<>("UNSET");
         HttpServer ollamaSrv =
                 HttpServer.create(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0), 0);
@@ -408,7 +510,7 @@ public final class AiBetaLabChecks {
                     "本地Ollama正常".equals(reply)
                             && ollamaReq.credential.isEmpty()
                             && ollamaAuthHdr.get().isEmpty(),
-                    "P1-2: keyless local Ollama HTTP works end-to-end with zero Authorization header");
+                    "P1-1/P1-2: keyless local Ollama HTTP works end-to-end with zero Authorization header");
         } finally {
             ollamaSrv.stop(0);
         }
@@ -583,31 +685,260 @@ public final class AiBetaLabChecks {
                         && afterNormalInvalid.hasCredential()
                         && afterNormalInvalid.needsReauth,
                 "P1-3: normal invalid_grant on current session sets needsReauth=true without deleting bundle");
+
+        // 7. P1-2: Closing/cancelling login sheet discards in-flight success and leaves active mode
+        //    and prior credentials completely untouched
+        MemoryOAuthStore st2 = new MemoryOAuthStore();
+        AiAuthManager.setAuthMode(st2, AiAuthManager.AUTH_MODE_API_KEY);
+        AiAuthManager.OAuthAttemptToken cancelAttempt =
+                AiAuthManager.beginOAuthAttempt(st2, AiAuthManager.OAUTH_OPENROUTER);
+        AiAuthManager.cancelOAuthAttempt(st2, cancelAttempt);
+        AiAuthManager.OAuthBundle lateSuccess = new AiAuthManager.OAuthBundle();
+        lateSuccess.providerId = AiAuthManager.OAUTH_OPENROUTER;
+        lateSuccess.accessToken = "sk-or-late-after-cancel";
+        boolean committedAfterCancel =
+                AiAuthManager.completeOAuthSignInAtomically(
+                        st2, cancelAttempt, lateSuccess, () -> true);
+        check(
+                !committedAfterCancel
+                        && AiAuthManager.loadBundle(st2, AiAuthManager.OAUTH_OPENROUTER) == null
+                        && AiAuthManager.AUTH_MODE_API_KEY.equals(AiAuthManager.authMode(st2)),
+                "P1-2: cancelling OAuth login sheet discards in-flight success without overwriting active mode");
+
+        // 8. P1-2: Switching to BYOK while OAuth is in flight discards late OAuth success
+        AiAuthManager.OAuthAttemptToken byokRaceAttempt =
+                AiAuthManager.beginOAuthAttempt(st2, AiAuthManager.OAUTH_OPENROUTER);
+        AiAuthManager.setAuthMode(st2, AiAuthManager.AUTH_MODE_API_KEY);
+        boolean committedAfterByok =
+                AiAuthManager.completeOAuthSignInAtomically(
+                        st2, byokRaceAttempt, lateSuccess, () -> true);
+        check(
+                !committedAfterByok
+                        && AiAuthManager.loadBundle(st2, AiAuthManager.OAUTH_OPENROUTER) == null
+                        && AiAuthManager.AUTH_MODE_API_KEY.equals(AiAuthManager.authMode(st2)),
+                "P1-2: switching to BYOK while OAuth is in flight discards late OAuth success and keeps BYOK active");
+
+        // 9. P1-2: Switching to another OAuth provider discards in-flight previous provider success
+        AiAuthManager.OAuthAttemptToken provRaceAttempt =
+                AiAuthManager.beginOAuthAttempt(st2, AiAuthManager.OAUTH_KIMI_CODE);
+        AiAuthManager.setAuthMode(st2, AiAuthManager.AUTH_MODE_OAUTH);
+        AiAuthManager.setActiveOAuthProvider(st2, AiAuthManager.OAUTH_OPENROUTER);
+        AiAuthManager.OAuthBundle lateKimi = new AiAuthManager.OAuthBundle();
+        lateKimi.providerId = AiAuthManager.OAUTH_KIMI_CODE;
+        lateKimi.accessToken = "late-kimi-at";
+        boolean committedAfterProvSwitch =
+                AiAuthManager.completeOAuthSignInAtomically(
+                        st2, provRaceAttempt, lateKimi, () -> true);
+        check(
+                !committedAfterProvSwitch
+                        && AiAuthManager.loadBundle(st2, AiAuthManager.OAUTH_KIMI_CODE) == null
+                        && AiAuthManager.OAUTH_OPENROUTER.equals(
+                                AiAuthManager.activeOAuthProvider(st2)),
+                "P1-2: switching OAuth provider while prior sign-in is in flight discards stale response and preserves final choice");
+
+        // 10. P1-2: Per-provider Client ID isolation across Kimi <-> OpenAI <-> OpenRouter switches
+        AiAuthManager.OAuthProviderSwitchState switchState =
+                new AiAuthManager.OAuthProviderSwitchState(st2, AiAuthManager.OAUTH_KIMI_CODE);
+        switchState.onClientIdTyped("kimi-client-id-111");
+        String loadedForOpenAi =
+                switchState.switchTo(
+                        st2, AiAuthManager.OAUTH_OPENAI_EXPERIMENTAL, "kimi-client-id-111");
+        check(
+                loadedForOpenAi.isEmpty()
+                        && "kimi-client-id-111"
+                                .equals(
+                                        AiAuthManager.oauthClientId(
+                                                st2, AiAuthManager.OAUTH_KIMI_CODE))
+                        && AiAuthManager.oauthClientId(st2, AiAuthManager.OAUTH_OPENAI_EXPERIMENTAL)
+                                .isEmpty(),
+                "P1-2: switching from Kimi to OpenAI saves Kimi Client ID strictly to Kimi and never writes it to OpenAI");
+        switchState.onClientIdTyped("openai-client-id-222");
+        String loadedBackKimi =
+                switchState.switchTo(st2, AiAuthManager.OAUTH_KIMI_CODE, "openai-client-id-222");
+        String loadedOpenRouter =
+                switchState.switchTo(st2, AiAuthManager.OAUTH_OPENROUTER, loadedBackKimi);
+        check(
+                "kimi-client-id-111".equals(loadedBackKimi)
+                        && loadedOpenRouter.isEmpty()
+                        && "openai-client-id-222"
+                                .equals(
+                                        AiAuthManager.oauthClientId(
+                                                st2, AiAuthManager.OAUTH_OPENAI_EXPERIMENTAL))
+                        && AiAuthManager.oauthClientId(st2, AiAuthManager.OAUTH_OPENROUTER)
+                                .isEmpty(),
+                "P1-2: Kimi and OpenAI Client IDs remain independently persisted across repeated switches");
+
+        // 11. P1-2: Same-provider concurrent refresh mutex allows only 1 network refresh call
+        long verMutex = AiAuthManager.beginOAuthSession(oauthStore, prov);
+        AiAuthManager.commitOAuthSignInIfCurrent(oauthStore, prov, verMutex, expiring, () -> true);
+        AtomicInteger refreshNetCalls = new AtomicInteger(0);
+        CountDownLatch t1Entered = new CountDownLatch(1);
+        CountDownLatch allowRefreshFinish = new CountDownLatch(1);
+        AiAuthManager.HttpTransport mutexTx =
+                (u, ct, b, h) -> {
+                    refreshNetCalls.incrementAndGet();
+                    t1Entered.countDown();
+                    try {
+                        allowRefreshFinish.await(3, TimeUnit.SECONDS);
+                    } catch (InterruptedException ignored) {
+                    }
+                    return new AiAuthManager.HttpResult(
+                            200,
+                            "{\"access_token\":\"mutex-fresh-at\",\"refresh_token\":\"mutex-fresh-rt\",\"expires_in\":7200}");
+                };
+        AtomicReference<String> res1 = new AtomicReference<>("");
+        AtomicReference<String> res2 = new AtomicReference<>("");
+        Thread rt1 =
+                new Thread(
+                        () -> {
+                            try {
+                                res1.set(
+                                        AiAuthManager.ensureFreshOAuthBundle(
+                                                        oauthStore,
+                                                        prov,
+                                                        "https://auth.kimi.com/api/oauth/token",
+                                                        "kimi-client-id-111",
+                                                        2000L,
+                                                        () -> true,
+                                                        mutexTx)
+                                                .accessToken);
+                            } catch (IOException ignored) {
+                            }
+                        });
+        Thread rt2 =
+                new Thread(
+                        () -> {
+                            try {
+                                res2.set(
+                                        AiAuthManager.ensureFreshOAuthBundle(
+                                                        oauthStore,
+                                                        prov,
+                                                        "https://auth.kimi.com/api/oauth/token",
+                                                        "kimi-client-id-111",
+                                                        2000L,
+                                                        () -> true,
+                                                        mutexTx)
+                                                .accessToken);
+                            } catch (IOException ignored) {
+                            }
+                        });
+        rt1.start();
+        check(t1Entered.await(3, TimeUnit.SECONDS), "P1-2: concurrent refresh #1 entered lock");
+        rt2.start();
+        Thread.sleep(80L);
+        allowRefreshFinish.countDown();
+        rt1.join(3000L);
+        rt2.join(3000L);
+        check(
+                refreshNetCalls.get() == 1
+                        && "mutex-fresh-at".equals(res1.get())
+                        && "mutex-fresh-at".equals(res2.get()),
+                "P1-2: same-provider refresh mutex deduplicates concurrent token refreshes into 1 network call");
+    }
+
+    private static String makeUnsignedJwt(String payloadJson) {
+        String hdr =
+                AiAuthManager.base64UrlEncode(
+                        "{\"alg\":\"none\",\"typ\":\"JWT\"}".getBytes(StandardCharsets.UTF_8));
+        String pay = AiAuthManager.base64UrlEncode(payloadJson.getBytes(StandardCharsets.UTF_8));
+        return hdr + "." + pay + ".sig";
     }
 
     private static void test4_ModelsSubscriptionInferenceAndLogRedaction() throws Exception {
-        // 1. P1-9: Active non-retired 2026 default models
+        // 1. P1-3: Active 2026 default models (Gemini updated off deprecated 2.5-flash for new
+        //    accounts -> gemini-3.5-flash-lite)
         check(
                 "deepseek-flash".equals(AiAssistantService.defaultModel("deepseek"))
                         && "claude-haiku-5-5".equals(AiAssistantService.defaultModel("anthropic"))
-                        && "gemini-2.5-flash".equals(AiAssistantService.defaultModel("gemini")),
-                "P1-9: default models updated off retired deepseek-chat & claude-3-5-haiku-latest");
+                        && "gemini-3.5-flash-lite"
+                                .equals(AiAssistantService.defaultModel("gemini")),
+                "P1-3: default models use deepseek-flash, claude-haiku-5-5, and new-account-ready gemini-3.5-flash-lite");
 
-        // 2. P1-9: OpenAI Experimental OAuth URL requests official plan-usage scopes + resource
-        AiAuthManager.PkcePair pkce = AiAuthManager.generatePkcePair();
-        String oaAuthUrl =
-                AiAuthManager.buildOpenAiAuthUrl(
-                        "app_user_registered_demo", "http://localhost:1455/auth/callback", pkce);
+        // 2. P1-3: Shipped 0.7.3 OAuth UI withdraws unverified experimental subscription paths
         check(
-                oaAuthUrl.contains("resource.invoke")
-                        && oaAuthUrl.contains("chatgpt.tokens.use.direct")
-                        && oaAuthUrl.contains("resource=https%3A%2F%2Fapi.openai.com%2Fv1"),
-                "P1-9: OpenAI OAuth URL includes delegated plan-usage scopes and API resource indicator");
+                AiAuthManager.SHIPPED_OAUTH_PROVIDER_IDS.length == 1
+                        && AiAuthManager.OAUTH_OPENROUTER.equals(
+                                AiAuthManager.SHIPPED_OAUTH_PROVIDER_IDS[0])
+                        && AiAuthManager.isShippedOAuthProvider(AiAuthManager.OAUTH_OPENROUTER)
+                        && !AiAuthManager.isShippedOAuthProvider(AiAuthManager.OAUTH_KIMI_CODE)
+                        && !AiAuthManager.isShippedOAuthProvider(
+                                AiAuthManager.OAUTH_OPENAI_EXPERIMENTAL),
+                "P1-3: 0.7.3 shipped OAuth UI keeps only OpenRouter PKCE and withdraws unverified experimental subscription paths");
 
-        // 3. P1-9: OpenAI subscription inference uses WIRE_OPENAI_RESPONSES -> POST /v1/responses
+        // 3. P1-3: OpenAI OAuth identity & actual granted scope verification contract
+        String validIdJwt = makeUnsignedJwt("{\"sub\":\"usr_123\",\"email\":\"dev@example.com\"}");
+        String validAccessJwt =
+                makeUnsignedJwt(
+                        "{\"sub\":\"usr_123\",\"scope\":\"openid profile email resource.invoke chatgpt.tokens.use.direct\"}");
+        AiAuthManager.OAuthBundle verifiedOa =
+                AiAuthManager.exchangeOpenAiCode(
+                        AiAuthManager.OPENAI_TOKEN_URL,
+                        "app_user_registered_demo",
+                        "auth_code_1",
+                        "verifier_1234567890",
+                        "http://localhost:1455/auth/callback",
+                        1_700_000_000_000L,
+                        (u, ct, body, hdrs) ->
+                                new AiAuthManager.HttpResult(
+                                        200,
+                                        "{\"access_token\":\""
+                                                + validAccessJwt
+                                                + "\",\"id_token\":\""
+                                                + validIdJwt
+                                                + "\",\"scope\":\"openid profile email resource.invoke chatgpt.tokens.use.direct\",\"expires_in\":3600}"));
+        boolean missingScopeRejected = false;
+        try {
+            AiAuthManager.exchangeOpenAiCode(
+                    AiAuthManager.OPENAI_TOKEN_URL,
+                    "app_user_registered_demo",
+                    "auth_code_2",
+                    "verifier_1234567890",
+                    "http://localhost:1455/auth/callback",
+                    1_700_000_000_000L,
+                    (u, ct, body, hdrs) ->
+                            new AiAuthManager.HttpResult(
+                                    200,
+                                    "{\"access_token\":\"opaque_no_scope\",\"id_token\":\""
+                                            + validIdJwt
+                                            + "\",\"scope\":\"openid profile email\",\"expires_in\":3600}"));
+        } catch (IOException expected) {
+            missingScopeRejected = expected.getMessage().contains("授权范围");
+        }
+        boolean missingIdentityRejected = false;
+        try {
+            AiAuthManager.exchangeOpenAiCode(
+                    AiAuthManager.OPENAI_TOKEN_URL,
+                    "app_user_registered_demo",
+                    "auth_code_3",
+                    "verifier_1234567890",
+                    "http://localhost:1455/auth/callback",
+                    1_700_000_000_000L,
+                    (u, ct, body, hdrs) ->
+                            new AiAuthManager.HttpResult(
+                                    200,
+                                    "{\"access_token\":\"opaque_no_sub\",\"scope\":\"resource.invoke chatgpt.tokens.use.direct\",\"expires_in\":3600}"));
+        } catch (IOException expected) {
+            missingIdentityRejected = expected.getMessage().contains("身份");
+        }
+        check(
+                "dev@example.com".equals(verifiedOa.accountLabel)
+                        && missingScopeRejected
+                        && missingIdentityRejected,
+                "P1-3: OpenAI OAuth verifies both user identity and actual granted inference scopes");
+
+        // 4. P1-3: OpenAI Responses API SSE contract (completed, failed, incomplete, mid-stream
+        // EOF)
         final AtomicReference<String> respUrl = new AtomicReference<>("");
         final AtomicReference<String> respBody = new AtomicReference<>("");
+        final AtomicReference<String> respAccept = new AtomicReference<>("");
         final AtomicReference<String> respAcctHdr = new AtomicReference<>("");
+        String sseCompleted =
+                "event: response.output_text.delta\n"
+                        + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"连接\"}\n\n"
+                        + "event: response.output_text.delta\n"
+                        + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"正常-SSE\"}\n\n"
+                        + "event: response.completed\n"
+                        + "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\"}}\n\n";
         String oaRespReply =
                 AiAuthManager.executeChatCompletion(
                         new AiAuthManager.ResolvedRequest(
@@ -625,28 +956,64 @@ public final class AiBetaLabChecks {
                         (u, ct, body, hdrs) -> {
                             respUrl.set(u);
                             respBody.set(body);
+                            respAccept.set(hdrs.getOrDefault("Accept", ""));
                             respAcctHdr.set(hdrs.getOrDefault("ChatGPT-Account-Id", ""));
-                            return new AiAuthManager.HttpResult(
-                                    200,
-                                    "{\"id\":\"resp_1\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"连接正常-Responses\"}]}]}");
+                            return new AiAuthManager.HttpResult(200, sseCompleted);
                         });
+        JSONObject oaSent = new JSONObject(respBody.get());
+        boolean sseFailedCaught = false;
+        try {
+            AiAuthManager.parseOpenAiResponsesSse(
+                    "event: response.failed\n"
+                            + "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"quota exceeded\"}}}\n\n",
+                    "oa-plan-access-token");
+        } catch (IOException expected) {
+            sseFailedCaught = expected.getMessage().contains("失败");
+        }
+        boolean sseIncompleteCaught = false;
+        try {
+            AiAuthManager.parseOpenAiResponsesSse(
+                    "event: response.output_text.delta\n"
+                            + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"半截\"}\n\n"
+                            + "event: response.incomplete\n"
+                            + "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
+                    "oa-plan-access-token");
+        } catch (IOException expected) {
+            sseIncompleteCaught = expected.getMessage().contains("未完成");
+        }
+        boolean sseTruncatedCaught = false;
+        try {
+            AiAuthManager.parseOpenAiResponsesSse(
+                    "event: response.output_text.delta\n"
+                            + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"断流前\"}\n\n",
+                    "oa-plan-access-token");
+        } catch (IOException expected) {
+            sseTruncatedCaught = expected.getMessage().contains("中断");
+        }
         check(
-                "连接正常-Responses".equals(oaRespReply)
+                "连接正常-SSE".equals(oaRespReply)
                         && "https://api.openai.com/v1/responses".equals(respUrl.get())
-                        && respBody.get().contains("\"instructions\":\"sys-instructions\"")
-                        && respBody.get().contains("\"input\":\"hello responses\"")
-                        && "acct_plus_99".equals(respAcctHdr.get()),
-                "P1-9: Experimental OpenAI OAuth routes through /v1/responses with instructions/input and parses output");
+                        && oaSent.optBoolean("stream", false)
+                        && "text/event-stream".equals(respAccept.get())
+                        && "sys-instructions".equals(oaSent.optString("instructions"))
+                        && "acct_plus_99".equals(respAcctHdr.get())
+                        && sseFailedCaught
+                        && sseIncompleteCaught
+                        && sseTruncatedCaught,
+                "P1-3: OpenAI Responses SSE handles stream=true, delta+completed, failed, incomplete, and truncated EOF");
 
-        // 4. Native Anthropic & Gemini over HTTPS transport check
+        // 5. P1-3: Anthropic Haiku 5.5 omits unsupported sampling params (temperature/top_p/top_k)
+        //    AND Gemini uses new-account default model gemini-3.5-flash-lite with x-goog-api-key
         final AtomicReference<String> antKeyHdr = new AtomicReference<>("");
+        final AtomicReference<String> antBody = new AtomicReference<>("");
+        final AtomicReference<String> gemUrl = new AtomicReference<>("");
         final AtomicReference<String> gemKeyHdr = new AtomicReference<>("");
         String claudeReply =
                 AiAuthManager.executeChatCompletion(
                         new AiAuthManager.ResolvedRequest(
                                 AiAuthManager.WIRE_ANTHROPIC,
                                 "https://api.anthropic.com",
-                                "claude-haiku-5-5",
+                                AiAssistantService.defaultModel("anthropic"),
                                 "sk-ant-valid-mock-123456",
                                 "",
                                 ""),
@@ -656,16 +1023,18 @@ public final class AiBetaLabChecks {
                         0.2,
                         (u, ct, body, hdrs) -> {
                             antKeyHdr.set(hdrs.getOrDefault("x-api-key", ""));
+                            antBody.set(body);
                             return new AiAuthManager.HttpResult(
                                     200,
                                     "{\"content\":[{\"type\":\"text\",\"text\":\"连接正常-Claude55\"}]}");
                         });
+        JSONObject antSent = new JSONObject(antBody.get());
         String geminiReply =
                 AiAuthManager.executeChatCompletion(
                         new AiAuthManager.ResolvedRequest(
                                 AiAuthManager.WIRE_GEMINI,
                                 "https://generativelanguage.googleapis.com",
-                                "gemini-2.5-flash",
+                                AiAssistantService.defaultModel("gemini"),
                                 "AIzaSyValidMockKey12345678",
                                 "",
                                 ""),
@@ -674,24 +1043,34 @@ public final class AiBetaLabChecks {
                         64,
                         0.2,
                         (u, ct, body, hdrs) -> {
+                            gemUrl.set(u);
                             gemKeyHdr.set(hdrs.getOrDefault("x-goog-api-key", ""));
                             return new AiAuthManager.HttpResult(
                                     200,
-                                    "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"连接正常-Gemini\"}]}}]}");
+                                    "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"连接正常-Gemini35\"}]}}]}");
                         });
         check(
                 "连接正常-Claude55".equals(claudeReply)
+                        && "claude-haiku-5-5".equals(antSent.optString("model"))
+                        && !antSent.has("temperature")
+                        && !antSent.has("top_p")
+                        && !antSent.has("top_k")
                         && "sk-ant-valid-mock-123456".equals(antKeyHdr.get())
-                        && "连接正常-Gemini".equals(geminiReply)
+                        && "连接正常-Gemini35".equals(geminiReply)
+                        && gemUrl.get().contains("/models/gemini-3.5-flash-lite:generateContent")
                         && "AIzaSyValidMockKey12345678".equals(gemKeyHdr.get()),
-                "P1-4/P1-9: Anthropic & Gemini HTTPS wire adapters send native auth headers");
+                "P1-3: Haiku 5.5 omits temperature/top_p/top_k; Gemini targets gemini-3.5-flash-lite with x-goog-api-key");
 
-        // 5. P1-4: Upstream error echoing bare API keys & native headers MUST be redacted from
-        //    thrown IOException, AppLog.entries(), and AppLog.dump()!
+        // 6. P1-4 / P2-6: Log, cause chain, short custom key, JSON native auth headers & diagnostic
+        //    export redaction
         AppLog.clear();
+        AppLog.clearRegisteredSecrets();
         String markerSk = "sk-INVALIDTESTMARKER99887766";
         String markerGem = "AIzaSyINVALIDTESTMARKER998877";
         String markerCustom = "CUSTOM_NATIVE_KEY_77665544";
+        String shortCustomKey = "k9x8";
+        String jsonAntHeaderVal = "JSON_XAPI_SECRET_5544";
+        String jsonGemHeaderVal = "JSON_GOOG_SECRET_6633";
 
         IOException caughtAnt = null;
         try {
@@ -712,22 +1091,23 @@ public final class AiBetaLabChecks {
                                     401,
                                     "{\"error\":{\"message\":\"Rejected bare key "
                                             + markerSk
-                                            + " in x-api-key: "
-                                            + markerCustom
-                                            + "\"}}"));
+                                            + " headers {\\\"x-api-key\\\":\\\""
+                                            + jsonAntHeaderVal
+                                            + "\\\"}\"}}"));
         } catch (IOException e) {
             caughtAnt = e;
         }
         AppLog.w("AiAssistant", "Anthropic test failed with x-api-key: " + markerCustom, caughtAnt);
 
-        IOException caughtGem = null;
+        // Short custom key echoed in upstream error + nested exception cause chain + JSON headers
+        IOException caughtShort = null;
         try {
             AiAuthManager.executeChatCompletion(
                     new AiAuthManager.ResolvedRequest(
-                            AiAuthManager.WIRE_GEMINI,
-                            "https://generativelanguage.googleapis.com",
-                            "gemini-2.5-flash",
-                            markerGem,
+                            AiAuthManager.WIRE_OPENAI_COMPAT,
+                            "https://custom-relay.example/v1",
+                            "gpt-4o-mini",
+                            shortCustomKey,
                             "",
                             ""),
                     "sys",
@@ -736,27 +1116,48 @@ public final class AiBetaLabChecks {
                     0.2,
                     (u, ct, body, hdrs) ->
                             new AiAuthManager.HttpResult(
-                                    400,
-                                    "Invalid x-goog-api-key: "
-                                            + markerGem
-                                            + " echoed directly "
-                                            + markerGem));
+                                    401,
+                                    "{\"error\":{\"message\":\"Bad custom key "
+                                            + shortCustomKey
+                                            + " with {\"x-goog-api-key\":\""
+                                            + jsonGemHeaderVal
+                                            + "\"}\"}}"));
         } catch (IOException e) {
-            caughtGem = e;
+            caughtShort = e;
         }
-        AppLog.w("AiAssistant", "Gemini error", caughtGem);
+        Throwable deepRootCause =
+                new IllegalStateException(
+                        "root echoed "
+                                + shortCustomKey
+                                + " and {\"x-api-key\":\""
+                                + jsonAntHeaderVal
+                                + "\",\"x-goog-api-key\":\""
+                                + jsonGemHeaderVal
+                                + "\"}");
+        IOException wrappedCauseEx =
+                new IOException(
+                        "outer wrapper " + markerGem, new RuntimeException("mid", deepRootCause));
+        AppLog.w("AiAssistant", "Nested diagnostic failure", wrappedCauseEx);
 
         String dump = AppLog.dump();
+        String crashStack = CrashReportStore.formatStackTrace(wrappedCauseEx);
+        String crashRecentLogs = CrashReportStore.collectSanitizedAppLogs(50);
+        String combinedDiag = dump + "\n" + crashStack + "\n" + crashRecentLogs;
         check(
                 caughtAnt != null
-                        && caughtGem != null
+                        && caughtShort != null
                         && !caughtAnt.getMessage().contains(markerSk)
-                        && !caughtAnt.getMessage().contains(markerCustom)
-                        && !caughtGem.getMessage().contains(markerGem)
-                        && !dump.contains(markerSk)
-                        && !dump.contains(markerGem)
-                        && !dump.contains(markerCustom),
-                "P1-4: echoed bare keys (sk-..., AIza...) & native headers (x-api-key / x-goog-api-key) scrubbed from exceptions, AppLog.entries, and AppLog.dump");
+                        && !caughtAnt.getMessage().contains(jsonAntHeaderVal)
+                        && !caughtShort.getMessage().contains(shortCustomKey)
+                        && !caughtShort.getMessage().contains(jsonGemHeaderVal)
+                        && !combinedDiag.contains(markerSk)
+                        && !combinedDiag.contains(markerGem)
+                        && !combinedDiag.contains(markerCustom)
+                        && !combinedDiag.contains(shortCustomKey)
+                        && !combinedDiag.contains(jsonAntHeaderVal)
+                        && !combinedDiag.contains(jsonGemHeaderVal),
+                "P2-6: short custom key, JSON native auth headers (raw & escaped), nested exception causes, AppLog.dump & CrashReportStore diagnostic export are all 0-leak");
+        AppLog.clearRegisteredSecrets();
     }
 
     private static void test5_FullEpisodeSubtitleRetryCacheAndSingleTrack() throws Exception {
@@ -859,6 +1260,299 @@ public final class AiBetaLabChecks {
         check(
                 liveText.contains("叶文洁的译文") && liveText.contains("Line 71"),
                 "P1-8: activeCueTextAt renders live progressive bilingual cue without needing exo.prepare()");
+
+        // 5. P2-5: Versioned completion cache rejects legacy 2-cue SRT where only 1 cue was
+        //    translated (same cue count == 2!) AND accepts only verified v2 complete caches
+        String legacyHalfTranslatedTwoCueSrt =
+                "1\n00:00:01,000 --> 00:00:04,000\n第一句译文\nLine 1\n\n"
+                        + "2\n00:00:05,000 --> 00:00:08,000\nLine 2\n\n";
+        check(
+                AiSubtitleTranslator.parseSrt(legacyHalfTranslatedTwoCueSrt).size() == 2
+                        && AiSubtitleTranslator.decodeVerifiedCompletionCache(
+                                        legacyHalfTranslatedTwoCueSrt, 2, true)
+                                == null,
+                "P2-5: legacy unmarked 2-cue half-translated SRT cache is rejected (never falsely reported complete)");
+        String partialV2Envelope =
+                "{\"cache_version\":2,\"complete\":false,\"bilingual\":true,\"total_cues\":2,\"translated_cues\":1,\"srt\":"
+                        + JSONObject.quote(legacyHalfTranslatedTwoCueSrt)
+                        + "}";
+        String completeTwoCueSrt =
+                "1\n00:00:01,000 --> 00:00:04,000\n第一句译文\nLine 1\n\n"
+                        + "2\n00:00:05,000 --> 00:00:08,000\n第二句译文\nLine 2\n\n";
+        String validV2Envelope =
+                AiSubtitleTranslator.encodeCompletionCache(completeTwoCueSrt, 2, 2, true);
+        String decodedV2 =
+                AiSubtitleTranslator.decodeVerifiedCompletionCache(validV2Envelope, 2, true);
+        List<AiSubtitleTranslator.SrtCue> cachedTwoCues = AiSubtitleTranslator.parseSrt(decodedV2);
+        String cachedOverlayLine =
+                AiSubtitleTranslator.activeCueTextAt(cachedTwoCues, null, 2000L, true);
+        check(
+                AiSubtitleTranslator.decodeVerifiedCompletionCache(partialV2Envelope, 2, true)
+                                == null
+                        && AiSubtitleTranslator.encodeCompletionCache(completeTwoCueSrt, 1, 2, true)
+                                == null
+                        && completeTwoCueSrt.equals(decodedV2)
+                        && AiSubtitleTranslator.decodeVerifiedCompletionCache(
+                                        validV2Envelope, 2, false)
+                                == null
+                        && "第一句译文\nLine 1".equals(cachedOverlayLine),
+                "P2-5: v2 completion cache enforces version+complete+mode+count invariants and preserves bilingual line breaks");
+
+        // 6. P1-4: All three engines (Media3, MPV, SystemPlayer) verified for BOTH first
+        //    progressive translation AND cache-hit re-entry (visible, switchable, 0 dupes, 0
+        //    progressive prepare())
+        // 6a. Media3 engine
+        final JSONObject media3Opts = new JSONObject();
+        final AtomicBoolean media3OverlayVisible = new AtomicBoolean(false);
+        final AtomicInteger media3PrepareCount = new AtomicInteger(0);
+        AiSubtitleTranslator.SubtitleMountTarget media3Target =
+                new AiSubtitleTranslator.SubtitleMountTarget() {
+                    @Override
+                    public void setLiveOverlay(
+                            List<AiSubtitleTranslator.SrtCue> c, String[] t, boolean bi) {
+                        media3OverlayVisible.set(true);
+                    }
+
+                    @Override
+                    public void clearLiveOverlay() {
+                        media3OverlayVisible.set(false);
+                    }
+
+                    @Override
+                    public boolean upsertExternalSubtitle(
+                            String uri,
+                            String name,
+                            String mime,
+                            boolean reload,
+                            Runnable onMounted)
+                            throws Exception {
+                        MoviePlayer.upsertSubtitleTrackJson(media3Opts, uri, name, mime);
+                        if (reload) {
+                            media3PrepareCount.incrementAndGet();
+                            if (onMounted != null) onMounted.run();
+                            return true;
+                        }
+                        return false;
+                    }
+                };
+        // First progressive updates on Media3: 0 prepare, overlay stays visible, 1 track
+        AiSubtitleTranslator.applySubtitleMountSafely(
+                media3Target,
+                "file:///sub/ep1.srt",
+                "application/x-subrip",
+                cachedTwoCues,
+                new String[] {"第一句译文", null},
+                true,
+                false);
+        AiSubtitleTranslator.applySubtitleMountSafely(
+                media3Target,
+                "file:///sub/ep1.srt",
+                "application/x-subrip",
+                cachedTwoCues,
+                new String[] {"第一句译文", "第二句译文"},
+                true,
+                false);
+        boolean media3ProgOk =
+                media3OverlayVisible.get()
+                        && media3PrepareCount.get() == 0
+                        && media3Opts.getJSONArray("subtitles").length() == 1;
+        // Cache hit re-entry on Media3: mounts single track, clears overlay ONLY after mount
+        AiSubtitleTranslator.applySubtitleMountSafely(
+                media3Target,
+                "file:///sub/ep1.srt",
+                "application/x-subrip",
+                cachedTwoCues,
+                null,
+                true,
+                true);
+        check(
+                media3ProgOk
+                        && !media3OverlayVisible.get()
+                        && media3PrepareCount.get() == 1
+                        && media3Opts.getJSONArray("subtitles").length() == 1,
+                "P1-4: Media3 progressive (0 prepare, overlay visible, 1 track) + cache-hit re-entry verified");
+
+        // 6b. MPV engine (deduplicates via sub-remove + sub-add, 0 prepare on both progressive &
+        //     cache hit)
+        final List<JSONObject> mpvTrackTable = new ArrayList<>();
+        mpvTrackTable.add(
+                new JSONObject()
+                        .put("id", 1)
+                        .put("type", "sub")
+                        .put("external", false)
+                        .put("title", "English"));
+        final AtomicBoolean mpvOverlayVisible = new AtomicBoolean(false);
+        final AtomicInteger mpvNextId = new AtomicInteger(2);
+        AiSubtitleTranslator.SubtitleMountTarget mpvTarget =
+                new AiSubtitleTranslator.SubtitleMountTarget() {
+                    @Override
+                    public void setLiveOverlay(
+                            List<AiSubtitleTranslator.SrtCue> c, String[] t, boolean bi) {
+                        mpvOverlayVisible.set(true);
+                    }
+
+                    @Override
+                    public void clearLiveOverlay() {
+                        mpvOverlayVisible.set(false);
+                    }
+
+                    @Override
+                    public boolean upsertExternalSubtitle(
+                            String uri,
+                            String name,
+                            String mime,
+                            boolean reload,
+                            Runnable onMounted)
+                            throws Exception {
+                        List<String[]> cmds =
+                                MpvPlayer.planExternalSubtitleUpsertCommands(
+                                        mpvTrackTable, uri, name);
+                        for (String[] cmd : cmds) {
+                            if ("sub-remove".equals(cmd[0])) {
+                                int rmId = Integer.parseInt(cmd[1]);
+                                mpvTrackTable.removeIf(t -> t.optInt("id", -1) == rmId);
+                            } else if ("sub-add".equals(cmd[0])) {
+                                mpvTrackTable.add(
+                                        new JSONObject()
+                                                .put("id", mpvNextId.getAndIncrement())
+                                                .put("type", "sub")
+                                                .put("external", true)
+                                                .put("external-filename", cmd[1])
+                                                .put("title", cmd[3]));
+                            }
+                        }
+                        if (onMounted != null) onMounted.run();
+                        return true;
+                    }
+                };
+        // First progressive + second update + cache-hit re-entry on MPV -> always 1 AI track + 1
+        // embedded English track = 2 total, 0 duplicates!
+        AiSubtitleTranslator.applySubtitleMountSafely(
+                mpvTarget,
+                "file:///sub/ep1.srt",
+                "application/x-subrip",
+                cachedTwoCues,
+                null,
+                true,
+                false);
+        AiSubtitleTranslator.applySubtitleMountSafely(
+                mpvTarget,
+                "file:///sub/ep1.srt",
+                "application/x-subrip",
+                cachedTwoCues,
+                null,
+                true,
+                true);
+        int mpvAiCount = 0;
+        for (JSONObject t : mpvTrackTable) {
+            if (AiSubtitleTranslator.AI_TRACK_NAME.equals(t.optString("title"))) mpvAiCount++;
+        }
+        check(
+                mpvAiCount == 1 && mpvTrackTable.size() == 2 && !mpvOverlayVisible.get(),
+                "P1-4: MPV progressive + cache-hit re-entry keeps strictly 1 AI track with 0 prepare()");
+
+        // 6c. SystemPlayer engine (progressive keeps overlay + 0 addTimedTextSource; cache hit
+        //     replaces prior AI track via filterVisibleTrackIndices and keeps overlay visible until
+        //     onMounted OR if addTimedTextSource fails!)
+        final List<Integer> sysRawTrackIndices = new ArrayList<>();
+        sysRawTrackIndices.add(0); // embedded track 0
+        final java.util.Set<Integer> sysReplaced = new java.util.HashSet<>();
+        final AtomicInteger sysActiveAiIdx = new AtomicInteger(-1);
+        final AtomicInteger sysAddCalls = new AtomicInteger(0);
+        final AtomicBoolean sysOverlayVisible = new AtomicBoolean(false);
+        final AtomicBoolean sysSimulateFailure = new AtomicBoolean(false);
+        final AtomicReference<Runnable> sysDeferredMount = new AtomicReference<>(null);
+        AiSubtitleTranslator.SubtitleMountTarget sysTarget =
+                new AiSubtitleTranslator.SubtitleMountTarget() {
+                    @Override
+                    public void setLiveOverlay(
+                            List<AiSubtitleTranslator.SrtCue> c, String[] t, boolean bi) {
+                        sysOverlayVisible.set(true);
+                    }
+
+                    @Override
+                    public void clearLiveOverlay() {
+                        sysOverlayVisible.set(false);
+                    }
+
+                    @Override
+                    public boolean upsertExternalSubtitle(
+                            String uri,
+                            String name,
+                            String mime,
+                            boolean reload,
+                            Runnable onMounted)
+                            throws Exception {
+                        if (!reload) return false;
+                        if (sysSimulateFailure.get()) {
+                            throw new IllegalStateException(
+                                    "simulated ROM addTimedTextSource failure");
+                        }
+                        if (sysActiveAiIdx.get() >= 0) {
+                            sysReplaced.add(sysActiveAiIdx.get());
+                        }
+                        int nextIdx = sysRawTrackIndices.size();
+                        sysRawTrackIndices.add(nextIdx);
+                        sysActiveAiIdx.set(nextIdx);
+                        sysAddCalls.incrementAndGet();
+                        sysDeferredMount.set(onMounted);
+                        return false;
+                    }
+                };
+        // Progressive on SystemPlayer -> 0 addTimedTextSource, overlay stays visible
+        AiSubtitleTranslator.applySubtitleMountSafely(
+                sysTarget,
+                "file:///sub/ep1.srt",
+                "application/x-subrip",
+                cachedTwoCues,
+                null,
+                true,
+                false);
+        boolean sysProgOk = sysAddCalls.get() == 0 && sysOverlayVisible.get();
+        // Cache hit #1 on SystemPlayer -> overlay stays visible until async onMounted completes
+        AiSubtitleTranslator.applySubtitleMountSafely(
+                sysTarget,
+                "file:///sub/ep1.srt",
+                "application/x-subrip",
+                cachedTwoCues,
+                null,
+                true,
+                true);
+        boolean sysVisibleBeforeCallback = sysOverlayVisible.get() && sysAddCalls.get() == 1;
+        sysDeferredMount.get().run();
+        boolean sysClearedAfterCallback = !sysOverlayVisible.get();
+        // Cache hit #2 replaces prior AI track index -> still strictly 2 visible tracks (1 embedded
+        // + 1 AI)
+        AiSubtitleTranslator.applySubtitleMountSafely(
+                sysTarget,
+                "file:///sub/ep1.srt",
+                "application/x-subrip",
+                cachedTwoCues,
+                null,
+                true,
+                true);
+        sysDeferredMount.get().run();
+        List<Integer> visibleSysTracks =
+                SystemPlayer.filterVisibleTrackIndices(sysRawTrackIndices, sysReplaced);
+        // Error resilience: if mount throws, overlay MUST stay visible (never cleared!)
+        sysSimulateFailure.set(true);
+        boolean mountOkOnFail =
+                AiSubtitleTranslator.applySubtitleMountSafely(
+                        sysTarget,
+                        "file:///sub/ep1.srt",
+                        "application/x-subrip",
+                        cachedTwoCues,
+                        null,
+                        true,
+                        true);
+        check(
+                sysProgOk
+                        && sysVisibleBeforeCallback
+                        && sysClearedAfterCallback
+                        && visibleSysTracks.size() == 2
+                        && !mountOkOnFail
+                        && sysOverlayVisible.get(),
+                "P1-4: SystemPlayer progressive + cache-hit re-entry + dedupe + error-fallback overlay visibility verified");
     }
 
     private static void test6_AntiSpoilerCutoffAndCopilotPrompts() {
@@ -951,8 +1645,39 @@ public final class AiBetaLabChecks {
                         && "ms-tablet-dock-pos".equals(tabletDockHits.get(0).key),
                 "P2-2: Settings search hides ms-tablet-dock-pos on ordinary bar phones and shows it on tablets/foldables");
 
+        // P2-1: Locked player button-order dialog hides "ai-sub" while preserving its relative slot
+        //       so re-unlocking restores user preference; DetailScreen masks stored mode 2 -> 0
+        //       while locked without erasing stored preference.
+        List<String> lockedButtons =
+                MobileSettingsScreen.visiblePlayerButtonOrderTokens(
+                        Prefs.DEFAULT_PLAYER_BUTTON_ORDER, false);
+        List<String> unlockedButtons =
+                MobileSettingsScreen.visiblePlayerButtonOrderTokens(
+                        Prefs.DEFAULT_PLAYER_BUTTON_ORDER, true);
+        List<String> reorderedLocked = new ArrayList<>(lockedButtons);
+        Collections.swap(reorderedLocked, 0, 1);
+        String mergedOrder =
+                MobileSettingsScreen.mergePlayerButtonOrderPreservingHidden(
+                        Prefs.DEFAULT_PLAYER_BUTTON_ORDER, reorderedLocked, false);
+        check(
+                !lockedButtons.contains("ai-sub")
+                        && unlockedButtons.contains("ai-sub")
+                        && MobileSettingsScreen.visiblePlayerButtonOrderTokens(mergedOrder, true)
+                                .contains("ai-sub")
+                        && !MobileSettingsScreen.visiblePlayerButtonOrderTokens(mergedOrder, false)
+                                .contains("ai-sub"),
+                "P2-1: locked player button order hides ai-sub and preserves its slot for re-unlock recovery");
+
+        check(
+                MobileDetailScreen.effectiveEpisodeCleanMode(2, false) == 0
+                        && "净化".equals(MobileDetailScreen.episodeCleanPillLabel(2, false))
+                        && MobileDetailScreen.nextEpisodeCleanMode(2, false, false) == 1
+                        && MobileDetailScreen.effectiveEpisodeCleanMode(2, true) == 2
+                        && "AI净化".equals(MobileDetailScreen.episodeCleanPillLabel(2, true)),
+                "P2-1: locked DetailScreen masks stored AI clean mode 2 -> local clean without erasing preference for re-unlock");
+
         // Static guards: zero hardcoded third-party CLI client IDs (P1-9), locked-state UI guards
-        // (P1-5), zero UI emoji in AI classes
+        // (P1-5/P2-1), zero UI emoji in AI classes
         String authSrc =
                 Files.readString(
                         root.resolve(
@@ -973,6 +1698,16 @@ public final class AiBetaLabChecks {
                         root.resolve(
                                 "android-mobile/src/main/java/com/pilipala/marcomovie/MobileSettingsScreen.java"),
                         StandardCharsets.UTF_8);
+        String mpvSrc =
+                Files.readString(
+                        root.resolve(
+                                "android-mobile/src/main/java/com/pilipala/marcomovie/MpvPlayer.java"),
+                        StandardCharsets.UTF_8);
+        String sysPlayerSrc =
+                Files.readString(
+                        root.resolve(
+                                "android-mobile/src/main/java/com/pilipala/marcomovie/SystemPlayer.java"),
+                        StandardCharsets.UTF_8);
         check(
                 controlsSrc.contains("final boolean aiUnlocked = AiBetaGate.isUnlocked(a);")
                         && controlsSrc.contains(
@@ -980,8 +1715,12 @@ public final class AiBetaLabChecks {
                         && settingsSrc.contains(
                                 "boolean aiUnlockedForEp = AiBetaGate.isUnlocked(a);")
                         && settingsSrc.contains(
-                                "MobileSettingsIndex.search(\n                                        q,\n                                        AiBetaGate.isUnlocked(a),"),
-                "P1-5: PlaybackControls subtitle sheet, Settings ms-ep-clean, ms-sub-bilingual, and search all enforce AiBetaGate");
+                                "visiblePlayerButtonOrderTokens(savedRaw, aiUnlocked)")
+                        && settingsSrc.contains(
+                                "MobileSettingsIndex.search(\n                                        q,\n                                        AiBetaGate.isUnlocked(a),")
+                        && mpvSrc.contains("public boolean upsertExternalSubtitle(")
+                        && sysPlayerSrc.contains("public boolean upsertExternalSubtitle("),
+                "P1-4/P1-5/P2-1: PlaybackControls, Settings button order, Detail clean, MPV & SystemPlayer overrides all wired");
 
         String[] emojiFreeFiles = {
             "android-mobile/src/main/java/com/pilipala/marcomovie/AiBetaGate.java",

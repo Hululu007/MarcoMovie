@@ -73,6 +73,30 @@ final class MobileRootShell {
     static int settingsSubPage = 0;
     static String settingsHighlightKey = "";
     static String pendingSearchKeyword = "";
+    private static int pendingRelayoutTab = -1;
+    private static int pendingRelayoutScrollY = -1;
+
+    static void recordRelayoutScrollState(int tab, int scrollY) {
+        pendingRelayoutTab = tab;
+        pendingRelayoutScrollY = Math.max(0, scrollY);
+    }
+
+    static int peekPendingRelayoutTab() {
+        return pendingRelayoutTab;
+    }
+
+    static int consumeRelayoutScrollForTab(int tab) {
+        if (pendingRelayoutTab != tab) return -1;
+        int y = pendingRelayoutScrollY;
+        pendingRelayoutTab = -1;
+        pendingRelayoutScrollY = -1;
+        return y;
+    }
+
+    static void clearPendingRelayoutScrollState() {
+        pendingRelayoutTab = -1;
+        pendingRelayoutScrollY = -1;
+    }
 
     final MainActivity a;
     FrameLayout shellRoot;
@@ -119,6 +143,52 @@ final class MobileRootShell {
         boolean widthChanged =
                 prevWidthPx > 0 && Math.abs(nextW - prevWidthPx) >= Math.max(1, widthThresholdPx);
         return orientChanged || dockChanged || widthChanged;
+    }
+
+    /** Pure-JVM viewport-clamped box &amp; scrollability plan for the Dock quick-action menu. */
+    static final class QuickMenuLayout {
+        final int left;
+        final int top;
+        final int width;
+        final int height;
+        final boolean scrollable;
+
+        QuickMenuLayout(int left, int top, int width, int height, boolean scrollable) {
+            this.left = left;
+            this.top = top;
+            this.width = width;
+            this.height = height;
+            this.scrollable = scrollable;
+        }
+    }
+
+    static QuickMenuLayout computeQuickMenuLayout(
+            int dockPos,
+            int rootW,
+            int rootH,
+            int insetL,
+            int insetT,
+            int insetR,
+            int insetB,
+            int ancLeft,
+            int ancTop,
+            int ancW,
+            int ancH,
+            int contentW,
+            int contentH,
+            int padPx,
+            int gapPx) {
+        int safePad = Math.max(0, padPx);
+        int maxW = Math.max(1, rootW - Math.max(0, insetL) - Math.max(0, insetR) - safePad * 2);
+        int maxH = Math.max(1, rootH - Math.max(0, insetT) - Math.max(0, insetB) - safePad * 2);
+        int menuW = Math.min(maxW, Math.max(1, contentW));
+        boolean scrollable = contentH > maxH;
+        int menuH = scrollable ? maxH : Math.max(1, contentH);
+        int[] origin =
+                computeQuickMenuOrigin(
+                        dockPos, rootW, rootH, insetL, insetT, insetR, insetB, ancLeft, ancTop,
+                        ancW, ancH, menuW, menuH, safePad, gapPx);
+        return new QuickMenuLayout(origin[0], origin[1], menuW, menuH, scrollable);
     }
 
     /**
@@ -382,6 +452,7 @@ final class MobileRootShell {
         settingsSubPage = 0;
         settingsHighlightKey = "";
         pendingSearchKeyword = "";
+        clearPendingRelayoutScrollState();
         MobileSearchPage.invalidateSession();
         MobilePosterTransition.clearSavedState(null);
     }
@@ -480,6 +551,15 @@ final class MobileRootShell {
     }
 
     static void show(MainActivity a) {
+        if (a != null && a.mobileShell != null && a.mobileShell.contentContainer != null) {
+            int curScroll = findFirstScrollY(a.mobileShell.contentContainer);
+            if (curScroll > 0) {
+                recordRelayoutScrollState(activeTab, curScroll);
+                if (activeTab == TAB_SETTINGS && a.pendingSettingsScrollY < 0) {
+                    a.pendingSettingsScrollY = curScroll;
+                }
+            }
+        }
         MobileRootShell shell = new MobileRootShell(a);
         a.mobileShell = shell;
         shell.render();
@@ -640,6 +720,16 @@ final class MobileRootShell {
                     (v, scrollX, scrollY, oldScrollX, oldScrollY) -> handleScroll.run());
         } else {
             sv.getViewTreeObserver().addOnScrollChangedListener(handleScroll::run);
+        }
+        final int restoreY = consumeRelayoutScrollForTab(activeTab);
+        if (restoreY > 0) {
+            sv.post(
+                    () -> {
+                        if (UiCompat.isAttached(sv)) {
+                            sv.scrollTo(0, restoreY);
+                            handleScroll.run();
+                        }
+                    });
         }
     }
 
@@ -1529,6 +1619,14 @@ final class MobileRootShell {
         UiCompat.setElevation(card, a.dp(14f));
         card.setClickable(true);
 
+        final ScrollView menuScroll = new ScrollView(a);
+        menuScroll.setTag("dock-quick-menu-scroll");
+        menuScroll.setVerticalScrollBarEnabled(true);
+        menuScroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
+        final LinearLayout itemsBox = a.vertical();
+        menuScroll.addView(itemsBox, new ScrollView.LayoutParams(-1, -2));
+        card.addView(menuScroll, new LinearLayout.LayoutParams(-1, -2));
+
         final List<LinearLayout> rowViews = new ArrayList<>();
         final List<MobileIcons.IconView> rowIcons = new ArrayList<>();
         final List<TextView> rowLabels = new ArrayList<>();
@@ -1563,14 +1661,14 @@ final class MobileRootShell {
                         dismissQuickMenu(false);
                         executeDockQuickAction(act.id);
                     });
-            card.addView(row, new LinearLayout.LayoutParams(menuW, -2));
+            itemsBox.addView(row, new LinearLayout.LayoutParams(menuW, -2));
             rowViews.add(row);
             rowIcons.add(ic);
             rowLabels.add(tv);
         }
 
-        // Compute anchored position inward from whichever edge hosts the Dock, clamped strictly to
-        // real viewport bounds and live system insets (never assuming fixed 240dp height).
+        // Measure unconstrained natural item height so low-height split-screen clamps the outer
+        // card height cleanly while menuScroll scrolls smoothly to the very last action row.
         int[] rootLoc = new int[2];
         int[] ancLoc = new int[2];
         shellRoot.getLocationOnScreen(rootLoc);
@@ -1583,17 +1681,16 @@ final class MobileRootShell {
         int insetB = Math.max(a.navigationBarHeight(), lastInsetBottom);
         int pad = a.dp(12);
         int maxMenuW = Math.max(a.dp(120), rootW - insetL - insetR - pad * 2);
-        int maxMenuH = Math.max(a.dp(64), rootH - insetT - insetB - pad * 2);
-        card.measure(
+        itemsBox.measure(
                 View.MeasureSpec.makeMeasureSpec(maxMenuW, View.MeasureSpec.AT_MOST),
-                View.MeasureSpec.makeMeasureSpec(maxMenuH, View.MeasureSpec.AT_MOST));
-        int actualMenuW = Math.min(maxMenuW, Math.max(menuW, card.getMeasuredWidth()));
-        int actualMenuH = Math.min(maxMenuH, Math.max(a.dp(48), card.getMeasuredHeight()));
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        int naturalContentW = Math.max(menuW, itemsBox.getMeasuredWidth()) + a.dp(12);
+        int naturalContentH = Math.max(a.dp(48), itemsBox.getMeasuredHeight()) + a.dp(12);
 
         int ancLeftX = ancLoc[0] - rootLoc[0];
         int ancTopY = ancLoc[1] - rootLoc[1];
-        int[] pos =
-                computeQuickMenuOrigin(
+        QuickMenuLayout layout =
+                computeQuickMenuLayout(
                         activeDockPosition,
                         rootW,
                         rootH,
@@ -1605,15 +1702,18 @@ final class MobileRootShell {
                         ancTopY,
                         anchor.getWidth(),
                         anchor.getHeight(),
-                        actualMenuW,
-                        actualMenuH,
+                        naturalContentW,
+                        naturalContentH,
                         pad,
                         a.dp(12));
 
         FrameLayout.LayoutParams clp =
-                new FrameLayout.LayoutParams(-2, -2, Gravity.LEFT | Gravity.TOP);
-        clp.leftMargin = pos[0];
-        clp.topMargin = pos[1];
+                new FrameLayout.LayoutParams(
+                        layout.width,
+                        layout.scrollable ? layout.height : -2,
+                        Gravity.LEFT | Gravity.TOP);
+        clp.leftMargin = layout.left;
+        clp.topMargin = layout.top;
         overlay.addView(card, clp);
         shellRoot.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
         activeQuickMenuOverlay = overlay;
@@ -1926,6 +2026,9 @@ final class MobileRootShell {
             a.pendingSettingsScrollY = -1;
         }
         int prevTab = lastRenderedTab;
+        if (prevTab >= 0 && prevTab != index) {
+            clearPendingRelayoutScrollState();
+        }
         activeTab = index;
         lastRenderedTab = index;
         MobileShell.syncFromRootTab(index);

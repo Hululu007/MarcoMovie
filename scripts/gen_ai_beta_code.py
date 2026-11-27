@@ -355,11 +355,15 @@ def _evaluate_platform_activation(
 ) -> Dict[str, object]:
     """Evaluates activation using each platform's ACTUAL released client rules."""
     if not signature_valid:
-        return {"ok": False, "reason": "Ed25519 signature invalid"}
+        return {"ok": False, "status": "invalid_signature", "reason": "Ed25519 signature invalid"}
     if not isinstance(claims, dict):
-        return {"ok": False, "reason": "Payload JSON invalid"}
+        return {"ok": False, "status": "invalid_payload", "reason": "Payload JSON invalid"}
     if claims.get("v") != 1:
-        return {"ok": False, "reason": f"Unsupported version v={claims.get('v')}"}
+        return {
+            "ok": False,
+            "status": "unsupported_version",
+            "reason": f"Unsupported version v={claims.get('v')}",
+        }
 
     raw_plat = str(claims.get("plat", "all") or "all").strip().lower()
     if target_platform in ("windows", "ios"):
@@ -372,22 +376,51 @@ def _evaluate_platform_activation(
         plat_ok = (not parts) or ("all" in parts) or (target_platform in parts)
 
     if not plat_ok:
-        return {"ok": False, "reason": f"Platform '{raw_plat}' rejected by {target_platform} client"}
-
-    min_vc = int(claims.get("min_vc", 0) or 0)
-    if target_platform == "android" and min_vc > 0 and app_version_code > 0 and app_version_code < min_vc:
-        return {"ok": False, "reason": f"App versionCode {app_version_code} < min_vc {min_vc}"}
+        return {
+            "ok": False,
+            "status": "wrong_platform",
+            "reason": f"Platform '{raw_plat}' rejected by {target_platform} client",
+        }
 
     exp = int(claims.get("exp", 0) or 0)
     if exp > 0 and now_sec > exp:
-        return {"ok": False, "reason": "Passcode expired"}
+        return {"ok": False, "status": "expired", "reason": "Passcode expired"}
 
-    note = ""
+    min_vc = int(claims.get("min_vc", 0) or 0)
+    if target_platform == "android" and min_vc > 0:
+        if app_version_code <= 0:
+            return {
+                "ok": False,
+                "status": "unknown_version",
+                "requires_app_version_code": True,
+                "min_vc": min_vc,
+                "reason": (
+                    f"Requires --app-version-code to verify min_vc={min_vc} "
+                    "(cannot report activatable without target version)"
+                ),
+            }
+        if app_version_code < min_vc:
+            return {
+                "ok": False,
+                "status": "version_too_low",
+                "min_vc": min_vc,
+                "reason": f"App versionCode {app_version_code} < min_vc {min_vc}",
+            }
+
+    warnings: List[str] = []
     if target_platform in ("windows", "ios") and min_vc > 0:
-        note = "min_vc is ignored by released Windows/iOS verifier"
-    out: Dict[str, object] = {"ok": True, "reason": "Activatable"}
-    if note:
-        out["warning"] = note
+        warnings.append("min_vc is ignored by released Windows/iOS verifier")
+    if target_platform == "windows":
+        warnings.append(
+            "Released Windows 0.7.3 requires single-line token (wrapping inside signature truncates)"
+        )
+    if target_platform == "ios":
+        warnings.append(
+            "iOS alignment follows planned Flutter verifier reuse; not yet verified against a shipped iOS build"
+        )
+    out: Dict[str, object] = {"ok": True, "status": "activatable", "reason": "Activatable"}
+    if warnings:
+        out["warning"] = "; ".join(warnings)
     return out
 
 

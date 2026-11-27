@@ -102,6 +102,10 @@ final class PlaybackControls {
         }
     }
 
+    boolean hasLiveAiSubtitles() {
+        return liveAiSubtitleCues != null && !liveAiSubtitleCues.isEmpty();
+    }
+
     void clearLiveAiSubtitles() {
         this.liveAiSubtitleCues = null;
         this.liveAiSubtitleTranslations = null;
@@ -2770,31 +2774,55 @@ final class PlaybackControls {
             cleanNames.add(raw == null ? ("字幕轨 " + (i + 1)) : raw);
         }
 
+        final boolean liveAiActive = hasLiveAiSubtitles();
+        boolean hasMountedAiTrack = false;
+        for (String name : cleanNames) {
+            if (name != null && name.startsWith("AI ")) {
+                hasMountedAiTrack = true;
+                break;
+            }
+        }
+
         // Row 0: 关闭字幕
         addDarkCheckRow(
                 container,
                 "关闭字幕",
-                selectedIdx < 0,
+                !liveAiActive && selectedIdx < 0,
                 p.accent,
                 () -> {
                     selectAndRememberSubtitle(-2, null);
                     if (dlgRef[0] != null) dlgRef[0].dismiss();
                 });
 
+        if (liveAiActive && !hasMountedAiTrack) {
+            addDarkCheckRow(
+                    container,
+                    AiSubtitleTranslator.AI_TRACK_NAME,
+                    true,
+                    p.accent,
+                    () -> {
+                        if (dlgRef[0] != null) dlgRef[0].dismiss();
+                    });
+        }
+
         for (int i = 0; i < cleanNames.size(); i++) {
             final int trackIdx = i;
             final String label = cleanNames.get(i);
+            boolean rowSelected =
+                    liveAiActive
+                            ? (label != null && label.startsWith("AI "))
+                            : (trackIdx == selectedIdx);
             addDarkCheckRow(
                     container,
                     label,
-                    trackIdx == selectedIdx,
+                    rowSelected,
                     p.accent,
                     () -> {
                         selectAndRememberSubtitle(trackIdx, label);
                         if (dlgRef[0] != null) dlgRef[0].dismiss();
                     });
         }
-        if (cleanNames.isEmpty()) {
+        if (cleanNames.isEmpty() && !liveAiActive) {
             TextView empty = a.text("当前视频流未包含内封字幕轨", 12.5f, 0xFF949BA8);
             empty.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
             container.addView(empty, new LinearLayout.LayoutParams(-1, -2));

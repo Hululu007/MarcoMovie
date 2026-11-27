@@ -1653,12 +1653,25 @@ public class MoviePlayer {
     }
 
     public void addExternalSubtitle(Uri subtitle, String name, String mime) {
-        upsertExternalSubtitle(subtitle, name, mime, true);
+        upsertExternalSubtitle(subtitle, name, mime, true, null);
     }
 
     public void upsertExternalSubtitle(
             Uri subtitle, String name, String mime, boolean reloadMediaSource) {
-        onMain(
+        upsertExternalSubtitle(subtitle, name, mime, reloadMediaSource, null);
+    }
+
+    /**
+     * Mounts or updates an external subtitle track without duplicating existing AI tracks.
+     *
+     * @return {@code true} when the engine synchronously mounted and selected the track (caller may
+     *     clear live overlay); {@code false} when the caller should keep live overlay active (e.g.,
+     *     progressive non-reloading Media3 updates or async SystemPlayer loading until {@code
+     *     onMounted} runs).
+     */
+    public boolean upsertExternalSubtitle(
+            Uri subtitle, String name, String mime, boolean reloadMediaSource, Runnable onMounted) {
+        return onMain(
                 () -> {
                     check();
                     if (mediaSourceFactory == null) throw new IllegalStateException("请等待视频开始播放");
@@ -1669,8 +1682,10 @@ public class MoviePlayer {
                         exo.setMediaSource(playbackSource(uri), position);
                         exo.prepare();
                         exo.setPlayWhenReady(play);
+                        if (onMounted != null) onMounted.run();
+                        return true;
                     }
-                    return null;
+                    return false;
                 });
     }
 

@@ -862,7 +862,7 @@ final class LiveController {
 
         List<String> labels = new java.util.ArrayList<>();
         final List<LiveEpgService.Program> actionPrograms = new java.util.ArrayList<>();
-        labels.add("🔴 返回实时直播 · " + channel.name);
+        labels.add("返回实时直播 · " + channel.name);
         actionPrograms.add(null);
         if (current != null) {
             labels.add("正在播出 · " + current.timeRangeLabel() + "  " + current.title);
@@ -873,7 +873,7 @@ final class LiveController {
             actionPrograms.add(null);
         }
         for (LiveEpgService.Program p : past) {
-            labels.add((canCatchup ? "⏪ 回看 · " : "已播 · ") + p.dayAndTimeLabel() + "  " + p.title);
+            labels.add((canCatchup ? "回看 · " : "已播 · ") + p.dayAndTimeLabel() + "  " + p.title);
             actionPrograms.add(canCatchup ? p : null);
         }
         if (labels.size() <= 1) {

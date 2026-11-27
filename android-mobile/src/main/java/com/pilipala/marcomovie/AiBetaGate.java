@@ -216,9 +216,6 @@ final class AiBetaGate {
             sb.append(tag.isEmpty() ? "内测口令" : tag);
             sb.append(" · ").append(platformScopeLabel());
             sb.append(sharedChannel ? " · 频道通用" : " · 专属内测");
-            if (experimentalOAuth) {
-                sb.append(" · 含实验性 OAuth");
-            }
             sb.append(" · ");
             sb.append(expiresAtEpochSec <= 0L ? "永久有效" : ("有效至 " + expireDateLabel()));
             return sb.toString();

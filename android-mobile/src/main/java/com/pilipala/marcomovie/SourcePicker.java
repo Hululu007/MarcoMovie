@@ -1509,7 +1509,7 @@ final class SourcePicker {
             final String activeId) {
         String[] actions =
                 new String[] {
-                    "⚡ 合并多个已添加源并自动分组（" + mergeable.size() + " 个可选）", "↻ 立即刷新全部在线订阅源", "删除不再使用的订阅源"
+                    "合并多个已添加源并自动分组（" + mergeable.size() + " 个可选）", "立即刷新全部在线订阅源", "删除不再使用的订阅源"
                 };
         new AppDialog.Builder(a)
                 .wrapChoices()
@@ -1614,7 +1614,7 @@ final class SourcePicker {
         boolean canMergeAll = rows.length() >= 2;
         String[] names = new String[rows.length() + (canMergeAll ? 1 : 0)];
         if (canMergeAll) {
-            names[0] = "⚡ 勾选多个子仓库合并并自动分组…";
+            names[0] = "勾选多个子仓库合并并自动分组…";
         }
         for (int i = 0; i < rows.length(); i++) {
             names[i + (canMergeAll ? 1 : 0)] = rows.optJSONObject(i).optString("name");

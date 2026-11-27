@@ -2156,6 +2156,61 @@ public final class MobileUiRedesignChecks {
                         && qmShort[1] + 260 <= 420 - 28 - 12,
                 "Pillar 10 dock (P2-2): quick-action menu clamps strictly inside compact viewport & insets");
 
+        MobileRootShell.QuickMenuLayout compactQm =
+                MobileRootShell.computeQuickMenuLayout(
+                        MobileRootShell.DOCK_POS_BOTTOM,
+                        1080,
+                        260,
+                        0,
+                        24,
+                        0,
+                        24,
+                        400,
+                        200,
+                        120,
+                        60,
+                        200,
+                        420,
+                        12,
+                        12);
+        MobileRootShell.QuickMenuLayout spaciousQm =
+                MobileRootShell.computeQuickMenuLayout(
+                        MobileRootShell.DOCK_POS_BOTTOM,
+                        1080,
+                        900,
+                        0,
+                        24,
+                        0,
+                        24,
+                        400,
+                        820,
+                        120,
+                        60,
+                        200,
+                        220,
+                        12,
+                        12);
+        check(
+                compactQm.scrollable
+                        && compactQm.height == 260 - 24 - 24 - 24
+                        && compactQm.top >= 36
+                        && compactQm.top + compactQm.height <= 260 - 24 - 12
+                        && !spaciousQm.scrollable
+                        && spaciousQm.height == 220,
+                "Pillar 10 dock (P2-3): low-height split-screen quick menu clamps height and enables scrolling to last item");
+
+        MobileRootShell.clearPendingRelayoutScrollState();
+        MobileRootShell.recordRelayoutScrollState(MobileRootShell.TAB_LIBRARY, 640);
+        check(
+                MobileRootShell.peekPendingRelayoutTab() == MobileRootShell.TAB_LIBRARY
+                        && MobileRootShell.consumeRelayoutScrollForTab(MobileRootShell.TAB_HOME)
+                                == -1
+                        && MobileRootShell.consumeRelayoutScrollForTab(MobileRootShell.TAB_LIBRARY)
+                                == 640
+                        && MobileRootShell.consumeRelayoutScrollForTab(MobileRootShell.TAB_LIBRARY)
+                                == -1,
+                "Pillar 10 dock (P2-3): same-orientation fold relayout preserves active tab and scroll position");
+
         String settingsSrc =
                 readUtf8(
                         root,
@@ -2176,6 +2231,18 @@ public final class MobileUiRedesignChecks {
                 readUtf8(
                         root,
                         "android-mobile/src/main/java/com/pilipala/marcomovie/DlnaCastClient.java");
+        String liveCtrlSrc =
+                readUtf8(
+                        root,
+                        "android-mobile/src/main/java/com/pilipala/marcomovie/LiveController.java");
+        String sourcePickerSrc =
+                readUtf8(
+                        root,
+                        "android-mobile/src/main/java/com/pilipala/marcomovie/SourcePicker.java");
+        String liveQualitySrc =
+                readUtf8(
+                        root,
+                        "android-mobile/src/main/java/com/pilipala/marcomovie/LiveQualityPolicy.java");
         check(
                 settingsSrc.contains("MobileRootShell.isTabletOrFoldable(a)")
                         && settingsSrc.contains("\"ms-tablet-dock-pos\"")
@@ -2184,17 +2251,23 @@ public final class MobileUiRedesignChecks {
                         && shellSrc.contains("DOCK_POS_LEFT")
                         && shellSrc.contains("DOCK_POS_RIGHT")
                         && shellSrc.contains("mobile-side-rail-scroll")
+                        && shellSrc.contains("dock-quick-menu-scroll")
+                        && shellSrc.contains("recordRelayoutScrollState(activeTab, curScroll)")
                         && shellSrc.contains("dlp.leftMargin = lastInsetLeft")
                         && shellSrc.contains("int cPadL = rightRail ? lastInsetLeft : 0;")
                         && homeSrc.contains("void updatePageWidth(int newWidthPx)"),
-                "Pillar 10 dock (P2-2): Settings, 4-edge insets, scrollable side rail, and HeroPagerView width sync verified");
+                "Pillar 10 dock (P2-2/P2-3): Settings, 4-edge insets, scrollable side rail & quick menu, fold scroll preservation, and HeroPagerView width sync verified");
         check(
                 !sourceCtrlSrc.contains("\uD83D\uDCCB")
                         && !sourceCtrlSrc.contains("\uD83D\uDCC2")
                         && !sourceCtrlSrc.contains("\uD83C\uDF10")
                         && !sourceCtrlSrc.contains("\uD83D\uDCC5")
-                        && !dlnaSrc.contains("\uD83D\uDCFA"),
-                "Pillar 10 icons (P2-4): live import dialog & DLNA cast picker replaced emojis with MobileIcons vectors");
+                        && !dlnaSrc.contains("\uD83D\uDCFA")
+                        && !liveCtrlSrc.contains("\uD83D\uDD34")
+                        && !liveCtrlSrc.contains("\u23EA")
+                        && !sourcePickerSrc.contains("\u26A1")
+                        && !liveQualitySrc.contains("\u2728"),
+                "Pillar 10 icons (P2-4): live import, DLNA cast, mobile EPG, live merged source & multi-warehouse switcher have zero UI emojis");
     }
 
     public static void main(String[] args) throws Exception {

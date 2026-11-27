@@ -17,15 +17,18 @@ import java.util.regex.Pattern;
 final class AppLog {
     static final int CAPACITY = 200;
     private static final ArrayDeque<String> ENTRIES = new ArrayDeque<>(CAPACITY);
+    private static final int MAX_REGISTERED_SECRETS = 16;
+    private static final ArrayDeque<String> REGISTERED_SECRETS =
+            new ArrayDeque<>(MAX_REGISTERED_SECRETS);
     private static final Method ANDROID_INFO;
     private static final Method ANDROID_WARN;
 
     private static final Pattern JSON_SECRET_RE =
             Pattern.compile(
-                    "(?i)(\"(?:access_token|refresh_token|id_token|api_key|apikey|key|secret|token|authorization|device_code|user_code|code_verifier|client_secret)\"\\s*:\\s*\")([^\"]*)(\")");
+                    "(?i)(\\\\?\"(?:access_token|refresh_token|id_token|api_key|apikey|api-key|x-api-key|x-goog-api-key|x_api_key|x_goog_api_key|key|secret|token|authorization|proxy-authorization|cookie|set-cookie|device_code|user_code|code_verifier|client_secret)\\\\?\"\\s*:\\s*\\\\?\")([^\"\\\\]*)(\\\\?\")");
     private static final Pattern AUTH_HEADER_RE =
             Pattern.compile(
-                    "(?i)((?:authorization|x-api-key|x-goog-api-key|api-key|cookie)\\s*[:=]\\s*(?:Bearer\\s+|Basic\\s+)?)([^\\s,;\"'}\\]]+)");
+                    "(?i)(['\"]?(?:authorization|proxy-authorization|x-api-key|x-goog-api-key|api-key|cookie|set-cookie)['\"]?\\s*[:=]\\s*['\"]?(?:Bearer\\s+|Basic\\s+)?)([^\\s,;\"'}\\]]+)");
     private static final Pattern BEARER_RE = Pattern.compile("(?i)(Bearer\\s+)[A-Za-z0-9._~+/=-]+");
     private static final Pattern FORM_SECRET_RE =
             Pattern.compile(
@@ -50,7 +53,44 @@ final class AppLog {
 
     private AppLog() {}
 
-    /** Redacts API keys, OAuth tokens, native auth headers, and passcodes before logging. */
+    /**
+     * Registers an active session credential in memory (never written to disk) so even short or
+     * non-prefixed custom gateway API keys are scrubbed from logs, exception causes, and diagnostic
+     * exports.
+     */
+    static void registerSecretForRedaction(String secret) {
+        if (secret == null) return;
+        String trimmed = secret.trim();
+        if (trimmed.length() < 3) return;
+        synchronized (REGISTERED_SECRETS) {
+            REGISTERED_SECRETS.remove(trimmed);
+            while (REGISTERED_SECRETS.size() >= MAX_REGISTERED_SECRETS) {
+                REGISTERED_SECRETS.pollFirst();
+            }
+            REGISTERED_SECRETS.addLast(trimmed);
+        }
+    }
+
+    static void clearRegisteredSecrets() {
+        synchronized (REGISTERED_SECRETS) {
+            REGISTERED_SECRETS.clear();
+        }
+    }
+
+    static String redactKnownSecret(String raw, String knownSecret) {
+        if (raw == null || raw.isEmpty() || knownSecret == null) return raw == null ? "" : raw;
+        String trimmed = knownSecret.trim();
+        if (trimmed.length() < 3) return raw;
+        if (trimmed.length() >= 4) {
+            return raw.replace(trimmed, "[REDACTED_KEY]");
+        }
+        // For 3-char custom secrets, redact token-bounded occurrences so ordinary words stay intact
+        return Pattern.compile("(?<![A-Za-z0-9_-])" + Pattern.quote(trimmed) + "(?![A-Za-z0-9_-])")
+                .matcher(raw)
+                .replaceAll("[REDACTED_KEY]");
+    }
+
+    /** Redacts API keys, OAuth tokens, native auth headers, short custom keys, and passcodes. */
     static String sanitize(String raw) {
         if (raw == null || raw.isEmpty()) return "";
         String s = JSON_SECRET_RE.matcher(raw).replaceAll("$1[REDACTED]$3");
@@ -60,6 +100,15 @@ final class AppLog {
         s = BARE_SK_KEY_RE.matcher(s).replaceAll("[REDACTED_KEY]");
         s = BARE_GEMINI_KEY_RE.matcher(s).replaceAll("[REDACTED_KEY]");
         s = PASSCODE_TOKEN_RE.matcher(s).replaceAll("MMAILAB1.[REDACTED]");
+        List<String> secretsSnap;
+        synchronized (REGISTERED_SECRETS) {
+            secretsSnap = REGISTERED_SECRETS.isEmpty() ? null : new ArrayList<>(REGISTERED_SECRETS);
+        }
+        if (secretsSnap != null) {
+            for (int i = secretsSnap.size() - 1; i >= 0; i--) {
+                s = redactKnownSecret(s, secretsSnap.get(i));
+            }
+        }
         return s;
     }
 
@@ -102,14 +151,19 @@ final class AppLog {
             String detail = sanitize(error.getMessage());
             if (!detail.isEmpty()) sb.append(": ").append(detail);
             Throwable cause = error.getCause();
-            if (cause != null && cause != error) {
+            Throwable prev = error;
+            int depth = 0;
+            while (cause != null && cause != prev && depth < 4) {
                 String cDetail = sanitize(cause.getMessage());
-                if (!cDetail.isEmpty() && !detail.contains(cDetail)) {
+                if (!cDetail.isEmpty()) {
                     sb.append(" <- ")
                             .append(cause.getClass().getSimpleName())
                             .append(": ")
                             .append(cDetail);
                 }
+                prev = cause;
+                cause = cause.getCause();
+                depth++;
             }
             sb.append(')');
         }

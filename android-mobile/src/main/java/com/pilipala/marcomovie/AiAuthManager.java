@@ -52,6 +52,7 @@ final class AiAuthManager {
     static final String KEY_OAUTH_BUNDLE_PREFIX = "ai_oauth_bundle_";
     static final String KEY_OAUTH_SESSION_VER_PREFIX = "ai_oauth_ver_";
     static final String KEY_OAUTH_CLIENT_ID_PREFIX = "ai_oauth_client_id_";
+    static final String KEY_AUTH_SELECTION_EPOCH = "ai_auth_selection_epoch";
     static final String KEY_OPENAI_EXPERIMENTAL_CONSENT = "ai_openai_oauth_consent";
 
     static final String SCOPED_API_KEY_PREFIX = "ai_api_key_v2:";
@@ -69,14 +70,25 @@ final class AiAuthManager {
     static final String OAUTH_KIMI_CODE = "kimi_code";
     static final String OAUTH_OPENAI_EXPERIMENTAL = "openai_oauth";
 
+    /** Shipped 0.7.3 OAuth UI provider list (unverified experimental paths withdrawn in 0.7.3). */
+    static final String[] SHIPPED_OAUTH_PROVIDER_IDS = {OAUTH_OPENROUTER};
+
+    static final String[] SHIPPED_OAUTH_PROVIDER_LABELS = {"OpenRouter 官方账号登录 (PKCE)"};
+
     static final String[] OAUTH_PROVIDER_IDS = {
         OAUTH_OPENROUTER, OAUTH_KIMI_CODE, OAUTH_OPENAI_EXPERIMENTAL
     };
     static final String[] OAUTH_PROVIDER_LABELS = {
-        "OpenRouter 官方账号登录 (PKCE)",
-        "Kimi Code 设备码登录 (需自备 Client ID)",
-        "OpenAI 订阅账号登录 (实验性 · 需自备 Client ID)"
+        "OpenRouter 官方账号登录 (PKCE)", "Kimi Code 设备码登录 (当前版本已撤下)", "OpenAI 订阅账号登录 (当前版本已撤下)"
     };
+
+    static boolean isShippedOAuthProvider(String providerId) {
+        return OAUTH_OPENROUTER.equals(providerId);
+    }
+
+    static boolean providerRequiresClientId(String providerId) {
+        return OAUTH_KIMI_CODE.equals(providerId) || OAUTH_OPENAI_EXPERIMENTAL.equals(providerId);
+    }
 
     // Official OAuth endpoints (all registered in scripts/check_public_content.py ALLOWED_HOSTS)
     static final String OPENROUTER_AUTH_URL = "https://openrouter.ai/auth";
@@ -110,6 +122,9 @@ final class AiAuthManager {
     /** Fast non-blocking state lock for atomic session version checks and Store commits. */
     private static final ConcurrentHashMap<String, Object> SESSION_STATE_LOCKS =
             new ConcurrentHashMap<>();
+
+    /** Global lock coordinating active auth mode/provider selection epochs and OAuth commits. */
+    private static final Object AUTH_SELECTION_LOCK = new Object();
 
     private AiAuthManager() {}
 
@@ -394,6 +409,128 @@ final class AiAuthManager {
         return loadScopedApiKey(new SharedPrefsStore(a.secretsPrefs()), provider, effectiveBaseUrl);
     }
 
+    static boolean hasLegacyUnboundApiKey(Store secStore) {
+        if (secStore == null) return false;
+        return !secStore.getString(Prefs.SECRET_AI_API_KEY, "").trim().isEmpty();
+    }
+
+    static boolean hasLegacyUnboundApiKey(MainActivity a) {
+        return a != null && hasLegacyUnboundApiKey(new SharedPrefsStore(a.secretsPrefs()));
+    }
+
+    static String legacyUnboundApiKeyNotice() {
+        return "检测到升级前的旧版未绑定 API Key。为防止跨服务商或跨网关泄露，请为当前接口重新录入 API Key 并保存（保存后自动清除旧版全局密钥）。";
+    }
+
+    /**
+     * Pure-JVM BYOK form controller enforcing immediate key reload/clear whenever the selected
+     * provider OR effective Base URL origin changes, preventing prefilled keys from leaking onto a
+     * newly typed gateway URL on Save or Test.
+     */
+    static final class ByokFormState {
+        String provider;
+        String customBaseUrl;
+        String boundOrigin;
+        String keyText;
+
+        ByokFormState(Store secStore, String initialProvider, String initialCustomBaseUrl) {
+            this.provider =
+                    initialProvider == null || initialProvider.trim().isEmpty()
+                            ? "deepseek"
+                            : initialProvider.trim().toLowerCase(Locale.ROOT);
+            this.customBaseUrl = initialCustomBaseUrl == null ? "" : initialCustomBaseUrl.trim();
+            String effBase = AiAssistantService.resolveBaseUrl(this.provider, this.customBaseUrl);
+            this.boundOrigin = canonicalOrigin(effBase);
+            this.keyText = loadScopedApiKey(secStore, this.provider, effBase);
+        }
+
+        /** Updates provider, clears custom Base URL, and immediately loads that provider's key. */
+        boolean onProviderChanged(Store secStore, String nextProvider) {
+            String next =
+                    nextProvider == null || nextProvider.trim().isEmpty()
+                            ? "deepseek"
+                            : nextProvider.trim().toLowerCase(Locale.ROOT);
+            this.provider = next;
+            this.customBaseUrl = "";
+            String effBase = AiAssistantService.resolveBaseUrl(this.provider, "");
+            this.boundOrigin = canonicalOrigin(effBase);
+            this.keyText = loadScopedApiKey(secStore, this.provider, effBase);
+            return true;
+        }
+
+        /**
+         * Updates custom Base URL; whenever the canonical origin changes (including malformed URLs
+         * with empty origin), immediately reloads the key bound to the new origin or clears {@link
+         * #keyText} to {@code ""} so an old origin's key can NEVER be saved or sent to a new host.
+         *
+         * @return {@code true} if origin changed and the UI key field must be refreshed.
+         */
+        boolean onBaseUrlChanged(Store secStore, String rawBaseUrl) {
+            this.customBaseUrl = rawBaseUrl == null ? "" : rawBaseUrl.trim();
+            String effBase = AiAssistantService.resolveBaseUrl(this.provider, this.customBaseUrl);
+            String nextOrigin = canonicalOrigin(effBase);
+            if (!nextOrigin.equals(this.boundOrigin)) {
+                this.boundOrigin = nextOrigin;
+                this.keyText =
+                        nextOrigin.isEmpty()
+                                ? ""
+                                : loadScopedApiKey(secStore, this.provider, effBase);
+                return true;
+            }
+            return false;
+        }
+
+        void onKeyEdited(String typedKey) {
+            this.keyText = typedKey == null ? "" : typedKey.trim();
+        }
+
+        String effectiveBaseUrl() {
+            return AiAssistantService.resolveBaseUrl(this.provider, this.customBaseUrl);
+        }
+
+        boolean needsLegacyReentryNotice(Store secStore) {
+            return !"ollama".equals(this.provider)
+                    && (this.keyText == null || this.keyText.trim().isEmpty())
+                    && hasLegacyUnboundApiKey(secStore);
+        }
+
+        /**
+         * Validates and persists current form state into {@code secStore} strictly under the
+         * current {@code (provider, canonicalOrigin)} binding.
+         */
+        String commitToStore(Store secStore, Store authStore) throws IOException {
+            String rawBase = this.customBaseUrl == null ? "" : this.customBaseUrl.trim();
+            String safeCustomBase =
+                    rawBase.isEmpty()
+                            ? ""
+                            : (Prefs.sanitizeHttpUrl(rawBase) == null ? "" : rawBase);
+            if (!rawBase.isEmpty() && safeCustomBase.isEmpty()) {
+                throw new IOException("接口地址格式无效，请输入规范的 HTTP/HTTPS URL");
+            }
+            String effBase = AiAssistantService.resolveBaseUrl(this.provider, safeCustomBase);
+            String targetOrigin = canonicalOrigin(effBase);
+            // Defensive guard: if origin diverged from boundOrigin without sync, reload instead of
+            // ever carrying an old origin's key forward.
+            if (!targetOrigin.equals(this.boundOrigin)) {
+                this.boundOrigin = targetOrigin;
+                this.keyText =
+                        targetOrigin.isEmpty()
+                                ? ""
+                                : loadScopedApiKey(secStore, this.provider, effBase);
+            }
+            String keyVal = this.keyText == null ? "" : this.keyText.trim();
+            validateTransportSecurity(effBase, keyVal);
+            if (authStore != null) {
+                setAuthMode(authStore, AUTH_MODE_API_KEY);
+            }
+            saveScopedApiKey(secStore, this.provider, effBase, keyVal);
+            if (!keyVal.isEmpty()) {
+                AppLog.registerSecretForRedaction(keyVal);
+            }
+            return safeCustomBase;
+        }
+    }
+
     /** Pure-JVM BYOK request resolver enforcing provider+origin key isolation and HTTPS check. */
     static ResolvedRequest resolveByokRequest(
             Store secStore, String provider, String customBaseUrl, String model)
@@ -406,9 +543,15 @@ final class AiAuthManager {
         if (base.isEmpty()) throw new IOException("未配置 AI 接口地址");
         String key = loadScopedApiKey(secStore, prov, base);
         if (!"ollama".equals(prov) && key.isEmpty()) {
+            if (hasLegacyUnboundApiKey(secStore)) {
+                throw new IOException("检测到升级前的旧版未绑定 API Key，请在「AI 认证中心」为当前服务商与接口地址重新录入并保存");
+            }
             throw new IOException("请先为当前服务商与接口地址填写 API Key");
         }
         validateTransportSecurity(base, key);
+        if (!key.isEmpty()) {
+            AppLog.registerSecretForRedaction(key);
+        }
         String effModel =
                 model == null || model.trim().isEmpty()
                         ? AiAssistantService.defaultModel(prov)
@@ -469,12 +612,31 @@ final class AiAuthManager {
         return AUTH_MODE_OAUTH.equals(m) ? AUTH_MODE_OAUTH : AUTH_MODE_API_KEY;
     }
 
+    static long getAuthSelectionEpoch(Store store) {
+        if (store == null) return 0L;
+        synchronized (AUTH_SELECTION_LOCK) {
+            return parseLongSafe(store.getString(KEY_AUTH_SELECTION_EPOCH, "0"));
+        }
+    }
+
+    private static long bumpAuthSelectionEpochLocked(Store store) {
+        long next = parseLongSafe(store.getString(KEY_AUTH_SELECTION_EPOCH, "0")) + 1L;
+        store.putString(KEY_AUTH_SELECTION_EPOCH, Long.toString(next));
+        return next;
+    }
+
+    static long setAuthMode(Store store, String mode) {
+        if (store == null) return 0L;
+        String normalized = AUTH_MODE_OAUTH.equals(mode) ? AUTH_MODE_OAUTH : AUTH_MODE_API_KEY;
+        synchronized (AUTH_SELECTION_LOCK) {
+            store.putString(KEY_AUTH_MODE, normalized);
+            return bumpAuthSelectionEpochLocked(store);
+        }
+    }
+
     static void setAuthMode(Context ctx, String mode) {
         if (ctx == null) return;
-        store(ctx)
-                .putString(
-                        KEY_AUTH_MODE,
-                        AUTH_MODE_OAUTH.equals(mode) ? AUTH_MODE_OAUTH : AUTH_MODE_API_KEY);
+        setAuthMode(store(ctx), mode);
     }
 
     static String activeOAuthProvider(Context ctx) {
@@ -491,9 +653,162 @@ final class AiAuthManager {
         return OAUTH_OPENROUTER;
     }
 
+    static long setActiveOAuthProvider(Store store, String providerId) {
+        if (store == null || providerId == null) return 0L;
+        synchronized (AUTH_SELECTION_LOCK) {
+            store.putString(KEY_OAUTH_PROVIDER, providerId);
+            return bumpAuthSelectionEpochLocked(store);
+        }
+    }
+
     static void setActiveOAuthProvider(Context ctx, String providerId) {
         if (ctx == null || providerId == null) return;
-        store(ctx).putString(KEY_OAUTH_PROVIDER, providerId);
+        setActiveOAuthProvider(store(ctx), providerId);
+    }
+
+    /**
+     * Pure-JVM OAuth provider switcher guaranteeing each provider's Client ID is saved strictly
+     * under its own key before switching and loading the destination provider's independent Client
+     * ID.
+     */
+    static final class OAuthProviderSwitchState {
+        String currentProviderId;
+        String clientIdInput;
+
+        OAuthProviderSwitchState(Store store, String initialProviderId) {
+            this.currentProviderId =
+                    initialProviderId == null || initialProviderId.trim().isEmpty()
+                            ? OAUTH_OPENROUTER
+                            : initialProviderId.trim();
+            this.clientIdInput =
+                    providerRequiresClientId(this.currentProviderId)
+                            ? oauthClientId(store, this.currentProviderId)
+                            : "";
+        }
+
+        void onClientIdTyped(String typed) {
+            this.clientIdInput = typed == null ? "" : typed.trim();
+        }
+
+        /**
+         * Persists {@code typedInputForPrevious} ONLY to the previously active provider (when it
+         * uses a Client ID), then switches to {@code nextProviderId} and loads {@code
+         * nextProviderId}'s own independent Client ID.
+         */
+        String switchTo(Store store, String nextProviderId, String typedInputForPrevious) {
+            if (store != null && providerRequiresClientId(this.currentProviderId)) {
+                String toSave =
+                        typedInputForPrevious != null
+                                ? typedInputForPrevious.trim()
+                                : clientIdInput;
+                saveOAuthClientId(store, this.currentProviderId, toSave);
+            }
+            this.currentProviderId =
+                    nextProviderId == null || nextProviderId.trim().isEmpty()
+                            ? OAUTH_OPENROUTER
+                            : nextProviderId.trim();
+            if (store != null) {
+                setActiveOAuthProvider(store, this.currentProviderId);
+            }
+            this.clientIdInput =
+                    providerRequiresClientId(this.currentProviderId)
+                            ? oauthClientId(store, this.currentProviderId)
+                            : "";
+            return this.clientIdInput;
+        }
+    }
+
+    /**
+     * Immutable handle for an in-flight interactive OAuth sign-in attempt, binding both the
+     * per-provider session version and the global auth-selection epoch so closing the login sheet,
+     * switching to BYOK, or switching to another OAuth provider atomically invalidates any late
+     * success response.
+     */
+    static final class OAuthAttemptToken {
+        final String providerId;
+        final long providerSessionVersion;
+        final long selectionEpoch;
+        final AtomicBoolean cancelled = new AtomicBoolean(false);
+
+        OAuthAttemptToken(String providerId, long providerSessionVersion, long selectionEpoch) {
+            this.providerId = providerId;
+            this.providerSessionVersion = providerSessionVersion;
+            this.selectionEpoch = selectionEpoch;
+        }
+    }
+
+    static OAuthAttemptToken beginOAuthAttempt(Store store, String providerId) {
+        if (store == null || providerId == null) {
+            return new OAuthAttemptToken(providerId == null ? "" : providerId, 0L, 0L);
+        }
+        synchronized (AUTH_SELECTION_LOCK) {
+            synchronized (sessionStateLockFor(providerId)) {
+                long nextVer =
+                        parseLongSafe(
+                                        store.getString(
+                                                KEY_OAUTH_SESSION_VER_PREFIX + providerId, "0"))
+                                + 1L;
+                store.putString(KEY_OAUTH_SESSION_VER_PREFIX + providerId, Long.toString(nextVer));
+                long selEpoch = bumpAuthSelectionEpochLocked(store);
+                return new OAuthAttemptToken(providerId, nextVer, selEpoch);
+            }
+        }
+    }
+
+    static void cancelOAuthAttempt(Store store, OAuthAttemptToken attempt) {
+        if (attempt == null) return;
+        attempt.cancelled.set(true);
+        if (store == null || attempt.providerId == null || attempt.providerId.isEmpty()) return;
+        synchronized (AUTH_SELECTION_LOCK) {
+            synchronized (sessionStateLockFor(attempt.providerId)) {
+                long curVer =
+                        parseLongSafe(
+                                store.getString(
+                                        KEY_OAUTH_SESSION_VER_PREFIX + attempt.providerId, "0"));
+                if (curVer == attempt.providerSessionVersion) {
+                    store.putString(
+                            KEY_OAUTH_SESSION_VER_PREFIX + attempt.providerId,
+                            Long.toString(curVer + 1L));
+                }
+                long curEpoch = parseLongSafe(store.getString(KEY_AUTH_SELECTION_EPOCH, "0"));
+                if (curEpoch == attempt.selectionEpoch) {
+                    bumpAuthSelectionEpochLocked(store);
+                }
+            }
+        }
+    }
+
+    /**
+     * Atomically commits an interactive OAuth sign-in bundle AND activates OAuth mode/provider ONLY
+     * if the attempt was not cancelled, the beta gate is still open, the provider's session epoch
+     * is unchanged, AND the user has not switched to BYOK or another provider in the meantime.
+     */
+    static boolean completeOAuthSignInAtomically(
+            Store store, OAuthAttemptToken attempt, OAuthBundle bundle, GateCheck gateCheck) {
+        if (store == null || attempt == null || bundle == null) return false;
+        synchronized (AUTH_SELECTION_LOCK) {
+            synchronized (sessionStateLockFor(attempt.providerId)) {
+                if (attempt.cancelled.get()) return false;
+                if (gateCheck != null && !gateCheck.isAllowed()) return false;
+                long curVer =
+                        parseLongSafe(
+                                store.getString(
+                                        KEY_OAUTH_SESSION_VER_PREFIX + attempt.providerId, "0"));
+                if (curVer != attempt.providerSessionVersion) return false;
+                long curEpoch = parseLongSafe(store.getString(KEY_AUTH_SELECTION_EPOCH, "0"));
+                if (curEpoch != attempt.selectionEpoch) return false;
+                bundle.providerId = attempt.providerId;
+                store.putString(
+                        KEY_OAUTH_BUNDLE_PREFIX + attempt.providerId, bundle.toJson().toString());
+                store.putString(KEY_AUTH_MODE, AUTH_MODE_OAUTH);
+                store.putString(KEY_OAUTH_PROVIDER, attempt.providerId);
+                AppLog.registerSecretForRedaction(bundle.accessToken);
+                if (bundle.refreshToken != null && !bundle.refreshToken.isEmpty()) {
+                    AppLog.registerSecretForRedaction(bundle.refreshToken);
+                }
+                return true;
+            }
+        }
     }
 
     static String oauthClientId(Store store, String providerId) {
@@ -697,9 +1012,7 @@ final class AiAuthManager {
         String mode = authMode(a);
         if (AUTH_MODE_OAUTH.equals(mode)) {
             String prov = activeOAuthProvider(a);
-            if (OAUTH_OPENAI_EXPERIMENTAL.equals(prov)
-                    && (!AiBetaGate.isExperimentalOAuthAllowed(a)
-                            || !hasOpenAiExperimentalConsent(a))) {
+            if (!isShippedOAuthProvider(prov)) {
                 return false;
             }
             OAuthBundle b = loadBundle(a, prov);
@@ -720,14 +1033,15 @@ final class AiAuthManager {
         if (!a.mobilePrefs().getBoolean(Prefs.AI_ENABLED, false)) return "已关闭";
         if (AUTH_MODE_OAUTH.equals(authMode(a))) {
             String prov = activeOAuthProvider(a);
+            if (!isShippedOAuthProvider(prov)) return "请重选认证方式";
             OAuthBundle b = loadBundle(a, prov);
-            if (b == null || !b.hasCredential()) return "订阅未登录";
+            if (b == null || !b.hasCredential()) return "账号未登录";
             if (b.needsReauth) return "授权过期";
-            if (OAUTH_KIMI_CODE.equals(prov)) return "Kimi Code";
-            if (OAUTH_OPENAI_EXPERIMENTAL.equals(prov)) return "OpenAI 订阅";
             return "OpenRouter 账号";
         }
-        if (!isActiveCredentialReady(a)) return "未配置 Key";
+        if (!isActiveCredentialReady(a)) {
+            return hasLegacyUnboundApiKey(a) ? "需重新录入 Key" : "未配置 Key";
+        }
         return AiAssistantService.providerLabel(
                 a.mobilePrefs().getString(Prefs.AI_PROVIDER, "deepseek"));
     }
@@ -1041,6 +1355,52 @@ final class AiAuthManager {
                 tokenUrl, clientId, code, codeVerifier, redirectUri, nowMs, DEFAULT_TRANSPORT);
     }
 
+    /**
+     * Verifies both user identity ({@code sub} / {@code email}) and actual granted OpenAI
+     * subscription inference scopes ({@code resource.invoke} and {@code
+     * chatgpt.tokens.use.direct}) before accepting an OpenAI OAuth token response.
+     */
+    static void verifyOpenAiOAuthIdentityAndScopes(
+            OAuthBundle bundle, String idToken, String accessToken, String grantedScope)
+            throws IOException {
+        JSONObject idClaims = extractJwtClaims(idToken);
+        JSONObject accessClaims = extractJwtClaims(accessToken);
+        String sub =
+                idClaims != null && !idClaims.optString("sub", "").trim().isEmpty()
+                        ? idClaims.optString("sub", "").trim()
+                        : (accessClaims != null ? accessClaims.optString("sub", "").trim() : "");
+        String email =
+                bundle != null && bundle.accountLabel != null ? bundle.accountLabel.trim() : "";
+        if (sub.isEmpty() && email.isEmpty()) {
+            throw new IOException("OpenAI OAuth 响应缺少可验证的身份声明（sub/email）");
+        }
+        String scopeText = grantedScope == null ? "" : grantedScope.trim();
+        if (scopeText.isEmpty() && accessClaims != null) {
+            scopeText = accessClaims.optString("scope", "").trim();
+            if (scopeText.isEmpty()) {
+                JSONArray scpArr = accessClaims.optJSONArray("scp");
+                if (scpArr != null) {
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = 0; i < scpArr.length(); i++) {
+                        if (i > 0) sb.append(' ');
+                        sb.append(scpArr.optString(i, ""));
+                    }
+                    scopeText = sb.toString().trim();
+                }
+            }
+        }
+        java.util.Set<String> scopes = new java.util.HashSet<>();
+        if (!scopeText.isEmpty()) {
+            for (String s : scopeText.split("\\s+")) {
+                if (!s.trim().isEmpty()) scopes.add(s.trim());
+            }
+        }
+        if (!scopes.contains("resource.invoke") || !scopes.contains("chatgpt.tokens.use.direct")) {
+            throw new IOException(
+                    "OpenAI OAuth 实际授权范围缺少订阅推理权限（需同时包含 resource.invoke 与 chatgpt.tokens.use.direct）");
+        }
+    }
+
     static OAuthBundle exchangeOpenAiCode(
             String tokenUrl,
             String clientId,
@@ -1079,6 +1439,8 @@ final class AiAuthManager {
             JSONObject obj = new JSONObject(res.body);
             String access = obj.optString("access_token", "").trim();
             if (access.isEmpty()) throw new IOException("OpenAI 返回空 access_token");
+            String idToken = obj.optString("id_token", "").trim();
+            String grantedScope = obj.optString("scope", "").trim();
             OAuthBundle b = new OAuthBundle();
             b.providerId = OAUTH_OPENAI_EXPERIMENTAL;
             b.accessToken = access;
@@ -1086,7 +1448,8 @@ final class AiAuthManager {
             long expiresIn = obj.optLong("expires_in", 3600L);
             b.expiresAtMs = expiresIn > 0 ? nowMs + expiresIn * 1000L : 0L;
             b.needsReauth = false;
-            applyJwtMetadata(b, obj.optString("id_token", ""), access);
+            applyJwtMetadata(b, idToken, access);
+            verifyOpenAiOAuthIdentityAndScopes(b, idToken, access, grantedScope);
             if (b.accountLabel.isEmpty()) b.accountLabel = "ChatGPT 订阅账号";
             return b;
         } catch (IOException e) {
@@ -1344,8 +1707,7 @@ final class AiAuthManager {
             return;
         }
         final Store st = store(a);
-        final long expectedVersion = beginOAuthSession(st, OAUTH_OPENROUTER);
-        final AtomicBoolean cancelled = new AtomicBoolean(false);
+        final OAuthAttemptToken attempt = beginOAuthAttempt(st, OAUTH_OPENROUTER);
         final LoopbackCallbackServer[] serverRef = new LoopbackCallbackServer[1];
 
         LinearLayout box = a.vertical();
@@ -1361,7 +1723,7 @@ final class AiAuthManager {
                         "OpenRouter 官方 OAuth 登录",
                         box,
                         () -> {
-                            cancelled.set(true);
+                            cancelOAuthAttempt(st, attempt);
                             if (serverRef[0] != null) serverRef[0].close();
                         });
 
@@ -1377,6 +1739,7 @@ final class AiAuthManager {
                         final String authUrl = buildOpenRouterAuthUrl(srv.callbackUrl(), pkce);
                         a.ui.post(
                                 () -> {
+                                    if (attempt.cancelled.get()) return;
                                     statusTv.setText(
                                             "已在浏览器打开 OpenRouter 授权页。完成确认后将自动跳回本机并换取专属密钥（无需手动复制 Key）。");
                                     try {
@@ -1386,7 +1749,8 @@ final class AiAuthManager {
                                         statusTv.setText("无法自动打开浏览器：" + a.message(ex));
                                     }
                                 });
-                        Map<String, String> params = srv.awaitCallback(180_000L, cancelled);
+                        Map<String, String> params = srv.awaitCallback(180_000L, attempt.cancelled);
+                        if (attempt.cancelled.get()) return;
                         if (params.containsKey("error") && !params.get("error").isEmpty()) {
                             throw new IOException("授权被取消：" + params.get("error"));
                         }
@@ -1394,23 +1758,23 @@ final class AiAuthManager {
                         if (code == null || code.trim().isEmpty()) {
                             throw new IOException("回调缺少授权码 code");
                         }
-                        a.ui.post(() -> statusTv.setText("已收到授权回调，等待回到应用前台并换取密钥…"));
+                        a.ui.post(
+                                () -> {
+                                    if (!attempt.cancelled.get()) {
+                                        statusTv.setText("已收到授权回调，等待回到应用前台并换取密钥…");
+                                    }
+                                });
                         awaitForeground(15_000L);
+                        if (attempt.cancelled.get()) return;
                         final OAuthBundle bundle =
                                 exchangeOpenRouterCode(
                                         OPENROUTER_EXCHANGE_URL, code.trim(), pkce.verifier);
                         boolean committed =
-                                commitOAuthSignInIfCurrent(
-                                        st,
-                                        OAUTH_OPENROUTER,
-                                        expectedVersion,
-                                        bundle,
-                                        () -> AiBetaGate.isUnlocked(a));
+                                completeOAuthSignInAtomically(
+                                        st, attempt, bundle, () -> AiBetaGate.isUnlocked(a));
                         if (!committed) {
-                            throw new IOException("授权期间内测口令已失效或会话已变更，已取消写入");
+                            return;
                         }
-                        setAuthMode(a, AUTH_MODE_OAUTH);
-                        setActiveOAuthProvider(a, OAUTH_OPENROUTER);
                         a.mobilePrefs().edit().putBoolean(Prefs.AI_ENABLED, true).apply();
                         a.ui.post(
                                 () -> {
@@ -1419,7 +1783,7 @@ final class AiAuthManager {
                                     if (onSuccess != null) onSuccess.onResult(bundle);
                                 });
                     } catch (Exception e) {
-                        if (!cancelled.get()) {
+                        if (!attempt.cancelled.get()) {
                             final String msg = sanitizeLogBody(a.message(e));
                             a.ui.post(
                                     () -> {
@@ -1436,294 +1800,13 @@ final class AiAuthManager {
     static void startKimiCodeDeviceSignIn(
             final MainActivity a, final AiAssistantService.ResultCallback<OAuthBundle> onSuccess) {
         if (a == null || a.isFinishing()) return;
-        if (!AiBetaGate.isUnlocked(a)) {
-            a.toast("内测口令未激活或已过期，请先解锁 AI 观影实验室");
-            return;
-        }
-        final String clientId = oauthClientId(a, OAUTH_KIMI_CODE);
-        if (clientId.isEmpty()) {
-            a.toast(
-                    "Kimi Code 未开放公共第三方 Client ID；请使用 API Key (Moonshot) / OpenRouter，或先填入自备 Client ID");
-            return;
-        }
-        final Store st = store(a);
-        final long expectedVersion = beginOAuthSession(st, OAUTH_KIMI_CODE);
-        final MobileTheme.Palette p = MobileTheme.of(a);
-        final AtomicBoolean cancelled = new AtomicBoolean(false);
-
-        LinearLayout box = a.vertical();
-        box.setPadding(a.dp(4), a.dp(6), a.dp(4), a.dp(6));
-        final TextView codeTv = a.text("正在向 Kimi 请求设备授权码…", 22f, p.accent);
-        codeTv.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
-        codeTv.setGravity(Gravity.CENTER);
-        codeTv.setPadding(a.dp(12), a.dp(14), a.dp(12), a.dp(14));
-        codeTv.setBackground(a.bg(p.bgSubtle, 14));
-        box.addView(codeTv, new LinearLayout.LayoutParams(-1, -2));
-        a.gap(box, 10);
-
-        final TextView statusTv =
-                a.text("采用标准 RFC 8628 设备码授权（使用你提供的 Client ID），请在浏览器确认授权。", 12.5f, p.textSecondary);
-        statusTv.setLineSpacing(a.dp(3f), 1f);
-        box.addView(statusTv);
-        a.gap(box, 12);
-
-        final String[] verifyUrlRef = {""};
-        final String[] userCodeRef = {""};
-        LinearLayout btnRow = a.row();
-        TextView copyBtn = a.text("复制设备码", 13.5f, p.textPrimary);
-        copyBtn.setTypeface(null, Typeface.BOLD);
-        copyBtn.setGravity(Gravity.CENTER);
-        copyBtn.setBackground(a.bg(p.bgSubtle, 12));
-        MobileMotion.bindPress(copyBtn, 0.95f);
-        copyBtn.setOnClickListener(
-                v -> {
-                    if (userCodeRef[0].isEmpty()) return;
-                    try {
-                        ClipboardManager cm =
-                                (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
-                        if (cm != null) {
-                            cm.setPrimaryClip(ClipData.newPlainText("kimi_code", userCodeRef[0]));
-                            a.toast("已复制设备码：" + userCodeRef[0]);
-                        }
-                    } catch (Exception ignored) {
-                    }
-                });
-        TextView openBtn = a.text("打开 Kimi 授权页", 13.5f, p.accentOnFill);
-        openBtn.setTypeface(null, Typeface.BOLD);
-        openBtn.setGravity(Gravity.CENTER);
-        openBtn.setBackground(MobileTheme.accentPillBg(a, 12));
-        MobileMotion.bindPress(openBtn, 0.95f);
-        openBtn.setOnClickListener(
-                v -> {
-                    if (verifyUrlRef[0].isEmpty()) return;
-                    try {
-                        a.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(verifyUrlRef[0])));
-                    } catch (Exception ex) {
-                        a.toast("无法打开浏览器：" + a.message(ex));
-                    }
-                });
-        LinearLayout.LayoutParams cLp = new LinearLayout.LayoutParams(0, a.dp(42), 1f);
-        cLp.rightMargin = a.dp(8);
-        btnRow.addView(copyBtn, cLp);
-        btnRow.addView(openBtn, new LinearLayout.LayoutParams(0, a.dp(42), 1.3f));
-        box.addView(btnRow, new LinearLayout.LayoutParams(-1, -2));
-
-        final MobileBottomSheet.SheetHandle handle =
-                MobileBottomSheet.showCustom(a, "Kimi Code 订阅账号登录", box, () -> cancelled.set(true));
-
-        a.worker.execute(
-                () -> {
-                    try {
-                        final DeviceCodeSession sess =
-                                requestDeviceCode(KIMI_DEVICE_AUTH_URL, clientId);
-                        userCodeRef[0] = sess.userCode;
-                        verifyUrlRef[0] = sess.verificationUriComplete;
-                        a.ui.post(
-                                () -> {
-                                    codeTv.setText(sess.userCode);
-                                    statusTv.setText("请点击下方按钮打开 Kimi 授权页并确认设备码，完成后本页会自动登录。");
-                                });
-                        long deadline = System.currentTimeMillis() + sess.expiresInSec * 1000L;
-                        long pollIntervalMs = Math.max(2000L, sess.intervalSec * 1000L);
-                        while (!cancelled.get() && System.currentTimeMillis() < deadline) {
-                            try {
-                                Thread.sleep(pollIntervalMs);
-                            } catch (InterruptedException ie) {
-                                Thread.currentThread().interrupt();
-                                return;
-                            }
-                            if (cancelled.get()) return;
-                            DevicePollOutcome out =
-                                    pollDeviceTokenOnce(
-                                            OAUTH_KIMI_CODE,
-                                            KIMI_TOKEN_URL,
-                                            clientId,
-                                            sess.deviceCode,
-                                            System.currentTimeMillis());
-                            if (out.status == DevicePollOutcome.STATUS_PENDING) {
-                                continue;
-                            }
-                            if (out.status == DevicePollOutcome.STATUS_SLOW_DOWN) {
-                                pollIntervalMs += 5000L;
-                                continue;
-                            }
-                            if (out.status == DevicePollOutcome.STATUS_SUCCESS
-                                    && out.bundle != null) {
-                                boolean committed =
-                                        commitOAuthSignInIfCurrent(
-                                                st,
-                                                OAUTH_KIMI_CODE,
-                                                expectedVersion,
-                                                out.bundle,
-                                                () -> AiBetaGate.isUnlocked(a));
-                                if (!committed) {
-                                    throw new IOException("授权期间内测口令已失效或会话已变更，已取消写入");
-                                }
-                                setAuthMode(a, AUTH_MODE_OAUTH);
-                                setActiveOAuthProvider(a, OAUTH_KIMI_CODE);
-                                a.mobilePrefs().edit().putBoolean(Prefs.AI_ENABLED, true).apply();
-                                final OAuthBundle done = out.bundle;
-                                a.ui.post(
-                                        () -> {
-                                            if (handle != null) handle.dismiss();
-                                            a.toast("Kimi Code 订阅登录成功");
-                                            if (onSuccess != null) onSuccess.onResult(done);
-                                        });
-                                return;
-                            }
-                            throw new IOException(out.errorMessage);
-                        }
-                        if (!cancelled.get()) {
-                            throw new IOException("等待确认超时，请重新发起");
-                        }
-                    } catch (Exception e) {
-                        if (!cancelled.get()) {
-                            final String msg = sanitizeLogBody(a.message(e));
-                            a.ui.post(
-                                    () -> {
-                                        statusTv.setText("登录未完成：" + msg);
-                                        a.toast("Kimi Code 登录失败：" + msg);
-                                    });
-                        }
-                    }
-                });
+        a.toast("当前版本已撤下未实测的 Kimi Code 订阅直连入口，请使用 Moonshot (Kimi) API Key 或 OpenRouter 官方登录");
     }
 
     static void startOpenAiExperimentalSignIn(
             final MainActivity a, final AiAssistantService.ResultCallback<OAuthBundle> onSuccess) {
         if (a == null || a.isFinishing()) return;
-        if (!AiBetaGate.isUnlocked(a) || !AiBetaGate.isExperimentalOAuthAllowed(a)) {
-            a.toast("当前内测口令未开启实验性 OpenAI OAuth 权限或已过期");
-            return;
-        }
-        final String clientId = oauthClientId(a, OAUTH_OPENAI_EXPERIMENTAL);
-        if (clientId.isEmpty()) {
-            a.toast("请先填入已注册的 OpenAI OAuth Client ID（本应用不冒用第三方 CLI 身份）");
-            return;
-        }
-        if (!hasOpenAiExperimentalConsent(a)) {
-            MobileBottomSheet.showConfirm(
-                    a,
-                    "实验性 OpenAI 订阅推理风险提示",
-                    "此方式使用你注册的 OpenAI OAuth Client ID 请求官方订阅额度推理权限（resource.invoke / chatgpt.tokens.use.direct）并调用 Responses API（/v1/responses）。建议普通用户优先使用 API Key 或 OpenRouter 官方登录。确认继续吗？",
-                    "我已了解，继续登录",
-                    false,
-                    () -> {
-                        setOpenAiExperimentalConsent(a, true);
-                        launchOpenAiPkceFlow(a, clientId, onSuccess);
-                    });
-            return;
-        }
-        launchOpenAiPkceFlow(a, clientId, onSuccess);
-    }
-
-    private static void launchOpenAiPkceFlow(
-            final MainActivity a,
-            final String clientId,
-            final AiAssistantService.ResultCallback<OAuthBundle> onSuccess) {
-        if (!AiBetaGate.isUnlocked(a) || !AiBetaGate.isExperimentalOAuthAllowed(a)) {
-            a.toast("当前内测口令未开启实验性 OpenAI OAuth 权限");
-            return;
-        }
-        final Store st = store(a);
-        final long expectedVersion = beginOAuthSession(st, OAUTH_OPENAI_EXPERIMENTAL);
-        final AtomicBoolean cancelled = new AtomicBoolean(false);
-        final LoopbackCallbackServer[] serverRef = new LoopbackCallbackServer[1];
-        LinearLayout box = a.vertical();
-        box.setPadding(a.dp(4), a.dp(6), a.dp(4), a.dp(6));
-        final TextView statusTv =
-                a.text(
-                        "正在监听 localhost:1455/auth/callback 并打开 OpenAI 授权页…",
-                        13.5f,
-                        MobileTheme.of(a).textPrimary);
-        statusTv.setLineSpacing(a.dp(3f), 1f);
-        box.addView(statusTv);
-
-        final MobileBottomSheet.SheetHandle handle =
-                MobileBottomSheet.showCustom(
-                        a,
-                        "OpenAI 订阅账号登录（实验性）",
-                        box,
-                        () -> {
-                            cancelled.set(true);
-                            if (serverRef[0] != null) serverRef[0].close();
-                        });
-
-        a.worker.execute(
-                () -> {
-                    LoopbackCallbackServer srv = null;
-                    try {
-                        PkcePair pkce = generatePkcePair();
-                        srv = LoopbackCallbackServer.bind(new int[] {1455}, "/auth/callback");
-                        serverRef[0] = srv;
-                        final String redirectUri = srv.callbackUrl();
-                        final String authUrl = buildOpenAiAuthUrl(clientId, redirectUri, pkce);
-                        a.ui.post(
-                                () -> {
-                                    statusTv.setText("请在浏览器中完成 OpenAI 登录授权，回调后将自动切回应用。");
-                                    try {
-                                        a.startActivity(
-                                                new Intent(Intent.ACTION_VIEW, Uri.parse(authUrl)));
-                                    } catch (Exception ex) {
-                                        statusTv.setText("无法打开浏览器：" + a.message(ex));
-                                    }
-                                });
-                        Map<String, String> params = srv.awaitCallback(180_000L, cancelled);
-                        if (params.containsKey("error") && !params.get("error").isEmpty()) {
-                            throw new IOException("授权未完成：" + params.get("error"));
-                        }
-                        if (!constantTimeEquals(pkce.state, params.get("state"))) {
-                            throw new IOException("OAuth state 校验不匹配，已拒绝回调");
-                        }
-                        String code = params.get("code");
-                        if (code == null || code.trim().isEmpty()) {
-                            throw new IOException("回调缺少授权码 code");
-                        }
-                        a.ui.post(() -> statusTv.setText("已收到回调，等待回到前台并交换令牌…"));
-                        awaitForeground(15_000L);
-                        final OAuthBundle bundle =
-                                exchangeOpenAiCode(
-                                        OPENAI_TOKEN_URL,
-                                        clientId,
-                                        code.trim(),
-                                        pkce.verifier,
-                                        redirectUri,
-                                        System.currentTimeMillis());
-                        boolean committed =
-                                commitOAuthSignInIfCurrent(
-                                        st,
-                                        OAUTH_OPENAI_EXPERIMENTAL,
-                                        expectedVersion,
-                                        bundle,
-                                        () ->
-                                                AiBetaGate.isUnlocked(a)
-                                                        && AiBetaGate.isExperimentalOAuthAllowed(a)
-                                                        && hasOpenAiExperimentalConsent(a));
-                        if (!committed) {
-                            throw new IOException("授权期间内测口令已失效或会话已变更，已取消写入");
-                        }
-                        setAuthMode(a, AUTH_MODE_OAUTH);
-                        setActiveOAuthProvider(a, OAUTH_OPENAI_EXPERIMENTAL);
-                        a.mobilePrefs().edit().putBoolean(Prefs.AI_ENABLED, true).apply();
-                        a.ui.post(
-                                () -> {
-                                    if (handle != null) handle.dismiss();
-                                    a.toast("OpenAI 账号登录成功：" + bundle.accountLabel);
-                                    if (onSuccess != null) onSuccess.onResult(bundle);
-                                });
-                    } catch (Exception e) {
-                        if (!cancelled.get()) {
-                            final String msg = sanitizeLogBody(a.message(e));
-                            a.ui.post(
-                                    () -> {
-                                        statusTv.setText("登录失败：" + msg);
-                                        a.toast("OpenAI 登录失败：" + msg);
-                                    });
-                        }
-                    } finally {
-                        if (srv != null) srv.close();
-                    }
-                });
+        a.toast("当前版本已撤下未实测的实验性 OpenAI 订阅直连入口，请使用 OpenAI API Key 或 OpenRouter 官方登录");
     }
 
     // -------------------------------------------------------------------------
@@ -1739,46 +1822,17 @@ final class AiAuthManager {
         String mode = authMode(a);
         if (AUTH_MODE_OAUTH.equals(mode)) {
             String prov = activeOAuthProvider(a);
-            if (OAUTH_OPENAI_EXPERIMENTAL.equals(prov)
-                    && (!AiBetaGate.isExperimentalOAuthAllowed(a)
-                            || !hasOpenAiExperimentalConsent(a))) {
-                throw new IOException("当前未授权使用实验性 OpenAI OAuth");
+            if (!isShippedOAuthProvider(prov)) {
+                throw new IOException("当前版本已撤下未实测的实验性订阅直连，请改用 OpenRouter 官方登录或 API Key 模式");
             }
             Store st = store(a);
-            OAuthBundle bundle;
-            if (OAUTH_KIMI_CODE.equals(prov)) {
-                String cid = oauthClientId(st, prov);
-                bundle =
-                        ensureFreshOAuthBundle(
-                                st,
-                                prov,
-                                KIMI_TOKEN_URL,
-                                cid,
-                                System.currentTimeMillis(),
-                                () -> AiBetaGate.isUnlocked(a),
-                                DEFAULT_TRANSPORT);
-            } else if (OAUTH_OPENAI_EXPERIMENTAL.equals(prov)) {
-                String cid = oauthClientId(st, prov);
-                bundle =
-                        ensureFreshOAuthBundle(
-                                st,
-                                prov,
-                                OPENAI_TOKEN_URL,
-                                cid,
-                                System.currentTimeMillis(),
-                                () ->
-                                        AiBetaGate.isUnlocked(a)
-                                                && AiBetaGate.isExperimentalOAuthAllowed(a)
-                                                && hasOpenAiExperimentalConsent(a),
-                                DEFAULT_TRANSPORT);
-            } else {
-                bundle = loadBundle(st, prov);
-                if (bundle == null || !bundle.hasCredential()) {
-                    throw new IOException("请先登录 " + oauthProviderLabel(prov));
-                }
+            OAuthBundle bundle = loadBundle(st, prov);
+            if (bundle == null || !bundle.hasCredential()) {
+                throw new IOException("请先登录 " + oauthProviderLabel(prov));
             }
             String base = oauthApiBase(prov);
             validateTransportSecurity(base, bundle.accessToken);
+            AppLog.registerSecretForRedaction(bundle.accessToken);
             return new ResolvedRequest(
                     oauthWireProtocol(prov),
                     base,
@@ -1813,6 +1867,9 @@ final class AiAuthManager {
             double temperature,
             HttpTransport transport)
             throws IOException {
+        if (req != null && req.credential != null && !req.credential.isEmpty()) {
+            AppLog.registerSecretForRedaction(req.credential);
+        }
         HttpTransport tx = transport == null ? DEFAULT_TRANSPORT : transport;
         if (WIRE_ANTHROPIC.equals(req.wireProtocol)) {
             return executeAnthropicMessages(
@@ -1827,6 +1884,147 @@ final class AiAuthManager {
                     req, systemPrompt, userPrompt, maxTokens, temperature, tx);
         }
         return executeOpenAiCompatChat(req, systemPrompt, userPrompt, maxTokens, temperature, tx);
+    }
+
+    /**
+     * Parses OpenAI Responses API Server-Sent Events (SSE) stream, handling {@code
+     * response.output_text.delta}, {@code response.completed}, {@code response.failed}, {@code
+     * response.incomplete}, and abrupt stream truncation / disconnect without a terminal completion
+     * event.
+     */
+    static String parseOpenAiResponsesSse(String rawSse, String knownSecret) throws IOException {
+        if (rawSse == null || rawSse.trim().isEmpty()) {
+            throw new IOException("OpenAI Responses SSE 响应为空（连接异常中断）");
+        }
+        StringBuilder deltaText = new StringBuilder();
+        String completedFallback = "";
+        boolean sawCompleted = false;
+
+        String normalized = rawSse.replace("\r\n", "\n").replace('\r', '\n');
+        String[] lines = normalized.split("\n", -1);
+        String curEvent = "";
+        StringBuilder dataBuf = new StringBuilder();
+
+        for (int idx = 0; idx <= lines.length; idx++) {
+            String line = idx < lines.length ? lines[idx] : "";
+            if (line.isEmpty()) {
+                if (dataBuf.length() > 0) {
+                    String payload = dataBuf.toString().trim();
+                    dataBuf.setLength(0);
+                    String evName = curEvent;
+                    curEvent = "";
+                    if ("[DONE]".equals(payload)) {
+                        continue;
+                    }
+                    try {
+                        JSONObject obj = new JSONObject(payload);
+                        String type = obj.optString("type", evName);
+                        if ("response.output_text.delta".equals(type)) {
+                            deltaText.append(obj.optString("delta", ""));
+                        } else if ("response.completed".equals(type)) {
+                            sawCompleted = true;
+                            JSONObject resp = obj.optJSONObject("response");
+                            if (resp != null) {
+                                String status = resp.optString("status", "completed");
+                                if ("failed".equals(status)) {
+                                    throw new IOException(
+                                            "OpenAI Responses 推理失败："
+                                                    + extractResponsesError(resp, knownSecret));
+                                }
+                                if ("incomplete".equals(status)) {
+                                    throw new IOException(
+                                            "OpenAI Responses 推理未完成："
+                                                    + extractResponsesIncompleteReason(resp));
+                                }
+                                completedFallback = extractResponsesOutputText(resp);
+                            }
+                        } else if ("response.failed".equals(type)) {
+                            JSONObject resp = obj.optJSONObject("response");
+                            throw new IOException(
+                                    "OpenAI Responses 推理失败："
+                                            + extractResponsesError(
+                                                    resp != null ? resp : obj, knownSecret));
+                        } else if ("response.incomplete".equals(type)) {
+                            JSONObject resp = obj.optJSONObject("response");
+                            throw new IOException(
+                                    "OpenAI Responses 推理未完成："
+                                            + extractResponsesIncompleteReason(
+                                                    resp != null ? resp : obj));
+                        } else if ("error".equals(type)) {
+                            throw new IOException(
+                                    "OpenAI Responses 错误："
+                                            + extractResponsesError(obj, knownSecret));
+                        }
+                    } catch (IOException ioe) {
+                        throw ioe;
+                    } catch (Exception parseErr) {
+                        throw new IOException(
+                                "OpenAI Responses SSE 事件解析失败（流可能已截断）："
+                                        + sanitizeErrorText(parseErr.getMessage(), knownSecret),
+                                parseErr);
+                    }
+                } else {
+                    curEvent = "";
+                }
+                continue;
+            }
+            if (line.startsWith(":")) continue;
+            if (line.startsWith("event:")) {
+                curEvent = line.substring(6).trim();
+            } else if (line.startsWith("data:")) {
+                if (dataBuf.length() > 0) dataBuf.append('\n');
+                dataBuf.append(line.substring(5).trim());
+            }
+        }
+        if (!sawCompleted) {
+            throw new IOException("OpenAI Responses SSE 流异常中断（未收到 response.completed 结束事件）");
+        }
+        return deltaText.length() > 0 ? deltaText.toString() : completedFallback;
+    }
+
+    private static String extractResponsesOutputText(JSONObject root) {
+        if (root == null) return "";
+        String directText = root.optString("output_text", "");
+        if (!directText.isEmpty()) return directText;
+        JSONArray output = root.optJSONArray("output");
+        if (output == null || output.length() == 0) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < output.length(); i++) {
+            JSONObject item = output.optJSONObject(i);
+            if (item == null) continue;
+            JSONArray content = item.optJSONArray("content");
+            if (content == null) continue;
+            for (int j = 0; j < content.length(); j++) {
+                JSONObject part = content.optJSONObject(j);
+                if (part == null) continue;
+                String text = part.optString("text", "");
+                if (!text.isEmpty()) sb.append(text);
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String extractResponsesError(JSONObject obj, String knownSecret) {
+        if (obj == null) return "unknown_error";
+        JSONObject err = obj.optJSONObject("error");
+        if (err != null) {
+            String msg = sanitizeErrorText(err.optString("message", "").trim(), knownSecret);
+            String code = sanitizeErrorText(err.optString("code", "").trim(), knownSecret);
+            if (!msg.isEmpty()) return msg;
+            if (!code.isEmpty()) return code;
+        }
+        String msg = sanitizeErrorText(obj.optString("message", "").trim(), knownSecret);
+        return msg.isEmpty() ? "upstream_failed" : msg;
+    }
+
+    private static String extractResponsesIncompleteReason(JSONObject obj) {
+        if (obj == null) return "incomplete";
+        JSONObject details = obj.optJSONObject("incomplete_details");
+        if (details != null) {
+            String r = details.optString("reason", "").trim();
+            if (!r.isEmpty()) return r;
+        }
+        return "max_output_tokens_or_interrupted";
     }
 
     private static String executeOpenAiResponses(
@@ -1848,12 +2046,13 @@ final class AiAuthManager {
             }
             body.put("input", userPrompt == null ? "" : userPrompt);
             body.put("max_output_tokens", maxTokens);
-            body.put("temperature", temperature);
+            body.put("stream", true);
             body.put("store", false);
         } catch (Exception e) {
             throw new IOException(e);
         }
         Map<String, String> headers = new HashMap<>();
+        headers.put("Accept", "text/event-stream");
         if (req.credential != null && !req.credential.isEmpty()) {
             headers.put("Authorization", "Bearer " + req.credential);
         }
@@ -1868,26 +2067,24 @@ final class AiAuthManager {
                             + ": "
                             + conciseError(res.body, req.credential));
         }
+        String trimmed = res.body == null ? "" : res.body.trim();
+        if (trimmed.startsWith("event:") || trimmed.startsWith("data:")) {
+            return parseOpenAiResponsesSse(res.body, req.credential);
+        }
         try {
-            JSONObject root = new JSONObject(res.body);
-            String directText = root.optString("output_text", "");
-            if (!directText.isEmpty()) return directText;
-            JSONArray output = root.optJSONArray("output");
-            if (output == null || output.length() == 0) return "";
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < output.length(); i++) {
-                JSONObject item = output.optJSONObject(i);
-                if (item == null) continue;
-                JSONArray content = item.optJSONArray("content");
-                if (content == null) continue;
-                for (int j = 0; j < content.length(); j++) {
-                    JSONObject part = content.optJSONObject(j);
-                    if (part == null) continue;
-                    String text = part.optString("text", "");
-                    if (!text.isEmpty()) sb.append(text);
-                }
+            JSONObject root = new JSONObject(trimmed);
+            String status = root.optString("status", "completed");
+            if ("failed".equals(status)) {
+                throw new IOException(
+                        "OpenAI Responses 推理失败：" + extractResponsesError(root, req.credential));
             }
-            return sb.toString();
+            if ("incomplete".equals(status)) {
+                throw new IOException(
+                        "OpenAI Responses 推理未完成：" + extractResponsesIncompleteReason(root));
+            }
+            return extractResponsesOutputText(root);
+        } catch (IOException ioe) {
+            throw ioe;
         } catch (Exception e) {
             throw new IOException("解析 OpenAI Responses 响应失败", e);
         }
@@ -1960,7 +2157,8 @@ final class AiAuthManager {
         try {
             body.put("model", req.model);
             body.put("max_tokens", maxTokens);
-            body.put("temperature", temperature);
+            // Anthropic Claude 5.5 (e.g. claude-haiku-5-5) & API 2026-10-21 reject sampling
+            // parameters (temperature / top_p / top_k) with HTTP 400; intentionally omitted.
             if (systemPrompt != null && !systemPrompt.isEmpty()) {
                 body.put("system", systemPrompt);
             }
@@ -2118,10 +2316,13 @@ final class AiAuthManager {
                 url, "application/x-www-form-urlencoded; charset=UTF-8", sb.toString(), headers);
     }
 
-    private static HttpResult postRawDirect(
+    static HttpResult postRawDirect(
             String url, String contentType, String body, Map<String, String> headers)
             throws IOException {
         HttpURLConnection conn = openProxiedConnection(url);
+        // Never auto-follow redirects on AI/OAuth endpoints: prevents Android 6 HttpURLConnection
+        // from forwarding Authorization / x-api-key / x-goog-api-key across origins.
+        conn.setInstanceFollowRedirects(false);
         conn.setRequestMethod("POST");
         conn.setDoOutput(true);
         conn.setConnectTimeout(15000);
@@ -2135,28 +2336,34 @@ final class AiAuthManager {
                 }
             }
         }
-        byte[] payload = (body == null ? "" : body).getBytes(StandardCharsets.UTF_8);
-        try (OutputStream out = conn.getOutputStream()) {
-            out.write(payload);
-        }
-        int code = conn.getResponseCode();
-        InputStream stream =
-                code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
-        String resp = "";
-        if (stream != null) {
-            try (InputStream in = stream;
-                    ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
-                byte[] buf = new byte[4096];
-                int n;
-                while ((n = in.read(buf)) != -1) {
-                    if (bos.size() + n > 1024 * 1024) break;
-                    bos.write(buf, 0, n);
-                }
-                resp = new String(bos.toByteArray(), StandardCharsets.UTF_8);
+        try {
+            byte[] payload = (body == null ? "" : body).getBytes(StandardCharsets.UTF_8);
+            try (OutputStream out = conn.getOutputStream()) {
+                out.write(payload);
             }
+            int code = conn.getResponseCode();
+            if (code >= 300 && code < 400) {
+                throw new IOException("AI 接口返回重定向（HTTP " + code + "），为防止认证凭据跨源泄露已拒绝自动跳转");
+            }
+            InputStream stream =
+                    code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
+            String resp = "";
+            if (stream != null) {
+                try (InputStream in = stream;
+                        ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
+                    byte[] buf = new byte[4096];
+                    int n;
+                    while ((n = in.read(buf)) != -1) {
+                        if (bos.size() + n > 1024 * 1024) break;
+                        bos.write(buf, 0, n);
+                    }
+                    resp = new String(bos.toByteArray(), StandardCharsets.UTF_8);
+                }
+            }
+            return new HttpResult(code, resp);
+        } finally {
+            conn.disconnect();
         }
-        conn.disconnect();
-        return new HttpResult(code, resp);
     }
 
     static JSONObject extractJwtClaims(String jwt) {
@@ -2199,10 +2406,7 @@ final class AiAuthManager {
 
     static String sanitizeErrorText(String raw, String knownSecret) {
         String s = AppLog.sanitize(raw);
-        if (knownSecret != null && knownSecret.trim().length() >= 6) {
-            s = s.replace(knownSecret.trim(), "[REDACTED_KEY]");
-        }
-        return s;
+        return AppLog.redactKnownSecret(s, knownSecret);
     }
 
     private static String extractOAuthErrorCode(String body) {

@@ -84,7 +84,7 @@ final class AiAssistantService {
         if ("glm".equals(provider)) return "glm-4-flash";
         if ("openai".equals(provider)) return "gpt-4o-mini";
         if ("anthropic".equals(provider)) return "claude-haiku-5-5";
-        if ("gemini".equals(provider)) return "gemini-2.5-flash";
+        if ("gemini".equals(provider)) return "gemini-3.5-flash-lite";
         if ("openrouter".equals(provider)) return "openai/gpt-4o-mini";
         if ("ollama".equals(provider)) return "qwen2.5:7b";
         if ("custom".equals(provider)) return "gpt-4o-mini";

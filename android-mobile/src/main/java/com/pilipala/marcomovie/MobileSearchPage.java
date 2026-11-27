@@ -1142,7 +1142,9 @@ final class MobileSearchPage {
             int fromIndex,
             String selectedSiteFilter) {
         MobileTheme.Palette p = MobileTheme.of(a);
-        boolean cleanTitle = a.mobilePrefs().getBoolean(Prefs.AI_CLEAN_SEARCH, false);
+        boolean cleanTitle =
+                AiBetaGate.isUnlocked(a)
+                        && a.mobilePrefs().getBoolean(Prefs.AI_CLEAN_SEARCH, false);
         boolean animateBatch = fromIndex > 0 && !MobileMotion.isReduced(a);
         int start = Math.max(0, fromIndex);
         for (int i = start; i < hits.size(); i++) {

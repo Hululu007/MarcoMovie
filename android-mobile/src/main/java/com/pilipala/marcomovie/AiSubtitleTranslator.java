@@ -40,6 +40,9 @@ import org.json.JSONObject;
 final class AiSubtitleTranslator {
     static final int DEFAULT_CHUNK_SIZE = 25;
     static final int MAX_CHUNK_ATTEMPTS = 3;
+    static final int COMPLETION_CACHE_VERSION = 2;
+    static final String COMPLETION_CACHE_PREFIX = "subfull_v2_";
+    static final String AI_TRACK_NAME = "AI 全片双语字幕";
 
     private static final Pattern SRT_BLOCK =
             Pattern.compile(
@@ -180,6 +183,9 @@ final class AiSubtitleTranslator {
                 if (!zh.isEmpty()) {
                     sb.append(zh);
                     if (bilingual) sb.append('\n').append(c.singleLinePlain());
+                } else if (translations == null) {
+                    // Pre-rendered cached bilingual SRT cues already carry line breaks in c.body.
+                    sb.append(HTML_TAG.matcher(c.body).replaceAll("").trim());
                 } else {
                     sb.append(c.singleLinePlain());
                 }
@@ -200,6 +206,95 @@ final class AiSubtitleTranslator {
     /** Only 100% completed episodes may populate the full-episode completion disk cache. */
     static boolean shouldWriteCompletionCache(int translatedCues, int totalCues) {
         return totalCues > 0 && translatedCues == totalCues;
+    }
+
+    /**
+     * Encodes a versioned, completion-marked full-episode cache envelope (v2). Refuses to encode
+     * partial translations so legacy/half-translated SRT files can never be mistaken for complete.
+     */
+    static String encodeCompletionCache(
+            String srt, int translatedCues, int totalCues, boolean bilingual) {
+        if (!shouldWriteCompletionCache(translatedCues, totalCues)) return null;
+        if (srt == null || srt.trim().isEmpty()) return null;
+        if (parseSrt(srt).size() != totalCues) return null;
+        try {
+            JSONObject obj = new JSONObject();
+            obj.put("cache_version", COMPLETION_CACHE_VERSION);
+            obj.put("complete", true);
+            obj.put("bilingual", bilingual);
+            obj.put("total_cues", totalCues);
+            obj.put("translated_cues", translatedCues);
+            obj.put("srt", srt);
+            return obj.toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Verifies and unwraps a v2 full-episode completion cache payload. Rejects legacy raw SRT
+     * strings (even if they preserved all cue indices while translating only half), older cache
+     * versions, mismatched bilingual mode, or incomplete cue counts.
+     */
+    static String decodeVerifiedCompletionCache(
+            String rawCache, int expectedTotalCues, boolean expectedBilingual) {
+        if (rawCache == null || expectedTotalCues <= 0) return null;
+        String trimmed = rawCache.trim();
+        if (!trimmed.startsWith("{")) return null;
+        try {
+            JSONObject obj = new JSONObject(trimmed);
+            if (obj.optInt("cache_version", 0) != COMPLETION_CACHE_VERSION) return null;
+            if (!obj.optBoolean("complete", false)) return null;
+            if (obj.optBoolean("bilingual", !expectedBilingual) != expectedBilingual) return null;
+            int total = obj.optInt("total_cues", 0);
+            int translated = obj.optInt("translated_cues", 0);
+            if (total != expectedTotalCues || translated != expectedTotalCues) return null;
+            String srt = obj.optString("srt", "");
+            if (srt.trim().isEmpty()) return null;
+            if (parseSrt(srt).size() != expectedTotalCues) return null;
+            return srt;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Pure-JVM engine mount abstraction verifying Media3 / MPV / SystemPlayer subtitle mounting. */
+    interface SubtitleMountTarget {
+        void setLiveOverlay(List<SrtCue> cues, String[] translations, boolean bilingual);
+
+        void clearLiveOverlay();
+
+        boolean upsertExternalSubtitle(
+                String uri, String name, String mime, boolean reloadMediaSource, Runnable onMounted)
+                throws Exception;
+    }
+
+    /**
+     * Safe mount order shared across Media3, MPV, and SystemPlayer: ALWAYS keeps/populates live
+     * overlay first and clears it ONLY inside {@code onMounted} after the engine successfully
+     * mounts the track, logging any failure instead of silently swallowing it.
+     */
+    static boolean applySubtitleMountSafely(
+            SubtitleMountTarget target,
+            String uri,
+            String mime,
+            List<SrtCue> cues,
+            String[] translations,
+            boolean bilingual,
+            boolean reloadMediaSource) {
+        if (target == null) return false;
+        target.setLiveOverlay(cues, translations, bilingual);
+        try {
+            target.upsertExternalSubtitle(
+                    uri, AI_TRACK_NAME, mime, reloadMediaSource, target::clearLiveOverlay);
+            return true;
+        } catch (Exception ex) {
+            AppLog.w(
+                    "AiSubtitleTranslator",
+                    "upsertExternalSubtitle failed; keeping live overlay",
+                    ex);
+            return false;
+        }
     }
 
     /**
@@ -452,31 +547,32 @@ final class AiSubtitleTranslator {
         final boolean bilingual = a.mobilePrefs().getBoolean(Prefs.SUBTITLE_BILINGUAL, true);
         final int ticket = a.generation;
         final String fullCacheKey =
-                "subfull_" + AiAssistantService.sha256((bilingual ? "bi|" : "zh|") + rawSrtText);
+                COMPLETION_CACHE_PREFIX
+                        + AiAssistantService.sha256((bilingual ? "bi|" : "zh|") + rawSrtText);
 
         a.worker.execute(
                 () -> {
                     try {
-                        String cachedSrt = AiAssistantService.readDiskCache(a, fullCacheKey);
-                        if (cachedSrt != null && !cachedSrt.trim().isEmpty()) {
+                        String rawCache = AiAssistantService.readDiskCache(a, fullCacheKey);
+                        String cachedSrt =
+                                decodeVerifiedCompletionCache(rawCache, cues.size(), bilingual);
+                        if (cachedSrt != null) {
                             writeUtf8(targetFile, cachedSrt);
                             List<SrtCue> cachedCues = parseSrt(cachedSrt);
-                            if (cachedCues.size() == cues.size()) {
-                                updateOverlayAndSingleTrackOnUi(
-                                        a,
-                                        ticket,
-                                        targetFile,
-                                        cachedCues,
-                                        null,
-                                        bilingual,
-                                        true,
-                                        "已加载缓存的全片 AI 双语字幕（" + cues.size() + " 条）",
-                                        listener,
-                                        cues.size(),
-                                        cues.size(),
-                                        true);
-                                return;
-                            }
+                            updateOverlayAndSingleTrackOnUi(
+                                    a,
+                                    ticket,
+                                    targetFile,
+                                    cachedCues,
+                                    null,
+                                    bilingual,
+                                    true,
+                                    "已加载缓存的全片 AI 双语字幕（" + cues.size() + " 条）",
+                                    listener,
+                                    cues.size(),
+                                    cues.size(),
+                                    true);
+                            return;
                         }
 
                         final String[] translations = new String[cues.size()];
@@ -541,7 +637,16 @@ final class AiSubtitleTranslator {
                                                 && shouldWriteCompletionCache(
                                                         translatedCount, cues.size());
                                 if (fullyDone) {
-                                    AiAssistantService.writeDiskCache(a, fullCacheKey, rendered);
+                                    String envelope =
+                                            encodeCompletionCache(
+                                                    rendered,
+                                                    translatedCount,
+                                                    cues.size(),
+                                                    bilingual);
+                                    if (envelope != null) {
+                                        AiAssistantService.writeDiskCache(
+                                                a, fullCacheKey, envelope);
+                                    }
                                 }
                                 String toastMsg =
                                         isLast
@@ -633,30 +738,56 @@ final class AiSubtitleTranslator {
                     if (a.isFinishing() || ticket != a.generation) return;
                     if (a.playbackControls != null) {
                         a.playbackControls.setActiveSubtitleFile(targetFile);
-                        if (reloadPlayerMediaSource) {
-                            a.playbackControls.clearLiveAiSubtitles();
-                        } else {
-                            a.playbackControls.setLiveAiSubtitles(cues, translations, bilingual);
-                        }
                     }
+                    final boolean effectiveReload =
+                            reloadPlayerMediaSource
+                                    || (completed && a.player instanceof SystemPlayer);
                     if (a.player != null && a.prepared) {
-                        try {
-                            Uri subUri = Uri.fromFile(targetFile);
-                            String mime = MediaOptions.subtitleMime(targetFile.getName(), "");
-                            if (a.player instanceof MoviePlayer) {
-                                // Always deduplicates single AI track; avoids mid-playback
-                                // exo.prepare() unless explicitly reloading from a 100% cache hit.
-                                ((MoviePlayer) a.player)
-                                        .upsertExternalSubtitle(
-                                                subUri, "AI 全片双语字幕", mime, reloadPlayerMediaSource);
-                            } else if (reloadPlayerMediaSource) {
-                                a.player.addExternalSubtitle(subUri, "AI 全片双语字幕", mime);
-                            }
-                            if (toastMsg != null && !toastMsg.isEmpty()) {
-                                a.toast(toastMsg);
-                            }
-                        } catch (Exception ignored) {
+                        final Uri subUri = Uri.fromFile(targetFile);
+                        final String mime = MediaOptions.subtitleMime(targetFile.getName(), "");
+                        SubtitleMountTarget mountTarget =
+                                new SubtitleMountTarget() {
+                                    @Override
+                                    public void setLiveOverlay(
+                                            List<SrtCue> c, String[] t, boolean bi) {
+                                        if (a.playbackControls != null) {
+                                            a.playbackControls.setLiveAiSubtitles(c, t, bi);
+                                        }
+                                    }
+
+                                    @Override
+                                    public void clearLiveOverlay() {
+                                        if (a.playbackControls != null
+                                                && !a.isFinishing()
+                                                && ticket == a.generation) {
+                                            a.playbackControls.clearLiveAiSubtitles();
+                                        }
+                                    }
+
+                                    @Override
+                                    public boolean upsertExternalSubtitle(
+                                            String u,
+                                            String n,
+                                            String m,
+                                            boolean reload,
+                                            Runnable onMounted) {
+                                        return a.player.upsertExternalSubtitle(
+                                                subUri, n, m, reload, onMounted);
+                                    }
+                                };
+                        applySubtitleMountSafely(
+                                mountTarget,
+                                subUri.toString(),
+                                mime,
+                                cues,
+                                translations,
+                                bilingual,
+                                effectiveReload);
+                        if (toastMsg != null && !toastMsg.isEmpty()) {
+                            a.toast(toastMsg);
                         }
+                    } else if (a.playbackControls != null) {
+                        a.playbackControls.setLiveAiSubtitles(cues, translations, bilingual);
                     }
                     if (listener != null) {
                         listener.onPartialReady(targetFile, done, total, completed);

@@ -60,17 +60,28 @@ FIXED_NON_AUTH_EXPIRED_TOKEN = codegen.encode_passcode(
 
 
 def windows_073_verify(code: str, pub_bytes: bytes, now_epoch: int) -> tuple[bool, str]:
-    """Exact mirror of released Windows 0.7.3 verifier (`flutter/lib/core/ai_lab_passcode.dart`).
+    """Exact mirror of released Windows 0.7.3 verifier (`a11deb29:flutter/lib/core/ai_lab_passcode.dart`).
 
-    Crucially: `matchesPlatform('windows')` accepts ONLY `""`, `"all"`, or exact `"windows"`
-    (NO comma combinations) and ignores `min_vc`.
+    Crucially:
+    1. `extractToken()` tries direct regex on raw text FIRST (so wrapping inside the 86-char
+       signature truncates at the newline and fails verification!).
+    2. `matchesPlatform('windows')` accepts ONLY `""`, `"all"`, or exact `"windows"`
+       (NO comma combinations) and ignores `min_vc`.
     """
-    collapsed = "".join((code or "").split())
-    m = re.search(r"MMAILAB1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)", collapsed)
+    trimmed = (code or "").strip()
+    if not trimmed:
+        return False, "empty"
+    m = re.search(r"MMAILAB1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)", trimmed)
+    if not m:
+        collapsed = "".join(trimmed.split())
+        m = re.search(r"MMAILAB1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)", collapsed)
     if not m:
         return False, "malformed"
-    payload_bytes = codegen._b64url_decode(m.group(1))
-    sig = codegen._b64url_decode(m.group(2))
+    try:
+        payload_bytes = codegen._b64url_decode(m.group(1))
+        sig = codegen._b64url_decode(m.group(2))
+    except Exception:
+        return False, "malformed"
     if len(sig) != 64 or not ed.verify(pub_bytes, codegen.SIGN_DOMAIN + payload_bytes, sig):
         return False, "invalidSignature"
     claims = json.loads(payload_bytes.decode("utf-8"))
@@ -154,14 +165,51 @@ def verify_python_issuance_rules(seed: bytes, pub_bytes: bytes, base_epoch: int)
     assert info["activatable_by_platform"]["windows"]["ok"] is False
     assert info["activatable_for_target"] is False
 
-    # 5. Fixed non-authorizable expired test vector verifies signature but is non-activatable everywhere
+    # 5. P2-2: min_vc=65535 MUST NOT report activatable when target app_version_code is omitted,
+    #    rejects candidate 103, and accepts 65535. Also verify Windows 0.7.3 wrapped-sig limitation.
+    max_vc_token = codegen.encode_passcode(
+        seed, tag="max-vc", days=30, platforms="android", min_version_code=65535, now_epoch=base_epoch
+    )
+    no_vc_info = codegen.decode_and_verify_passcode(
+        max_vc_token, pub_bytes, now_epoch=base_epoch + 10, target_platform="android"
+    )
+    assert no_vc_info["valid_signature"] is True
+    assert no_vc_info["activatable_by_platform"]["android"]["ok"] is False
+    assert no_vc_info["activatable_by_platform"]["android"]["status"] == "unknown_version"
+    assert no_vc_info["activatable_for_target"] is False
+    vc103_info = codegen.decode_and_verify_passcode(
+        max_vc_token,
+        pub_bytes,
+        now_epoch=base_epoch + 10,
+        target_platform="android",
+        app_version_code=103,
+    )
+    assert vc103_info["activatable_by_platform"]["android"]["ok"] is False
+    assert vc103_info["activatable_by_platform"]["android"]["status"] == "version_too_low"
+    vc65535_info = codegen.decode_and_verify_passcode(
+        max_vc_token,
+        pub_bytes,
+        now_epoch=base_epoch + 10,
+        target_platform="android",
+        app_version_code=65535,
+    )
+    assert vc65535_info["activatable_by_platform"]["android"]["ok"] is True
+
+    # Windows 0.7.3 rejects signature-wrapped tokens (single-line required for Windows 0.7.3)
+    win_tok = [it["token"] for it in split_items if it["platform"] == "windows"][0]
+    w_dot2 = win_tok.rindex(".")
+    win_wrapped_sig = win_tok[: w_dot2 + 20] + "\n" + win_tok[w_dot2 + 20 :]
+    assert windows_073_verify(win_tok, pub_bytes, base_epoch + 10)[0] is True
+    assert windows_073_verify(win_wrapped_sig, pub_bytes, base_epoch + 10)[0] is False
+
+    # 6. Fixed non-authorizable expired test vector verifies signature but is non-activatable everywhere
     fixed_info = codegen.decode_and_verify_passcode(
         FIXED_NON_AUTH_EXPIRED_TOKEN, FIXED_TEST_PUB, now_epoch=base_epoch
     )
     assert fixed_info["valid_signature"] is True and fixed_info["expired"] is True
     assert all(not fixed_info["activatable_by_platform"][p]["ok"] for p in ("android", "ios", "windows"))
     assert FIXED_TEST_PUB.hex() != codegen.DEFAULT_PUBKEY_HEX
-    print("PASS Python issuance constraints (split multi-plat, min_vc Android-only, strict expiry, wrapped sig)")
+    print("PASS Python issuance constraints (split multi-plat, min_vc version guard, strict expiry, wrapped sig)")
 
 
 def run_phone_js_roundtrip(
@@ -176,12 +224,14 @@ def run_phone_js_roundtrip(
     html_path = ROOT / "scripts" / "ai_beta_phone_keygen.html"
     html = html_path.read_text(encoding="utf-8")
 
-    # Static P1-6 & P2-1 hygiene checks on phone keygen HTML (always executed even without Node)
+    # Static P1-3, P1-5, P1-6 & P2-1 hygiene checks on phone keygen HTML (always executed)
     assert ".innerHTML" not in html, "Security P1-6: ai_beta_phone_keygen.html must not use innerHTML"
     assert "Math.random" not in html, "Security P2-1: ai_beta_phone_keygen.html must not fall back to Math.random"
     assert "contains_usable_passcodes: false" in html, "Security P1-6: exported ledger must explicitly exclude usable passcodes"
     assert "isOfficialPublicKey" in html, "Security P1-6: phone keygen must check pinned official public key"
     assert "activeSeed.fill(0)" in html, "Security P1-6: lockVault must scrub activeSeed in memory"
+    assert "clearFileInput()" in html and "scrubPendingImport()" in html, "Security P1-5: phone keygen must release file input and scrub pending seed"
+    assert 'id="expChk"' not in html, "P1-3: phone keygen must not advertise withdrawn experimental OpenAI OAuth"
 
     node = shutil.which("node")
     if not node:
@@ -286,6 +336,170 @@ if (!wrappedChk.signatureValid || !wrappedChk.activatable.ios.ok || wrappedChk.a
 const reVault = edMod.encryptVault(seed, pub, "js-ed-pwd-2026", 10000);
 const reDec = edMod.decryptVault(reVault, "js-ed-pwd-2026");
 if (edMod.bytesToHex(reDec.seed) !== edMod.bytesToHex(seed)) throw new Error("Phone JS vault roundtrip failed");
+
+// P2-2: min_vc=65535 MUST NOT report activatable when appVersionCode is missing, rejects 103, accepts 65535
+const highVcCode = edMod.encodePasscode(seed, { tag: "vc-max", days: 30, plat: "android", minVc: 65535, nowEpochSec: baseEpoch });
+const chkNoVc = edMod.verifyPasscode(highVcCode, pubHex, { nowEpochSec: baseEpoch + 10 });
+const chk103 = edMod.verifyPasscode(highVcCode, pubHex, { nowEpochSec: baseEpoch + 10, appVersionCode: 103 });
+const chk65535 = edMod.verifyPasscode(highVcCode, pubHex, { nowEpochSec: baseEpoch + 10, appVersionCode: 65535 });
+if (!chkNoVc.signatureValid || chkNoVc.activatable.android.ok !== false || chkNoVc.activatable.android.status !== "unknown_version") {
+  throw new Error("P2-2: Phone JS reported min_vc=65535 activatable without versionCode: " + JSON.stringify(chkNoVc));
+}
+if (chk103.activatable.android.ok !== false || chk103.activatable.android.status !== "version_too_low") {
+  throw new Error("P2-2: Phone JS did not reject candidate 103 for min_vc=65535");
+}
+if (chk65535.activatable.android.ok !== true) {
+  throw new Error("P2-2: Phone JS rejected exact min_vc=65535");
+}
+
+// P1-5: Full DOM lifecycle simulation with ephemeral .key seed -> FileList=0 on import, cancel, fail, and lock!
+const vm = require("vm");
+const scriptSrc = fs.readFileSync(process.argv[2], "utf8");
+function makeClassList(initial = []) {
+  const s = new Set(initial);
+  return {
+    add: (...c) => c.forEach(x => s.add(x)),
+    remove: (...c) => c.forEach(x => s.delete(x)),
+    toggle: (c, force) => { if (force === undefined) { if (s.has(c)) s.delete(c); else s.add(c); } else if (force) s.add(c); else s.delete(c); },
+    contains: (c) => s.has(c),
+  };
+}
+function makeEl(id, extra = {}) {
+  const el = {
+    id, value: "", textContent: "", checked: false, disabled: false, dataset: {},
+    classList: makeClassList(), children: [],
+    appendChild(c) { this.children.push(c); return c; },
+    ...extra
+  };
+  return el;
+}
+const vaultFileEl = makeEl("vaultFile");
+let vaultFileList = [];
+Object.defineProperty(vaultFileEl, "files", {
+  get() { return vaultFileList; },
+  set(v) { vaultFileList = Array.from(v || []); }
+});
+let vaultFileVal = "";
+Object.defineProperty(vaultFileEl, "value", {
+  get() { return vaultFileVal; },
+  set(v) { vaultFileVal = String(v || ""); if (!vaultFileVal) vaultFileList = []; }
+});
+const els = {
+  toast: makeEl("toast"),
+  lockBadge: makeEl("lockBadge"),
+  lockBtn: makeEl("lockBtn"),
+  vaultHint: makeEl("vaultHint"),
+  unlockPane: makeEl("unlockPane"),
+  unlockPwd: makeEl("unlockPwd"),
+  importPane: makeEl("importPane"),
+  vaultFile: vaultFileEl,
+  rawPwdBox: makeEl("rawPwdBox", { classList: makeClassList(["hidden"]) }),
+  newVaultPwd: makeEl("newVaultPwd"),
+  issueCard: makeEl("issueCard", { classList: makeClassList(["hidden"]) }),
+  ledgerCard: makeEl("ledgerCard", { classList: makeClassList(["hidden"]) }),
+  testKeyWarn: makeEl("testKeyWarn", { classList: makeClassList(["hidden"]) }),
+  testKeyWarnText: makeEl("testKeyWarnText"),
+  allowTestKeyChk: makeEl("allowTestKeyChk"),
+  minVcIn: makeEl("minVcIn", { value: "0" }),
+  minVcLbl: makeEl("minVcLbl"),
+  platModeNotice: makeEl("platModeNotice", { classList: makeClassList(["hidden"]) }),
+  neverExpireChk: makeEl("neverExpireChk"),
+  tagIn: makeEl("tagIn", { value: "ephem-tag" }),
+  daysIn: makeEl("daysIn", { value: "30" }),
+  countIn: makeEl("countIn", { value: "1" }),
+  noteIn: makeEl("noteIn", { value: "test-note" }),
+  sharedChk: makeEl("sharedChk", { checked: true }),
+  resultWrap: makeEl("resultWrap", { classList: makeClassList(["hidden"]) }),
+  resultMeta: makeEl("resultMeta"),
+  resultCodes: makeEl("resultCodes"),
+  verifyIn: makeEl("verifyIn"),
+  verifyAndroidVcIn: makeEl("verifyAndroidVcIn"),
+  verifyOut: makeEl("verifyOut", { classList: makeClassList(["hidden"]) }),
+  ledgerList: makeEl("ledgerList"),
+};
+const lsMap = new Map();
+class FakeFileReader {
+  readAsText(file) {
+    if (file && file.fail) {
+      if (this.onerror) this.onerror(new Error("read failed"));
+      return;
+    }
+    this.result = file ? file.content : "";
+    if (this.onload) this.onload();
+  }
+}
+const sandbox = {
+  console, TextEncoder, TextDecoder, Uint8Array, Uint32Array, DataView, BigInt, JSON, Set, Map, Array, Object, Number, String, Error, Date, Math,
+  setTimeout: () => 1, clearTimeout: () => {},
+  crypto: require("crypto").webcrypto,
+  localStorage: {
+    getItem: (k) => lsMap.has(k) ? lsMap.get(k) : null,
+    setItem: (k, v) => lsMap.set(k, String(v)),
+    removeItem: (k) => lsMap.delete(k),
+  },
+  FileReader: FakeFileReader,
+  document: {
+    getElementById: (id) => els[id] || null,
+    querySelectorAll: () => [],
+    createElement: (tag) => makeEl(tag),
+  },
+  window: { addEventListener: () => {} },
+};
+sandbox.globalThis = sandbox;
+const ctx = vm.createContext(sandbox);
+vm.runInContext(scriptSrc, ctx);
+vm.runInContext("initUi();", ctx);
+
+const seedHex = edMod.bytesToHex(seed);
+// Step A: Import ephemeral .key file -> FileList MUST become 0 immediately
+vaultFileVal = "C:\\fakepath\\ephemeral.key";
+vaultFileList = [{ name: "ephemeral.key", content: seedHex }];
+vm.runInContext("handleImportFile({ target: document.getElementById('vaultFile') });", ctx);
+if (vaultFileEl.files.length !== 0 || vaultFileEl.value !== "") {
+  throw new Error("P1-5: FileList not cleared right after .key import!");
+}
+if (els.rawPwdBox.classList.contains("hidden")) {
+  throw new Error("P1-5: rawPwdBox did not open for pending raw seed");
+}
+
+// Step B: Cancel import -> pendingRawSeed scrubbed & FileList=0
+vm.runInContext("cancelRawImport();", ctx);
+if (vm.runInContext("pendingRawSeed !== null", ctx) || vaultFileEl.files.length !== 0 || !els.rawPwdBox.classList.contains("hidden")) {
+  throw new Error("P1-5: cancelRawImport failed to clear pendingRawSeed/FileList");
+}
+
+// Step C: Failed read / malformed file -> clears pending seed & outputs & FileList=0
+vaultFileVal = "C:\\fakepath\\bad.key";
+vaultFileList = [{ name: "bad.key", fail: true }];
+vm.runInContext("handleImportFile({ target: document.getElementById('vaultFile') });", ctx);
+if (vm.runInContext("pendingRawSeed !== null", ctx) || vaultFileEl.files.length !== 0) {
+  throw new Error("P1-5: read error left pendingRawSeed or FileList populated");
+}
+
+// Step D: Full ephemeral flow -> import -> encrypt & unlock -> issue -> lock -> FileList=0 & all cleared!
+vaultFileVal = "C:\\fakepath\\ephemeral2.key";
+vaultFileList = [{ name: "ephemeral2.key", content: seedHex }];
+vm.runInContext("handleImportFile({ target: document.getElementById('vaultFile') });", ctx);
+els.newVaultPwd.value = "ephem-pass-999";
+vm.runInContext("finishRawImport();", ctx);
+els.allowTestKeyChk.checked = true;
+vm.runInContext("issueNow();", ctx);
+if (!els.resultCodes.textContent.includes("MMAILAB1.")) {
+  throw new Error("P1-5: ephemeral issueNow did not render passcode");
+}
+vm.runInContext("lockVault();", ctx);
+if (
+  vaultFileEl.files.length !== 0 ||
+  vaultFileEl.value !== "" ||
+  vm.runInContext("activeSeed !== null || pendingRawSeed !== null", ctx) ||
+  els.resultCodes.textContent !== "" ||
+  els.verifyOut.textContent !== "" ||
+  els.ledgerList.textContent !== "" ||
+  els.unlockPwd.value !== "" ||
+  els.newVaultPwd.value !== ""
+) {
+  throw new Error("P1-5: lockVault failed to clear FileList=0, seeds, passwords, or outputs!");
+}
 
 console.log(JSON.stringify({ nodeExecuted: true, jsAllPlatCode, jsIosOnlyCode, jsWinOnlyCode, reVault }));
 """,

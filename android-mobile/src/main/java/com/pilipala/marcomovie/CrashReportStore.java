@@ -182,10 +182,10 @@ final class CrashReportStore {
         return new File(filesDir, DIR_NAME);
     }
 
-    /** Strips URLs, tokens, cookies, credentials, LAN IPs, and storage paths before writing. */
+    /** Strips AI secrets, URLs, tokens, cookies, credentials, LAN IPs, and storage paths. */
     static String sanitize(String raw) {
         if (raw == null || raw.isEmpty()) return "";
-        String s = raw;
+        String s = AppLog.sanitize(raw);
         s = URL_PATTERN.matcher(s).replaceAll("[URL_REDACTED]");
         s = GH_TOKEN_PATTERN.matcher(s).replaceAll("[TOKEN_REDACTED]");
         s = BEARER_PATTERN.matcher(s).replaceAll("Bearer [REDACTED]");

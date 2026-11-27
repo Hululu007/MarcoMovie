@@ -603,9 +603,13 @@ final class MobileLivePage {
                         final int idx = i;
                         boolean active = (i == srcIdx[0]);
                         String rawName = sources.get(i).name == null ? "" : sources.get(i).name;
-                        boolean hasSparkle = rawName.startsWith("✨");
+                        boolean hasSparkle =
+                                LiveQualityPolicy.MERGED_SOURCE_URL.equals(sources.get(i).url)
+                                        || rawName.startsWith("✨");
                         String cleanName =
-                                hasSparkle ? rawName.replaceFirst("^✨\\s*", "").trim() : rawName;
+                                rawName.startsWith("✨")
+                                        ? rawName.replaceFirst("^✨\\s*", "").trim()
+                                        : rawName;
                         View chipView;
                         if (hasSparkle) {
                             LinearLayout chipRow = a.row();

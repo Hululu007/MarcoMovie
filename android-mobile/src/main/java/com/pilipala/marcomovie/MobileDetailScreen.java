@@ -340,12 +340,37 @@ final class MobileDetailScreen {
         }
     }
 
+    /**
+     * Pure-JVM lock-state gate for episode-name cleaning: when AI Lab is locked, masks a stored
+     * mode {@code 2} (AI deep clean) down to {@code 0} (local regex clean) WITHOUT erasing the
+     * persisted preference, so re-unlocking AI Lab automatically restores the user's prior choice.
+     */
+    static int effectiveEpisodeCleanMode(int storedMode, boolean aiUnlocked) {
+        if (storedMode == 2 && !aiUnlocked) return 0;
+        return storedMode;
+    }
+
+    static String episodeCleanPillLabel(int storedMode, boolean aiUnlocked) {
+        int eff = effectiveEpisodeCleanMode(storedMode, aiUnlocked);
+        return eff == 2 ? "AI净化" : (eff == 0 ? "净化" : "原集名");
+    }
+
+    static int nextEpisodeCleanMode(int storedMode, boolean aiUnlocked, boolean aiConfigured) {
+        int eff = effectiveEpisodeCleanMode(storedMode, aiUnlocked);
+        if (!aiUnlocked || !aiConfigured) {
+            return eff == 0 ? 1 : 0;
+        }
+        return eff == 0 ? 2 : (eff == 2 ? 1 : 0);
+    }
+
     static EpisodeDisplay parseEpisodeDisplay(String rawName, int epNumber) {
         MainActivity act = MainActivity.activeActivity;
-        int cleanMode =
+        boolean aiUnlocked = act != null && !act.isTvDevice() && AiBetaGate.isUnlocked(act);
+        int storedMode =
                 act != null && !act.isTvDevice()
                         ? act.mobilePrefs().getInt(Prefs.EPISODE_CLEAN_MODE, 0)
                         : 0;
+        int cleanMode = effectiveEpisodeCleanMode(storedMode, aiUnlocked);
         if (cleanMode == 1) {
             String raw =
                     rawName == null || rawName.trim().isEmpty() ? ("E" + epNumber) : rawName.trim();
@@ -1863,10 +1888,12 @@ final class MobileDetailScreen {
         }
         headerRow.addView(seasonBtn, new LinearLayout.LayoutParams(0, -2, 1f));
 
-        // Episode Name Purifier Pill (Local Regex / AI / Raw)
-        final int curCleanMode = a.mobilePrefs().getInt(Prefs.EPISODE_CLEAN_MODE, 0);
+        // Episode Name Purifier Pill (Local Regex / AI when unlocked / Raw)
+        final boolean aiUnlocked = AiBetaGate.isUnlocked(a);
+        final int storedCleanMode = a.mobilePrefs().getInt(Prefs.EPISODE_CLEAN_MODE, 0);
+        final int curCleanMode = effectiveEpisodeCleanMode(storedCleanMode, aiUnlocked);
         boolean cleanActive = curCleanMode != 1;
-        String cleanLabel = curCleanMode == 2 ? "AI净化" : (curCleanMode == 0 ? "净化" : "原集名");
+        String cleanLabel = episodeCleanPillLabel(storedCleanMode, aiUnlocked);
         LinearLayout cleanBtn = a.row();
         cleanBtn.setTag("episodes-cleaner");
         cleanBtn.setGravity(Gravity.CENTER_VERTICAL);
@@ -1885,12 +1912,14 @@ final class MobileDetailScreen {
         MobileMotion.bindPress(cleanBtn, 0.94f);
         cleanBtn.setOnClickListener(
                 v -> {
-                    int nextMode = curCleanMode == 0 ? 2 : (curCleanMode == 2 ? 1 : 0);
-                    if (nextMode == 2 && !AiAssistantService.isConfigured(a)) {
-                        nextMode = 1;
-                    }
+                    boolean nowUnlocked = AiBetaGate.isUnlocked(a);
+                    int nextMode =
+                            nextEpisodeCleanMode(
+                                    storedCleanMode,
+                                    nowUnlocked,
+                                    AiAssistantService.isConfigured(a));
                     a.mobilePrefs().edit().putInt(Prefs.EPISODE_CLEAN_MODE, nextMode).apply();
-                    if (nextMode == 2) {
+                    if (nextMode == 2 && nowUnlocked) {
                         a.toast("正在调用 AI 智能净化集名…");
                         AiAssistantService.cleanEpisodesAsync(
                                 a,

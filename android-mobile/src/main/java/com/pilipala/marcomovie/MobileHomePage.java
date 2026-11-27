@@ -1717,7 +1717,10 @@ final class MobileHomePage {
     static String formatCleanHistorySubtitle(MainActivity a, WatchHistory.Entry e) {
         if (e == null) return "";
         String raw = a != null ? a.historyLabel(e) : "";
-        int cleanMode = a != null ? a.mobilePrefs().getInt(Prefs.EPISODE_CLEAN_MODE, 1) : 1;
+        int storedCleanMode = a != null ? a.mobilePrefs().getInt(Prefs.EPISODE_CLEAN_MODE, 1) : 1;
+        int cleanMode =
+                MobileDetailScreen.effectiveEpisodeCleanMode(
+                        storedCleanMode, a != null && AiBetaGate.isUnlocked(a));
         return formatCleanHistoryLabel(raw, e.episode, e.title, e.index, cleanMode);
     }
 

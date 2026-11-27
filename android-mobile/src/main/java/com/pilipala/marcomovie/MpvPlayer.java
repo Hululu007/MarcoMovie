@@ -993,15 +993,59 @@ public final class MpvPlayer extends MoviePlayer {
         return sb.toString();
     }
 
+    /**
+     * Pure-JVM deduplication planner for libmpv external subtitle upsert: emits {@code sub-remove}
+     * for any prior matching external/AI track followed by a single {@code sub-add ... select}
+     * command so progressive updates and cache hits never duplicate subtitle tracks or trigger
+     * playback reload.
+     */
+    static List<String[]> planExternalSubtitleUpsertCommands(
+            List<JSONObject> existingSubTracks, String targetUri, String trackName) {
+        List<String[]> cmds = new ArrayList<>();
+        if (targetUri == null || targetUri.trim().isEmpty()) return cmds;
+        String safeUri = targetUri.trim();
+        String safeName =
+                trackName == null || trackName.trim().isEmpty() ? "外挂字幕" : trackName.trim();
+        boolean isAiTrack = safeName.startsWith("AI ");
+        if (existingSubTracks != null) {
+            for (JSONObject t : existingSubTracks) {
+                if (t == null) continue;
+                int id = t.optInt("id", -1);
+                if (id <= 0) continue;
+                boolean external = t.optBoolean("external", false);
+                String extFile = t.optString("external-filename", "").trim();
+                String title = t.optString("title", "").trim();
+                boolean sameFile = !extFile.isEmpty() && extFile.equals(safeUri);
+                boolean sameAi = isAiTrack && title.startsWith("AI ");
+                if ((external && (sameFile || sameAi || title.equals(safeName))) || sameAi) {
+                    cmds.add(new String[] {"sub-remove", Integer.toString(id)});
+                }
+            }
+        }
+        cmds.add(new String[] {"sub-add", safeUri, "select", safeName});
+        return cmds;
+    }
+
     @Override
     public void addExternalSubtitle(Uri subtitle, String name, String mime) {
-        onMain(
+        upsertExternalSubtitle(subtitle, name, mime, true, null);
+    }
+
+    @Override
+    public boolean upsertExternalSubtitle(
+            Uri subtitle, String name, String mime, boolean reloadMediaSource, Runnable onMounted) {
+        return onMain(
                 () -> {
                     checkState();
-                    if (subtitle != null) {
-                        MPVLib.command(new String[] {"sub-add", subtitle.toString(), "select"});
+                    if (subtitle == null) return false;
+                    List<String[]> cmds =
+                            planExternalSubtitleUpsertCommands(
+                                    mpvTracks(C.TRACK_TYPE_TEXT), subtitle.toString(), name);
+                    for (String[] cmd : cmds) {
+                        MPVLib.command(cmd);
                     }
-                    return null;
+                    if (onMounted != null) onMounted.run();
+                    return true;
                 });
     }
 

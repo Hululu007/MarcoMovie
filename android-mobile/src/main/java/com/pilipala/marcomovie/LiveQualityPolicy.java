@@ -30,7 +30,7 @@ public final class LiveQualityPolicy {
     private LiveQualityPolicy() {}
 
     public static final String MERGED_SOURCE_URL = "marcomovie://live-merged";
-    public static final String MERGED_SOURCE_NAME = "✨ 智能聚合 · 高清优选";
+    public static final String MERGED_SOURCE_NAME = "智能聚合 · 高清优选";
     private static final int MAX_METRICS_ENTRIES = 400;
     private static final long FAILURE_COOLDOWN_MS = 30L * 60L * 1000L;
 

@@ -70,7 +70,8 @@ input[type=checkbox]{width:20px;height:20px;flex:0 0 auto;accent-color:var(--acc
         <label class="lbl">为导入的 Ed25519 私钥设置本机加密主密码（至少 6 位）</label>
         <div class="row">
           <input id="newVaultPwd" type="password" placeholder="设置主密码">
-          <button type="button" class="btn" style="flex:0 0 108px" onclick="finishRawImport()">加密保存</button>
+          <button type="button" class="btn" style="flex:0 0 98px" onclick="finishRawImport()">加密保存</button>
+          <button type="button" class="btn sec" style="flex:0 0 68px" onclick="cancelRawImport()">取消</button>
         </div>
       </div>
     </div>
@@ -137,10 +138,6 @@ input[type=checkbox]{width:20px;height:20px;flex:0 0 auto;accent-color:var(--acc
       <span>频道通用口令（多人共用体验）</span>
       <input id="sharedChk" type="checkbox" checked>
     </div>
-    <div class="sw">
-      <span>开放实验性 OpenAI OAuth 权限</span>
-      <input id="expChk" type="checkbox">
-    </div>
 
     <button type="button" class="btn" style="margin-top:8px" onclick="issueNow()">立即离线签发口令</button>
 
@@ -156,7 +153,9 @@ input[type=checkbox]{width:20px;height:20px;flex:0 0 auto;accent-color:var(--acc
 
   <section class="card">
     <h2>离线验签与各端激活检查</h2>
-    <textarea id="verifyIn" placeholder="粘贴 MMAILAB1.… 口令（支持折行或含说明文案）离线检查签名真伪与三端可激活状态"></textarea>
+    <textarea id="verifyIn" placeholder="粘贴 MMAILAB1.… 口令（支持 Android/发码器折行提取；注意 Windows 0.7.3 正式版需保持整条口令单行无换行）"></textarea>
+    <label class="lbl">目标 Android 版本码 versionCode（可选；含 min_vc 限制的口令须填写后才可判定是否可激活）</label>
+    <input id="verifyAndroidVcIn" type="number" min="0" max="65535" step="1" placeholder="留空表示未指定目标版本码，例如 103">
     <button type="button" class="btn sec" style="margin-top:8px" onclick="verifyInputCode()">立即离线验证</button>
     <div id="verifyOut" class="code-box hidden"></div>
   </section>
@@ -667,9 +666,9 @@ const MarcoEd25519 = (() => {
     return { targets, items };
   }
   function evaluatePlatformActivation(claims, signatureValid, targetPlatform, nowSec, appVersionCode = 0) {
-    if (!signatureValid) return { ok: false, reason: "Ed25519 签名无效" };
-    if (!claims || typeof claims !== "object") return { ok: false, reason: "载荷 JSON 无效" };
-    if (claims.v !== 1) return { ok: false, reason: `不支持的版本 v=${claims.v}` };
+    if (!signatureValid) return { ok: false, status: "invalid_signature", reason: "Ed25519 签名无效" };
+    if (!claims || typeof claims !== "object") return { ok: false, status: "invalid_payload", reason: "载荷 JSON 无效" };
+    if (claims.v !== 1) return { ok: false, status: "unsupported_version", reason: `不支持的版本 v=${claims.v}` };
     const rawPlat = String(claims.plat || "all").trim().toLowerCase();
     let platOk = false;
     if (targetPlatform === "windows" || targetPlatform === "ios") {
@@ -679,17 +678,36 @@ const MarcoEd25519 = (() => {
       const parts = rawPlat.split(/[,;/\s]+/).map(normalizeSinglePlatform).filter(Boolean);
       platOk = !parts.length || parts.includes("all") || parts.includes(targetPlatform);
     }
-    if (!platOk) return { ok: false, reason: `平台字段 "${rawPlat}" 不被 ${targetPlatform} 客户端接受` };
-    const minVc = Number(claims.min_vc || 0);
-    if (targetPlatform === "android" && minVc > 0 && appVersionCode > 0 && appVersionCode < minVc) {
-      return { ok: false, reason: `版本码 ${appVersionCode} 低于最低要求 ${minVc}` };
-    }
+    if (!platOk) return { ok: false, status: "wrong_platform", reason: `平台字段 "${rawPlat}" 不被 ${targetPlatform} 客户端接受` };
     const exp = Number(claims.exp || 0);
-    if (exp > 0 && nowSec > exp) return { ok: false, reason: "口令已过期" };
-    const res = { ok: true, reason: "可激活" };
-    if ((targetPlatform === "windows" || targetPlatform === "ios") && minVc > 0) {
-      res.warning = "Windows/iOS 正式版不校验 min_vc";
+    if (exp > 0 && nowSec > exp) return { ok: false, status: "expired", reason: "口令已过期" };
+    const minVc = Number(claims.min_vc || 0);
+    if (targetPlatform === "android" && minVc > 0) {
+      if (!Number.isInteger(appVersionCode) || appVersionCode <= 0) {
+        return {
+          ok: false,
+          status: "unknown_version",
+          requiresVersionCheck: true,
+          minVc,
+          reason: `要求 Android versionCode >= ${minVc}，未提供目标版本码前不能判定为可激活`
+        };
+      }
+      if (appVersionCode < minVc) {
+        return { ok: false, status: "version_too_low", minVc, reason: `版本码 ${appVersionCode} 低于最低要求 ${minVc}` };
+      }
     }
+    const res = { ok: true, status: "activatable", reason: "可激活" };
+    const warnings = [];
+    if ((targetPlatform === "windows" || targetPlatform === "ios") && minVc > 0) {
+      warnings.push("Windows/iOS 正式版不校验 min_vc");
+    }
+    if (targetPlatform === "windows") {
+      warnings.push("Windows 0.7.3 须单行粘贴，签名段内换行会截断失败");
+    }
+    if (targetPlatform === "ios") {
+      warnings.push("iOS 规则按规划复用 Flutter 验签器，尚未经独立已发布 iOS 包实测");
+    }
+    if (warnings.length) res.warning = warnings.join("；");
     return res;
   }
   function verifyPasscode(code, pubHex = DEFAULT_PUB_HEX, opts = {}) {
@@ -798,24 +816,58 @@ function unlockStoredVault() {
       : "已解锁（警告：非正式公钥，正式版客户端将拒绝激活）");
   } catch (e) { toast(e.message || "解锁失败"); }
 }
-function lockVault() {
-  if (activeSeed && activeSeed.fill) activeSeed.fill(0);
-  activeSeed = null;
+function clearFileInput() {
+  const vf = document.getElementById("vaultFile");
+  if (!vf) return;
+  try {
+    vf.value = "";
+    if (vf.files && vf.files.length > 0 && typeof DataTransfer !== "undefined") {
+      vf.files = new DataTransfer().files;
+    }
+  } catch (_) {
+    try { vf.value = ""; } catch (_) {}
+  }
+}
+function scrubPendingImport() {
+  if (pendingRawSeed && pendingRawSeed.fill) pendingRawSeed.fill(0);
+  pendingRawSeed = null;
+  const np = document.getElementById("newVaultPwd");
+  const rb = document.getElementById("rawPwdBox");
+  if (np) np.value = "";
+  if (rb) rb.classList.add("hidden");
+  clearFileInput();
+}
+function clearVisibleOutputs() {
   lastIssued = { items: [], summary: "" };
   const rc = document.getElementById("resultCodes");
   const rm = document.getElementById("resultMeta");
   const rw = document.getElementById("resultWrap");
   const vi = document.getElementById("verifyIn");
+  const vv = document.getElementById("verifyAndroidVcIn");
   const vo = document.getElementById("verifyOut");
   const ll = document.getElementById("ledgerList");
   if (rc) rc.textContent = "";
   if (rm) rm.textContent = "";
   if (rw) rw.classList.add("hidden");
   if (vi) vi.value = "";
+  if (vv) vv.value = "";
   if (vo) { vo.textContent = ""; vo.classList.add("hidden"); }
   if (ll) ll.textContent = "";
+}
+function lockVault() {
+  if (activeSeed && activeSeed.fill) activeSeed.fill(0);
+  activeSeed = null;
+  scrubPendingImport();
+  const up = document.getElementById("unlockPwd");
+  if (up) up.value = "";
+  clearVisibleOutputs();
   syncUnlockedUi(false);
-  toast("已锁定密钥库并清空界面口令");
+  toast("已锁定密钥库、清除待处理种子并释放文件选择");
+}
+function cancelRawImport() {
+  scrubPendingImport();
+  clearVisibleOutputs();
+  toast("已取消导入并清除待处理私钥");
 }
 function syncUnlockedUi(on) {
   const b = document.getElementById("lockBadge");
@@ -854,17 +906,32 @@ function syncUnlockedUi(on) {
   }
 }
 function handleImportFile(ev) {
-  const f = ev.target.files && ev.target.files[0]; if (!f) return;
+  const f = ev && ev.target && ev.target.files && ev.target.files[0];
+  clearFileInput();
+  if (!f) {
+    scrubPendingImport();
+    return;
+  }
   const reader = new FileReader();
+  reader.onerror = () => {
+    scrubPendingImport();
+    clearVisibleOutputs();
+    toast("读取密钥文件失败，已清除待处理状态");
+  };
+  reader.onabort = () => {
+    scrubPendingImport();
+    clearVisibleOutputs();
+  };
   reader.onload = () => {
+    clearFileInput();
     const text = String(reader.result || "").trim();
     try {
       const obj = JSON.parse(text);
       if (obj.format === "marco-ai-ed25519-vault-v1") {
+        scrubPendingImport();
         localStorage.setItem(LS_VAULT, JSON.stringify(obj));
         activePubHex = obj.pub_hex || MarcoEd25519.DEFAULT_PUB_HEX;
         document.getElementById("unlockPane").classList.remove("hidden");
-        document.getElementById("rawPwdBox").classList.add("hidden");
         return toast(MarcoEd25519.isOfficialPublicKey(activePubHex)
           ? "已导入官方加密密钥库，请输入主密码解锁"
           : "已导入密钥库（注意：非官方钉住公钥），请输入主密码解锁");
@@ -872,11 +939,14 @@ function handleImportFile(ev) {
     } catch (_) {}
     const hex = text.split(/\r?\n/).filter(l => l.trim() && !l.trim().startsWith("#")).join("").trim();
     if (/^[0-9a-fA-F]{64}$/.test(hex)) {
+      if (pendingRawSeed && pendingRawSeed.fill) pendingRawSeed.fill(0);
       pendingRawSeed = MarcoEd25519.hexToBytes(hex);
       document.getElementById("rawPwdBox").classList.remove("hidden");
-      return toast("已读取 32 字节 Ed25519 私钥，请设置本机加密主密码");
+      return toast("已读取 32 字节 Ed25519 私钥并释放文件句柄，请设置本机加密主密码");
     }
-    toast("无法识别的密钥文件格式");
+    scrubPendingImport();
+    clearVisibleOutputs();
+    toast("无法识别的密钥文件格式，已清除待处理状态");
   };
   reader.readAsText(f);
 }
@@ -888,16 +958,19 @@ function finishRawImport() {
     const pub = MarcoEd25519.publicKeyFromSeed(pendingRawSeed);
     const vault = MarcoEd25519.encryptVault(pendingRawSeed, pub, pwd);
     localStorage.setItem(LS_VAULT, JSON.stringify(vault));
-    activeSeed = pendingRawSeed;
+    if (activeSeed && activeSeed.fill) activeSeed.fill(0);
+    activeSeed = pendingRawSeed.slice();
     activePubHex = MarcoEd25519.bytesToHex(pub);
-    pendingRawSeed = null;
-    document.getElementById("newVaultPwd").value = "";
-    document.getElementById("rawPwdBox").classList.add("hidden");
+    scrubPendingImport();
     syncUnlockedUi(true);
     toast(MarcoEd25519.isOfficialPublicKey(activePubHex)
       ? "官方私钥已加密存入本机并解锁"
       : "测试私钥已加密存入本机（非正式公钥）");
-  } catch (e) { toast(e.message || "加密保存失败"); }
+  } catch (e) {
+    scrubPendingImport();
+    clearVisibleOutputs();
+    toast(e.message || "加密保存失败");
+  }
 }
 function pickPlat(p) {
   if (p === "all") {
@@ -967,7 +1040,7 @@ function issueNow() {
   const minVcRaw = document.getElementById("minVcIn").value;
   const note = (document.getElementById("noteIn").value || "").trim();
   const shared = document.getElementById("sharedChk").checked;
-  const expOAuth = document.getElementById("expChk").checked;
+  const expOAuth = false;
   try {
     const batch = MarcoEd25519.issueBatch(activeSeed, activePubHex, {
       tag,
@@ -1030,7 +1103,12 @@ function copyLastCodes(withCaption) {
   copyText(`【Marco Movie · AI 观影实验室测试口令】\n${lastIssued.summary}\n复制对应平台口令前往设置「AI 观影实验室」粘贴解锁：\n${raw}`);
 }
 function verifyInputCode() {
-  const res = MarcoEd25519.verifyPasscode(document.getElementById("verifyIn").value, activePubHex);
+  const vcEl = document.getElementById("verifyAndroidVcIn");
+  const vcRaw = vcEl ? String(vcEl.value || "").trim() : "";
+  const appVersionCode = vcRaw ? Number(vcRaw) : 0;
+  const res = MarcoEd25519.verifyPasscode(document.getElementById("verifyIn").value, activePubHex, {
+    appVersionCode: Number.isInteger(appVersionCode) && appVersionCode > 0 ? appVersionCode : 0
+  });
   const out = document.getElementById("verifyOut");
   const lines = [];
   lines.push(`Ed25519 签名有效：${res.signatureValid ? "是" : "否"}${res.error ? "（" + res.error + "）" : ""}`);
@@ -1039,14 +1117,16 @@ function verifyInputCode() {
     lines.push(`有效期至：${res.expireDate}${res.expired ? "（已过期）" : ""}`);
     for (const p of MarcoEd25519.SINGLE_PLATFORMS) {
       const a = res.activatable[p];
-      lines.push(`- ${p} 端可激活：${a.ok ? "是" : "否"}（${a.reason}${a.warning ? "；" + a.warning : ""}）`);
+      const statusText = a.status === "unknown_version" ? "待核验目标版本" : (a.ok ? "是" : "否");
+      lines.push(`- ${p} 端可激活：${statusText}（${a.reason}${a.warning ? "；" + a.warning : ""}）`);
     }
     if (res.claims) lines.push("\n原始载荷：\n" + JSON.stringify(res.claims, null, 2));
   }
   out.textContent = lines.join("\n");
   out.classList.remove("hidden");
   const anyOk = res.activatable && MarcoEd25519.SINGLE_PLATFORMS.some(p => res.activatable[p].ok);
-  toast(!res.signatureValid ? "签名校验未通过" : (anyOk ? "签名有效，请核对上方各端可激活状态" : "签名有效，但当前无端可激活（已过期或平台不兼容）"));
+  const anyUnknown = res.activatable && MarcoEd25519.SINGLE_PLATFORMS.some(p => res.activatable[p].status === "unknown_version");
+  toast(!res.signatureValid ? "签名校验未通过" : (anyUnknown ? "签名有效，请填写目标 Android 版本码以判定是否可激活" : (anyOk ? "签名有效，请核对上方各端可激活状态" : "签名有效，但当前无端可激活（已过期、版本不足或平台不兼容）")));
 }
 function loadLedger() {
   try {
