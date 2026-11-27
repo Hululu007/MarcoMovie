@@ -244,6 +244,81 @@ class PlayerScreen extends StatefulWidget {
     return '播放失败，请重试或切换线路';
   }
 
+  /// Ranks play-response quality variants while preserving the source's real
+  /// labels (原画 > 臻彩 > 4K/2160P > 杜比/HDR/2K > 1080P > 720P > 480P).
+  static int rankVariantQuality(CmsEpisode v) {
+    final lower = '${v.name} ${v.url}'.toLowerCase();
+    if (lower.contains('原画') ||
+        lower.contains('raw') ||
+        lower.contains('original')) {
+      return 100;
+    }
+    if (lower.contains('臻彩')) {
+      return 95;
+    }
+    if (lower.contains('4k') ||
+        lower.contains('2160') ||
+        lower.contains('uhd')) {
+      return 90;
+    }
+    if (lower.contains('杜比') || lower.contains('dolby')) {
+      return 85;
+    }
+    if (lower.contains('2k') || lower.contains('1440')) {
+      return 80;
+    }
+    if (lower.contains('蓝光') ||
+        lower.contains('高码') ||
+        lower.contains('hdr')) {
+      return 75;
+    }
+    if (lower.contains('超清') ||
+        lower.contains('super') ||
+        lower.contains('1080')) {
+      return 60;
+    }
+    if (lower.contains('高清') ||
+        lower.contains('high') ||
+        lower.contains('720')) {
+      return 40;
+    }
+    if (lower.contains('标清') ||
+        lower.contains('low') ||
+        lower.contains('480')) {
+      return 20;
+    }
+    return 10;
+  }
+
+  /// Selects the highest-ranked real variant returned by the play response
+  /// without fabricating options not present in [resolved.variants].
+  static CmsEpisode selectBestQualityVariant(CmsEpisode resolved) {
+    if (resolved.variants.isEmpty) return resolved;
+    CmsEpisode best = resolved.variants.first;
+    int bestRank = rankVariantQuality(best);
+    for (final v in resolved.variants.skip(1)) {
+      final r = rankVariantQuality(v);
+      if (r > bestRank) {
+        best = v;
+        bestRank = r;
+      }
+    }
+    if (best.url == resolved.url) return resolved;
+    return CmsEpisode(
+      name: resolved.name,
+      url: best.url,
+      headers: best.headers,
+      variants: resolved.variants,
+      externalAudioUrl: best.externalAudioUrl.isNotEmpty
+          ? best.externalAudioUrl
+          : resolved.externalAudioUrl,
+      playbackSession: {
+        ...resolved.playbackSession,
+        ...best.playbackSession,
+      },
+    );
+  }
+
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
 }
@@ -915,6 +990,16 @@ class _PlayerScreenState extends State<PlayerScreen>
     return logical is String &&
         logical.isNotEmpty &&
         logical == _activeQualityLogicalUrl;
+  }
+
+  String? get _activeQualityLabel {
+    for (final choice in _qualityChoices) {
+      if (_matchesActiveQuality(choice)) {
+        final name = choice.name.trim();
+        if (name.isNotEmpty) return name;
+      }
+    }
+    return null;
   }
   bool get _matchesActiveMedia {
     if (_usingAvPlayer) return _allowEvents;
@@ -2969,10 +3054,13 @@ class _PlayerScreenState extends State<PlayerScreen>
               throw const FormatException('片源解析超时，请重试');
             }));
       pendingLease = PlayerCloudMediaSession.of(resolvedEpisode);
-      if (quality == null &&
-          resolvedEpisode.variants.length > 1 &&
-          widget.storage.preferredQuality == '4k_netdisk') {
-        resolvedEpisode = _selectBestQualityVariant(resolvedEpisode);
+      if (quality == null && resolvedEpisode.variants.length > 1) {
+        final pref = widget.storage.preferredQuality;
+        final hasHighTier = resolvedEpisode.variants
+            .any((v) => _rankVariantQuality(v) > 60);
+        if (pref == '4k_netdisk' || (pref == 'auto' && hasHighTier)) {
+          resolvedEpisode = _selectBestQualityVariant(resolvedEpisode);
+        }
       }
       if (quality != null && widget.site.isCatPaw) {
         final logicalCatpaw = resolvedEpisode.playbackSession['catpawLogicalUrl'];
@@ -4217,58 +4305,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     } catch (_) {}
   }
 
-  static int _rankVariantQuality(CmsEpisode v) {
-    final lower = '${v.name} ${v.url}'.toLowerCase();
-    if (lower.contains('原画') || lower.contains('raw') || lower.contains('original')) {
-      return 100;
-    }
-    if (lower.contains('4k') || lower.contains('2160') || lower.contains('uhd')) {
-      return 90;
-    }
-    if (lower.contains('2k') || lower.contains('1440')) {
-      return 80;
-    }
-    if (lower.contains('蓝光') || lower.contains('高码') || lower.contains('hdr')) {
-      return 75;
-    }
-    if (lower.contains('超清') || lower.contains('super') || lower.contains('1080')) {
-      return 60;
-    }
-    if (lower.contains('高清') || lower.contains('high') || lower.contains('720')) {
-      return 40;
-    }
-    if (lower.contains('标清') || lower.contains('low') || lower.contains('480')) {
-      return 20;
-    }
-    return 10;
-  }
+  static int _rankVariantQuality(CmsEpisode v) =>
+      PlayerScreen.rankVariantQuality(v);
 
-  CmsEpisode _selectBestQualityVariant(CmsEpisode resolved) {
-    if (resolved.variants.isEmpty) return resolved;
-    CmsEpisode best = resolved.variants.first;
-    int bestRank = _rankVariantQuality(best);
-    for (final v in resolved.variants.skip(1)) {
-      final r = _rankVariantQuality(v);
-      if (r > bestRank) {
-        best = v;
-        bestRank = r;
-      }
-    }
-    if (best.url == resolved.url) return resolved;
-    return CmsEpisode(
-      name: resolved.name,
-      url: best.url,
-      headers: best.headers,
-      variants: resolved.variants,
-      externalAudioUrl: best.externalAudioUrl.isNotEmpty
-          ? best.externalAudioUrl
-          : resolved.externalAudioUrl,
-      playbackSession: {
-        ...resolved.playbackSession,
-        ...best.playbackSession,
-      },
-    );
-  }
+  CmsEpisode _selectBestQualityVariant(CmsEpisode resolved) =>
+      PlayerScreen.selectBestQualityVariant(resolved);
 
   String get _videoSpecsLabel {
     final parts = <String>[];
@@ -8876,6 +8917,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           DesktopMoreMenuRow(
             icon: CupertinoIcons.sparkles,
             label: '清晰度切换',
+            valueText: _activeQualityLabel,
             onTap: () => closeAndRun(_showQualityChoices),
           ),
         if (_blurayChapters.isNotEmpty)

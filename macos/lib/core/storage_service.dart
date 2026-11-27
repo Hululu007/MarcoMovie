@@ -2847,31 +2847,48 @@ class StorageService {
       final n = name.toLowerCase();
       return n.contains('4k') ||
           n.contains('原画') ||
+          n.contains('臻彩') ||
           n.contains('夸父') ||
           n.contains('夸克') ||
+          n.contains('quark') ||
           n.contains('优汐') ||
           n.contains('uc') ||
           n.contains('嘟嘟') ||
           n.contains('百度') ||
+          n.contains('baidu') ||
           n.contains('阿狸') ||
-          n.contains('阿里');
+          n.contains('阿里') ||
+          n.contains('ali');
+    }
+    bool matchesDrive(String lineName, String drive) {
+      final n = lineName.toLowerCase();
+      return switch (drive) {
+        'quark' => n.contains('夸') || n.contains('quark'),
+        'uc' => n.contains('优') || RegExp(r'(^|[^a-z])uc([^a-z]|$)').hasMatch(n),
+        'baidu' => n.contains('百度') || n.contains('baidu') || n.contains('嘟'),
+        'ali' => n.contains('阿') || n.contains('ali'),
+        _ => false,
+      };
     }
     if (pref == '4k_netdisk') {
-      // First check according to driveOrder
+      // Pass 1: prefer logged-in drives in configured driveOrder
       for (final drive in driveOrder) {
-        final alias = switch (drive) {
-          'quark' => '夸',
-          'uc' => '优',
-          'baidu' => '嘟',
-          'ali' => '阿',
-          _ => '',
-        };
-        if (alias.isNotEmpty) {
-          final idx = lines.indexWhere((l) => l.name.contains(alias));
-          if (idx >= 0) return idx;
-        }
+        if (!isNetdiskLoggedIn(drive)) continue;
+        final idx = lines.indexWhere(
+          (l) => l.episodes.isNotEmpty && matchesDrive(l.name, drive),
+        );
+        if (idx >= 0) return idx;
       }
-      final idx = lines.indexWhere((l) => isNetdiskLine(l.name));
+      // Pass 2: any matching drive in configured driveOrder
+      for (final drive in driveOrder) {
+        final idx = lines.indexWhere(
+          (l) => l.episodes.isNotEmpty && matchesDrive(l.name, drive),
+        );
+        if (idx >= 0) return idx;
+      }
+      final idx = lines.indexWhere(
+        (l) => l.episodes.isNotEmpty && isNetdiskLine(l.name),
+      );
       if (idx >= 0) return idx;
     } else if (pref == '1080p_direct') {
       final idx = lines.indexWhere(
@@ -3385,7 +3402,7 @@ class StorageService {
   }
 
   static String _siteHomeSnapshotKey(CmsSite site) =>
-      '${site.subscriptionId}::${site.key}::${site.api}::${site.ext.hashCode}';
+      'v2::${site.subscriptionId}::${site.key}::${site.api}::${site.ext.hashCode}::${site.pluginReference.hashCode}';
 
   ({List<CmsCategory> categories, CmsListing listing})? getCachedSiteHome(
     CmsSite site,

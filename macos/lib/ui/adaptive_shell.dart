@@ -1352,14 +1352,21 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         () => widget.client.fetchHome(site),
         cancellation: abort,
       );
+      final homeTimeout = (WoggSource.supports(site) ||
+              CspBridge.usesWoggNetdiskAdapter(site) ||
+              site.isCatPaw ||
+              site.api.toLowerCase().contains('guard'))
+          ? const Duration(seconds: 30)
+          : const Duration(seconds: 15);
       final (cats, listing) = !kIsWeb &&
               !Platform.environment.containsKey('FLUTTER_TEST')
-          ? await homeFuture.timeout(const Duration(seconds: 15))
+          ? await homeFuture.timeout(homeTimeout)
           : await homeFuture;
       if (!mounted || epoch != _homeEpoch || _activeSite?.key != site.key) {
         return;
       }
-      if (listing.videos.isNotEmpty && !site.isEffectivelyPrivate) {
+      if ((listing.videos.isNotEmpty || cats.isNotEmpty) &&
+          !site.isEffectivelyPrivate) {
         unawaited(widget.storage.saveCachedSiteHome(site, cats, listing));
       }
       if ((hadCached || keepVisible) &&
@@ -1424,10 +1431,33 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     await _reloadFilteredListing(page: 1);
   }
+  Future<void> _selectDirectSourceCategory(CmsCategory category) async {
+    if (_primaryTab == 'recommend' &&
+        _filterSubCategoryId == category.id &&
+        _selectedCategoryId == category.id) {
+      setState(() {
+        _filterExpanded = false;
+        _filterSubCategoryId = '';
+        _filterGenreLabel = '';
+        _selectedCategoryId = '';
+      });
+      await _reloadFilteredListing(page: 1);
+      return;
+    }
+    setState(() {
+      _primaryTab = 'recommend';
+      _filterExpanded = false;
+      _filterSubCategoryId = category.id;
+      _filterGenreLabel = '';
+      _selectedCategoryId = category.id;
+    });
+    await _reloadFilteredListing(page: 1);
+  }
   Future<void> _selectPrimaryTab(String tabKey) async {
     if (tabKey == 'recommend') {
       if (_primaryTab == 'recommend' &&
           _filterSubCategoryId.isEmpty &&
+          _selectedCategoryId.isEmpty &&
           _filterGenreLabel.isEmpty) {
         if (_filterExpanded) setState(() => _filterExpanded = false);
         return;
@@ -1437,6 +1467,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         _filterExpanded = false;
         _filterSubCategoryId = '';
         _filterGenreLabel = '';
+        _selectedCategoryId = '';
       });
       await _reloadFilteredListing(page: 1);
       return;
@@ -1498,8 +1529,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           page == 1) {
         final (cats, homeListing) = await read(() => widget.client.fetchHome(site));
         if (!mounted || epoch != _categoryEpoch || _activeSite?.key != site.key) return;
-        if (_categories.isEmpty && cats.isNotEmpty) {
+        if (cats.isNotEmpty) {
           _categories = cats;
+        }
+        if ((homeListing.videos.isNotEmpty || cats.isNotEmpty) &&
+            !site.isEffectivelyPrivate) {
+          unawaited(widget.storage.saveCachedSiteHome(site, cats, homeListing));
         }
         listing = homeListing;
       } else if (targetCategoryId.isEmpty && filter.hasSubFilter) {
@@ -3801,6 +3836,38 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             );
           },
         ),
+        if (defaultTargetPlatform != TargetPlatform.iOS && _activeSite != null) ...[
+          const SizedBox(width: 6),
+          ApplePressableScale(
+            key: const ValueKey('home-refresh-button'),
+            pressedScale: 0.92,
+            onTap: _homeRefreshing
+                ? null
+                : () => unawaited(_refreshCurrentHomeView()),
+            child: Tooltip(
+              message: '刷新当前片源与分类',
+              child: LiquidGlass(
+                width: 34,
+                height: 34,
+                borderRadius: 999,
+                elevated: false,
+                rimStrength: 0.88,
+                tint: ApplePalette.isDarkOf(context)
+                    ? const Color(0x281E1E24)
+                    : const Color(0xCCFFFFFF),
+                child: Center(
+                  child: _homeRefreshing
+                      ? const CupertinoActivityIndicator(radius: 7)
+                      : Icon(
+                          CupertinoIcons.refresh,
+                          size: 14.5,
+                          color: ApplePalette.of(context).labelPrimary,
+                        ),
+                ),
+              ),
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -3929,6 +3996,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     required int activeFilterCount,
     required double topSpacing,
   }) {
+    final extraSourceCategories =
+        CmsParser.extraTopLevelHomeCategories(_categories);
+    final desktopCategoryCount =
+        CmsParser.primaryHomeTabs.length + extraSourceCategories.length;
     return Column(
       key: const ValueKey('home-category-filter-bar'),
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -3961,15 +4032,33 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         controller: _categoryPillsScrollController,
                         scrollDirection: Axis.horizontal,
                         physics: const BouncingScrollPhysics(),
-                        itemCount: CmsParser.primaryHomeTabs.length,
+                        itemCount: desktopCategoryCount,
                         separatorBuilder: (_, __) => const SizedBox(width: 8),
                         itemBuilder: (ctx, idx) {
-                          final (tabKey, tabLabel) =
-                              CmsParser.primaryHomeTabs[idx];
+                          if (idx < CmsParser.primaryHomeTabs.length) {
+                            final (tabKey, tabLabel) =
+                                CmsParser.primaryHomeTabs[idx];
+                            final selected = tabKey == 'recommend'
+                                ? (_primaryTab == 'recommend' &&
+                                    _filterSubCategoryId.isEmpty)
+                                : _primaryTab == tabKey;
+                            return _buildCategoryPill(
+                              label: tabLabel,
+                              selected: selected,
+                              onTap: () => _selectPrimaryTab(tabKey),
+                            );
+                          }
+                          final sourceCat = extraSourceCategories[
+                              idx - CmsParser.primaryHomeTabs.length];
+                          final selected = _primaryTab == 'recommend' &&
+                              _filterSubCategoryId == sourceCat.id;
                           return _buildCategoryPill(
-                            label: tabLabel,
-                            selected: _primaryTab == tabKey,
-                            onTap: () => _selectPrimaryTab(tabKey),
+                            pillKey: ValueKey(
+                              'home-source-category-${sourceCat.id}',
+                            ),
+                            label: sourceCat.name,
+                            selected: selected,
+                            onTap: () => _selectDirectSourceCategory(sourceCat),
                           );
                         },
                       ),
@@ -6262,12 +6351,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
   }
   Widget _buildCategoryPill({
+    Key? pillKey,
     required String label,
     required bool selected,
     required VoidCallback onTap,
   }) {
     final palette = ApplePalette.of(context);
     return ApplePressableScale(
+      key: pillKey,
       pressedScale: 0.92,
       pressedOpacity: 0.86,
       onTap: onTap,

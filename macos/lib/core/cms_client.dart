@@ -1958,7 +1958,7 @@ class CmsClient {
           CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s))).toList();
     int sitePriority(CmsSite s) {
       if (WoggSource.supports(s) || CspBridge.isNetdiskSite(s)) {
-        return 3;
+        return 1;
       }
       if (CspBridge.isBiliSite(s) || CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s)) {
         return 2;
@@ -3371,7 +3371,7 @@ class CmsClient {
       }
       if (CspBridge.canHandleSite(s)) {
         final backends = CspBridge.backendsForSite(s);
-        final nativeAdapter = _usesJs(s) || s.usesAdapterPack || s.usesSpiderGateway || CspRuleEngines.supports(s) || CspBridge.isBiliSite(s) || CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s);
+        final nativeAdapter = _usesJs(s) || s.usesAdapterPack || s.usesSpiderGateway || CspBridge.usesWoggNetdiskAdapter(s) || CspRuleEngines.supports(s) || CspBridge.isBiliSite(s) || CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s);
         if (!nativeAdapter && backends.isEmpty) continue;
         final String sig;
         if (_usesJs(s) || s.usesAdapterPack || s.usesSpiderGateway) {
@@ -3379,6 +3379,8 @@ class CmsClient {
           // artifacts, extensions and credentials. They are separate sources.
           sig = jsonEncode([s.subscriptionId, s.key, s.api, s.ext,
             s.pluginReference, s.headers, s.usesAdapterPack, s.usesSpiderGateway]);
+        } else if (CspBridge.usesWoggNetdiskAdapter(s)) {
+          sig = jsonEncode(['wogg_netdisk', s.subscriptionId, s.key, s.api, s.ext]);
         } else if (CspRuleEngines.supports(s)) {
           sig = jsonEncode(['csp_rule', s.subscriptionId, s.key, s.api, s.ext]);
         } else if (CspBridge.isBiliSite(s)) {

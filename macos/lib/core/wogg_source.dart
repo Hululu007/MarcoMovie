@@ -458,10 +458,54 @@ class WoggSource {
       'total': entries.length,
     };
     if (method == 'homeContent') {
-      result['class'] = categories;
+      final dynamicCategories = _parseHomeNavCategories(document, base);
+      result['class'] =
+          dynamicCategories.length >= 2 ? dynamicCategories : categories;
       result['filters'] = _filters();
     }
     return jsonEncode(result);
+  }
+
+  /// Extracts real categories from a WoGG homepage navigation bar when the
+  /// source HTML explicitly renders one (e.g. `/vodtype/44.html` or
+  /// `/vodshow/44-----------.html`). Returns empty when the page has no nav bar
+  /// so minimal or JS-rendered pages fall back to [categories].
+  static List<Map<String, String>> _parseHomeNavCategories(
+    Document doc,
+    Uri base,
+  ) {
+    final navLinks = doc.querySelectorAll(
+      'nav a[href], header a[href], .nav a[href], .navbar a[href], '
+      '.nav-menu a[href], .header a[href]',
+    );
+    if (navLinks.isEmpty) return const [];
+    final out = <Map<String, String>>[];
+    final seenIds = <String>{};
+    for (final a in navLinks) {
+      final href = (a.attributes['href'] ?? '').trim();
+      if (href.isEmpty) continue;
+      final Uri uri;
+      try {
+        uri = base.resolve(href);
+      } catch (_) {
+        continue;
+      }
+      if (uri.origin != base.origin) continue;
+      final match = RegExp(
+        r'/(?:vodtype|vod/type/id)/(\d+)(?:\.html)?/?$|/vodshow/(\d+)-+(?:\.html)?$',
+        caseSensitive: false,
+      ).firstMatch(uri.path);
+      final id = match?.group(1) ?? match?.group(2);
+      if (id == null || id.isEmpty || !seenIds.add(id)) continue;
+      final name = _text(a);
+      if (name.isEmpty ||
+          name.length > 24 ||
+          RegExp(r'^(?:首页|主页|全部|\d+)$').hasMatch(name)) {
+        continue;
+      }
+      out.add({'type_id': id, 'type_name': name});
+    }
+    return out;
   }
 
   static String _year(String value) =>
@@ -511,7 +555,7 @@ class WoggSource {
         'vod_pic': _image(image, base),
         'vod_remarks': _text(item.querySelector(search
             ? '.video-info-header a.video-serial'
-            : '.module-item-text')),
+            : '.module-item-text, .module-item-note')),
         'vod_year': _text(item.querySelector('.module-item-caption span')),
       });
     }
