@@ -211,7 +211,8 @@ final class HomeScreen {
                                                 (curF != null
                                                                 && curF.getTag() instanceof String
                                                                 && ((String) curF.getTag())
-                                                                        .startsWith("home-curated-"))
+                                                                        .startsWith(
+                                                                                "home-curated-"))
                                                         ? (String) curF.getTag()
                                                         : null;
                                         curatedCatalog = fresh;
@@ -2947,8 +2948,7 @@ final class HomeScreen {
                 tvOffscreenInitial
                         ? Math.min(COLUMNS, 3)
                         : (start == 0 ? Math.max(COLUMNS * 2, 10) : Math.max(COLUMNS, 5));
-        long budgetNs =
-                tvOffscreenInitial ? 4000000L : (start == 0 ? 12000000L : 5000000L);
+        long budgetNs = tvOffscreenInitial ? 4000000L : (start == 0 ? 12000000L : 5000000L);
         long batchStarted = System.nanoTime();
         for (int index = start; index < windowEnd() && index < start + batchCount; index++) {
             int column = index % COLUMNS;

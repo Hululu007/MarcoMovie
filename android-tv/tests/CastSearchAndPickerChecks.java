@@ -524,7 +524,8 @@ public final class CastSearchAndPickerChecks {
                             long deadline = System.nanoTime() + 3_000_000_000L;
                             while (releaseWorkers.getCount() > 0 && System.nanoTime() < deadline) {
                                 try {
-                                    releaseWorkers.await(200, java.util.concurrent.TimeUnit.MILLISECONDS);
+                                    releaseWorkers.await(
+                                            200, java.util.concurrent.TimeUnit.MILLISECONDS);
                                 } catch (InterruptedException ignored) {
                                     // Keep workers occupied until test releases them so queued
                                     // sockets must be closed by CastService.close() drain path.
@@ -571,7 +572,9 @@ public final class CastSearchAndPickerChecks {
         String normalResp =
                 rawHttp(
                         boundPort,
-                        "GET /dlna/device.xml HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n");
+                        "GET /dlna/device.xml HTTP/1.1\r\nHost: "
+                                + host
+                                + "\r\nConnection: close\r\n\r\n");
         check(
                 normalResp.startsWith("HTTP/1.1 200 ")
                         && normalResp.contains("<friendlyName>Marco R18 Cast</friendlyName>"),
@@ -608,7 +611,9 @@ public final class CastSearchAndPickerChecks {
             check(bothBusy, "R18 P2 CastService occupied both HTTP workers before queuing");
 
             String deviceReq =
-                    "GET /dlna/device.xml HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n";
+                    "GET /dlna/device.xml HTTP/1.1\r\nHost: "
+                            + host
+                            + "\r\nConnection: close\r\n\r\n";
             for (int i = 0; i < 3; i++) {
                 java.net.Socket q = new java.net.Socket("127.0.0.1", boundPort);
                 q.setSoTimeout(1500);
@@ -626,7 +631,8 @@ public final class CastSearchAndPickerChecks {
                             + cast.httpPool.getQueue().size()
                             + ")");
 
-            // Stop service while both workers are STILL blocked; queued sockets must close promptly!
+            // Stop service while both workers are STILL blocked; queued sockets must close
+            // promptly!
             cast.close();
             int closedQueued = 0;
             for (java.net.Socket q : queuedClients) {
@@ -662,7 +668,9 @@ public final class CastSearchAndPickerChecks {
             while (!cast.httpSocket.isClosed() && System.nanoTime() < sockDeadline) {
                 Thread.sleep(10);
             }
-            check(cast.httpSocket.isClosed(), "R18 P2 CastService background closer closed httpSocket");
+            check(
+                    cast.httpSocket.isClosed(),
+                    "R18 P2 CastService background closer closed httpSocket");
             boolean rejectedAfterStop = false;
             try (java.net.Socket after = new java.net.Socket()) {
                 after.connect(new InetSocketAddress("127.0.0.1", boundPort), 500);

@@ -835,9 +835,7 @@ final class CatalogScreen {
         String ep = e.episode == null ? "" : e.episode.trim();
         if (e.complete()) return ep.isEmpty() ? "已看完" : ep + " · 已看完";
         if (e.duration > 0)
-            return formatHistoryDuration(e.position)
-                    + " / "
-                    + formatHistoryDuration(e.duration);
+            return formatHistoryDuration(e.position) + " / " + formatHistoryDuration(e.duration);
         if (e.position > 0) return "观看至 " + formatHistoryDuration(e.position);
         return ep.isEmpty() ? "继续观看" : ep;
     }
@@ -1150,7 +1148,9 @@ final class CatalogScreen {
                                     final int gridH =
                                             Math.max(
                                                     a.dp(360),
-                                                    a.getResources().getDisplayMetrics().heightPixels
+                                                    a.getResources()
+                                                                    .getDisplayMetrics()
+                                                                    .heightPixels
                                                             - a.dp(112));
                                     final TvHistoryCardTheme theme =
                                             obtainTvHistoryTheme(a, cardW, artWPx, artHPx);
@@ -1161,7 +1161,8 @@ final class CatalogScreen {
                                     theme.progTextPaint.measureText("已看 99% 已看完 刚刚观看");
                                     theme.headerEyePaint.measureText("CONTINUE WATCHING");
                                     theme.headerTitlePaint.measureText("观看历史");
-                                    theme.headerSummaryPaint.measureText("31 部观看记录 · 确认继续观看，长按确认或按菜单键管理");
+                                    theme.headerSummaryPaint.measureText(
+                                            "31 部观看记录 · 确认继续观看，长按确认或按菜单键管理");
                                     theme.subTextWarmup();
                                     List<WatchHistory.Entry> entries = a.watchHistory();
                                     int cap = Math.min(entries.size(), columns * 2);
@@ -1200,11 +1201,8 @@ final class CatalogScreen {
                                                         try {
                                                             final TvHistoryPageHost shell =
                                                                     obtainOrCreateTvHistoryHost(
-                                                                            a,
-                                                                            columns,
-                                                                            theme,
-                                                                            gridH,
-                                                                            null);
+                                                                            a, columns, theme,
+                                                                            gridH, null);
                                                             a.attachPrewarmedHistoryRoot(
                                                                     shell.root);
                                                             a.layoutPrewarmedHistoryRoot(
@@ -1216,14 +1214,14 @@ final class CatalogScreen {
                                                                         @Override
                                                                         public void run() {
                                                                             if (a.isFinishing()
-                                                                                    || (android.os.Build
-                                                                                                    .VERSION
-                                                                                                    .SDK_INT
-                                                                                            >= 17
+                                                                                    || (android.os
+                                                                                                            .Build
+                                                                                                            .VERSION
+                                                                                                            .SDK_INT
+                                                                                                    >= 17
                                                                                             && a
                                                                                                     .isDestroyed())
-                                                                                    || a
-                                                                                            .privateMode) {
+                                                                                    || a.privateMode) {
                                                                                 return;
                                                                             }
                                                                             if (shell.grid
@@ -1248,7 +1246,8 @@ final class CatalogScreen {
                                                                                     k++) {
                                                                                 shell.pool
                                                                                         .putRecycledView(
-                                                                                                shell.adapter
+                                                                                                shell
+                                                                                                        .adapter
                                                                                                         .createViewHolder(
                                                                                                                 shell.grid,
                                                                                                                 0));
@@ -1371,8 +1370,7 @@ final class CatalogScreen {
                         actionsRow.addView(syncBtn, syncLp);
                     }
                     Button clearBtn =
-                            a.navButton(
-                                    "清空观看历史", "history-clear", () -> confirmClearHistory(a));
+                            a.navButton("清空观看历史", "history-clear", () -> confirmClearHistory(a));
                     actionsRow.addView(clearBtn, new LinearLayout.LayoutParams(-2, a.dp(36)));
                 };
         // Defer the two secondary top-right header pill buttons past Frame 1 on first display so
@@ -1815,8 +1813,7 @@ final class CatalogScreen {
                                             a, entry.poster, theme.artW, theme.artH);
                             profile.posterCacheHitTotalNs +=
                                     (SystemClock.elapsedRealtimeNanos() - p0);
-                            if (bmp != null
-                                    || (entry.poster != null && !entry.poster.isEmpty())) {
+                            if (bmp != null || (entry.poster != null && !entry.poster.isEmpty())) {
                                 RecyclerView.ViewHolder vh = grid.getChildViewHolder(cv);
                                 if (vh instanceof TvHistoryCardHolder) {
                                     TvHistoryCardHolder th = (TvHistoryCardHolder) vh;
@@ -2256,8 +2253,10 @@ final class CatalogScreen {
                                                 return;
                                             }
                                             TvHistoryPageHost host =
-                                                    a.tvHistoryHostCache instanceof TvHistoryPageHost
-                                                            ? (TvHistoryPageHost) a.tvHistoryHostCache
+                                                    a.tvHistoryHostCache
+                                                                    instanceof TvHistoryPageHost
+                                                            ? (TvHistoryPageHost)
+                                                                    a.tvHistoryHostCache
                                                             : (tvHistoryHostRef == null
                                                                     ? null
                                                                     : tvHistoryHostRef.get());
@@ -2283,7 +2282,9 @@ final class CatalogScreen {
                                                                     View ch =
                                                                             host.grid.getChildAt(
                                                                                     idx[0]++);
-                                                                    if (ch instanceof TvHistoryCardView
+                                                                    if (ch
+                                                                                    instanceof
+                                                                                    TvHistoryCardView
                                                                             && ((TvHistoryCardView)
                                                                                                     ch)
                                                                                             .posterBitmap
@@ -2767,9 +2768,11 @@ final class CatalogScreen {
                     canvas.drawBitmap(focusCorners, t.cardCornerSrcBl, cardCornerDstBl, null);
                     canvas.drawBitmap(focusCorners, t.cardCornerSrcBr, cardCornerDstBr, null);
                     canvas.drawRect(ccs, 0f, t.cardW - ccs, sw, t.focusRingFillPaint);
-                    canvas.drawRect(ccs, t.cardH - sw, t.cardW - ccs, t.cardH, t.focusRingFillPaint);
+                    canvas.drawRect(
+                            ccs, t.cardH - sw, t.cardW - ccs, t.cardH, t.focusRingFillPaint);
                     canvas.drawRect(0f, ccs, sw, t.cardH - ccs, t.focusRingFillPaint);
-                    canvas.drawRect(t.cardW - sw, ccs, t.cardW, t.cardH - ccs, t.focusRingFillPaint);
+                    canvas.drawRect(
+                            t.cardW - sw, ccs, t.cardW, t.cardH - ccs, t.focusRingFillPaint);
                 } else {
                     canvas.drawRect(cardRect, t.focusBgPaint);
                     canvas.drawRect(0f, 0f, t.cardW, sw, t.focusRingFillPaint);
@@ -2883,7 +2886,9 @@ final class CatalogScreen {
             String tag = pendingFreshFocusTag;
             if (tag == null || a.generation != pageTicket || lm == null) return;
             View c0 = lm.findViewByPosition(0);
-            if (c0 instanceof TvHistoryCardView && tag.equals(c0.getTag()) && c0.isAttachedToWindow()) {
+            if (c0 instanceof TvHistoryCardView
+                    && tag.equals(c0.getTag())
+                    && c0.isAttachedToWindow()) {
                 pendingFreshFocusTag = null;
                 a.tvInitialFocus = c0;
                 a.autoFocus = c0;
@@ -3019,7 +3024,8 @@ final class CatalogScreen {
             firstFrameRendered = true;
             if (stagingRows && grid != null) {
                 // Serialize Row-2 hydration FIRST; drain deferred poster textures AFTER Row 2
-                // finishes so holder creation and Mali-450 texture upload never collide in one frame.
+                // finishes so holder creation and Mali-450 texture upload never collide in one
+                // frame.
                 scheduleRowHydrationStep(grid, pageTicket);
                 return;
             } else if (stagingRows) {
@@ -3068,7 +3074,8 @@ final class CatalogScreen {
                             notifyItemRangeInserted(prev, next - prev);
                             scheduleRowHydrationStep(grid, expectedTicket);
                         } else if (prev < targetRowTwo) {
-                            // Hydrate Row 2 spaced across >=2 VSyncs so Mali-450 SwapChain never queues.
+                            // Hydrate Row 2 spaced across >=2 VSyncs so Mali-450 SwapChain never
+                            // queues.
                             next = Math.min(targetRowTwo, prev + 1);
                             visibleLimit = next;
                             notifyItemRangeInserted(prev, next - prev);

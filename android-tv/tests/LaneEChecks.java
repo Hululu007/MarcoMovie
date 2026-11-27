@@ -436,6 +436,12 @@ public final class LaneEChecks {
                         < site.methodBody.indexOf(".commit()");
     }
 
+    private static boolean backupRestoreCommit(CommitSite site) {
+        return "SettingsScreen.applyRestorablePrefsSnapshot".equals(site.classAndMethod)
+                && site.methodBody.contains("RESTORE_TX_APPLIED_ID_PREF")
+                && site.methodBody.contains("if (syncCommit)");
+    }
+
     private static List<String> auditCommitSites(List<CommitSite> sites) {
         List<String> violations = new ArrayList<>();
         for (CommitSite site : sites) {
@@ -444,6 +450,7 @@ public final class LaneEChecks {
                 continue;
             }
             if (workerCommit(site)
+                    || backupRestoreCommit(site)
                     || WHITELISTED_SECURE_STORAGE_METHODS.contains(site.classAndMethod)) {
                 continue;
             }
@@ -463,6 +470,7 @@ public final class LaneEChecks {
         Set<String> matchedCrashMethods = new HashSet<>();
         int allowedCrashMarkerCount = 0;
         int allowedSecureStorageCount = 0;
+        int allowedBackupRestoreCount = 0;
 
         try (java.util.stream.Stream<Path> stream = Files.walk(root)) {
             java.util.Iterator<Path> it =
@@ -477,6 +485,8 @@ public final class LaneEChecks {
                             && site.methodBody.contains("LOADING_SITE")) {
                         allowedCrashMarkerCount++;
                         matchedCrashMethods.add(site.classAndMethod);
+                    } else if (backupRestoreCommit(site)) {
+                        allowedBackupRestoreCount++;
                     } else if (workerCommit(site)
                             || WHITELISTED_SECURE_STORAGE_METHODS.contains(site.classAndMethod)) {
                         allowedSecureStorageCount++;
@@ -503,9 +513,31 @@ public final class LaneEChecks {
                 allowedSecureStorageCount > 0,
                 "E1: SecureStorage keeps synchronous commit() matched by method name");
         check(
+                allowedBackupRestoreCount == 1,
+                "E1: WAL backup-restore snapshot keeps guarded synchronous commit() matched by method name");
+        check(
                 violations.isEmpty(),
                 "E1: Zero unwhitelisted .commit() violations across android-tv/src/main/java: "
                         + violations);
+
+        String backupRestoreGuarded =
+                "final class SettingsScreen { static void applyRestorablePrefsSnapshot(boolean syncCommit) { edit.putString(ConfigLibrary.RESTORE_TX_APPLIED_ID_PREF, txId); if (syncCommit) { edit.commit(); } } }";
+        check(
+                auditCommitSites(
+                                findCommitSitesByMethod(
+                                        "SettingsScreen.java", backupRestoreGuarded))
+                        .isEmpty(),
+                "backup-restore snapshot commit requires WAL marker and syncCommit guard");
+        check(
+                auditCommitSites(
+                                        findCommitSitesByMethod(
+                                                "SettingsScreen.java",
+                                                backupRestoreGuarded.replace(
+                                                        "if (syncCommit) { edit.commit(); }",
+                                                        "edit.commit();")))
+                                .size()
+                        == 1,
+                "unguarded backup-restore commit remains forbidden");
 
         String guarded =
                 "final class MarkerLegacyCommit { static void clear() { MarkerClearTask.requireWorker(); prefs.edit().commit(); } }";

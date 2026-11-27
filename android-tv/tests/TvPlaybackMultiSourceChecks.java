@@ -4240,10 +4240,14 @@ public final class TvPlaybackMultiSourceChecks {
         srcDir.mkdirs();
         String urlA = "https://sub.example/r10-a.json";
         String urlB = "https://sub.example/r10-b.json";
-        String rawOldA = "{\"sites\":[{\"key\":\"oldA\",\"name\":\"oldA\",\"type\":1,\"api\":\"https://old-a.example\"}]}";
-        String rawOldB = "{\"sites\":[{\"key\":\"oldB\",\"name\":\"oldB\",\"type\":1,\"api\":\"https://old-b.example\"}]}";
-        String rawNewA = "{\"sites\":[{\"key\":\"newA\",\"name\":\"newA\",\"type\":1,\"api\":\"https://new-a.example\"}]}";
-        String rawNewB = "{\"sites\":[{\"key\":\"newB\",\"name\":\"newB\",\"type\":1,\"api\":\"https://new-b.example\"}]}";
+        String rawOldA =
+                "{\"sites\":[{\"key\":\"oldA\",\"name\":\"oldA\",\"type\":1,\"api\":\"https://old-a.example\"}]}";
+        String rawOldB =
+                "{\"sites\":[{\"key\":\"oldB\",\"name\":\"oldB\",\"type\":1,\"api\":\"https://old-b.example\"}]}";
+        String rawNewA =
+                "{\"sites\":[{\"key\":\"newA\",\"name\":\"newA\",\"type\":1,\"api\":\"https://new-a.example\"}]}";
+        String rawNewB =
+                "{\"sites\":[{\"key\":\"newB\",\"name\":\"newB\",\"type\":1,\"api\":\"https://new-b.example\"}]}";
         MainActivity srcAct = newHeadlessActivity(srcDir);
         ConfigLibrary srcLib = new ConfigLibrary(srcDir);
         srcAct.multiSourceStore.registerSubscription(srcLib, rawNewA, urlA, "A", true, 10L);
@@ -4257,7 +4261,10 @@ public final class TvPlaybackMultiSourceChecks {
         File tPrefsFile = new File(tDir, "prefs.json");
         Files.write(
                 tPrefsFile.toPath(),
-                new org.json.JSONObject().put(Prefs.HOME_COLUMNS, 6).toString().getBytes(StandardCharsets.UTF_8));
+                new org.json.JSONObject()
+                        .put(Prefs.HOME_COLUMNS, 6)
+                        .toString()
+                        .getBytes(StandardCharsets.UTF_8));
         MainActivity tAct = newHeadlessActivity(tDir);
         ConfigLibrary tLib = new ConfigLibrary(tDir);
         tAct.multiSourceStore.registerSubscription(tLib, rawOldA, urlA, "A", true, 1L);
@@ -4270,7 +4277,8 @@ public final class TvPlaybackMultiSourceChecks {
                     }
                 };
         try (java.io.ByteArrayInputStream in = new java.io.ByteArrayInputStream(bkBytes)) {
-            SettingsScreen.BackupRestorePlan plan = SettingsScreen.readAndValidateBackupStream(in, true);
+            SettingsScreen.BackupRestorePlan plan =
+                    SettingsScreen.readAndValidateBackupStream(in, true);
             try {
                 SettingsScreen.commitBackupRestoreOnWorker(tAct, plan);
             } catch (java.io.IOException ignored) {
@@ -4283,12 +4291,14 @@ public final class TvPlaybackMultiSourceChecks {
         // Revert manifest phase to COMMITTING_PREFS while prefs hold matching txId
         File manFile = new File(new File(tDir, "restore-tx"), "manifest.json");
         org.json.JSONObject manJson =
-                new org.json.JSONObject(new String(Files.readAllBytes(manFile.toPath()), StandardCharsets.UTF_8));
+                new org.json.JSONObject(
+                        new String(Files.readAllBytes(manFile.toPath()), StandardCharsets.UTF_8));
         manJson.put("phase", "COMMITTING_PREFS");
         manJson.put("prefsPersisted", false);
         Files.write(manFile.toPath(), manJson.toString().getBytes(StandardCharsets.UTF_8));
 
-        // Disable B, update HOME_COLUMNS=7, then invoke ordinary ConfigLibrary.entries() & readState()
+        // Disable B, update HOME_COLUMNS=7, then invoke ordinary ConfigLibrary.entries() &
+        // readState()
         TvMultiSourceStore.State stBefore = tAct.multiSourceStore.readState();
         String bId = "";
         for (TvMultiSourceStore.SubscriptionRecord sr : stBefore.subscriptions) {
@@ -4332,7 +4342,9 @@ public final class TvPlaybackMultiSourceChecks {
                             && replays[0] == 0
                             && !manFile.isFile()
                             && coldPrefs.getInt(Prefs.HOME_COLUMNS, -1) == 7,
-                    "R10.1 boot " + (boot + 1) + ": B remains disabled, 0 replays, WAL cleared, 7 cols");
+                    "R10.1 boot "
+                            + (boot + 1)
+                            + ": B remains disabled, 0 replays, WAL cleared, 7 cols");
         }
 
         // 2. #97 Netdisk cold-start history resume & QR backup line guard contracts
@@ -4504,7 +4516,8 @@ public final class TvPlaybackMultiSourceChecks {
                         && "https://fixture.test/s2".equals(hitRenamed.episode.url),
                 "R12.2: renamed '第二季 第1集' uniquely matches S02E01 instead of S01E01");
 
-        // Case 3: Season 2 truly removed (only S01E01 remains) -> MUST return null episode (no wrong-season hop!)
+        // Case 3: Season 2 truly removed (only S01E01 remains) -> MUST return null episode (no
+        // wrong-season hop!)
         Cms.Video s2Removed = new Cms.Video();
         Cms.Line lOnlyS1 = new Cms.Line();
         lOnlyS1.name = "嘟嘟无限1";

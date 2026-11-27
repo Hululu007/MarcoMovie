@@ -111,7 +111,8 @@ final class TvSearchMatcher {
      * Evaluates match tier for a {@link Cms.Video} against {@code rawQuery} under {@code mode}.
      * Returns {@link #TIER_NONE} when the item MUST be excluded.
      */
-    static int matchTier(Mode mode, String rawQuery, Cms.Video video, PhoneticSearchIndex phonetic) {
+    static int matchTier(
+            Mode mode, String rawQuery, Cms.Video video, PhoneticSearchIndex phonetic) {
         if (video == null) return TIER_NONE;
         return matchTier(mode, rawQuery, video.title, video.aliases, phonetic);
     }

@@ -70,6 +70,7 @@ final class DanmakuView extends View implements AutoCloseable {
         pool.allowCoreThreadTimeOut(true);
         return pool;
     }
+
     final LayoutEngine layoutEngine = new LayoutEngine();
     final FramePacingMonitor tvPacingMonitor = new FramePacingMonitor();
     final SmoothClock smoothClock = new SmoothClock();

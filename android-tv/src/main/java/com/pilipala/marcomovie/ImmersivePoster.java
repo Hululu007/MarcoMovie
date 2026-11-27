@@ -231,6 +231,7 @@ final class ImmersivePoster extends FrameLayout {
             INFLIGHT_SUBJECT_DETAILS = new java.util.concurrent.ConcurrentHashMap<>();
     private static final String SESSION_DOUBAN_BID = generateDoubanBid();
     private static final Pattern YEAR_PATTERN = Pattern.compile("((?:19|20)\\d{2})");
+
     private static java.util.concurrent.ThreadPoolExecutor newBoundedBackgroundPool(
             int maxThreads, final String name) {
         java.util.concurrent.ThreadPoolExecutor pool =

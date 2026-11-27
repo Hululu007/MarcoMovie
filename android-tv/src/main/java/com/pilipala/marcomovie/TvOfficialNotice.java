@@ -149,8 +149,7 @@ final class TvOfficialNotice {
                                     showDonate ? "官网捐赠区二维码" : "Marco 唯一官网二维码");
                         }
                         if (qrTitleRef[0] != null) {
-                            qrTitleRef[0].setText(
-                                    showDonate ? "手机扫码前往官网捐赠区" : "手机扫码访问唯一官网");
+                            qrTitleRef[0].setText(showDonate ? "手机扫码前往官网捐赠区" : "手机扫码访问唯一官网");
                         }
                         if (qrUrlRef[0] != null) {
                             qrUrlRef[0].setText(nextUrl);
@@ -222,7 +221,8 @@ final class TvOfficialNotice {
         final ImageView[] qrViewRef = new ImageView[1];
         final TextView[] qrTitleRef = new TextView[1];
         final TextView[] qrUrlRef = new TextView[1];
-        final int qrSize = Math.max(a.dp(136), Math.min(a.dp(176), Math.round(a.windowHeight() * 0.30f)));
+        final int qrSize =
+                Math.max(a.dp(136), Math.min(a.dp(176), Math.round(a.windowHeight() * 0.30f)));
 
         LinearLayout outer = a.vertical();
         outer.setTag("tv-donate-dialog-body");
@@ -310,8 +310,7 @@ final class TvOfficialNotice {
                                     showDonate ? "官网捐赠区二维码" : "Marco 官网二维码");
                         }
                         if (qrTitleRef[0] != null) {
-                            qrTitleRef[0].setText(
-                                    showDonate ? "手机扫码前往官网捐赠区" : "手机扫码访问 Marco 官网");
+                            qrTitleRef[0].setText(showDonate ? "手机扫码前往官网捐赠区" : "手机扫码访问 Marco 官网");
                         }
                         if (qrUrlRef[0] != null) {
                             qrUrlRef[0].setText(nextUrl);
@@ -328,8 +327,7 @@ final class TvOfficialNotice {
      * Builds an inline, focusable Apple-TV-styled voluntary sponsorship & donation card with a
      * scannable official donation QR code and URL for Settings -> Updates and the Update Center.
      */
-    static LinearLayout buildInlineDonateCard(
-            final MainActivity a, String cardTag, String qrTag) {
+    static LinearLayout buildInlineDonateCard(final MainActivity a, String cardTag, String qrTag) {
         final LinearLayout card = a.row();
         card.setId(View.generateViewId());
         card.setTag(cardTag);
@@ -342,15 +340,13 @@ final class TvOfficialNotice {
 
         final GradientDrawable restingBg =
                 new GradientDrawable(
-                        GradientDrawable.Orientation.TL_BR,
-                        new int[] {0xd4221a24, 0xdc171b24});
+                        GradientDrawable.Orientation.TL_BR, new int[] {0xd4221a24, 0xdc171b24});
         restingBg.setCornerRadius(a.dp(18));
         restingBg.setStroke(Math.max(1, a.dp(1)), 0x3ef9a8d4);
 
         final GradientDrawable focusedBg =
                 new GradientDrawable(
-                        GradientDrawable.Orientation.TL_BR,
-                        new int[] {0xee2e2130, 0xf21e2534});
+                        GradientDrawable.Orientation.TL_BR, new int[] {0xee2e2130, 0xf21e2534});
         focusedBg.setCornerRadius(a.dp(18));
         focusedBg.setStroke(Math.max(2, a.dp(2.5f)), Color.WHITE);
 
@@ -580,17 +576,14 @@ final class TvOfficialNotice {
         a.gap(left, 8);
 
         left.addView(
-                buildInfoCard(a, "Marco 唯一官网", OFFICIAL_SITE_DISPLAY, OFFICIAL_SITE_URL, 0xff6ee7b7),
+                buildInfoCard(
+                        a, "Marco 唯一官网", OFFICIAL_SITE_DISPLAY, OFFICIAL_SITE_URL, 0xff6ee7b7),
                 new LinearLayout.LayoutParams(-1, -2));
         a.gap(left, 8);
 
         left.addView(
                 buildInfoCard(
-                        a,
-                        "官网交流群链接",
-                        OFFICIAL_GROUP_URL,
-                        "打开或扫码进入官网交流群页面，获取最新官方交流群入口",
-                        0xffc4b5fd),
+                        a, "官网交流群链接", OFFICIAL_GROUP_URL, "打开或扫码进入官网交流群页面，获取最新官方交流群入口", 0xffc4b5fd),
                 new LinearLayout.LayoutParams(-1, -2));
 
         split.addView(left, leftLp);

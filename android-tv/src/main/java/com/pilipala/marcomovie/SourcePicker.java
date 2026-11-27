@@ -1385,10 +1385,12 @@ final class SourcePicker {
                             ViewGroup.LayoutParams.WRAP_CONTENT));
 
             // On TV, skip stroked rounded-rect SDF on idle cards (solid rounded card on dark panel)
-            // so Mali-450 halves per-card SDF shader passes while keeping crisp focused/current rings.
-            idleBg = tv
-                    ? makeCardDrawable(a, 0xff1e2734, 0, 0, 10)
-                    : makeCardDrawable(a, 0xff222a36, 0xff3b4657, 1, 14);
+            // so Mali-450 halves per-card SDF shader passes while keeping crisp focused/current
+            // rings.
+            idleBg =
+                    tv
+                            ? makeCardDrawable(a, 0xff1e2734, 0, 0, 10)
+                            : makeCardDrawable(a, 0xff222a36, 0xff3b4657, 1, 14);
             currentBg = makeCardDrawable(a, 0xff16343c, 0xff49c5b6, 2, tv ? 10 : 14);
             focusedBg = makeCardDrawable(a, 0xff2f4156, MainActivity.WHITE, 3, tv ? 10 : 14);
             focusedCurrentBg = makeCardDrawable(a, 0xff1f4d57, MainActivity.WHITE, 3, tv ? 10 : 14);

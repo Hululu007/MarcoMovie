@@ -57,7 +57,12 @@ final class ImageLoader {
             this.ticket = 0;
         }
 
-        Waiter(Object ownerToken, BitmapCallback callback, int bindToken, int scopeToken, int ticket) {
+        Waiter(
+                Object ownerToken,
+                BitmapCallback callback,
+                int bindToken,
+                int scopeToken,
+                int ticket) {
             this.viewRef = null;
             this.ownerToken = ownerToken;
             this.callback = callback;
@@ -188,7 +193,8 @@ final class ImageLoader {
         }
     }
 
-    private static boolean hasActiveWaiters(String key, InFlightEntry owned, int currentGeneration) {
+    private static boolean hasActiveWaiters(
+            String key, InFlightEntry owned, int currentGeneration) {
         synchronized (IN_FLIGHT) {
             if (IN_FLIGHT.get(key) != owned) return false;
             for (Iterator<Waiter> it = owned.waiters.iterator(); it.hasNext(); ) {
@@ -799,7 +805,8 @@ final class ImageLoader {
                 RequestScope.submit(
                         a.artwork,
                         () -> {
-                            if (ticket != a.generation || !hasActiveWaiters(key, owned, a.generation)) {
+                            if (ticket != a.generation
+                                    || !hasActiveWaiters(key, owned, a.generation)) {
                                 synchronized (IN_FLIGHT) {
                                     if (IN_FLIGHT.get(key) == owned) IN_FLIGHT.remove(key);
                                 }
@@ -824,7 +831,8 @@ final class ImageLoader {
                                                     a, source, resolvedUrl, targetUrl, detail);
                                 }
                                 if (bytes == null || bytes.length == 0) return;
-                                if (ticket != a.generation || !hasActiveWaiters(key, owned, a.generation)) return;
+                                if (ticket != a.generation
+                                        || !hasActiveWaiters(key, owned, a.generation)) return;
                                 BitmapFactory.Options options = new BitmapFactory.Options();
                                 options.inJustDecodeBounds = true;
                                 BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);

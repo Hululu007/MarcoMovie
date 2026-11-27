@@ -19,6 +19,7 @@ import java.util.concurrent.*;
 /** Independent first native build. No original APK code or artwork is embedded. */
 public final class MainActivity extends Activity {
     static final int WHITE = 0xfff5f5f7, MUTED = 0xffa1a1aa, DARK = 0xff101013;
+
     private static ThreadPoolExecutor boundedTvPool(int maxThreads, final String threadName) {
         ThreadPoolExecutor pool =
                 new ThreadPoolExecutor(
@@ -1225,8 +1226,7 @@ public final class MainActivity extends Activity {
 
                         @Override
                         public void run() {
-                            if (isFinishing()
-                                    || (Build.VERSION.SDK_INT >= 17 && isDestroyed())) {
+                            if (isFinishing() || (Build.VERSION.SDK_INT >= 17 && isDestroyed())) {
                                 return;
                             }
                             if (isOwnModalDialogShowing()

@@ -299,12 +299,12 @@ final class SearchVariants {
     static List<Cms.Video> run(String query, List<String> variants, Match matches, Fetch fetch)
             throws Exception {
         final Match pred = matches;
-        return runVideos(query, variants, v -> v != null && (pred == null || pred.test(v.title)), fetch);
+        return runVideos(
+                query, variants, v -> v != null && (pred == null || pred.test(v.title)), fetch);
     }
 
     static List<Cms.Video> runVideos(
-            String query, List<String> variants, VideoMatch matches, Fetch fetch)
-            throws Exception {
+            String query, List<String> variants, VideoMatch matches, Fetch fetch) throws Exception {
         if (variants == null || variants.isEmpty()) {
             return Collections.emptyList();
         }

@@ -31,7 +31,8 @@ import java.util.concurrent.Future;
  * history bookmark persistence extracted from {@link MainActivity}.
  */
 final class PlaybackController {
-    private static final ExecutorService PLAYER_RESOLVE = createBoundedDaemonPool(6, "player-resolve");
+    private static final ExecutorService PLAYER_RESOLVE =
+            createBoundedDaemonPool(6, "player-resolve");
     private static final ExecutorService PLAYER_INIT = createBoundedDaemonPool(1, "player-init");
 
     private static ExecutorService createBoundedDaemonPool(int maxThreads, final String name) {
@@ -50,6 +51,7 @@ final class PlaybackController {
         pool.allowCoreThreadTimeOut(true);
         return pool;
     }
+
     static final ExecutorService STORAGE_EXECUTOR = WatchHistory.STORAGE_EXECUTOR;
     private static final long DISK_SAVE_INTERVAL_MS = 15000L;
 
@@ -405,7 +407,8 @@ final class PlaybackController {
                                         if (freshVideo.id == null || freshVideo.id.isEmpty()) {
                                             freshVideo.id = v.id;
                                         }
-                                        if (freshVideo.title == null || freshVideo.title.isEmpty()) {
+                                        if (freshVideo.title == null
+                                                || freshVideo.title.isEmpty()) {
                                             freshVideo.title = v.title;
                                         }
                                         if (freshVideo.poster == null
@@ -449,12 +452,12 @@ final class PlaybackController {
                                             origLineName.isEmpty()
                                                     ? "原线路"
                                                     : "原线路「" + origLineName + "」";
-                                    msg =
-                                            missingLabel
-                                                    + "已下线或更换，已保留观看进度，请重试或手动切换其他线路";
+                                    msg = missingLabel + "已下线或更换，已保留观看进度，请重试或手动切换其他线路";
                                 } else {
                                     String epLabel =
-                                            origEpName.isEmpty() ? "原剧集" : "原剧集「" + origEpName + "」";
+                                            origEpName.isEmpty()
+                                                    ? "原剧集"
+                                                    : "原剧集「" + origEpName + "」";
                                     msg = epLabel + "未能唯一确认或已下线，已保留观看进度，请重试或手动选集";
                                 }
                                 a.ui.post(
@@ -2722,13 +2725,16 @@ final class PlaybackController {
                                                                         Cms.Line nextLine = null;
                                                                         Cms.Episode nextEp = null;
                                                                         for (int off = 1;
-                                                                                off < v.lines.size();
+                                                                                off
+                                                                                        < v.lines
+                                                                                                .size();
                                                                                 off++) {
                                                                             Cms.Line candLine =
                                                                                     v.lines.get(
                                                                                             (curLineIdx
                                                                                                             + off)
-                                                                                                    % v.lines
+                                                                                                    % v
+                                                                                                            .lines
                                                                                                             .size());
                                                                             if (candLine == null
                                                                                     || candLine
@@ -2773,8 +2779,8 @@ final class PlaybackController {
                                                                                             + "…");
                                                                             final Cms.Line hopLine =
                                                                                     nextLine;
-                                                                            final Cms.Episode hopEp =
-                                                                                    nextEp;
+                                                                            final Cms.Episode
+                                                                                    hopEp = nextEp;
                                                                             a.ui.post(
                                                                                     () -> {
                                                                                         if (ticket
