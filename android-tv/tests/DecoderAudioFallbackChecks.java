@@ -22,8 +22,7 @@ public final class DecoderAudioFallbackChecks {
     }
 
     private static MediaCodecInfo fakeCodec(String name, String mime, boolean secure) {
-        return MediaCodecInfo.newInstance(
-                name, mime, mime, null, true, false, true, false, secure);
+        return MediaCodecInfo.newInstance(name, mime, mime, null, true, false, true, false, secure);
     }
 
     private static MediaCodecInfo fakeCodec(String name, String mime) {
@@ -102,7 +101,8 @@ public final class DecoderAudioFallbackChecks {
                         "OMX.google.opus.decoder", MimeTypes.AUDIO_OPUS),
                 "google opus preserved");
 
-        // 4. Clear tracks: filter strips silent Amlogic AC-3/E-AC-3/Atmos when FFmpeg + PCM sink can handle
+        // 4. Clear tracks: filter strips silent Amlogic AC-3/E-AC-3/Atmos when FFmpeg + PCM sink
+        // can handle
         MediaCodecInfo amlAc3 = fakeCodec("OMX.amlogic.audio.decoder.ac3", MimeTypes.AUDIO_AC3);
         MediaCodecInfo amlEac3 = fakeCodec("OMX.amlogic.audio.decoder.eac3", MimeTypes.AUDIO_E_AC3);
         MediaCodecInfo vendorSecureEac3 =
@@ -138,7 +138,9 @@ public final class DecoderAudioFallbackChecks {
                         true,
                         true,
                         true);
-        check(eac3Out.isEmpty(), "clear eac3 drops amlogic stub so Media3 uses FfmpegAudioRenderer");
+        check(
+                eac3Out.isEmpty(),
+                "clear eac3 drops amlogic stub so Media3 uses FfmpegAudioRenderer");
 
         List<MediaCodecInfo> eac3JocOut =
                 DecoderRenderersFactory.filterAudioDecodersForFormat(
@@ -168,8 +170,10 @@ public final class DecoderAudioFallbackChecks {
                 aacOut.size() == 1 && "OMX.google.aac.decoder".equals(aacOut.get(0).name),
                 "clear aac keeps google decoder and drops amlogic stub");
 
-        // 5. R14 P1 DRM-protected tracks: BOTH secure-decoder-required AND encrypted-without-secure-decoder
-        //    MUST preserve platform vendor decoders because FfmpegAudioRenderer returns FORMAT_UNSUPPORTED_DRM!
+        // 5. R14 P1 DRM-protected tracks: BOTH secure-decoder-required AND
+        // encrypted-without-secure-decoder
+        //    MUST preserve platform vendor decoders because FfmpegAudioRenderer returns
+        // FORMAT_UNSUPPORTED_DRM!
         Format protectedEac3 = formatOf(MimeTypes.AUDIO_E_AC3, C.CRYPTO_TYPE_FRAMEWORK, false);
         Format protectedDrmInitOnly = formatOf(MimeTypes.AUDIO_E_AC3, C.CRYPTO_TYPE_NONE, true);
         Format protectedAac = formatOf(MimeTypes.AUDIO_AAC, C.CRYPTO_TYPE_FRAMEWORK, false);
@@ -202,7 +206,8 @@ public final class DecoderAudioFallbackChecks {
                         true);
         check(
                 protectedNoSecureOut.size() == 1
-                        && "OMX.amlogic.audio.decoder.eac3".equals(protectedNoSecureOut.get(0).name),
+                        && "OMX.amlogic.audio.decoder.eac3"
+                                .equals(protectedNoSecureOut.get(0).name),
                 "R14 P1: encrypted E-AC-3 with requiresSecureDecoder=false STILL preserves platform codec");
 
         List<MediaCodecInfo> protectedDrmInitOut =
@@ -234,7 +239,8 @@ public final class DecoderAudioFallbackChecks {
                         && "OMX.google.aac.decoder".equals(protectedAacOut.get(0).name),
                 "R14 P1: protected AAC control preserves AOSP codec");
 
-        // 6. Controls: tunneling, FFmpeg unavailable, MIME unsupported by FFmpeg, or sink doesn't support PCM
+        // 6. Controls: tunneling, FFmpeg unavailable, MIME unsupported by FFmpeg, or sink doesn't
+        // support PCM
         List<MediaCodecInfo> tunneledClear =
                 DecoderRenderersFactory.filterAudioDecodersForFormat(
                         clearEac3,
@@ -281,7 +287,9 @@ public final class DecoderAudioFallbackChecks {
                         false,
                         false,
                         true);
-        check(noFfmpegProtected.size() == 1, "keep vendor codec when ffmpeg unavailable (protected)");
+        check(
+                noFfmpegProtected.size() == 1,
+                "keep vendor codec when ffmpeg unavailable (protected)");
 
         List<MediaCodecInfo> noSinkPcm =
                 DecoderRenderersFactory.filterAudioDecodersForFormat(
@@ -303,14 +311,20 @@ public final class DecoderAudioFallbackChecks {
                 "legacy MIME filter empties clear ac3");
         check(
                 DecoderRenderersFactory.filterAudioDecodersForFfmpegFallback(
-                                MimeTypes.AUDIO_AC3, Collections.singletonList(amlAc3), false, false)
-                        .size()
+                                        MimeTypes.AUDIO_AC3,
+                                        Collections.singletonList(amlAc3),
+                                        false,
+                                        false)
+                                .size()
                         == 1,
                 "legacy MIME filter preserves ac3 when ffmpeg unavailable");
         check(
                 DecoderRenderersFactory.filterAudioDecodersForFfmpegFallback(
-                                MimeTypes.AUDIO_AC3, Collections.singletonList(amlAc3), true, true)
-                        .size()
+                                        MimeTypes.AUDIO_AC3,
+                                        Collections.singletonList(amlAc3),
+                                        true,
+                                        true)
+                                .size()
                         == 1,
                 "legacy MIME filter preserves ac3 when tunneling");
 

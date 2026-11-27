@@ -795,8 +795,7 @@ final class UpdateScreen {
 
         a.gap(a.body, 14);
         LinearLayout donateCard =
-                TvOfficialNotice.buildInlineDonateCard(
-                        a, "update-donate-card", "update-donate-qr");
+                TvOfficialNotice.buildInlineDonateCard(a, "update-donate-card", "update-donate-qr");
         a.body.addView(donateCard, new LinearLayout.LayoutParams(-1, -2));
 
         // Explicit D-pad focus choreography & guaranteed initial focus on primary CTA ("立即下载")

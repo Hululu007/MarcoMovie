@@ -47,10 +47,16 @@ public final class TvSearchAcceptanceChecks {
         if (rec.has("explicit_aliases")) {
             item.put("explicit_aliases", rec.getJSONArray("explicit_aliases"));
         }
-        String json = new JSONObject().put("page", 1).put("pagecount", 1).put("list", new JSONArray().put(item)).toString();
+        String json =
+                new JSONObject()
+                        .put("page", 1)
+                        .put("pagecount", 1)
+                        .put("list", new JSONArray().put(item))
+                        .toString();
         Cms.Listing listing = Cms.listing(json);
         if (listing.videos.size() != 1) {
-            throw new AssertionError("Cms.listing failed for synthetic record " + rec.optString("key"));
+            throw new AssertionError(
+                    "Cms.listing failed for synthetic record " + rec.optString("key"));
         }
         return listing.videos.get(0);
     }
@@ -126,7 +132,8 @@ public final class TvSearchAcceptanceChecks {
                                         "android-tv/src/main/assets/search/title-phrases.txt")));
         phonetic.learn("三体");
 
-        // Parse synthetic records through real Cms.listing() so alias mapping is exercised end-to-end
+        // Parse synthetic records through real Cms.listing() so alias mapping is exercised
+        // end-to-end
         Map<String, Cms.Site> sitesByKey = new LinkedHashMap<>();
         Map<String, List<Cms.Video>> corpusBySite = new LinkedHashMap<>();
         JSONArray records = spec.getJSONArray("records");
@@ -209,7 +216,12 @@ public final class TvSearchAcceptanceChecks {
             if (c.has("source_calls")) {
                 check(
                         sourceCalls.get() == c.getInt("source_calls"),
-                        "case[" + idx + "] query='" + query + "' source_calls==" + c.getInt("source_calls"));
+                        "case["
+                                + idx
+                                + "] query='"
+                                + query
+                                + "' source_calls=="
+                                + c.getInt("source_calls"));
             }
             if (c.has("expected_keys")) {
                 List<String> expected = jsonStrings(c.getJSONArray("expected_keys"));
@@ -268,25 +280,14 @@ public final class TvSearchAcceptanceChecks {
                 for (String f : forbid) {
                     check(
                             !actualKeys.contains(f),
-                            "case["
-                                    + idx
-                                    + "] forbidden excluded "
-                                    + f
-                                    + " query='"
-                                    + query
-                                    + "'");
+                            "case[" + idx + "] forbidden excluded " + f + " query='" + query + "'");
                 }
             }
             if (c.has("must_include")) {
                 List<String> must = jsonStrings(c.getJSONArray("must_include"));
                 check(
                         actualKeys.containsAll(must),
-                        "case["
-                                + idx
-                                + "] must_include query='"
-                                + query
-                                + "' got="
-                                + actualKeys);
+                        "case[" + idx + "] must_include query='" + query + "' got=" + actualKeys);
             }
 
             reportCases.put(
@@ -302,7 +303,8 @@ public final class TvSearchAcceptanceChecks {
                             .put("passed", true));
         }
 
-        // Alias constraint check: removing explicit_aliases makes "星际穿越" -> 0 hits; description/actor never impersonate alias
+        // Alias constraint check: removing explicit_aliases makes "星际穿越" -> 0 hits;
+        // description/actor never impersonate alias
         JSONObject noAliasItem =
                 new JSONObject()
                         .put("vod_id", "8")
@@ -328,7 +330,8 @@ public final class TvSearchAcceptanceChecks {
                                 TvSearchMatcher.Mode.FUZZY, "星际穿越", parsedNoAlias, phonetic),
                 "removing explicit_aliases yields 0 matches; description/actor/remarks never impersonate title");
 
-        // Transition 1: Page 1 all irrelevant, Page 2 contains strict exact match -> bounded auto-advance finds it & keeps cursor
+        // Transition 1: Page 1 all irrelevant, Page 2 contains strict exact match -> bounded
+        // auto-advance finds it & keeps cursor
         AtomicInteger pagedCalls = new AtomicInteger();
         TvSearchPages paged =
                 TvSearchPages.firstVideos(
@@ -398,7 +401,8 @@ public final class TvSearchAcceptanceChecks {
                         && !pagedNext.hasMore(),
                 "transition 2: cross-page duplicate siteKey+vodId deduped while distinct year/id preserved");
 
-        // Transition 2b: Same siteKey+vodId deduped across retries/batches; distinct sites & distinct years kept
+        // Transition 2b: Same siteKey+vodId deduped across retries/batches; distinct sites &
+        // distinct years kept
         Cms.Site siteA = site("A", "星海源");
         Cms.Site siteB = site("B", "远航源");
         Cms.Video a1 = new Cms.Video();
@@ -435,7 +439,8 @@ public final class TvSearchAcceptanceChecks {
                         && "B:1".equals(dedupHits.get(1).stableKey()),
                 "transition 2b: same siteKey+vodId deduplicated; different site same vodId & title preserved");
 
-        // Transition 3: Rapid EXACT -> FUZZY -> EXACT drops late FUZZY response via serial + mode guard
+        // Transition 3: Rapid EXACT -> FUZZY -> EXACT drops late FUZZY response via serial + mode
+        // guard
         final AtomicInteger currentSerial = new AtomicInteger(1);
         final AtomicReference<TvSearchMatcher.Mode> currentMode =
                 new AtomicReference<>(TvSearchMatcher.Mode.FUZZY);
@@ -482,7 +487,8 @@ public final class TvSearchAcceptanceChecks {
                         && GlobalSearchScreen.computeTvSearchColumns(440f, 1.0f) == 3,
                 "responsive Apple TV search wall columns adapt cleanly to width and 1.3x fontScale");
 
-        // R13 #1a: Page 1 & 2 repeat identical pinned unrelated item, Page 3 has exact hit -> found & bounded
+        // R13 #1a: Page 1 & 2 repeat identical pinned unrelated item, Page 3 has exact hit -> found
+        // & bounded
         AtomicInteger r13ThirdPageCalls = new AtomicInteger();
         TvSearchPages r13ThirdPage =
                 TvSearchPages.firstVideos(
@@ -532,9 +538,7 @@ public final class TvSearchAcceptanceChecks {
                         },
                         TvSearchPages.MAX_RESULTS);
         check(
-                r13Endless.videos.isEmpty()
-                        && r13EndlessCalls.get() <= 3
-                        && !r13Endless.hasMore(),
+                r13Endless.videos.isEmpty() && r13EndlessCalls.get() <= 3 && !r13Endless.hasMore(),
                 "R13 #1a-bounded: endless repeating irrelevant source terminates boundedly");
 
         // R13 #1b: Page 2 enriches same ID with explicit alias -> admitted & shown once
@@ -559,7 +563,8 @@ public final class TvSearchAcceptanceChecks {
                 r13Enriched.videos.size() == 1 && "same".equals(r13Enriched.videos.get(0).id),
                 "R13 #1b: same video ID enriched with full alias on page 2 is re-evaluated and admitted once");
 
-        // R13 #1c: Singular string alias with slash stays intact ("Face/Off" -> 1, "Face" -> 0, "Off" -> 0)
+        // R13 #1c: Singular string alias with slash stays intact ("Face/Off" -> 1, "Face" -> 0,
+        // "Off" -> 0)
         Cms.Listing faceOffListing =
                 Cms.listing(
                         "{\"page\":1,\"pagecount\":1,\"list\":[{\"vod_id\":\"f1\",\"vod_name\":\"变脸\",\"alias\":\"Face/Off\"}]}");
@@ -567,9 +572,12 @@ public final class TvSearchAcceptanceChecks {
         check(
                 faceOff.aliases.size() == 1
                         && "Face/Off".equals(faceOff.aliases.get(0))
-                        && TvSearchMatcher.matches(TvSearchMatcher.Mode.EXACT, "Face/Off", faceOff, phonetic)
-                        && !TvSearchMatcher.matches(TvSearchMatcher.Mode.EXACT, "Face", faceOff, phonetic)
-                        && !TvSearchMatcher.matches(TvSearchMatcher.Mode.EXACT, "Off", faceOff, phonetic),
+                        && TvSearchMatcher.matches(
+                                TvSearchMatcher.Mode.EXACT, "Face/Off", faceOff, phonetic)
+                        && !TvSearchMatcher.matches(
+                                TvSearchMatcher.Mode.EXACT, "Face", faceOff, phonetic)
+                        && !TvSearchMatcher.matches(
+                                TvSearchMatcher.Mode.EXACT, "Off", faceOff, phonetic),
                 "R13 #1c: singular string alias preserves slash punctuation (Face/Off=1, Face=0, Off=0)");
 
         // R13 #2: Fuzzy search ranks BEFORE low-RAM per-source cap truncation (200-site cap == 4)
@@ -577,7 +585,8 @@ public final class TvSearchAcceptanceChecks {
         TvSearchPages r13FuzzyCap =
                 TvSearchPages.firstVideos(
                         "三体",
-                        TvSearchMatcher.buildRecallTerms(TvSearchMatcher.Mode.FUZZY, "三体", phonetic),
+                        TvSearchMatcher.buildRecallTerms(
+                                TvSearchMatcher.Mode.FUZZY, "三体", phonetic),
                         TvSearchMatcher.videoPredicate(TvSearchMatcher.Mode.FUZZY, "三体", phonetic),
                         (term, page) -> {
                             Cms.Listing l = new Cms.Listing();
@@ -606,7 +615,8 @@ public final class TvSearchAcceptanceChecks {
                         && "exact-alias".equals(r13FuzzyCap.videos.get(0).id),
                 "R13 #2: fuzzy search ranks full alias #1 BEFORE applying low-RAM 200-site cap=4 truncation");
 
-        // R13 #3: Pagination focus resolution stays on first newly added card (#25) or anchor, never 0
+        // R13 #3: Pagination focus resolution stays on first newly added card (#25) or anchor,
+        // never 0
         List<TvSearchMatcher.RankedHit> hits48 = new ArrayList<>();
         Set<String> prev24 = new LinkedHashSet<>();
         for (int i = 0; i < 48; i++) {
@@ -627,15 +637,18 @@ public final class TvSearchAcceptanceChecks {
                 localTarget == 24 && noNewTarget == 23,
                 "R13 #3: pagination focus advances to index 24 (card #25) or keeps anchor 23, never jumps to 0");
 
-        // R13 #4: Unicode blank queries (ASCII space, U+3000, U+00A0) -> 0 recall terms & 0 source calls
+        // R13 #4: Unicode blank queries (ASCII space, U+3000, U+00A0) -> 0 recall terms & 0 source
+        // calls
         for (String blankQ : new String[] {"   ", "\u3000", "\u00a0", " \u3000\u00a0 "}) {
             AtomicInteger blankCalls = new AtomicInteger();
-            List<String> terms = TvSearchMatcher.buildRecallTerms(TvSearchMatcher.Mode.EXACT, blankQ, phonetic);
+            List<String> terms =
+                    TvSearchMatcher.buildRecallTerms(TvSearchMatcher.Mode.EXACT, blankQ, phonetic);
             TvSearchPages blankPages =
                     TvSearchPages.firstVideos(
                             blankQ,
                             terms,
-                            TvSearchMatcher.videoPredicate(TvSearchMatcher.Mode.EXACT, blankQ, phonetic),
+                            TvSearchMatcher.videoPredicate(
+                                    TvSearchMatcher.Mode.EXACT, blankQ, phonetic),
                             (term, page) -> {
                                 blankCalls.incrementAndGet();
                                 return new Cms.Listing();
@@ -655,7 +668,8 @@ public final class TvSearchAcceptanceChecks {
                 hotSeed != null && !hotSeed.hotDramas.isEmpty() && !hotSeed.hotMovies.isEmpty(),
                 "Search empty-state hot recommendations available instantaneously with 0 CMS source calls");
 
-        // R14 #1: 200-site low-RAM cap=4 auto-advance MUST preserve remainder on page 2 and page 3 cursor
+        // R14 #1: 200-site low-RAM cap=4 auto-advance MUST preserve remainder on page 2 and page 3
+        // cursor
         int r14LowRamCap = TvSearchBudget.initialPerSourceCap(200, true, true);
         SearchVariants.VideoMatch exactSanti =
                 TvSearchMatcher.videoPredicate(TvSearchMatcher.Mode.EXACT, "三体", phonetic);
@@ -689,7 +703,13 @@ public final class TvSearchAcceptanceChecks {
                             r14LowRamCap);
             check(
                     pg.videos.size() == r14LowRamCap && pg.hasMore() && !pg.limited,
-                    "R14 #1: initial cap=" + r14LowRamCap + " preserves hasMore (noiseFirst=" + noiseFirst + ", p2=" + secondPageMatches + ")");
+                    "R14 #1: initial cap="
+                            + r14LowRamCap
+                            + " preserves hasMore (noiseFirst="
+                            + noiseFirst
+                            + ", p2="
+                            + secondPageMatches
+                            + ")");
             for (int step = 0; step < 4 && pg.hasMore(); step++) {
                 pg = pg.nextVideos(exactSanti, budgetFetch, 16, 100);
             }
@@ -697,7 +717,11 @@ public final class TvSearchAcceptanceChecks {
             for (Cms.Video v : pg.videos) uniqueIds.add(v.id);
             check(
                     pg.videos.size() == expectedTotal && uniqueIds.size() == expectedTotal,
-                    "R14 #1: manual load more recovers all " + expectedTotal + " unique hits (got " + pg.videos.size() + ")");
+                    "R14 #1: manual load more recovers all "
+                            + expectedTotal
+                            + " unique hits (got "
+                            + pg.videos.size()
+                            + ")");
         }
 
         // R14 #3: Late single-source pagination callback MUST NOT hijack "全部" or another source
@@ -755,11 +779,7 @@ public final class TvSearchAcceptanceChecks {
                     };
             TvSearchPages firstA =
                     TvSearchPages.firstVideos(
-                            "三体",
-                            Collections.singletonList("三体"),
-                            fuzzyPred,
-                            strongLateFetch,
-                            24);
+                            "三体", Collections.singletonList("三体"), fuzzyPred, strongLateFetch, 24);
             List<TvSearchMatcher.RankedHit> beforeRanked =
                     TvSearchMatcher.collectAndRank(
                             TvSearchMatcher.Mode.FUZZY,
@@ -775,7 +795,8 @@ public final class TvSearchAcceptanceChecks {
                             "",
                             phonetic);
             List<TvSearchMatcher.RankedHit> beforeVis =
-                    GlobalSearchScreen.projectVisibleHits(beforeRanked, 24, Collections.emptyList(), "", false);
+                    GlobalSearchScreen.projectVisibleHits(
+                            beforeRanked, 24, Collections.emptyList(), "", false);
             List<String> prevKeys24 = new ArrayList<>();
             for (TvSearchMatcher.RankedHit h : beforeVis) prevKeys24.add(h.stableKey());
             String focused24 = prevKeys24.get(23);
@@ -810,7 +831,8 @@ public final class TvSearchAcceptanceChecks {
                             && "A:p1".equals(afterStrongKeys.get(0)),
                     "R15 P2a: late full match enters cache & ranks #1 in ranked, while focused A:p24 stays at index 23");
 
-            // 2) Active re-search / leaving wall (preserveFocusedPosition=false) puts full match #1!
+            // 2) Active re-search / leaving wall (preserveFocusedPosition=false) puts full match
+            // #1!
             List<TvSearchMatcher.RankedHit> activeResearchVis =
                     GlobalSearchScreen.projectVisibleHits(
                             afterStrongRanked, 24, Collections.emptyList(), "", false);
@@ -819,7 +841,8 @@ public final class TvSearchAcceptanceChecks {
                             && "A:late_exact".equals(activeResearchVis.get(0).stableKey()),
                     "R15 P2b: active re-search / filter refresh ranks late full match 《三体》 #1");
 
-            // 3) Staying on source A (pendingPaginationFocus -> preserveFocusedPosition=false, limit=48)
+            // 3) Staying on source A (pendingPaginationFocus -> preserveFocusedPosition=false,
+            // limit=48)
             // reveals and focuses newly added full match A:late_exact!
             List<TvSearchMatcher.RankedHit> stayOnARanked =
                     TvSearchMatcher.collectAndRank(
@@ -835,7 +858,8 @@ public final class TvSearchAcceptanceChecks {
                             "",
                             phonetic);
             List<TvSearchMatcher.RankedHit> stayOnAVis =
-                    GlobalSearchScreen.projectVisibleHits(stayOnARanked, 48, prevKeys24, focused24, false);
+                    GlobalSearchScreen.projectVisibleHits(
+                            stayOnARanked, 48, prevKeys24, focused24, false);
             int stayTargetIdx =
                     GlobalSearchScreen.resolvePaginationFocusIndex(
                             stayOnAVis, new LinkedHashSet<>(prevKeys24), 24, focused24);
@@ -891,7 +915,8 @@ public final class TvSearchAcceptanceChecks {
 
         // R16 P2: Low-RAM TV 900-item global budget eviction protects active filter, visible cards
         // and focused card #24 across full_last_A, headroom_last_A_control, full_early_A_control,
-        // 2-source-only cap (trimming incoming B with resumable cursor), and "全部" tab visible protection.
+        // 2-source-only cap (trimming incoming B with resumable cursor), and "全部" tab visible
+        // protection.
         {
             final String q = "三体";
             final SearchVariants.VideoMatch fuzzyPred =
@@ -904,14 +929,12 @@ public final class TvSearchAcceptanceChecks {
                     "R16 P2 precheck: low-RAM TV budget constants (cap=900, step=60, 15-source initial=60)");
 
             final boolean[][] scenarios = {
-                {true, true},   // full_last_A (exact R16 failure case!)
-                {false, true},  // headroom_last_A_control
-                {true, false},  // full_early_A_control
+                {true, true}, // full_last_A (exact R16 failure case!)
+                {false, true}, // headroom_last_A_control
+                {true, false}, // full_early_A_control
             };
             final String[] scenarioNames = {
-                "full_last_A",
-                "headroom_last_A_control",
-                "full_early_A_control",
+                "full_last_A", "headroom_last_A_control", "full_early_A_control",
             };
             for (int sc = 0; sc < scenarios.length; sc++) {
                 final boolean fullBudget = scenarios[sc][0];
@@ -965,7 +988,8 @@ public final class TvSearchAcceptanceChecks {
                 for (TvSearchMatcher.RankedHit h : aBeforeVis) aBeforeKeys.add(h.stableKey());
                 String focused24 = aBeforeKeys.get(23);
 
-                // User requested network next page on B, switched to A and focused A:p24, now B returns 60 items.
+                // User requested network next page on B, switched to A and focused A:p24, now B
+                // returns 60 items.
                 GlobalSearchScreen.SourceResult bPrev = sources.get("B");
                 TvSearchPages bPage2 =
                         bPrev.pages.nextVideos(
@@ -988,10 +1012,12 @@ public final class TvSearchAcceptanceChecks {
                 sources.put(
                         "B",
                         new GlobalSearchScreen.SourceResult(
-                                bPrev.site, bPage2.videos, SearchCoordinator.Outcome.RESULT, bPage2));
+                                bPrev.site,
+                                bPage2.videos,
+                                SearchCoordinator.Outcome.RESULT,
+                                bPage2));
                 boolean evicted =
-                        TvSearchBudget.enforceGlobalResultsCap(
-                                sources, "A", "B", aBeforeKeys, cap);
+                        TvSearchBudget.enforceGlobalResultsCap(sources, "A", "B", aBeforeKeys, cap);
                 int totalAfter = 0;
                 for (GlobalSearchScreen.SourceResult sr : sources.values()) {
                     totalAfter += sr.videos.size();
@@ -1041,7 +1067,8 @@ public final class TvSearchAcceptanceChecks {
                                 && aAfter.videos.size() == 60
                                 && aAfterVis.size() == 24
                                 && aAfterKeys.indexOf("A:p24") == 23
-                                && !GlobalSearchScreen.shouldApplyPaginationViewUpdate("B", "A", 1, 2)
+                                && !GlobalSearchScreen.shouldApplyPaginationViewUpdate(
+                                        "B", "A", 1, 2)
                                 && bAfter.videos.size() == 120
                                 && bAfter.pages.hasMore()
                                 && bPage3.videos.size() == 180
@@ -1058,8 +1085,10 @@ public final class TvSearchAcceptanceChecks {
                                 + bPage3.videos.size());
             }
 
-            // R16 P2 extra 1: 2-source-only full budget (A=600 active last, B=300->360 late incoming)
-            // -> Pass 2 trims incoming B back to 300 while keeping B.pages.hasMore()==true and A untouched!
+            // R16 P2 extra 1: 2-source-only full budget (A=600 active last, B=300->360 late
+            // incoming)
+            // -> Pass 2 trims incoming B back to 300 while keeping B.pages.hasMore()==true and A
+            // untouched!
             {
                 Map<String, GlobalSearchScreen.SourceResult> twoSrc = new LinkedHashMap<>();
                 TvSearchPages.Fetch bigFetch =
@@ -1077,20 +1106,45 @@ public final class TvSearchAcceptanceChecks {
                             return l;
                         };
                 TvSearchPages bPages =
-                        TvSearchPages.firstVideos(q, Collections.singletonList(q), fuzzyPred, bigFetch, 60);
-                for (int k = 0; k < 4; k++) bPages = bPages.nextVideos(fuzzyPred, bigFetch, 60, cap); // 300
+                        TvSearchPages.firstVideos(
+                                q, Collections.singletonList(q), fuzzyPred, bigFetch, 60);
+                for (int k = 0; k < 4; k++)
+                    bPages = bPages.nextVideos(fuzzyPred, bigFetch, 60, cap); // 300
                 TvSearchPages aPages =
-                        TvSearchPages.firstVideos(q, Collections.singletonList(q), fuzzyPred, bigFetch, 60);
-                for (int k = 0; k < 9; k++) aPages = aPages.nextVideos(fuzzyPred, bigFetch, 60, cap); // 600
-                twoSrc.put("B", new GlobalSearchScreen.SourceResult(site("B", "B"), bPages.videos, SearchCoordinator.Outcome.RESULT, bPages));
-                twoSrc.put("A", new GlobalSearchScreen.SourceResult(site("A", "A"), aPages.videos, SearchCoordinator.Outcome.RESULT, aPages));
+                        TvSearchPages.firstVideos(
+                                q, Collections.singletonList(q), fuzzyPred, bigFetch, 60);
+                for (int k = 0; k < 9; k++)
+                    aPages = aPages.nextVideos(fuzzyPred, bigFetch, 60, cap); // 600
+                twoSrc.put(
+                        "B",
+                        new GlobalSearchScreen.SourceResult(
+                                site("B", "B"),
+                                bPages.videos,
+                                SearchCoordinator.Outcome.RESULT,
+                                bPages));
+                twoSrc.put(
+                        "A",
+                        new GlobalSearchScreen.SourceResult(
+                                site("A", "A"),
+                                aPages.videos,
+                                SearchCoordinator.Outcome.RESULT,
+                                aPages));
                 List<String> aVisKeys = new ArrayList<>();
                 for (int i = 1; i <= 24; i++) aVisKeys.add("A:p" + i);
-                TvSearchPages bNext = bPages.nextVideos(fuzzyPred, bigFetch, 60, cap); // 360 -> total 960
-                twoSrc.put("B", new GlobalSearchScreen.SourceResult(site("B", "B"), bNext.videos, SearchCoordinator.Outcome.RESULT, bNext));
-                boolean ev2 = TvSearchBudget.enforceGlobalResultsCap(twoSrc, "A", "B", aVisKeys, cap);
+                TvSearchPages bNext =
+                        bPages.nextVideos(fuzzyPred, bigFetch, 60, cap); // 360 -> total 960
+                twoSrc.put(
+                        "B",
+                        new GlobalSearchScreen.SourceResult(
+                                site("B", "B"),
+                                bNext.videos,
+                                SearchCoordinator.Outcome.RESULT,
+                                bNext));
+                boolean ev2 =
+                        TvSearchBudget.enforceGlobalResultsCap(twoSrc, "A", "B", aVisKeys, cap);
                 int tot2 = twoSrc.get("A").videos.size() + twoSrc.get("B").videos.size();
-                TvSearchPages bResume = twoSrc.get("B").pages.nextVideos(fuzzyPred, bigFetch, 60, cap);
+                TvSearchPages bResume =
+                        twoSrc.get("B").pages.nextVideos(fuzzyPred, bigFetch, 60, cap);
                 check(
                         ev2
                                 && tot2 == 900
@@ -1101,7 +1155,8 @@ public final class TvSearchAcceptanceChecks {
                         "R16 P2 (2-source-only full budget): trims incoming B to 300 with resumable cursor, keeps active A=600 intact");
             }
 
-            // R16 P2 extra 2: "全部" activeFilter ("") with focused A:p24 in visible keys protects A from eviction!
+            // R16 P2 extra 2: "全部" activeFilter ("") with focused A:p24 in visible keys protects A
+            // from eviction!
             {
                 Map<String, GlobalSearchScreen.SourceResult> allTab = new LinkedHashMap<>();
                 List<String> keysOrder = new ArrayList<>();
@@ -1128,7 +1183,13 @@ public final class TvSearchAcceptanceChecks {
                                         return l;
                                     },
                                     60);
-                    allTab.put(key, new GlobalSearchScreen.SourceResult(site(key, key), first.videos, SearchCoordinator.Outcome.RESULT, first));
+                    allTab.put(
+                            key,
+                            new GlobalSearchScreen.SourceResult(
+                                    site(key, key),
+                                    first.videos,
+                                    SearchCoordinator.Outcome.RESULT,
+                                    first));
                 }
                 List<String> visOnAll = new ArrayList<>();
                 for (int i = 1; i <= 24; i++) visOnAll.add("A:p" + i);
@@ -1151,10 +1212,15 @@ public final class TvSearchAcceptanceChecks {
                                 },
                                 60,
                                 cap);
-                allTab.put("B", new GlobalSearchScreen.SourceResult(b0.site, b2.videos, SearchCoordinator.Outcome.RESULT, b2));
-                boolean evAll = TvSearchBudget.enforceGlobalResultsCap(allTab, "", "B", visOnAll, cap);
+                allTab.put(
+                        "B",
+                        new GlobalSearchScreen.SourceResult(
+                                b0.site, b2.videos, SearchCoordinator.Outcome.RESULT, b2));
+                boolean evAll =
+                        TvSearchBudget.enforceGlobalResultsCap(allTab, "", "B", visOnAll, cap);
                 int totAll = 0;
-                for (GlobalSearchScreen.SourceResult sr : allTab.values()) totAll += sr.videos.size();
+                for (GlobalSearchScreen.SourceResult sr : allTab.values())
+                    totAll += sr.videos.size();
                 boolean hasAp24 = false;
                 for (Cms.Video v : allTab.get("A").videos) {
                     if ("p24".equals(v.id)) {
@@ -1163,10 +1229,7 @@ public final class TvSearchAcceptanceChecks {
                     }
                 }
                 check(
-                        evAll
-                                && totAll == 900
-                                && allTab.get("A").videos.size() >= 24
-                                && hasAp24,
+                        evAll && totAll == 900 && allTab.get("A").videos.size() >= 24 && hasAp24,
                         "R16 P2 (all-tab visible focus protection): total=900 and visible A:p24 retained");
             }
 
@@ -1203,7 +1266,10 @@ public final class TvSearchAcceptanceChecks {
                     all900.put(
                             key,
                             new GlobalSearchScreen.SourceResult(
-                                    site(key, key), first.videos, SearchCoordinator.Outcome.RESULT, first));
+                                    site(key, key),
+                                    first.videos,
+                                    SearchCoordinator.Outcome.RESULT,
+                                    first));
                 }
                 List<TvSearchMatcher.RankedHit> allRanked =
                         TvSearchMatcher.collectAndRank(
@@ -1221,7 +1287,8 @@ public final class TvSearchAcceptanceChecks {
                     if (cand != null) netCallsOnAll++;
                 }
                 boolean exhaustedAll =
-                        GlobalSearchScreen.isAllTabBudgetExhausted("", 900, 900, allRanked.size(), 912, cap);
+                        GlobalSearchScreen.isAllTabBudgetExhausted(
+                                "", 900, 900, allRanked.size(), 912, cap);
                 boolean exhaustedSingleB =
                         GlobalSearchScreen.isAllTabBudgetExhausted("B", 60, 900, 60, 72, cap);
                 GlobalSearchScreen.SourceResult singleBNext =
@@ -1249,14 +1316,18 @@ public final class TvSearchAcceptanceChecks {
                 all900.put(
                         "B",
                         new GlobalSearchScreen.SourceResult(
-                                singleBNext.site, bPage2.videos, SearchCoordinator.Outcome.RESULT, bPage2));
+                                singleBNext.site,
+                                bPage2.videos,
+                                SearchCoordinator.Outcome.RESULT,
+                                bPage2));
                 List<TvSearchBudget.ProtectedItem> bProt = new ArrayList<>();
                 for (Cms.Video v : bPage2.videos) {
                     bProt.add(new TvSearchBudget.ProtectedItem("B", v.id));
                 }
                 TvSearchBudget.enforceGlobalResultsCapByItems(all900, "B", "B", bProt, cap);
                 int totAfterB = 0;
-                for (GlobalSearchScreen.SourceResult sr : all900.values()) totAfterB += sr.videos.size();
+                for (GlobalSearchScreen.SourceResult sr : all900.values())
+                    totAfterB += sr.videos.size();
                 check(
                         exhaustedAll
                                 && netCallsOnAll == 0
@@ -1270,7 +1341,8 @@ public final class TvSearchAcceptanceChecks {
             }
 
             // R17 P2b: Overlapping colon site keys ("film" + "film:hk") AND colon inside video IDs
-            // ("ep:24:hd") stay fully protected under BOTH string-key and two-field ProtectedItem APIs!
+            // ("ep:24:hd") stay fully protected under BOTH string-key and two-field ProtectedItem
+            // APIs!
             for (String specialKey : new String[] {"film:hk", "film-hk"}) {
                 for (boolean useStructuredItems : new boolean[] {false, true}) {
                     for (boolean colonInVodId : new boolean[] {false, true}) {
@@ -1294,7 +1366,10 @@ public final class TvSearchAcceptanceChecks {
                                                 for (int idx = 0; idx < 60; idx++) {
                                                     int idNum = 60 * (page - 1) + idx + 1;
                                                     Cms.Video v = new Cms.Video();
-                                                    v.id = colonInVodId ? ("ep:" + idNum + ":hd") : ("p" + idNum);
+                                                    v.id =
+                                                            colonInVodId
+                                                                    ? ("ep:" + idNum + ":hd")
+                                                                    : ("p" + idNum);
                                                     v.title =
                                                             siteKey.equals(specialKey)
                                                                     ? (q + "外传" + idNum)
@@ -1327,7 +1402,8 @@ public final class TvSearchAcceptanceChecks {
                         List<TvSearchBudget.ProtectedItem> visItemsBefore = new ArrayList<>();
                         for (TvSearchMatcher.RankedHit h : visBefore) {
                             visKeysBefore.add(h.stableKey());
-                            visItemsBefore.add(new TvSearchBudget.ProtectedItem(h.site.key, h.video.id));
+                            visItemsBefore.add(
+                                    new TvSearchBudget.ProtectedItem(h.site.key, h.video.id));
                         }
                         String focusKey = visKeysBefore.get(23);
                         GlobalSearchScreen.SourceResult bSrc = map.get("B");
@@ -1341,7 +1417,10 @@ public final class TvSearchAcceptanceChecks {
                                             for (int idx = 0; idx < 60; idx++) {
                                                 int idNum = 60 * (page - 1) + idx + 1;
                                                 Cms.Video v = new Cms.Video();
-                                                v.id = colonInVodId ? ("ep:" + idNum + ":hd") : ("p" + idNum);
+                                                v.id =
+                                                        colonInVodId
+                                                                ? ("ep:" + idNum + ":hd")
+                                                                : ("p" + idNum);
                                                 v.title = "纪实" + q + idNum;
                                                 l.videos.add(v);
                                             }
@@ -1352,7 +1431,10 @@ public final class TvSearchAcceptanceChecks {
                         map.put(
                                 "B",
                                 new GlobalSearchScreen.SourceResult(
-                                        bSrc.site, bNext.videos, SearchCoordinator.Outcome.RESULT, bNext));
+                                        bSrc.site,
+                                        bNext.videos,
+                                        SearchCoordinator.Outcome.RESULT,
+                                        bNext));
                         if (useStructuredItems) {
                             TvSearchBudget.enforceGlobalResultsCapByItems(
                                     map, "", "B", visItemsBefore, cap);
@@ -1376,7 +1458,8 @@ public final class TvSearchAcceptanceChecks {
                                 GlobalSearchScreen.projectVisibleHits(
                                         rankedAfter, 24, visKeysBefore, focusKey, true);
                         List<String> visKeysAfter = new ArrayList<>();
-                        for (TvSearchMatcher.RankedHit h : visAfter) visKeysAfter.add(h.stableKey());
+                        for (TvSearchMatcher.RankedHit h : visAfter)
+                            visKeysAfter.add(h.stableKey());
                         check(
                                 totalAfter <= cap
                                         && map.get(specialKey).videos.size() == 60
@@ -1411,10 +1494,10 @@ public final class TvSearchAcceptanceChecks {
             check(
                     "star_a:p24".equals(TvSearchMatcher.stableKey("star_a", "p24")),
                     "R18 P2: plain keys without colons/percent stay backward-compatible");
-            TvSearchMatcher.HitId literalPercent =
-                    new TvSearchMatcher.HitId("film%3Ahk", "p%25:1");
+            TvSearchMatcher.HitId literalPercent = new TvSearchMatcher.HitId("film%3Ahk", "p%25:1");
             check(
-                    literalPercent.equals(TvSearchMatcher.HitId.parseKey(literalPercent.stableKey()))
+                    literalPercent.equals(
+                                    TvSearchMatcher.HitId.parseKey(literalPercent.stableKey()))
                             && idA.equals(TvSearchMatcher.HitId.parseKey(idA.stableKey()))
                             && idB.equals(TvSearchMatcher.HitId.parseKey(idB.stableKey())),
                     "R18 P2: HitId.parseKey round-trips colon and literal percent escapes losslessly");
@@ -1479,7 +1562,9 @@ public final class TvSearchAcceptanceChecks {
                                 && "film:hk%3Ap24".equals(onlyFilm.get(0).stableKey())
                                 && onlyFilmHk.size() == 1
                                 && "film%3Ahk:p24".equals(onlyFilmHk.get(0).stableKey()),
-                        "R18 P2 order=" + order + ": single-source tabs keep matching bijective keys");
+                        "R18 P2 order="
+                                + order
+                                + ": single-source tabs keep matching bijective keys");
 
                 // Late-arrival focus projection & pagination anchor keep the exact focused card.
                 List<String> prevKeys = Collections.singletonList("film:hk%3Ap24");
@@ -1502,7 +1587,9 @@ public final class TvSearchAcceptanceChecks {
                 check(
                         pageFocusIdx == 0
                                 && "film%3Ahk:p24".equals(allHits.get(pageFocusIdx).stableKey()),
-                        "R18 P2 order=" + order + ": pagination focus recognizes newly revealed distinct key");
+                        "R18 P2 order="
+                                + order
+                                + ": pagination focus recognizes newly revealed distinct key");
             }
 
             // True duplicate control: same site + same vodId still deduplicates to 1.
@@ -1551,13 +1638,13 @@ public final class TvSearchAcceptanceChecks {
                 new JSONObject()
                         .put("ok", true)
                         .put("total_checks", checks)
-                        .put("cases_source", Files.isRegularFile(casesPath) ? casesPath.toString() : "embedded")
+                        .put(
+                                "cases_source",
+                                Files.isRegularFile(casesPath) ? casesPath.toString() : "embedded")
                         .put("cases", reportCases);
         if (outJsonPath != null) {
             Files.createDirectories(outJsonPath.toAbsolutePath().getParent());
-            Files.write(
-                    outJsonPath,
-                    summary.toString(2).getBytes(StandardCharsets.UTF_8));
+            Files.write(outJsonPath, summary.toString(2).getBytes(StandardCharsets.UTF_8));
         }
         System.out.println("ALL PASS (" + checks + " TV search acceptance checks)");
     }

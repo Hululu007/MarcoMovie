@@ -1755,7 +1755,8 @@ final class CastService implements Closeable {
             String body,
             Map<String, String> extraHeaders)
             throws IOException {
-        replyHttpBytes(out, code, contentType, (body == null ? "" : body).getBytes("UTF-8"), extraHeaders);
+        replyHttpBytes(
+                out, code, contentType, (body == null ? "" : body).getBytes("UTF-8"), extraHeaders);
     }
 
     private static void replyHttpBytes(

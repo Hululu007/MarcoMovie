@@ -394,7 +394,9 @@ final class TvSearchPages {
                 int nextPages;
                 if (cursor.pageHasRemainder || rewinding) {
                     nextPages =
-                            (emptyPage || (sameSignatureAsPrev && nextRepeats >= MAX_CONSECUTIVE_REPEAT_PAGES))
+                            (emptyPage
+                                            || (sameSignatureAsPrev
+                                                    && nextRepeats >= MAX_CONSECUTIVE_REPEAT_PAGES))
                                     ? requested
                                     : Math.max(requested, page.pageCount);
                 } else {

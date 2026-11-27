@@ -180,10 +180,7 @@ final class DecoderRenderersFactory extends DefaultRenderersFactory {
      * devices whenever the bundled FFmpeg audio extension can decode {@code mime} cleanly to PCM.
      */
     static List<MediaCodecInfo> filterAudioDecodersForFfmpegFallback(
-            String mime,
-            List<MediaCodecInfo> raw,
-            boolean tunneling,
-            boolean ffmpegSupportsMime) {
+            String mime, List<MediaCodecInfo> raw, boolean tunneling, boolean ffmpegSupportsMime) {
         if (tunneling
                 || !ffmpegSupportsMime
                 || mime == null
@@ -203,13 +200,10 @@ final class DecoderRenderersFactory extends DefaultRenderersFactory {
 
     @Override
     protected AudioSink buildAudioSink(
-            Context context,
-            boolean enableFloatOutput,
-            boolean enableAudioTrackPlaybackParams) {
+            Context context, boolean enableFloatOutput, boolean enableAudioTrackPlaybackParams) {
         AudioProcessor diag = diagnosticAudioProcessor;
         if (diag == null) {
-            return super.buildAudioSink(
-                    context, enableFloatOutput, enableAudioTrackPlaybackParams);
+            return super.buildAudioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams);
         }
         return new DefaultAudioSink.Builder(context)
                 .setEnableFloatOutput(enableFloatOutput)
@@ -289,8 +283,7 @@ final class DecoderRenderersFactory extends DefaultRenderersFactory {
                     }
 
                     @Override
-                    protected int supportsFormat(
-                            MediaCodecSelector selector, Format format)
+                    protected int supportsFormat(MediaCodecSelector selector, Format format)
                             throws MediaCodecUtil.DecoderQueryException {
                         return super.supportsFormat(wrapForFormat(selector, format), format);
                     }
