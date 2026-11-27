@@ -688,124 +688,394 @@ final class WatchHistory {
         return value != null && WINDOWS_CANONICAL_MEDIA_ID_PATTERN.matcher(value.trim()).matches();
     }
 
-    private static String encodeUriQueryComponentUtf8(String value) {
-        if (value == null || value.isEmpty()) return "";
-        try {
-            return java.net.URLEncoder.encode(value, "UTF-8")
-                    .replace("+", "%20")
-                    .replace("%21", "!")
-                    .replace("%27", "'")
-                    .replace("%28", "(")
-                    .replace("%29", ")")
-                    .replace("%7E", "~");
-        } catch (Exception ignored) {
-            return value;
+    private static final char[] HEX_UPPER = "0123456789ABCDEF".toCharArray();
+
+    private static boolean isUriUnreservedByte(int b) {
+        return (b >= 'A' && b <= 'Z')
+                || (b >= 'a' && b <= 'z')
+                || (b >= '0' && b <= '9')
+                || b == '-'
+                || b == '.'
+                || b == '_'
+                || b == '~';
+    }
+
+    private static boolean isUriPathLiteralByte(int b) {
+        if (isUriUnreservedByte(b)) return true;
+        switch (b) {
+            case '/':
+            case ':':
+            case '@':
+            case '!':
+            case '$':
+            case '&':
+            case '\'':
+            case '(':
+            case ')':
+            case '*':
+            case '+':
+            case ',':
+            case ';':
+            case '=':
+                return true;
+            default:
+                return false;
         }
     }
 
-    private static String decodeUriQueryComponentUtf8(String value) {
+    private static int hexVal(char c) {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    }
+
+    private static void appendPercentHexUpper(StringBuilder sb, int b) {
+        sb.append('%').append(HEX_UPPER[(b >>> 4) & 0xF]).append(HEX_UPPER[b & 0xF]);
+    }
+
+    /** Exact Dart {@code Uri.encodeQueryComponent} (UTF-8, space -> {@code +}, RFC3986 unreserved). */
+    private static String encodeDartQueryComponent(String value) {
         if (value == null || value.isEmpty()) return "";
-        try {
-            return java.net.URLDecoder.decode(value, "UTF-8");
-        } catch (Exception ignored) {
-            return value;
+        byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte raw : bytes) {
+            int b = raw & 0xFF;
+            if (b == ' ') {
+                sb.append('+');
+            } else if (isUriUnreservedByte(b)) {
+                sb.append((char) b);
+            } else {
+                appendPercentHexUpper(sb, b);
+            }
         }
+        return sb.toString();
+    }
+
+    /** Exact Dart {@code Uri.decodeQueryComponent} (UTF-8, {@code +} -> space, safe on bad {@code %}). */
+    private static String decodeDartQueryComponent(String raw) {
+        if (raw == null || raw.isEmpty()) return "";
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream(raw.length());
+        int len = raw.length();
+        for (int i = 0; i < len; ) {
+            char c = raw.charAt(i);
+            if (c == '+') {
+                bos.write(' ');
+                i++;
+            } else if (c == '%' && i + 2 < len) {
+                int hi = hexVal(raw.charAt(i + 1));
+                int lo = hexVal(raw.charAt(i + 2));
+                if (hi >= 0 && lo >= 0) {
+                    bos.write((hi << 4) | lo);
+                    i += 3;
+                } else {
+                    bos.write('%');
+                    i++;
+                }
+            } else {
+                int cp = Character.codePointAt(raw, i);
+                int charCount = Character.charCount(cp);
+                if (cp < 0x80) {
+                    bos.write(cp);
+                } else {
+                    byte[] utf8 =
+                            new String(Character.toChars(cp))
+                                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    bos.write(utf8, 0, utf8.length);
+                }
+                i += charCount;
+            }
+        }
+        return new String(bos.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Normalizes a URI path component identically to Dart's {@code Uri.tryParse(...).path}:
+     * unescapes percent-encoded RFC 3986 unreserved bytes, uppercases valid percent hex digits,
+     * escapes raw spaces/non-ASCII/invalid {@code %}, and removes {@code .}/{@code ..} dot segments
+     * for hierarchical URIs.
+     */
+    private static String normalizeDartUriPath(String rawPath, boolean removeDots) {
+        if (rawPath == null || rawPath.isEmpty()) return "";
+        StringBuilder encoded = new StringBuilder(rawPath.length() + 16);
+        int len = rawPath.length();
+        for (int i = 0; i < len; ) {
+            char c = rawPath.charAt(i);
+            if (c == '%') {
+                if (i + 2 < len) {
+                    int hi = hexVal(rawPath.charAt(i + 1));
+                    int lo = hexVal(rawPath.charAt(i + 2));
+                    if (hi >= 0 && lo >= 0) {
+                        int b = (hi << 4) | lo;
+                        if (isUriUnreservedByte(b)) {
+                            encoded.append((char) b);
+                        } else {
+                            appendPercentHexUpper(encoded, b);
+                        }
+                        i += 3;
+                        continue;
+                    }
+                }
+                encoded.append("%25");
+                i++;
+                continue;
+            }
+            int cp = Character.codePointAt(rawPath, i);
+            int charCount = Character.charCount(cp);
+            if (cp < 0x80 && isUriPathLiteralByte(cp)) {
+                encoded.append((char) cp);
+            } else {
+                byte[] utf8 =
+                        new String(Character.toChars(cp))
+                                .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                for (byte raw : utf8) {
+                    appendPercentHexUpper(encoded, raw & 0xFF);
+                }
+            }
+            i += charCount;
+        }
+        String norm = encoded.toString();
+        if (!removeDots || (!norm.contains("/.") && !norm.startsWith("."))) {
+            return norm;
+        }
+        return removeDotSegmentsRfc3986(norm);
+    }
+
+    private static String removeDotSegmentsRfc3986(String path) {
+        List<String> out = new ArrayList<>();
+        boolean leadingSlash = path.startsWith("/");
+        boolean trailingSlash = path.endsWith("/");
+        String[] parts = path.split("/", -1);
+        for (int i = 0; i < parts.length; i++) {
+            String seg = parts[i];
+            if (i == 0 && seg.isEmpty() && leadingSlash) continue;
+            if (i == parts.length - 1 && seg.isEmpty() && trailingSlash) continue;
+            if (".".equals(seg)) {
+                if (i == parts.length - 1) trailingSlash = true;
+                continue;
+            }
+            if ("..".equals(seg)) {
+                if (!out.isEmpty()) {
+                    out.remove(out.size() - 1);
+                }
+                if (i == parts.length - 1) trailingSlash = true;
+                continue;
+            }
+            out.add(seg);
+        }
+        StringBuilder sb = new StringBuilder(path.length());
+        if (leadingSlash) sb.append('/');
+        for (int i = 0; i < out.size(); i++) {
+            if (i > 0) sb.append('/');
+            sb.append(out.get(i));
+        }
+        if (trailingSlash && (sb.length() == 0 || sb.charAt(sb.length() - 1) != '/')) {
+            sb.append('/');
+        }
+        return sb.toString();
+    }
+
+    private static boolean isValidUriScheme(String s) {
+        if (s == null || s.isEmpty()) return false;
+        char c0 = s.charAt(0);
+        if (!((c0 >= 'A' && c0 <= 'Z') || (c0 >= 'a' && c0 <= 'z'))) return false;
+        for (int i = 1; i < s.length(); i++) {
+            char c = s.charAt(i);
+            boolean ok =
+                    (c >= 'A' && c <= 'Z')
+                            || (c >= 'a' && c <= 'z')
+                            || (c >= '0' && c <= '9')
+                            || c == '+'
+                            || c == '-'
+                            || c == '.';
+            if (!ok) return false;
+        }
+        return true;
     }
 
     /**
      * Computes a Windows/Flutter 0.7.3-compatible {@code mid:v1:<32hex>} non-streamable media
-     * identity from an upstream episode URL (matching {@code
-     * WatchHistoryEntry.mediaIdentityForUrl}). Returns {@code ""} for empty URLs or ephemeral
-     * loopback proxy leases.
+     * identity from an upstream episode URL, aligned bit-for-bit with Dart's {@code Uri.tryParse}
+     * and {@code WatchHistoryEntry.mediaIdentityForUrl} across spaces, literal {@code +}, encoded
+     * paths, Unicode, dot segments, and query parameter canonicalization. Returns {@code ""} for
+     * empty URLs or ephemeral loopback proxy leases.
      */
     static String windowsMediaIdentityForUrl(String rawUrl) {
         if (rawUrl == null) return "";
         String trimmed = rawUrl.trim();
         if (trimmed.isEmpty()) return "";
         if (isCanonicalWindowsMediaId(trimmed)) return trimmed;
-        String lowerRaw = trimmed.toLowerCase(Locale.ROOT);
-        if (lowerRaw.startsWith("proxy://")
-                || lowerRaw.contains("127.0.0.1")
-                || lowerRaw.contains("localhost")
-                || lowerRaw.contains("[::1]")
-                || lowerRaw.contains("/proxy/")
-                || lowerRaw.contains("/lease/")) {
-            return "";
+        String canonical = canonicalWindowsMediaStringForUrl(trimmed);
+        if (canonical.isEmpty()) return "";
+        String digest = sha256Hex(canonical);
+        return digest.length() >= 32 ? ("mid:v1:" + digest.substring(0, 32)) : "";
+    }
+
+    static String canonicalWindowsMediaStringForUrl(String rawUrl) {
+        if (rawUrl == null) return "";
+        String trimmed = rawUrl.trim();
+        if (trimmed.isEmpty()) return "";
+        if (isCanonicalWindowsMediaId(trimmed)) return trimmed;
+
+        // Strip #fragment before structural parsing (identical to RFC 3986 / Dart Uri.tryParse).
+        int hashIdx = trimmed.indexOf('#');
+        String noFrag = hashIdx >= 0 ? trimmed.substring(0, hashIdx) : trimmed;
+
+        // Detect RFC 3986 scheme before any '/', '?', or '#'.
+        int colonIdx = -1;
+        for (int i = 0; i < noFrag.length(); i++) {
+            char c = noFrag.charAt(i);
+            if (c == ':') {
+                colonIdx = i;
+                break;
+            }
+            if (c == '/' || c == '?') break;
         }
-        String canonical = trimmed;
-        try {
-            java.net.URI uri = java.net.URI.create(trimmed);
-            String scheme = uri.getScheme();
-            if (scheme != null && !scheme.isEmpty()) {
-                String lowerScheme = scheme.toLowerCase(Locale.ROOT);
-                String rawAuth = uri.getRawAuthority();
-                String host = uri.getHost();
-                int port = uri.getPort();
-                boolean hasExplicitPort =
-                        port >= 0
-                                && !(("http".equals(lowerScheme) && port == 80)
-                                        || ("https".equals(lowerScheme) && port == 443));
-                StringBuilder buf = new StringBuilder();
-                buf.append(lowerScheme).append(':');
-                if (rawAuth != null) {
-                    buf.append("//");
-                    if (host != null) {
-                        buf.append(host.toLowerCase(Locale.ROOT));
+
+        if (colonIdx > 0 && isValidUriScheme(noFrag.substring(0, colonIdx))) {
+            String scheme = noFrag.substring(0, colonIdx).toLowerCase(Locale.ROOT);
+            if ("proxy".equals(scheme)) return "";
+            String afterScheme = noFrag.substring(colonIdx + 1);
+            int qIdx = afterScheme.indexOf('?');
+            String hierPart = qIdx >= 0 ? afterScheme.substring(0, qIdx) : afterScheme;
+            String rawQuery = qIdx >= 0 ? afterScheme.substring(qIdx + 1) : null;
+
+            boolean hasAuthority = hierPart.startsWith("//");
+            String host = "";
+            boolean hasPort = false;
+            int port = -1;
+            String rawPath;
+            boolean validAuthority = true;
+
+            if (hasAuthority) {
+                int slashIdx = hierPart.indexOf('/', 2);
+                String rawAuth =
+                        slashIdx >= 0 ? hierPart.substring(2, slashIdx) : hierPart.substring(2);
+                rawPath = slashIdx >= 0 ? hierPart.substring(slashIdx) : "";
+                int atIdx = rawAuth.lastIndexOf('@');
+                String hostPort = atIdx >= 0 ? rawAuth.substring(atIdx + 1) : rawAuth;
+                if (hostPort.startsWith("[")) {
+                    int closeBracket = hostPort.indexOf(']');
+                    if (closeBracket > 1) {
+                        // Dart Uri.host omits enclosing IPv6 brackets.
+                        host = hostPort.substring(1, closeBracket).toLowerCase(Locale.ROOT);
+                        if (closeBracket + 1 < hostPort.length()) {
+                            if (hostPort.charAt(closeBracket + 1) == ':') {
+                                String pStr = hostPort.substring(closeBracket + 2);
+                                if (!pStr.isEmpty()) {
+                                    try {
+                                        port = Integer.parseInt(pStr);
+                                        hasPort = port >= 0;
+                                    } catch (NumberFormatException e) {
+                                        validAuthority = false;
+                                    }
+                                }
+                            } else {
+                                validAuthority = false;
+                            }
+                        }
+                    } else {
+                        validAuthority = false;
                     }
+                } else {
+                    int portColon = hostPort.lastIndexOf(':');
+                    String rawHost = portColon >= 0 ? hostPort.substring(0, portColon) : hostPort;
+                    if (portColon >= 0) {
+                        String pStr = hostPort.substring(portColon + 1);
+                        if (!pStr.isEmpty()) {
+                            try {
+                                port = Integer.parseInt(pStr);
+                                hasPort = port >= 0;
+                            } catch (NumberFormatException e) {
+                                validAuthority = false;
+                            }
+                        }
+                    }
+                    host = rawHost.toLowerCase(Locale.ROOT);
+                }
+            } else {
+                rawPath = hierPart;
+            }
+
+            if (validAuthority) {
+                // Reject ephemeral local loopback proxy leases (127.x, localhost, ::1).
+                if (hasAuthority
+                        && ("127.0.0.1".equals(host)
+                                || "localhost".equals(host)
+                                || "::1".equals(host)
+                                || host.startsWith("127."))) {
+                    return "";
+                }
+                boolean hasExplicitPort =
+                        hasPort
+                                && !(("http".equals(scheme) && port == 80)
+                                        || ("https".equals(scheme) && port == 443));
+                StringBuilder buf = new StringBuilder(trimmed.length() + 16);
+                buf.append(scheme).append(':');
+                if (hasAuthority) {
+                    buf.append("//").append(host);
                     if (hasExplicitPort) {
                         buf.append(':').append(port);
                     }
                 }
-                String path = uri.getRawPath();
-                if (path != null) {
-                    buf.append(path);
-                } else if (uri.getRawSchemeSpecificPart() != null && rawAuth == null) {
-                    String ssp = uri.getRawSchemeSpecificPart();
-                    int qIdx = ssp.indexOf('?');
-                    buf.append(qIdx >= 0 ? ssp.substring(0, qIdx) : ssp);
-                }
-                String rawQuery = uri.getRawQuery();
+                boolean removeDots =
+                        hasAuthority || "http".equals(scheme) || "https".equals(scheme);
+                buf.append(normalizeDartUriPath(rawPath, removeDots));
+
                 if (rawQuery != null && !rawQuery.isEmpty()) {
-                    TreeMap<String, List<String>> kept = new TreeMap<>();
+                    // Preserve original key case during parsing (exact Dart uri.queryParametersAll)
+                    LinkedHashMap<String, List<String>> rawParams = new LinkedHashMap<>();
                     for (String pair : rawQuery.split("&")) {
                         if (pair.isEmpty()) continue;
                         int eq = pair.indexOf('=');
-                        String k =
-                                decodeUriQueryComponentUtf8(eq >= 0 ? pair.substring(0, eq) : pair);
-                        String v =
-                                eq >= 0 ? decodeUriQueryComponentUtf8(pair.substring(eq + 1)) : "";
-                        String lowerKey = k.toLowerCase(Locale.ROOT);
-                        if (!WINDOWS_SAFE_IDENTITY_QUERY_KEYS.contains(lowerKey)) continue;
-                        List<String> list = kept.get(lowerKey);
+                        String rawKey = eq >= 0 ? pair.substring(0, eq) : pair;
+                        String rawVal = eq >= 0 ? pair.substring(eq + 1) : "";
+                        String decKey = decodeDartQueryComponent(rawKey);
+                        String decVal = decodeDartQueryComponent(rawVal);
+                        List<String> list = rawParams.get(decKey);
                         if (list == null) {
                             list = new ArrayList<>();
-                            kept.put(lowerKey, list);
+                            rawParams.put(decKey, list);
                         }
-                        list.add(v);
+                        list.add(decVal);
                     }
-                    if (!kept.isEmpty()) {
+                    List<Map.Entry<String, List<String>>> sortedEntries =
+                            new ArrayList<>(rawParams.entrySet());
+                    Collections.sort(
+                            sortedEntries,
+                            (a, b) ->
+                                    a.getKey()
+                                            .toLowerCase(Locale.ROOT)
+                                            .compareTo(b.getKey().toLowerCase(Locale.ROOT)));
+                    LinkedHashMap<String, List<String>> keptQuery = new LinkedHashMap<>();
+                    for (Map.Entry<String, List<String>> entry : sortedEntries) {
+                        String lowerKey = entry.getKey().toLowerCase(Locale.ROOT);
+                        if (WINDOWS_SAFE_IDENTITY_QUERY_KEYS.contains(lowerKey)) {
+                            keptQuery.put(lowerKey, entry.getValue());
+                        }
+                    }
+                    if (!keptQuery.isEmpty()) {
                         buf.append('?');
                         boolean first = true;
-                        for (Map.Entry<String, List<String>> e : kept.entrySet()) {
+                        for (Map.Entry<String, List<String>> e : keptQuery.entrySet()) {
                             for (String val : e.getValue()) {
                                 if (!first) buf.append('&');
                                 first = false;
-                                buf.append(encodeUriQueryComponentUtf8(e.getKey()))
+                                buf.append(encodeDartQueryComponent(e.getKey()))
                                         .append('=')
-                                        .append(encodeUriQueryComponentUtf8(val));
+                                        .append(encodeDartQueryComponent(val));
                             }
                         }
                     }
                 }
-                canonical = buf.toString();
-            } else {
-                canonical = WINDOWS_NON_URI_SECRET_SEG_PATTERN.matcher(trimmed).replaceAll("$1");
+                return buf.toString();
             }
-        } catch (Exception ignored) {
-            canonical = WINDOWS_NON_URI_SECRET_SEG_PATTERN.matcher(trimmed).replaceAll("$1");
         }
-        String digest = sha256Hex(canonical);
-        return digest.length() >= 32 ? ("mid:v1:" + digest.substring(0, 32)) : "";
+
+        // Non-URI provider tokens: match Dart's WatchHistoryEntry.mediaIdentityForUrl fallback.
+        return WINDOWS_NON_URI_SECRET_SEG_PATTERN
+                .matcher(trimmed)
+                .replaceAll(java.util.regex.Matcher.quoteReplacement("$1"));
     }
 
     /**

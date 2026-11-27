@@ -2647,6 +2647,101 @@ public final class AiBetaLabChecks {
                                 && "sub-remove".equals(mpvAbSecond.get(0)[0])
                                 && "6".equals(mpvAbSecond.get(0)[1]),
                         "R9 P2-1: two distinct online subtitle candidates sharing filename movie.srt get isolated cache files; switching back to A reads exact A bytes and updating B replaces only B's AI track");
+
+                // 12. Round-10 P2-2: 238-byte English & 240+-byte multi-byte Chinese SRT filenames
+                //     with OpenSubtitles candidate prefix MUST reserve UTF-8 byte budget for
+                //     prefix + AI derived suffix + extension (<= 255 bytes on Android ext4/f2fs),
+                //     actually write & read back cleanly, AND keep two same-named candidates
+                //     strictly isolated!
+                StringBuilder longAsciiStem = new StringBuilder();
+                while (longAsciiStem.length() < 234) {
+                    longAsciiStem.append("Interstellar_IMAX_2160p_REMUX_");
+                }
+                String longAscii238 = longAsciiStem.substring(0, 234) + ".srt"; // exact 238 bytes!
+                StringBuilder longCnStem = new StringBuilder();
+                while (longCnStem.toString().getBytes(StandardCharsets.UTF_8).length < 246) {
+                    longCnStem.append("流浪地球导演剪辑蓝光原盘中英双语字幕");
+                }
+                String longCn250 = longCnStem + ".srt"; // > 250 UTF-8 bytes!
+
+                OnlineSubtitleDanmakuService.SubtitleCandidate osCandA =
+                        new OnlineSubtitleDanmakuService.SubtitleCandidate(
+                                "opensubtitles", "900001", "OpenSubtitles A", "en", "srt");
+                OnlineSubtitleDanmakuService.SubtitleCandidate osCandB =
+                        new OnlineSubtitleDanmakuService.SubtitleCandidate(
+                                "opensubtitles", "900002", "OpenSubtitles B", "en", "srt");
+
+                File[] longFiles =
+                        new File[] {
+                            OnlineSubtitleDanmakuService.resolveOriginalSubtitleCacheFile(
+                                    subCacheRoot, osCandA, longAscii238),
+                            OnlineSubtitleDanmakuService.resolveAiDerivedSubtitleCacheFile(
+                                    subCacheRoot, osCandA, longAscii238, true),
+                            OnlineSubtitleDanmakuService.resolveAiDerivedSubtitleCacheFile(
+                                    subCacheRoot, osCandA, longAscii238, false),
+                            OnlineSubtitleDanmakuService.resolveOriginalSubtitleCacheFile(
+                                    subCacheRoot, osCandB, longAscii238),
+                            OnlineSubtitleDanmakuService.resolveAiDerivedSubtitleCacheFile(
+                                    subCacheRoot, osCandB, longAscii238, true),
+                            OnlineSubtitleDanmakuService.resolveAiDerivedSubtitleCacheFile(
+                                    subCacheRoot, osCandB, longAscii238, false),
+                            OnlineSubtitleDanmakuService.resolveOriginalSubtitleCacheFile(
+                                    subCacheRoot, osCandA, longCn250),
+                            OnlineSubtitleDanmakuService.resolveAiDerivedSubtitleCacheFile(
+                                    subCacheRoot, osCandA, longCn250, true),
+                            OnlineSubtitleDanmakuService.resolveAiDerivedSubtitleCacheFile(
+                                    subCacheRoot, osCandA, longCn250, false),
+                            OnlineSubtitleDanmakuService.resolveOriginalSubtitleCacheFile(
+                                    subCacheRoot, osCandB, longCn250),
+                            OnlineSubtitleDanmakuService.resolveAiDerivedSubtitleCacheFile(
+                                    subCacheRoot, osCandB, longCn250, true),
+                            OnlineSubtitleDanmakuService.resolveAiDerivedSubtitleCacheFile(
+                                    subCacheRoot, osCandB, longCn250, false),
+                        };
+                java.util.Set<String> uniquePaths = new java.util.HashSet<>();
+                boolean allBoundedAndWritable =
+                        longAscii238.getBytes(StandardCharsets.UTF_8).length == 238
+                                && longCn250.getBytes(StandardCharsets.UTF_8).length > 246;
+                for (int fi = 0; fi < longFiles.length; fi++) {
+                    File lf = longFiles[fi];
+                    int nameUtf8Len = lf.getName().getBytes(StandardCharsets.UTF_8).length;
+                    String content = "payload_" + fi + "_" + lf.getName();
+                    Files.writeString(lf.toPath(), content, StandardCharsets.UTF_8);
+                    String longReadBack = Files.readString(lf.toPath(), StandardCharsets.UTF_8);
+                    if (nameUtf8Len > 255
+                            || !lf.getName().endsWith(".srt")
+                            || lf.getName().contains("\uFFFD")
+                            || !content.equals(longReadBack)
+                            || !uniquePaths.add(lf.getCanonicalPath())) {
+                        allBoundedAndWritable = false;
+                    }
+                }
+                // Verify candA original bytes remain untouched after candB orig/bi/zh writes, and
+                // defensive resolveSafeDerivedTargetFile stays <= 255 bytes & equals candB bi!
+                String candAEnReadBack =
+                        Files.readString(longFiles[0].toPath(), StandardCharsets.UTF_8);
+                String candACnReadBack =
+                        Files.readString(longFiles[6].toPath(), StandardCharsets.UTF_8);
+                File longEnGuarded =
+                        AiSubtitleTranslator.resolveSafeDerivedTargetFile(longFiles[3], true);
+                File longCnGuarded =
+                        AiSubtitleTranslator.resolveSafeDerivedTargetFile(longFiles[9], true);
+                check(
+                        allBoundedAndWritable
+                                && uniquePaths.size() == longFiles.length
+                                && candAEnReadBack.startsWith("payload_0_")
+                                && candACnReadBack.startsWith("payload_6_")
+                                && longEnGuarded
+                                        .getCanonicalPath()
+                                        .equals(longFiles[4].getCanonicalPath())
+                                && longCnGuarded
+                                        .getCanonicalPath()
+                                        .equals(longFiles[10].getCanonicalPath())
+                                && longEnGuarded.getName().getBytes(StandardCharsets.UTF_8).length
+                                        <= 255
+                                && longCnGuarded.getName().getBytes(StandardCharsets.UTF_8).length
+                                        <= 255,
+                        "R10 P2-2: 238B English & 246B+ Chinese filenames with OpenSubtitles prefix stay <=255 UTF-8 bytes across orig/bi/zh, write cleanly, and isolate same-named candidates A vs B");
             } finally {
                 deleteRecursive(subCacheRoot);
             }

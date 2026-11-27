@@ -4912,8 +4912,258 @@ public final class MobileIos077ParityChecks {
                         mediansMs[1],
                         mediansMs[2]));
 
+        // 27. Round-10 P1-1: Season stored ONLY in original bookmark line name
+        //     ("星途 / 夸克·第二季 / 第2集", 42s) MUST steer cross-site failover to Season 2 in BOTH
+        //     line orders and refuse transfer when only Season 1 or seasonless lines exist!
+        WatchHistory.Entry bmLineOnlyS2 = new WatchHistory.Entry();
+        bmLineOnlyS2.site = "orig_site";
+        bmLineOnlyS2.id = "vod_xingtu";
+        bmLineOnlyS2.title = "星途";
+        bmLineOnlyS2.line = "夸克·第二季";
+        bmLineOnlyS2.lineId = "夸克·第二季";
+        bmLineOnlyS2.driveKey = NetdiskStore.DRIVE_QUARK;
+        bmLineOnlyS2.episode = "第2集";
+        bmLineOnlyS2.episodeKey = WatchHistory.stableEpisodeKey("https://pan.quark.cn/s/xt_s2_e2");
+        bmLineOnlyS2.index = 1;
+        bmLineOnlyS2.position = 42_000;
+        bmLineOnlyS2.duration = 240_000;
+
+        Cms.Line altXtQuarkS1 = new Cms.Line();
+        altXtQuarkS1.lineId = "夸克·第一季";
+        altXtQuarkS1.name = "夸克·第一季";
+        altXtQuarkS1.rawName = "夸克·第一季";
+        Cms.Episode xtQ1E2 = new Cms.Episode();
+        xtQ1E2.name = "第2集";
+        xtQ1E2.url = "https://pan.quark.cn/s/alt_xt_s1_e2";
+        altXtQuarkS1.episodes.add(xtQ1E2);
+
+        Cms.Line altXtBaiduS2 = new Cms.Line();
+        altXtBaiduS2.lineId = "百度·第二季";
+        altXtBaiduS2.name = "百度·第二季";
+        altXtBaiduS2.rawName = "百度·第二季";
+        Cms.Episode xtB2E2 = new Cms.Episode();
+        xtB2E2.name = "第2集";
+        xtB2E2.url = "https://pan.baidu.com/s/alt_xt_s2_e2";
+        altXtBaiduS2.episodes.add(xtB2E2);
+
+        Cms.Video altXtAB = new Cms.Video();
+        altXtAB.id = "alt_xt_ab";
+        altXtAB.title = "星途";
+        altXtAB.lines.addAll(Arrays.asList(altXtQuarkS1, altXtBaiduS2));
+        Cms.Video altXtBA = new Cms.Video();
+        altXtBA.id = "alt_xt_ba";
+        altXtBA.title = "星途";
+        altXtBA.lines.addAll(Arrays.asList(altXtBaiduS2, altXtQuarkS1));
+        Cms.Video altXtOnlyS1 = new Cms.Video();
+        altXtOnlyS1.id = "alt_xt_only_s1";
+        altXtOnlyS1.title = "星途";
+        altXtOnlyS1.lines.add(altXtQuarkS1);
+
+        HistoryResumeMatcher.EpisodeMatch xtPickAB =
+                HistoryResumeMatcher.matchEpisodeForFailover(altXtAB, bmLineOnlyS2);
+        HistoryResumeMatcher.EpisodeMatch xtPickBA =
+                HistoryResumeMatcher.matchEpisodeForFailover(altXtBA, bmLineOnlyS2);
+        HistoryResumeMatcher.EpisodeMatch xtPickOnlyS1 =
+                HistoryResumeMatcher.matchEpisodeForFailover(altXtOnlyS1, bmLineOnlyS2);
+        HistoryResumeMatcher.EpisodeMatch xtPickSeasonless =
+                HistoryResumeMatcher.matchEpisodeForFailover(altAllSeasonless, bmLineOnlyS2);
+        check(
+                xtPickAB != null
+                        && xtPickAB.line == altXtBaiduS2
+                        && HistoryResumeMatcher.resolveFailoverResumePositionMs(
+                                        xtPickAB, bmLineOnlyS2)
+                                == 42_000
+                        && xtPickBA != null
+                        && xtPickBA.line == altXtBaiduS2
+                        && HistoryResumeMatcher.resolveFailoverResumePositionMs(
+                                        xtPickBA, bmLineOnlyS2)
+                                == 42_000
+                        && xtPickOnlyS1 == null
+                        && xtPickSeasonless == null,
+                "R10 P1-1: bookmark with season ONLY in original line name (星途/夸克·第二季/第2集) picks Season 2 Baidu (42000ms) in both orders and rejects Season-1-only & seasonless");
+
+        // 28. Round-10 P2-1: Same-site missing original drive (orig Quark -> same-site only has
+        //     Baidu with identical "第二季第2集") MUST return null (prompt re-select), NEVER
+        //     auto-switch to Baidu at 0ms; original Quark recovers 42s; cross-site still switches!
+        WatchHistory.Entry bmSameSiteQuarkS2 = new WatchHistory.Entry();
+        bmSameSiteQuarkS2.site = "same_site";
+        bmSameSiteQuarkS2.id = "vod_same_s2";
+        bmSameSiteQuarkS2.title = "星途";
+        bmSameSiteQuarkS2.line = "夸克·第二季";
+        bmSameSiteQuarkS2.lineId = "夸克·第二季";
+        bmSameSiteQuarkS2.driveKey = NetdiskStore.DRIVE_QUARK;
+        bmSameSiteQuarkS2.episode = "第二季第2集";
+        bmSameSiteQuarkS2.episodeKey =
+                WatchHistory.stableEpisodeKey("https://pan.quark.cn/s/same_s2_e2");
+        bmSameSiteQuarkS2.index = 1;
+        bmSameSiteQuarkS2.position = 42_000;
+        bmSameSiteQuarkS2.duration = 240_000;
+
+        Cms.Video sameSiteOnlyBaidu = new Cms.Video();
+        sameSiteOnlyBaidu.id = "vod_same_s2";
+        sameSiteOnlyBaidu.title = "星途";
+        sameSiteOnlyBaidu.lines.add(altBaiduS2); // Baidu with "第二季第2集"
+
+        Cms.Video sameSiteHasQuark = new Cms.Video();
+        sameSiteHasQuark.id = "vod_same_s2";
+        sameSiteHasQuark.title = "星途";
+        sameSiteHasQuark.lines.addAll(Arrays.asList(altBaiduS2, altQuarkS2));
+
+        HistoryResumeMatcher.EpisodeMatch ssMissingQuark =
+                HistoryResumeMatcher.matchEpisode(sameSiteOnlyBaidu, bmSameSiteQuarkS2);
+        HistoryResumeMatcher.EpisodeMatch ssHasQuark =
+                HistoryResumeMatcher.matchEpisode(sameSiteHasQuark, bmSameSiteQuarkS2);
+        HistoryResumeMatcher.EpisodeMatch crossSiteToBaidu =
+                HistoryResumeMatcher.matchEpisodeForFailover(sameSiteOnlyBaidu, bmSameSiteQuarkS2);
+        check(
+                ssMissingQuark == null
+                        && ssHasQuark != null
+                        && ssHasQuark.line == altQuarkS2
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        altQuarkS2, aqs2e2, 0, bmSameSiteQuarkS2)
+                                == 42_000
+                        && crossSiteToBaidu != null
+                        && crossSiteToBaidu.line == altBaiduS2
+                        && HistoryResumeMatcher.resolveFailoverResumePositionMs(
+                                        crossSiteToBaidu, bmSameSiteQuarkS2)
+                                == 42_000,
+                "R10 P2-1: same-site missing Quark returns null (prompts re-select), present Quark recovers 42000ms, and cross-site failover still switches to Baidu at 42000ms");
+
+        // 29. Round-10 P1-2: Exact Dart Uri.tryParse + WatchHistoryEntry.mediaIdentityForUrl
+        //     canonicalization alignment (spaces -> '+', literal '+', encoded path, dot segments,
+        //     Unicode, Baidu mmcloud://baidu with "Movie Part 2.mkv", and two duplicate-named
+        //     files bidirectional round-trip 480003 -> 487003 ms).
+        String baiduSpaced1 =
+                "mmcloud://baidu?share=https%3A%2F%2Fpan.baidu.com%2Fs%2F1abcXYZ&fid=987654321&parent=0&name=Movie+Part+2.mkv&size=1024&path=%2FMovies%2FSeason+1%2FMovie+Part+2.mkv";
+        String baiduSpaced2 =
+                "mmcloud://baidu?share=https%3A%2F%2Fpan.baidu.com%2Fs%2F1abcXYZ&fid=987654322&parent=0&name=Movie+Part+2.mkv&size=2048&path=%2FMovies%2FSeason+2%2FMovie+Part+2.mkv";
+        check(
+                "mmcloud://baidu?fid=987654321&name=Movie+Part+2.mkv&path=%2FMovies%2FSeason+1%2FMovie+Part+2.mkv"
+                                .equals(
+                                        WatchHistory.canonicalWindowsMediaStringForUrl(
+                                                baiduSpaced1))
+                        && "https://cdn.example/Movies/Movie%20Part%202.mkv?id=12"
+                                .equals(
+                                        WatchHistory.canonicalWindowsMediaStringForUrl(
+                                                "https://cdn.example/Movies/Movie Part 2.mkv?id=12&sign=secret"))
+                        && "https://cdn.example/Movies/a+b/c%2Bd/e%20f%2FA~.mkv?name=A%2BB+C+D"
+                                .equals(
+                                        WatchHistory.canonicalWindowsMediaStringForUrl(
+                                                "https://cdn.example/Movies/a+b/c%2Bd/e%20f%2f%41%7e.mkv?name=A%2BB+C%20D&token=xx"))
+                        && "https://cdn.example/a/c/Movie%20Part%202.mkv?name=Movie+Part+2.mkv"
+                                .equals(
+                                        WatchHistory.canonicalWindowsMediaStringForUrl(
+                                                "https://cdn.example/a/b/../c/./Movie Part 2.mkv?name=Movie Part 2.mkv"))
+                        && "https://pan.quark.cn/s/abc?fid=2&path="
+                                .equals(
+                                        WatchHistory.canonicalWindowsMediaStringForUrl(
+                                                "https://"
+                                                        + "demo_u:demo_p@"
+                                                        + "Pan.Quark.CN:443/s/abc?FID=1&fid=2&path&sign=x#frag"))
+                        && "mmcloud://baidu?fid=1&name=A%2BB+%282024%29+%21%2A%27~.mkv&path=%2FDir+A%2BB%2FA%2BB.mkv"
+                                .equals(
+                                        WatchHistory.canonicalWindowsMediaStringForUrl(
+                                                "mmcloud://baidu?fid=1&name=A%2BB+%282024%29+%21%2A%27~.mkv&path=%2FDir+A%2BB%2FA%2BB.mkv")),
+                "R10 P1-2A: WatchHistory.canonicalWindowsMediaStringForUrl matches Dart Uri.tryParse & encodeQueryComponent across spaces, literal '+', encoded paths, dot segments & case");
+
+        // Bidirectional duplicate "Movie Part 2.mkv" Baidu round-trip (480003 -> 487003 ms)
+        String baiduMidFile2 = WatchHistory.windowsMediaIdentityForUrl(baiduSpaced2);
+        Cms.Line baiduDupLine = new Cms.Line();
+        baiduDupLine.lineId = "baidu_share_1";
+        baiduDupLine.name = "百度网盘 1";
+        baiduDupLine.rawName = "百度网盘 1";
+        Cms.Episode bdDupEp1 = new Cms.Episode();
+        bdDupEp1.name = "Movie Part 2.mkv";
+        bdDupEp1.url = baiduSpaced1;
+        Cms.Episode bdDupEp2 = new Cms.Episode();
+        bdDupEp2.name = "Movie Part 2.mkv";
+        bdDupEp2.url = baiduSpaced2;
+        baiduDupLine.episodes.add(bdDupEp1);
+        baiduDupLine.episodes.add(bdDupEp2);
+        Cms.Video baiduDupVideo = new Cms.Video();
+        baiduDupVideo.id = "wogg_bd_spaced";
+        baiduDupVideo.title = "Movie Part 2";
+        baiduDupVideo.lines.add(baiduDupLine);
+
+        JSONObject winBdSpacedBm =
+                new JSONObject()
+                        .put("site", "wogg")
+                        .put("id", "wogg_bd_spaced")
+                        .put("title", "Movie Part 2")
+                        .put("poster", "")
+                        .put("line", "百度网盘 1")
+                        .put("lineId", "baidu_share_1")
+                        .put("episode", "Movie Part 2.mkv")
+                        .put("episodeMediaId", baiduMidFile2)
+                        .put("index", 1)
+                        .put("position", 480_003)
+                        .put("duration", 3_600_000)
+                        .put("updated", 5_000L);
+        String winBdPayload =
+                new JSONObject()
+                        .put("schema", CloudSync.SCHEMA)
+                        .put("version", CloudSync.VERSION)
+                        .put("updated", 5_000L)
+                        .put("watch_history", new JSONArray().put(winBdSpacedBm))
+                        .put("favorites", new JSONArray())
+                        .put("tombstones", new JSONObject())
+                        .toString();
+        CloudSync.MergeResult bdPull =
+                CloudSync.merge(
+                        "[]",
+                        "[]",
+                        "{}",
+                        Collections.emptyList(),
+                        true,
+                        true,
+                        winBdPayload,
+                        5_500L);
+        WatchHistory.Entry bdAndroidEntry = WatchHistory.read(bdPull.historyJson).get(0);
+        int bdPos1 =
+                HistoryResumeMatcher.resolveResumePositionMs(
+                        baiduDupLine, bdDupEp1, 0, bdAndroidEntry);
+        int bdPos2 =
+                HistoryResumeMatcher.resolveResumePositionMs(
+                        baiduDupLine, bdDupEp2, 1, bdAndroidEntry);
+        WatchHistory.Entry bdContinued =
+                WatchHistory.buildPlaybackEntry(
+                        "wogg",
+                        "wogg_bd_spaced",
+                        "Movie Part 2",
+                        "",
+                        baiduDupLine.rawName(),
+                        baiduDupLine.lineId(),
+                        NetdiskStore.DRIVE_BAIDU,
+                        bdDupEp2.name,
+                        bdDupEp2.url,
+                        1,
+                        487_003,
+                        3_600_000,
+                        7_000L,
+                        bdAndroidEntry);
+        String bdLocalAfter = WatchHistory.upsert(bdPull.historyJson, bdContinued);
+        CloudSync.MergeResult bdPush =
+                CloudSync.merge(
+                        bdLocalAfter,
+                        "[]",
+                        "{}",
+                        Collections.emptyList(),
+                        true,
+                        true,
+                        winBdPayload,
+                        7_500L);
+        JSONObject bdCloudOut =
+                new JSONObject(bdPush.payloadJson).getJSONArray("watch_history").getJSONObject(0);
+        check(
+                bdPos1 == 0
+                        && bdPos2 == 480_003
+                        && baiduMidFile2.equals(bdCloudOut.optString("episodeMediaId", ""))
+                        && bdCloudOut.optInt("position") == 487_003
+                        && !bdCloudOut.has("episodeUrl"),
+                "R10 P1-2B: Baidu spaced 'Movie Part 2.mkv' duplicate files round-trip Windows(480003)->Android([0,480003])->487003->CloudSync preserving exact Dart mid:v1");
+
         pass(
-                "DriveOrder + R4..R9 P1-1..P2-3: season-first failover, Windows WoGG round-trip + conflict safety, re-index resume, and O(N) 250/500/800-ep perf verified");
+                "DriveOrder + R4..R10 P1-1..P2-3: line-season failover, Dart-aligned episodeMediaId, same-site drive conflict, re-index resume, and O(N) 250/500/800-ep perf verified");
     }
 
     private static String computeWindowsV073MediaId(String canonicalUrl) throws Exception {

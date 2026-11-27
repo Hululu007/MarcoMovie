@@ -420,11 +420,77 @@ final class OnlineSubtitleDanmakuService {
     static final String ORIGINAL_SUBTITLE_CACHE_DIR = "online_subs_v1";
     static final String AI_DERIVED_SUBTITLE_CACHE_DIR = "online_subs_ai_v1";
 
+    /** Linux ext4 / f2fs single path component ceiling (NAME_MAX = 255 UTF-8 bytes). */
+    static final int MAX_SUBTITLE_FILENAME_UTF8_BYTES = 255;
+
+    private static final String AI_SUFFIX_BI = "__marco_ai_bi";
+    private static final String AI_SUFFIX_ZH = "__marco_ai_zh";
+    private static final int RESERVED_AI_SUFFIX_BYTES =
+            Math.max(AI_SUFFIX_BI.length(), AI_SUFFIX_ZH.length());
+
     static String sanitizeSubtitleCacheName(String fileName) {
         String base =
                 fileName == null || fileName.trim().isEmpty() ? "subtitle.srt" : fileName.trim();
         String safe = base.replaceAll("[^A-Za-z0-9._\\-\\u4e00-\\u9fa5]", "_");
         return safe.isEmpty() ? "subtitle.srt" : safe;
+    }
+
+    private static int utf8ByteLength(String text) {
+        return text == null ? 0 : text.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+    }
+
+    /** Truncates {@code text} cleanly on a Unicode codepoint boundary to at most {@code maxBytes} UTF-8 bytes. */
+    private static String truncateUtf8Bytes(String text, int maxBytes) {
+        if (text == null || text.isEmpty() || maxBytes <= 0) return "";
+        if (utf8ByteLength(text) <= maxBytes) return text;
+        StringBuilder sb = new StringBuilder();
+        int used = 0;
+        for (int i = 0; i < text.length(); ) {
+            int cp = Character.codePointAt(text, i);
+            int charCount = Character.charCount(cp);
+            int cpBytes = cp <= 0x7F ? 1 : (cp <= 0x7FF ? 2 : (cp <= 0xFFFF ? 3 : 4));
+            if (used + cpBytes > maxBytes) break;
+            sb.append(text, i, i + charCount);
+            used += cpBytes;
+            i += charCount;
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Bounds a cache filename's stem so {@code prefix + boundedStem + reservedSuffix + ext} NEVER
+     * exceeds {@link #MAX_SUBTITLE_FILENAME_UTF8_BYTES} (255 UTF-8 bytes) on Android ext4/f2fs,
+     * while preserving candidate prefix, extension, UTF-8 validity, and collision resistance via an
+     * 8-hex hash tail whenever truncation occurs.
+     */
+    private static String buildBoundedCacheFileName(
+            String prefixWithSep, String safeBaseName, String suffix, int extraReservedBytes) {
+        String prefix = prefixWithSep == null ? "" : prefixWithSep;
+        String safe = sanitizeSubtitleCacheName(safeBaseName);
+        String stem = safe;
+        String ext = ".srt";
+        int dot = safe.lastIndexOf('.');
+        if (dot > 0 && dot < safe.length() - 1) {
+            String candExt = safe.substring(dot);
+            if (utf8ByteLength(candExt) <= 16) {
+                stem = safe.substring(0, dot);
+                ext = candExt;
+            }
+        }
+        String effSuffix = suffix == null ? "" : suffix;
+        int fixedBytes =
+                utf8ByteLength(prefix)
+                        + utf8ByteLength(effSuffix)
+                        + Math.max(0, extraReservedBytes)
+                        + utf8ByteLength(ext);
+        int maxStemBytes = Math.max(12, MAX_SUBTITLE_FILENAME_UTF8_BYTES - fixedBytes);
+        String boundedStem = stem;
+        if (utf8ByteLength(stem) > maxStemBytes) {
+            String disambig = "_" + AiAssistantService.sha256(safe).substring(0, 8);
+            int headBudget = Math.max(1, maxStemBytes - disambig.length());
+            boundedStem = truncateUtf8Bytes(stem, headBudget) + disambig;
+        }
+        return prefix + boundedStem + effSuffix + ext;
     }
 
     /**
@@ -448,13 +514,15 @@ final class OnlineSubtitleDanmakuService {
         }
         String cleanProvider = provider.replaceAll("[^a-z0-9]", "");
         if (cleanProvider.isEmpty()) cleanProvider = "sub";
+        if (cleanProvider.length() > 16) cleanProvider = cleanProvider.substring(0, 16);
         return cleanProvider + "_" + AiAssistantService.sha256(rawKey).substring(0, 12);
     }
 
     /**
      * Resolves the cache file for a downloaded plain/original online subtitle. Original subtitle
-     * files live under {@code online_subs_v1/} keyed by candidate identity + filename so neither
-     * AI-derived outputs nor another candidate with the same filename can overwrite it.
+     * files live under {@code online_subs_v1/} keyed by candidate identity + filename, strictly
+     * bounded so both the original file and any sibling AI-derived file fit within the 255-byte
+     * UTF-8 Android filesystem filename limit.
      */
     static File resolveOriginalSubtitleCacheFile(File cacheDir, String fileName) {
         return resolveOriginalSubtitleCacheFile(cacheDir, null, fileName);
@@ -465,18 +533,19 @@ final class OnlineSubtitleDanmakuService {
         File subDir = new File(cacheDir, ORIGINAL_SUBTITLE_CACHE_DIR);
         if (!subDir.exists()) subDir.mkdirs();
         String safeName = sanitizeSubtitleCacheName(fileName);
-        if (cand == null) {
-            return new File(subDir, safeName);
-        }
-        return new File(subDir, buildCandidateCachePrefix(cand, safeName) + "__" + safeName);
+        String prefixWithSep =
+                cand == null ? "" : (buildCandidateCachePrefix(cand, safeName) + "__");
+        // Reserve RESERVED_AI_SUFFIX_BYTES so AiSubtitleTranslator.resolveSafeDerivedTargetFile
+        // appending __marco_ai_bi / __marco_ai_zh always produces the exact same <=255-byte name.
+        String bounded =
+                buildBoundedCacheFileName(prefixWithSep, safeName, "", RESERVED_AI_SUFFIX_BYTES);
+        return new File(subDir, bounded);
     }
 
     /**
      * Resolves a dedicated cache file for an AI-translated derived subtitle under {@code
-     * online_subs_ai_v1/}, strictly separate from {@link #resolveOriginalSubtitleCacheFile} and
-     * scoped to the candidate identity so generating AI bilingual/Chinese output for candidate B
-     * preserves candidate A's original subtitle bytes and track switching across Media3, MPV, and
-     * SystemPlayer.
+     * online_subs_ai_v1/}, strictly separate from {@link #resolveOriginalSubtitleCacheFile}, scoped
+     * to candidate identity, and bounded to at most 255 UTF-8 bytes.
      */
     static File resolveAiDerivedSubtitleCacheFile(
             File cacheDir, String fileName, boolean bilingual) {
@@ -487,24 +556,19 @@ final class OnlineSubtitleDanmakuService {
             File cacheDir, SubtitleCandidate cand, String fileName, boolean bilingual) {
         File aiDir = new File(cacheDir, AI_DERIVED_SUBTITLE_CACHE_DIR);
         if (!aiDir.exists()) aiDir.mkdirs();
-        String safe = sanitizeSubtitleCacheName(fileName);
-        String prefixed =
-                cand == null ? safe : (buildCandidateCachePrefix(cand, safe) + "__" + safe);
-        return buildDerivedAiFileFromSafeName(aiDir, prefixed, bilingual);
+        String safeName = sanitizeSubtitleCacheName(fileName);
+        String prefixWithSep =
+                cand == null ? "" : (buildCandidateCachePrefix(cand, safeName) + "__");
+        String suffix = bilingual ? AI_SUFFIX_BI : AI_SUFFIX_ZH;
+        String bounded = buildBoundedCacheFileName(prefixWithSep, safeName, suffix, 0);
+        return new File(aiDir, bounded);
     }
 
     static File buildDerivedAiFileFromSafeName(File aiDir, String safeBaseName, boolean bilingual) {
         if (!aiDir.exists()) aiDir.mkdirs();
-        String safe = sanitizeSubtitleCacheName(safeBaseName);
-        String stem = safe;
-        String ext = ".srt";
-        int dot = safe.lastIndexOf('.');
-        if (dot > 0) {
-            stem = safe.substring(0, dot);
-            ext = safe.substring(dot);
-        }
-        String suffix = bilingual ? "__marco_ai_bi" : "__marco_ai_zh";
-        return new File(aiDir, stem + suffix + ext);
+        String suffix = bilingual ? AI_SUFFIX_BI : AI_SUFFIX_ZH;
+        String bounded = buildBoundedCacheFileName("", safeBaseName, suffix, 0);
+        return new File(aiDir, bounded);
     }
 
     /** Downloads a selected online subtitle candidate, optionally AI-translates it, and attaches. */

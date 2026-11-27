@@ -88,6 +88,15 @@ final class HistoryResumeMatcher {
         return -1;
     }
 
+    static int resolveBookmarkSeason(WatchHistory.Entry bookmark, boolean includeTitle) {
+        if (bookmark == null) return -1;
+        int epS = extractSeasonNumber(bookmark.episode);
+        if (epS > 0) return epS;
+        int lineS = extractExplicitLineSeasonNumber(bookmark.line);
+        if (lineS > 0) return lineS;
+        return includeTitle ? extractSeasonNumber(bookmark.title) : -1;
+    }
+
     private static int firstPositive(int a, int b) {
         return a > 0 ? a : b;
     }
@@ -241,7 +250,7 @@ final class HistoryResumeMatcher {
         }
         int lineSize = line.episodes.size();
         int bmEpNum = extractEpisodeNumber(bmEp);
-        int bmSeason = extractSeasonNumber(bmEp);
+        int bmSeason = resolveBookmarkSeason(bookmark, false);
         int bmPart = extractPartMarker(bmEp);
         boolean bmTrailer = isTrailerOrExtraName(bmEp);
         int lineSeason = extractExplicitLineSeasonNumber(line.name);
@@ -552,7 +561,7 @@ final class HistoryResumeMatcher {
         if (bmEpNum > 0 && candEpNum > 0 && bmEpNum != candEpNum) {
             return false;
         }
-        int bmSeason = extractSeasonNumber(bmEp);
+        int bmSeason = resolveBookmarkSeason(bookmark, false);
         int lineSeason = extractExplicitLineSeasonNumber(line.name);
         int candEffSeason = firstPositive(extractSeasonNumber(candName), lineSeason);
         int bmPart = extractPartMarker(bmEp);
@@ -655,8 +664,7 @@ final class HistoryResumeMatcher {
         if (bmEpNum > 0 && candEpNum > 0 && bmEpNum != candEpNum) {
             return 0;
         }
-        int bmSeason =
-                firstPositive(extractSeasonNumber(bmEp), extractSeasonNumber(bookmark.title));
+        int bmSeason = resolveBookmarkSeason(bookmark, true);
         int lineSeason = extractExplicitLineSeasonNumber(match.line.name);
         int candEffSeason =
                 firstPositive(extractSeasonNumber(candName), lineSeason, match.videoSeason);
@@ -736,7 +744,7 @@ final class HistoryResumeMatcher {
         String bmEpKey = bookmarkEpisodeKey(bookmark);
         String bmEpMediaId = WatchHistory.sanitizeEpisodeMediaId(bookmark.episodeMediaId);
         int bmEpNum = extractEpisodeNumber(bmEp);
-        int bmSeason = extractSeasonNumber(bmEp);
+        int bmSeason = resolveBookmarkSeason(bookmark, false);
         int bmPart = extractPartMarker(bmEp);
         boolean bmTrailer = isTrailerOrExtraName(bmEp);
 
@@ -797,11 +805,7 @@ final class HistoryResumeMatcher {
                         : WatchHistory.sanitizeEpisodeMediaId(bookmark.episodeMediaId);
         int bmIndex = bookmark == null ? 0 : Math.max(0, bookmark.index);
         int bmEpNum = extractEpisodeNumber(bmEp);
-        int bmSeason =
-                crossSourceFailover && bookmark != null
-                        ? firstPositive(
-                                extractSeasonNumber(bmEp), extractSeasonNumber(bookmark.title))
-                        : extractSeasonNumber(bmEp);
+        int bmSeason = resolveBookmarkSeason(bookmark, crossSourceFailover);
         int bmPart = extractPartMarker(bmEp);
         boolean bmTrailer = isTrailerOrExtraName(bmEp);
         boolean bmMovieLike = looksLikeMovieEpisode(bmEp) && bmPart == 0 && bmIndex == 0;
@@ -813,12 +817,14 @@ final class HistoryResumeMatcher {
             if (line == null || line.episodes == null || line.episodes.isEmpty()) continue;
             int lineStrength = lineMatchStrength(line, bookmark);
             boolean driveConflict = !crossSourceFailover && lineStrength < 0;
+            // Same-site confirmed drive conflict MUST take strict precedence over same-name /
+            // same-season episode scoring so a missing original drive prompts re-selection instead
+            // of silently switching drives at 0 ms.
+            if (driveConflict) continue;
             boolean sameLine = lineStrength > 0;
             int lineCount = line.episodes.size();
             int lineBonus;
-            if (driveConflict) {
-                lineBonus = -240;
-            } else if (crossSourceFailover) {
+            if (crossSourceFailover) {
                 // Secondary preference ONLY: identity tier gaps (>= 60) always outrank same-drive
                 // preference (+20) so season+episode confirmation strictly precedes drive matching.
                 String candDrive = NetdiskStore.detectLineDriveKey(line);
