@@ -358,10 +358,17 @@ public final class Settings {
 }
 """
 STUBS["android/content/ContentResolver.java"] = "package android.content;\npublic class ContentResolver {}\n"
+STUBS["android/os/Environment.java"] = """package android.os;
+public final class Environment {
+    public static final String DIRECTORY_MOVIES = "Movies";
+}
+"""
 STUBS["android/content/Context.java"] = STUBS["android/content/Context.java"].replace(
     "    public Resources getResources() {",
     """    private final ContentResolver resolver = new ContentResolver();
     public ContentResolver getContentResolver() { return resolver; }
+    public java.io.File getFilesDir() { return null; }
+    public java.io.File getExternalFilesDir(String type) { return null; }
     private final java.util.Map<String, SharedPreferences> spMap = new java.util.HashMap<>();
     public SharedPreferences getSharedPreferences(String name, int mode) {
         return spMap.computeIfAbsent(name, k -> new SharedPreferences() {
@@ -2000,7 +2007,392 @@ public final class MobileDetailPrimaryButtonChecks {
                     "R15-normal-5arg-confirm: 5-arg pick enqueues 百度 / 第5集 (1 call)");
         }
 
+        // =====================================================================
+        // Round-16 P2: Duplicate-named files (A & B both named 「正片」) on the same line:
+        //   1. Selecting A via episode pill OR episode card -> default cache confirm enqueues ONLY A;
+        //      selecting B via episode pill OR episode card -> default cache confirm enqueues ONLY B!
+        //   2. Resuming from bookmark A or bookmark B (Android episodeKey OR Windows episodeMediaId)
+        //      points BOTH the player AND the default download picker to the exact same file!
+        // =====================================================================
+        {
+            String urlA = "https://pan.quark.cn/s/r16_dup_movie_a";
+            String urlB = "https://pan.quark.cn/s/r16_dup_movie_b";
+
+            // 1a. Episode number pill selection: A -> only A; B -> only B (0 plays!)
+            MobileBottomSheet.resetForTest();
+            DownloadManager.resetForTest();
+            Cms.Line dupLine = line("夸克", ep("正片", urlA), ep("正片", urlB));
+            Cms.Video vDup = video("vod_r16_dup", "双影", dupLine);
+            MainActivity act = new MainActivity();
+            act.setupForTest(site, Collections.<WatchHistory.Entry>emptyList(), vDup, 0);
+            act.detail(site, vDup);
+
+            act.root.findViewWithTag("episode:夸克:0").performClick();
+            act.root.findViewWithTag("episodes-download").performClick();
+            check(
+                    "离线缓存 · 夸克".equals(MobileBottomSheet.lastTitle)
+                            && "已选 1 / 2 集".equals(MobileBottomSheet.lastSubtitle),
+                    "R16-1a-pillA-open: pill-selecting A opens cache with '已选 1 / 2 集'");
+            MobileBottomSheet.lastContent.findViewWithTag("download-pick-confirm").performClick();
+            check(
+                    DownloadManager.enqueueCalls.size() == 1
+                            && "夸克".equals(DownloadManager.enqueueCalls.get(0).line.name)
+                            && DownloadManager.enqueueCalls.get(0).episodes.size() == 1
+                            && "正片".equals(DownloadManager.enqueueCalls.get(0).episodes.get(0).name)
+                            && urlA.equals(DownloadManager.enqueueCalls.get(0).episodes.get(0).url)
+                            && act.playCalls.isEmpty(),
+                    "R16-1a-pillA-confirm: pill A default cache confirm enqueues ONLY file A (" + urlA + "), 0 plays");
+
+            DownloadManager.resetForTest();
+            act.root.findViewWithTag("episode:夸克:1").performClick();
+            act.root.findViewWithTag("episodes-download").performClick();
+            MobileBottomSheet.lastContent.findViewWithTag("download-pick-confirm").performClick();
+            check(
+                    DownloadManager.enqueueCalls.size() == 1
+                            && "夸克".equals(DownloadManager.enqueueCalls.get(0).line.name)
+                            && DownloadManager.enqueueCalls.get(0).episodes.size() == 1
+                            && "正片".equals(DownloadManager.enqueueCalls.get(0).episodes.get(0).name)
+                            && urlB.equals(DownloadManager.enqueueCalls.get(0).episodes.get(0).url)
+                            && act.playCalls.isEmpty(),
+                    "R16-1a-pillB-confirm: pill B default cache confirm enqueues ONLY file B (" + urlB + "), 0 plays");
+
+            // 1b. Episode preview card direct tap: card A -> default cache ONLY A; card B -> default cache ONLY B!
+            DownloadManager.resetForTest();
+            act.root.findViewWithTag("ep-card:夸克:0").performClick();
+            check(
+                    act.playCalls.size() == 1 && urlA.equals(act.playCalls.get(0).ep.url),
+                    "R16-1b-cardA-play: tapping card A plays A once");
+            act.root.findViewWithTag("episodes-download").performClick();
+            MobileBottomSheet.lastContent.findViewWithTag("download-pick-confirm").performClick();
+            check(
+                    DownloadManager.enqueueCalls.size() == 1
+                            && DownloadManager.enqueueCalls.get(0).episodes.size() == 1
+                            && urlA.equals(DownloadManager.enqueueCalls.get(0).episodes.get(0).url)
+                            && act.playCalls.size() == 1,
+                    "R16-1b-cardA-confirm: after tapping card A, default cache confirm enqueues ONLY A (0 extra plays)");
+
+            DownloadManager.resetForTest();
+            act.root.findViewWithTag("ep-card:夸克:1").performClick();
+            check(
+                    act.playCalls.size() == 2 && urlB.equals(act.playCalls.get(1).ep.url),
+                    "R16-1b-cardB-play: tapping card B plays B once");
+            act.root.findViewWithTag("episodes-download").performClick();
+            MobileBottomSheet.lastContent.findViewWithTag("download-pick-confirm").performClick();
+            check(
+                    DownloadManager.enqueueCalls.size() == 1
+                            && DownloadManager.enqueueCalls.get(0).episodes.size() == 1
+                            && urlB.equals(DownloadManager.enqueueCalls.get(0).episodes.get(0).url)
+                            && act.playCalls.size() == 2,
+                    "R16-1b-cardB-confirm: after tapping card B, default cache confirm enqueues ONLY B (0 extra plays)");
+
+            // 2a. Bookmark A recovery -> BOTH cache picker AND player point to file A!
+            WatchHistory.Entry bmA = bookmark(
+                    "site_main", "vod_r16_dup", "双影", "夸克", NetdiskStore.DRIVE_QUARK,
+                    "正片", urlA, 0, 42_000);
+            MobileBottomSheet.resetForTest();
+            DownloadManager.resetForTest();
+            MainActivity actBmA = new MainActivity();
+            actBmA.setupForTest(site, Collections.singletonList(bmA), video("vod_r16_dup", "双影", line("夸克", ep("正片", urlA), ep("正片", urlB))), 0);
+            CatalogScreen.resumeHistory(actBmA, bmA);
+            actBmA.root.findViewWithTag("episodes-download").performClick();
+            MobileBottomSheet.lastContent.findViewWithTag("download-pick-confirm").performClick();
+            check(
+                    DownloadManager.enqueueCalls.size() == 1
+                            && DownloadManager.enqueueCalls.get(0).episodes.size() == 1
+                            && urlA.equals(DownloadManager.enqueueCalls.get(0).episodes.get(0).url)
+                            && actBmA.playCalls.isEmpty(),
+                    "R16-2a-bmA-download: resuming bookmark A pre-selects ONLY file A in cache picker (0 plays)");
+            ((Button) actBmA.root.findViewWithTag("detail-play")).performClick();
+            check(
+                    actBmA.playCalls.size() == 1
+                            && urlA.equals(actBmA.playCalls.get(0).ep.url)
+                            && actBmA.playCalls.get(0).resumeAt == 42_000,
+                    "R16-2a-bmA-play: resuming bookmark A plays the exact same file A @ 42000 ms");
+
+            // 2b. Bookmark B recovery -> BOTH cache picker AND player point to file B!
+            WatchHistory.Entry bmB = bookmark(
+                    "site_main", "vod_r16_dup", "双影", "夸克", NetdiskStore.DRIVE_QUARK,
+                    "正片", urlB, 1, 42_000);
+            MobileBottomSheet.resetForTest();
+            DownloadManager.resetForTest();
+            MainActivity actBmB = new MainActivity();
+            actBmB.setupForTest(site, Collections.singletonList(bmB), video("vod_r16_dup", "双影", line("夸克", ep("正片", urlA), ep("正片", urlB))), 0);
+            CatalogScreen.resumeHistory(actBmB, bmB);
+            actBmB.root.findViewWithTag("episodes-download").performClick();
+            MobileBottomSheet.lastContent.findViewWithTag("download-pick-confirm").performClick();
+            check(
+                    DownloadManager.enqueueCalls.size() == 1
+                            && DownloadManager.enqueueCalls.get(0).episodes.size() == 1
+                            && urlB.equals(DownloadManager.enqueueCalls.get(0).episodes.get(0).url)
+                            && actBmB.playCalls.isEmpty(),
+                    "R16-2b-bmB-download: resuming bookmark B pre-selects ONLY file B in cache picker (0 plays)");
+            ((Button) actBmB.root.findViewWithTag("detail-play")).performClick();
+            check(
+                    actBmB.playCalls.size() == 1
+                            && urlB.equals(actBmB.playCalls.get(0).ep.url)
+                            && actBmB.playCalls.get(0).resumeAt == 42_000,
+                    "R16-2b-bmB-play: resuming bookmark B plays the exact same file B @ 42000 ms");
+
+            // 2c. Windows episodeMediaId bookmark for B (even with stale index=0 & empty episodeKey) -> BOTH point to B!
+            WatchHistory.Entry bmWinB = bookmark(
+                    "site_main", "vod_r16_dup", "双影", "夸克", NetdiskStore.DRIVE_QUARK,
+                    "正片", "", 0, 42_000);
+            bmWinB.episodeKey = "";
+            bmWinB.episodeMediaId = WatchHistory.windowsMediaIdentityForUrl(urlB);
+            MobileBottomSheet.resetForTest();
+            DownloadManager.resetForTest();
+            MainActivity actWinB = new MainActivity();
+            actWinB.setupForTest(site, Collections.singletonList(bmWinB), video("vod_r16_dup", "双影", line("夸克", ep("正片", urlA), ep("正片", urlB))), 0);
+            CatalogScreen.resumeHistory(actWinB, bmWinB);
+            actWinB.root.findViewWithTag("episodes-download").performClick();
+            MobileBottomSheet.lastContent.findViewWithTag("download-pick-confirm").performClick();
+            ((Button) actWinB.root.findViewWithTag("detail-play")).performClick();
+            check(
+                    DownloadManager.enqueueCalls.size() == 1
+                            && urlB.equals(DownloadManager.enqueueCalls.get(0).episodes.get(0).url)
+                            && actWinB.playCalls.size() == 1
+                            && urlB.equals(actWinB.playCalls.get(0).ep.url)
+                            && actWinB.playCalls.get(0).resumeAt == 42_000,
+                    "R16-2c-winMidB: Windows episodeMediaId bookmark for B aligns BOTH cache picker & player to file B @ 42000 ms");
+        }
+
         System.out.println("MobileDetailPrimaryButtonChecks OK (" + passed + " checks passed)");
+    }
+}
+"""
+
+
+REAL_DOWNLOAD_MANAGER_TEST_JAVA = r"""package com.pilipala.marcomovie;
+
+import android.content.Context;
+import com.sun.net.httpserver.HttpServer;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
+import java.lang.reflect.Constructor;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+/**
+ * Executes the REAL unmodified production DownloadManager.class against a local loopback HTTP
+ * server and real downloads.json persistence to verify Round-16 Criterion 3 & legacy saved task
+ * compatibility.
+ */
+public final class RealDownloadManagerQueueChecks {
+    private static int passed = 0;
+
+    private static void check(boolean cond, String msg) {
+        if (!cond) throw new AssertionError("FAIL: " + msg);
+        passed++;
+        System.out.println("PASS " + msg);
+    }
+
+    private static DownloadManager createRealManager(final File dir) throws Exception {
+        Context ctx =
+                new Context() {
+                    @Override public Context getApplicationContext() { return this; }
+                    @Override public File getFilesDir() { return dir; }
+                    @Override public File getExternalFilesDir(String type) { return dir; }
+                };
+        Constructor<DownloadManager> ctor =
+                DownloadManager.class.getDeclaredConstructor(Context.class);
+        ctor.setAccessible(true);
+        return ctor.newInstance(ctx);
+    }
+
+    private static void waitAllTerminal(DownloadManager dm, int expectedCount) throws Exception {
+        long deadline = System.currentTimeMillis() + 10_000L;
+        while (System.currentTimeMillis() < deadline) {
+            List<DownloadManager.Task> snap = dm.snapshot();
+            if (snap.size() >= expectedCount) {
+                boolean allDone = true;
+                for (DownloadManager.Task t : snap) {
+                    if (t.state == DownloadManager.WAITING || t.state == DownloadManager.RUNNING) {
+                        allDone = false;
+                        break;
+                    }
+                }
+                if (allDone) return;
+            }
+            Thread.sleep(25);
+        }
+        throw new AssertionError("Timed out waiting for DownloadManager tasks to finish");
+    }
+
+    public static void main(String[] args) throws Exception {
+        File rootDir = new File(args[0]);
+        final byte[] payloadA = "MOVIE_PAYLOAD_FILE_A_0123456789".getBytes(StandardCharsets.UTF_8);
+        final byte[] payloadB = "MOVIE_PAYLOAD_FILE_B_ABCDEFGHIJKL".getBytes(StandardCharsets.UTF_8);
+
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext(
+                "/fileA.mp4",
+                ex -> {
+                    ex.getResponseHeaders().set("Content-Type", "video/mp4");
+                    ex.sendResponseHeaders(200, payloadA.length);
+                    try (OutputStream out = ex.getResponseBody()) {
+                        out.write(payloadA);
+                    }
+                });
+        server.createContext(
+                "/fileB.mp4",
+                ex -> {
+                    ex.getResponseHeaders().set("Content-Type", "video/mp4");
+                    ex.sendResponseHeaders(200, payloadB.length);
+                    try (OutputStream out = ex.getResponseBody()) {
+                        out.write(payloadB);
+                    }
+                });
+        server.start();
+
+        try {
+            int port = server.getAddress().getPort();
+            String urlA = "http://127.0.0.1:" + port + "/fileA.mp4";
+            String urlB = "http://127.0.0.1:" + port + "/fileB.mp4";
+
+            Cms.Site site = new Cms.Site();
+            site.key = "site_r16";
+            site.name = "测试站";
+            site.type = 1;
+            site.api = "http://127.0.0.1:" + port + "/api";
+
+            Cms.Video vid = new Cms.Video();
+            vid.id = "vod_r16";
+            vid.title = "双影";
+
+            Cms.Line line = new Cms.Line();
+            line.lineId = "夸克";
+            line.name = "夸克";
+            line.rawName = "夸克";
+
+            Cms.Episode epA = new Cms.Episode();
+            epA.name = "正片";
+            epA.url = urlA;
+            Cms.Episode epB = new Cms.Episode();
+            epB.name = "正片";
+            epB.url = urlB;
+            line.episodes.add(epA);
+            line.episodes.add(epB);
+
+            // =================================================================
+            // Criterion 3: From empty queue submit A, B, A -> added = 1, 1, 0;
+            //   persist to downloads.json & reload -> retains 1 task for A and 1 task for B!
+            // =================================================================
+            File freshDir = new File(rootDir, "fresh-queue");
+            freshDir.mkdirs();
+            DownloadManager dm1 = createRealManager(freshDir);
+            check(dm1.snapshot().isEmpty(), "R16-3-init: fresh DownloadManager starts empty");
+
+            int add1 = dm1.enqueue(site, vid, line, Collections.singletonList(epA));
+            int add2 = dm1.enqueue(site, vid, line, Collections.singletonList(epB));
+            int add3 = dm1.enqueue(site, vid, line, Collections.singletonList(epA));
+            check(
+                    add1 == 1 && add2 == 1 && add3 == 0,
+                    "R16-3-aba: submitting A, B, A from empty queue returns added=1, 1, 0 (actual="
+                            + add1 + "," + add2 + "," + add3 + ")");
+
+            waitAllTerminal(dm1, 2);
+            dm1.flushSaved();
+
+            // Reload brand-new DownloadManager from persisted downloads.json
+            DownloadManager dmReloaded = createRealManager(freshDir);
+            List<DownloadManager.Task> loaded = dmReloaded.snapshot();
+            DownloadManager.Task loadedA = null;
+            DownloadManager.Task loadedB = null;
+            for (DownloadManager.Task t : loaded) {
+                if (urlA.equals(t.source)) loadedA = t;
+                if (urlB.equals(t.source)) loadedB = t;
+            }
+            check(
+                    loaded.size() == 2
+                            && loadedA != null
+                            && loadedB != null
+                            && "正片".equals(loadedA.episode)
+                            && "正片".equals(loadedB.episode)
+                            && loadedA.state == DownloadManager.DONE
+                            && loadedB.state == DownloadManager.DONE
+                            && !loadedA.key.equals(loadedB.key)
+                            && !loadedA.path.equals(loadedB.path)
+                            && new File(loadedA.path).length() == payloadA.length
+                            && new File(loadedB.path).length() == payloadB.length,
+                    "R16-3-persist: reloading downloads.json retains both A & B DONE tasks with distinct keys and output files");
+
+            // Re-submitting A, B, or A with refreshed temporary signature returns 0!
+            Cms.Episode epASigned = new Cms.Episode();
+            epASigned.name = "正片";
+            epASigned.url = urlA + "?sign=refreshed999&expires=999999";
+            check(
+                    dmReloaded.enqueue(site, vid, line, Collections.singletonList(epA)) == 0
+                            && dmReloaded.enqueue(site, vid, line, Collections.singletonList(epB)) == 0
+                            && dmReloaded.enqueue(site, vid, line, Collections.singletonList(epASigned)) == 0,
+                    "R16-3-reload-dedup: reloaded queue deduplicates A, B & re-signed A (all added=0)");
+
+            // =================================================================
+            // Legacy compatibility: already-saved task under old 4-part key (site|vid|line|episode)
+            // =================================================================
+            File legacyDir = new File(rootDir, "legacy-queue");
+            legacyDir.mkdirs();
+            JSONObject legacyA =
+                    new JSONObject()
+                            .put("id", "legA1")
+                            .put("key", DownloadManager.key(site.key, vid.id, line.rawName(), "正片"))
+                            .put("title", vid.title)
+                            .put("episode", "正片")
+                            .put("line", line.rawName())
+                            .put("site", site.key)
+                            .put("videoId", vid.id)
+                            .put("source", urlA)
+                            .put("url", urlA)
+                            .put("state", DownloadManager.DONE)
+                            .put("bytes", payloadA.length)
+                            .put("total", payloadA.length);
+            try (FileOutputStream fos = new FileOutputStream(new File(legacyDir, "downloads.json"))) {
+                fos.write(new JSONArray().put(legacyA).toString().getBytes(StandardCharsets.UTF_8));
+            }
+            DownloadManager dmLegacy = createRealManager(legacyDir);
+            int legAddA = dmLegacy.enqueue(site, vid, line, Collections.singletonList(epA));
+            int legAddB = dmLegacy.enqueue(site, vid, line, Collections.singletonList(epB));
+            int legAddB2 = dmLegacy.enqueue(site, vid, line, Collections.singletonList(epB));
+            check(
+                    legAddA == 0 && legAddB == 1 && legAddB2 == 0,
+                    "R16-3-legacy-with-source: legacy 4-part task for A deduplicates A (0), allows B (1), deduplicates B (0)");
+            waitAllTerminal(dmLegacy, 2);
+            dmLegacy.flushSaved();
+            DownloadManager dmLegacyReloaded = createRealManager(legacyDir);
+            check(
+                    dmLegacyReloaded.snapshot().size() == 2,
+                    "R16-3-legacy-persist: reloaded legacy queue retains both legacy A and new B (size=2)");
+
+            // Ultra-legacy saved task with old 4-part key & empty source/url stays deduplicated
+            File ultraLegacyDir = new File(rootDir, "ultra-legacy-queue");
+            ultraLegacyDir.mkdirs();
+            JSONObject ultraLegacy =
+                    new JSONObject()
+                            .put("id", "ultra1")
+                            .put("key", DownloadManager.key(site.key, vid.id, line.rawName(), "正片"))
+                            .put("title", vid.title)
+                            .put("episode", "正片")
+                            .put("line", line.rawName())
+                            .put("site", site.key)
+                            .put("videoId", vid.id)
+                            .put("source", "")
+                            .put("url", "")
+                            .put("state", DownloadManager.DONE);
+            try (FileOutputStream fos = new FileOutputStream(new File(ultraLegacyDir, "downloads.json"))) {
+                fos.write(new JSONArray().put(ultraLegacy).toString().getBytes(StandardCharsets.UTF_8));
+            }
+            DownloadManager dmUltra = createRealManager(ultraLegacyDir);
+            check(
+                    dmUltra.enqueue(site, vid, line, Collections.singletonList(epA)) == 0,
+                    "R16-3-legacy-sourceless: sourceless legacy 4-part task still prevents duplicate re-queue (added=0)");
+
+            System.out.println("RealDownloadManagerQueueChecks OK (" + passed + " checks passed)");
+        } finally {
+            server.stop(0);
+        }
     }
 }
 """
@@ -2090,6 +2482,46 @@ def main() -> int:
                 "-cp",
                 os.pathsep.join(str(p) for p in [test_cls_dir, stub_cls_dir, *runtime_cp]),
                 "com.pilipala.marcomovie.MobileDetailPrimaryButtonChecks",
+            ],
+            cwd=ROOT,
+            check=True,
+        )
+
+        # Pass 2: Execute the REAL unmodified production DownloadManager.class (no DownloadManager override)
+        dm_src_dir = work_dir / "dm-test-src"
+        dm_cls_dir = work_dir / "dm-test-classes"
+        dm_data_dir = work_dir / "dm-data"
+        dm_cls_dir.mkdir(parents=True, exist_ok=True)
+        dm_data_dir.mkdir(parents=True, exist_ok=True)
+        dm_driver = dm_src_dir / "com/pilipala/marcomovie/RealDownloadManagerQueueChecks.java"
+        dm_driver.parent.mkdir(parents=True, exist_ok=True)
+        dm_driver.write_text(REAL_DOWNLOAD_MANAGER_TEST_JAVA, encoding="utf-8")
+        subprocess.run(
+            [
+                str(JDK / ("javac" + SUFFIX)),
+                "-encoding",
+                "UTF-8",
+                "-source",
+                "8",
+                "-target",
+                "8",
+                "-Xlint:-options",
+                "-cp",
+                os.pathsep.join(str(p) for p in [stub_cls_dir, *runtime_cp]),
+                "-d",
+                str(dm_cls_dir),
+                str(dm_driver),
+            ],
+            check=True,
+        )
+        subprocess.run(
+            [
+                str(JDK / ("java" + SUFFIX)),
+                "-Dfile.encoding=UTF-8",
+                "-cp",
+                os.pathsep.join(str(p) for p in [dm_cls_dir, stub_cls_dir, *runtime_cp]),
+                "com.pilipala.marcomovie.RealDownloadManagerQueueChecks",
+                str(dm_data_dir),
             ],
             cwd=ROOT,
             check=True,

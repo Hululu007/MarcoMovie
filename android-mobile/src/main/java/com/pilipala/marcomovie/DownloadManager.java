@@ -20,7 +20,9 @@ import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.net.UnknownHostException;
 import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -371,6 +373,111 @@ final class DownloadManager {
         return text(site) + "|" + text(video) + "|" + text(line) + "|" + text(episode);
     }
 
+    static String key(String site, String video, String line, String episode, String source) {
+        String base = key(site, video, line, episode);
+        String mediaId = mediaIdentity(source);
+        return mediaId.isEmpty() ? base : (base + "|" + mediaId);
+    }
+
+    /**
+     * Computes a stable, non-raw media fingerprint ({@code m:<24hex>}) for download deduplication
+     * so two files on the same line sharing a display name (e.g. two {@code 正片} files) receive
+     * distinct keys while refreshed temporary signing/token query parameters still deduplicate.
+     */
+    static String mediaIdentity(String rawSource) {
+        String canonical = canonicalizeMediaSource(rawSource);
+        if (canonical.isEmpty()) return "";
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(canonical.getBytes("UTF-8"));
+            StringBuilder hex = new StringBuilder(26);
+            hex.append("m:");
+            for (int i = 0; i < 12 && i < digest.length; i++) {
+                int b = digest[i] & 0xFF;
+                if (b < 16) hex.append('0');
+                hex.append(Integer.toHexString(b));
+            }
+            return hex.toString();
+        } catch (Exception e) {
+            return "m:" + Integer.toHexString(canonical.hashCode());
+        }
+    }
+
+    private static boolean isVolatileQueryParam(String keyLower) {
+        if (keyLower == null || keyLower.isEmpty()) return true;
+        return "token".equals(keyLower)
+                || "sign".equals(keyLower)
+                || "sig".equals(keyLower)
+                || "signature".equals(keyLower)
+                || "auth".equals(keyLower)
+                || "auth_key".equals(keyLower)
+                || "access_token".equals(keyLower)
+                || "expires".equals(keyLower)
+                || "expire".equals(keyLower)
+                || "exp".equals(keyLower)
+                || "timestamp".equals(keyLower)
+                || "ts".equals(keyLower)
+                || "nonce".equals(keyLower)
+                || "wssecret".equals(keyLower)
+                || "wstime".equals(keyLower)
+                || keyLower.startsWith("x-oss-")
+                || keyLower.startsWith("x-amz-")
+                || keyLower.startsWith("x-cos-")
+                || keyLower.startsWith("x-qiniu-");
+    }
+
+    private static String canonicalizeMediaSource(String rawSource) {
+        if (rawSource == null) return "";
+        String trimmed = rawSource.trim();
+        if (trimmed.isEmpty()) return "";
+        int hashIdx = trimmed.indexOf('#');
+        String noFrag = hashIdx >= 0 ? trimmed.substring(0, hashIdx) : trimmed;
+        int qIdx = noFrag.indexOf('?');
+        String basePart = qIdx >= 0 ? noFrag.substring(0, qIdx) : noFrag;
+        String rawQuery = qIdx >= 0 ? noFrag.substring(qIdx + 1) : "";
+
+        String canonicalBase = basePart;
+        String lowerBase = basePart.toLowerCase(Locale.ROOT);
+        if (lowerBase.startsWith("http://") || lowerBase.startsWith("https://")) {
+            try {
+                URL u = new URL(basePart);
+                String proto = u.getProtocol().toLowerCase(Locale.ROOT);
+                String host = u.getHost() == null ? "" : u.getHost().toLowerCase(Locale.ROOT);
+                int port = u.getPort();
+                String portPart =
+                        (port > 0
+                                        && !(("http".equals(proto) && port == 80)
+                                                || ("https".equals(proto) && port == 443)))
+                                ? (":" + port)
+                                : "";
+                String path = u.getPath() == null ? "" : u.getPath();
+                canonicalBase = proto + "://" + host + portPart + path;
+            } catch (Exception ignored) {
+            }
+        }
+        if (canonicalBase.isEmpty()) return "";
+        if (rawQuery.isEmpty()) return canonicalBase;
+
+        List<String> kept = new ArrayList<>();
+        String[] pairs = rawQuery.split("&");
+        for (String pair : pairs) {
+            if (pair == null || pair.isEmpty()) continue;
+            int eq = pair.indexOf('=');
+            String k = eq >= 0 ? pair.substring(0, eq).trim() : pair.trim();
+            if (isVolatileQueryParam(k.toLowerCase(Locale.ROOT))) continue;
+            kept.add(pair);
+        }
+        if (kept.isEmpty()) return canonicalBase;
+        Collections.sort(kept);
+        StringBuilder sb = new StringBuilder(canonicalBase.length() + rawQuery.length() + 1);
+        sb.append(canonicalBase).append('?');
+        for (int i = 0; i < kept.size(); i++) {
+            if (i > 0) sb.append('&');
+            sb.append(kept.get(i));
+        }
+        return sb.toString();
+    }
+
     static String text(String value) {
         return value == null ? "" : value;
     }
@@ -388,15 +495,21 @@ final class DownloadManager {
     int enqueue(Cms.Site site, Cms.Video video, Cms.Line line, List<Cms.Episode> episodes) {
         int added = 0;
         synchronized (this) {
+            String lineId = line.lineId();
+            String lineKey = lineId.isEmpty() ? line.rawName() : lineId;
+            String rawLineName = line.rawName();
             for (Cms.Episode ep : episodes) {
-                String key = key(site.key, video.id, line.rawName(), ep.name);
-                if (findKey(key) != null) continue;
+                if (ep == null) continue;
+                String mediaId = mediaIdentity(ep.url);
+                String taskKey = key(site.key, video.id, lineKey, ep.name, ep.url);
+                String legacyKey = key(site.key, video.id, rawLineName, ep.name);
+                if (findMatchingTask(taskKey, legacyKey, mediaId) != null) continue;
                 Task t = new Task();
                 t.id = newId();
-                t.key = key;
+                t.key = taskKey;
                 t.title = text(video.title);
                 t.episode = text(ep.name);
-                t.line = text(line.rawName());
+                t.line = text(rawLineName);
                 t.poster = text(video.poster);
                 t.site = text(site.key);
                 t.videoId = text(video.id);
@@ -498,9 +611,26 @@ final class DownloadManager {
         return null;
     }
 
-    private Task findKey(String key) {
+    private static String taskMediaIdentity(Task t) {
+        if (t == null) return "";
+        String id = mediaIdentity(t.source);
+        return !id.isEmpty() ? id : mediaIdentity(t.url);
+    }
+
+    private Task findMatchingTask(String taskKey, String legacyKey, String mediaId) {
         for (Task t : tasks) {
-            if (t.key.equals(key)) return t;
+            if (t == null) continue;
+            if (taskKey.equals(t.key)) return t;
+            // Backward compatibility with already-saved tasks persisted under the legacy 4-part
+            // key format (site|video|line|episode) before media-identity disambiguation.
+            if (!legacyKey.isEmpty() && legacyKey.equals(t.key)) {
+                String existingMediaId = taskMediaIdentity(t);
+                if (existingMediaId.isEmpty()
+                        || mediaId.isEmpty()
+                        || existingMediaId.equals(mediaId)) {
+                    return t;
+                }
+            }
         }
         return null;
     }
@@ -1878,6 +2008,13 @@ final class DownloadManager {
         saver.execute(this::write);
     }
 
+    void flushSaved() {
+        try {
+            saver.submit(() -> {}).get();
+        } catch (Exception ignored) {
+        }
+    }
+
     private void write() {
         String text;
         synchronized (this) {
@@ -1896,7 +2033,11 @@ final class DownloadManager {
             try (OutputStream out = new FileOutputStream(temp)) {
                 out.write(text.getBytes("UTF-8"));
             }
-            if (!temp.renameTo(store)) AppLog.i(TAG, "replace download list failed");
+            if (!temp.renameTo(store)) {
+                if (!(store.exists() && store.delete() && temp.renameTo(store))) {
+                    AppLog.i(TAG, "replace download list failed");
+                }
+            }
         } catch (IOException e) {
             AppLog.w(TAG, "save downloads failed", e);
         }

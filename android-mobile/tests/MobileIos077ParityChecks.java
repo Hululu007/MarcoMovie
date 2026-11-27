@@ -5486,8 +5486,44 @@ public final class MobileIos077ParityChecks {
                                 == 2,
                 "R15 P2: MobileDownloads.resolveInitialPickIndex starts at 0 selected when preselectDefault=false and preserves default selection when true");
 
+        // 35. Round-16 P2: Duplicate-named episodes on the same line (two 「正片」 files A & B)
+        //     resolve by exact episode object / index in MobileDownloads.resolveInitialPickIndex,
+        //     and DownloadManager.key / mediaIdentity distinguishes A vs B while deduplicating
+        //     refreshed volatile signing parameters on A.
+        Cms.Episode r16DupA = new Cms.Episode();
+        r16DupA.name = "正片";
+        r16DupA.url = "https://pan.quark.cn/s/dup_movie_a";
+        Cms.Episode r16DupB = new Cms.Episode();
+        r16DupB.name = "正片";
+        r16DupB.url = "https://pan.quark.cn/s/dup_movie_b";
+        List<Cms.Episode> r16DupList = Arrays.asList(r16DupA, r16DupB);
+        String keyDupA = DownloadManager.key("s1", "v1", "夸克", "正片", r16DupA.url);
+        String keyDupB = DownloadManager.key("s1", "v1", "夸克", "正片", r16DupB.url);
+        String keyDupASigned1 =
+                DownloadManager.key(
+                        "s1", "v1", "夸克", "正片", r16DupA.url + "?sign=old111&expires=100");
+        String keyDupASigned2 =
+                DownloadManager.key(
+                        "s1", "v1", "夸克", "正片", r16DupA.url + "?sign=new222&expires=200");
+        check(
+                MobileDownloads.resolveInitialPickIndex(r16DupList, r16DupA, 0, "正片", true) == 0
+                        && MobileDownloads.resolveInitialPickIndex(
+                                        r16DupList, r16DupB, 1, "正片", true)
+                                == 1
+                        && MobileDownloads.resolveInitialPickIndex(r16DupList, null, 0, "正片", true)
+                                == 0
+                        && MobileDownloads.resolveInitialPickIndex(r16DupList, null, 1, "正片", true)
+                                == 1
+                        && MobileDownloads.resolveInitialPickIndex(
+                                        r16DupList, r16DupA, 0, "正片", false)
+                                == -1
+                        && !keyDupA.equals(keyDupB)
+                        && keyDupA.equals(keyDupASigned1)
+                        && keyDupASigned1.equals(keyDupASigned2),
+                "R16 P2: duplicate-named 「正片」 A/B resolve cleanly in MobileDownloads.resolveInitialPickIndex and produce distinct stable keys in DownloadManager");
+
         pass(
-                "DriveOrder + R4..R15 P1-1..P2: line-season failover, Dart-aligned episodeMediaId, same-site drive conflict, direct-card, line-management rebind, awaiting-reselection & 0-preselect download picker verified");
+                "DriveOrder + R4..R16 P1-1..P2: line-season failover, Dart-aligned episodeMediaId, same-site drive conflict, direct-card, line-management rebind, awaiting-reselection, 0-preselect & duplicate-name download identity verified");
     }
 
     private static String computeWindowsV073MediaId(String canonicalUrl) throws Exception {

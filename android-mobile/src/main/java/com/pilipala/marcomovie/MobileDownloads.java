@@ -418,27 +418,62 @@ final class MobileDownloads {
 
     /**
      * Pure-JVM initial-selection index policy for {@link #pick}: returns {@code -1} (0 episodes
-     * selected) when {@code preselectDefault} is {@code false}; otherwise matches {@code current}
-     * by episode name or falls back to index {@code 0}.
+     * selected) when {@code preselectDefault} is {@code false}; otherwise resolves by exact episode
+     * object identity (or unique media URL), then reliable explicit index, then first name match,
+     * else {@code 0}.
      */
     static int resolveInitialPickIndex(
             List<Cms.Episode> episodes, String current, boolean preselectDefault) {
+        return resolveInitialPickIndex(episodes, null, -1, current, preselectDefault);
+    }
+
+    static int resolveInitialPickIndex(
+            List<Cms.Episode> episodes,
+            Cms.Episode preferredEpisode,
+            int preferredIndex,
+            String current,
+            boolean preselectDefault) {
         if (episodes == null || episodes.isEmpty() || !preselectDefault) return -1;
-        int initial = 0;
+        if (preferredEpisode != null) {
+            for (int i = 0; i < episodes.size(); i++) {
+                if (episodes.get(i) == preferredEpisode) {
+                    return i;
+                }
+            }
+            String prefUrl = preferredEpisode.url == null ? "" : preferredEpisode.url.trim();
+            if (!prefUrl.isEmpty()) {
+                int urlMatch = -1;
+                for (int i = 0; i < episodes.size(); i++) {
+                    Cms.Episode cand = episodes.get(i);
+                    String candUrl = cand == null || cand.url == null ? "" : cand.url.trim();
+                    if (prefUrl.equals(candUrl)) {
+                        if (urlMatch >= 0) {
+                            urlMatch = -2;
+                            break;
+                        }
+                        urlMatch = i;
+                    }
+                }
+                if (urlMatch >= 0) return urlMatch;
+            }
+        }
+        if (preferredIndex >= 0 && preferredIndex < episodes.size()) {
+            return preferredIndex;
+        }
         if (current != null && !current.isEmpty()) {
             for (int i = 0; i < episodes.size(); i++) {
                 Cms.Episode ep = episodes.get(i);
                 if (ep != null && current.equals(ep.name)) {
-                    initial = i;
+                    return i;
                 }
             }
         }
-        return initial;
+        return 0;
     }
 
     /** Lets the user pick episodes of one line; {@code current} (or episode 0) is preselected. */
     static void pick(MainActivity a, Cms.Site s, Cms.Video v, Cms.Line line, String current) {
-        pick(a, s, v, line, current, true);
+        pick(a, s, v, line, null, -1, current, true);
     }
 
     /**
@@ -452,11 +487,30 @@ final class MobileDownloads {
             Cms.Line line,
             String current,
             boolean preselectDefault) {
+        pick(a, s, v, line, null, -1, current, preselectDefault);
+    }
+
+    /**
+     * Lets the user pick episodes of one line using an exact target episode object / reliable index
+     * so duplicate-named files (e.g. two {@code 正片} files on the same line) pre-select the exact
+     * intended item.
+     */
+    static void pick(
+            MainActivity a,
+            Cms.Site s,
+            Cms.Video v,
+            Cms.Line line,
+            Cms.Episode preferredEpisode,
+            int preferredIndex,
+            String current,
+            boolean preselectDefault) {
         final int total = line.episodes.size();
         if (total == 0) return;
         final MobileTheme.Palette p = MobileTheme.of(a);
         final boolean[] chosen = new boolean[total];
-        int initial = resolveInitialPickIndex(line.episodes, current, preselectDefault);
+        int initial =
+                resolveInitialPickIndex(
+                        line.episodes, preferredEpisode, preferredIndex, current, preselectDefault);
         if (initial >= 0 && initial < total) {
             chosen[initial] = true;
         }

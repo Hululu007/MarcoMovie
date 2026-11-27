@@ -588,14 +588,25 @@ final class MobileDetailScreen {
             Cms.Site site,
             Cms.Video video,
             Cms.Line line,
-            String currentName,
+            Cms.Episode targetEpisode,
+            int targetEpisodeIndex,
             boolean preselectDefault) {
         if (a == null || a.root == null || line == null) return;
         View topDownView = a.root.findViewWithTag("episodes-download");
         if (topDownView == null) return;
-        final String safeName = currentName == null ? "" : currentName;
+        final String safeName =
+                targetEpisode != null && targetEpisode.name != null ? targetEpisode.name : "";
         topDownView.setOnClickListener(
-                v -> MobileDownloads.pick(a, site, video, line, safeName, preselectDefault));
+                v ->
+                        MobileDownloads.pick(
+                                a,
+                                site,
+                                video,
+                                line,
+                                targetEpisode,
+                                targetEpisodeIndex,
+                                safeName,
+                                preselectDefault));
     }
 
     private static void bindPrimaryPlayButton(
@@ -2182,18 +2193,27 @@ final class MobileDetailScreen {
                 }
             }
             final boolean preselectDownload = !renderPlayAction.requiresReselection;
-            String pickFrom = "";
+            Cms.Episode pickEp = null;
+            int pickIdx = -1;
             if (preselectDownload) {
                 if (hasExplicitEpisodeOnLine) {
-                    pickFrom = line.episodes.get(selectedEpisodeIndex).name;
+                    pickIdx = selectedEpisodeIndex;
+                    pickEp = line.episodes.get(selectedEpisodeIndex);
+                } else if (renderPlayAction.line == line
+                        && renderPlayAction.episode != null
+                        && renderPlayAction.episodeIndex >= 0
+                        && renderPlayAction.episodeIndex < line.episodes.size()) {
+                    pickIdx = renderPlayAction.episodeIndex;
+                    pickEp = renderPlayAction.episode;
                 } else if (lineMatchesBookmark) {
                     int matchedIdx = HistoryResumeMatcher.findMatchedEpisodeIndex(line, remembered);
                     if (matchedIdx >= 0 && matchedIdx < line.episodes.size()) {
-                        pickFrom = line.episodes.get(matchedIdx).name;
+                        pickIdx = matchedIdx;
+                        pickEp = line.episodes.get(matchedIdx);
                     }
                 }
             }
-            bindTopDownloadButton(a, site, video, line, pickFrom, preselectDownload);
+            bindTopDownloadButton(a, site, video, line, pickEp, pickIdx, preselectDownload);
         }
 
         // Keep line strip in place when switching between lines so its scroll position stays steady
@@ -2591,8 +2611,7 @@ final class MobileDetailScreen {
                                 bindPrimaryPlayButton(
                                         a, site, video, (Button) playBtnView, pickedAction);
                             }
-                            bindTopDownloadButton(
-                                    a, site, video, line, ep != null ? ep.name : "", true);
+                            bindTopDownloadButton(a, site, video, line, ep, posIdx, true);
                         });
                 selectionState.numPills.put(posIdx, numPill);
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, a.dp(34));
@@ -2650,8 +2669,7 @@ final class MobileDetailScreen {
                         if (playBtnView instanceof Button) {
                             bindPrimaryPlayButton(a, site, video, (Button) playBtnView, cardAction);
                         }
-                        bindTopDownloadButton(
-                                a, site, video, line, ep != null ? ep.name : "", true);
+                        bindTopDownloadButton(a, site, video, line, ep, posIdx, true);
                         a.resumeAt = cardAction.resumePositionMs;
                         handleDetailEpisodeTap(a, site, video, line, ep, posIdx + 1, false);
                     });
