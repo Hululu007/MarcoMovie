@@ -1306,7 +1306,8 @@ public final class DanmuEngineChecks {
                 "Missing Retry-After defaults to 2000ms");
 
         final AtomicInteger callCount = new AtomicInteger(0);
-        final List<Long> timestamps = new CopyOnWriteArrayList<>();
+        final List<Long> dispatchMonotonicMs = new CopyOnWriteArrayList<>();
+        final List<Long> serverReceiptMonotonicMs = new CopyOnWriteArrayList<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.setExecutor(daemonPool(2));
         final String origin = "http://127.0.0.1:" + server.getAddress().getPort();
@@ -1316,8 +1317,18 @@ public final class DanmuEngineChecks {
                 new HttpHandler() {
                     @Override
                     public void handle(HttpExchange ex) throws IOException {
-                        timestamps.add(System.currentTimeMillis());
                         int n = callCount.incrementAndGet();
+                        if (n == 1) {
+                            // Deliberately inject a 140ms slow first-request delay simulating a
+                            // cold-JVM connect/init latency; post-response monotonic cooldown MUST
+                            // still space Request 2 >= 180ms at the server receipt point!
+                            try {
+                                Thread.sleep(140L);
+                            } catch (InterruptedException ignored) {
+                                Thread.currentThread().interrupt();
+                            }
+                        }
+                        serverReceiptMonotonicMs.add(DandanplayProvider.monotonicNowMs());
                         if (n == 3) {
                             ex.getResponseHeaders().set("Retry-After", "1");
                             sendResponse(ex, 429, "text/plain", "slow down");
@@ -1329,12 +1340,24 @@ public final class DanmuEngineChecks {
         server.start();
         try {
             DandanplayProvider limited = new DandanplayProvider(origin, "", "", 4, 200L);
+            limited.setRateLimitObserver(
+                    new DandanplayProvider.RateLimitObserver() {
+                        @Override
+                        public void onDispatchAcquired(String originKey, long monotonicMs) {
+                            dispatchMonotonicMs.add(monotonicMs);
+                        }
+                    });
             limited.listEpisodes(origin, "1", null);
             limited.listEpisodes(origin, "2", null);
-            long deltaMs = timestamps.get(1) - timestamps.get(0);
+            long dispatchDeltaMs = dispatchMonotonicMs.get(1) - dispatchMonotonicMs.get(0);
+            long serverDeltaMs = serverReceiptMonotonicMs.get(1) - serverReceiptMonotonicMs.get(0);
             check(
-                    deltaMs >= 180L,
-                    "Per-domain rate limiter enforces >= 200ms spacing (actual=" + deltaMs + "ms)");
+                    dispatchDeltaMs >= 200L && serverDeltaMs >= 180L,
+                    "Per-domain monotonic rate limiter enforces >=200ms dispatch & >=180ms server spacing even with slow 1st request (dispatch="
+                            + dispatchDeltaMs
+                            + "ms, server="
+                            + serverDeltaMs
+                            + "ms)");
 
             boolean got429 = false;
             long retryAfter = 0L;
@@ -1347,6 +1370,19 @@ public final class DanmuEngineChecks {
             check(
                     got429 && retryAfter == 1000L,
                     "HTTP 429 parses Retry-After=1s into 1000ms backoff");
+
+            // Request 4 immediately after HTTP 429 MUST honor the full 1000ms Retry-After backoff
+            limited.listEpisodes(origin, "4", null);
+            long post429DispatchDeltaMs = dispatchMonotonicMs.get(3) - dispatchMonotonicMs.get(2);
+            long post429ServerDeltaMs =
+                    serverReceiptMonotonicMs.get(3) - serverReceiptMonotonicMs.get(2);
+            check(
+                    post429DispatchDeltaMs >= 950L && post429ServerDeltaMs >= 950L,
+                    "HTTP 429 Retry-After=1s enforces >=950ms monotonic backoff on next call (dispatch="
+                            + post429DispatchDeltaMs
+                            + "ms, server="
+                            + post429ServerDeltaMs
+                            + "ms)");
         } finally {
             server.stop(0);
         }

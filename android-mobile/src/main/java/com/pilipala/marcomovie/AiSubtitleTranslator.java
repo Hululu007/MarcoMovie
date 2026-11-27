@@ -594,6 +594,26 @@ final class AiSubtitleTranslator {
                 OnlineSubtitleDanmakuService.captureEpisodeIdentity(a));
     }
 
+    /**
+     * Defensive isolation guard: if a caller ever passes a plain online subtitle cache file inside
+     * {@code online_subs_v1/}, redirects AI output to a sibling derived file inside {@code
+     * online_subs_ai_v1/} so original online subtitle bytes are never overwritten.
+     */
+    static File resolveSafeDerivedTargetFile(File requestedTarget, boolean bilingual) {
+        if (requestedTarget == null) return null;
+        File parent = requestedTarget.getParentFile();
+        if (parent != null
+                && OnlineSubtitleDanmakuService.ORIGINAL_SUBTITLE_CACHE_DIR.equals(
+                        parent.getName())) {
+            File cacheRoot = parent.getParentFile();
+            if (cacheRoot != null) {
+                return OnlineSubtitleDanmakuService.resolveAiDerivedSubtitleCacheFile(
+                        cacheRoot, requestedTarget.getName(), bilingual);
+            }
+        }
+        return requestedTarget;
+    }
+
     static void translateAndMountFullEpisodeAsync(
             final MainActivity a,
             final String showTitle,
@@ -621,6 +641,7 @@ final class AiSubtitleTranslator {
         if (cues.isEmpty()) return;
 
         final boolean bilingual = a.mobilePrefs().getBoolean(Prefs.SUBTITLE_BILINGUAL, true);
+        final File derivedTargetFile = resolveSafeDerivedTargetFile(targetFile, bilingual);
         final String fullCacheKey =
                 COMPLETION_CACHE_PREFIX
                         + AiAssistantService.sha256((bilingual ? "bi|" : "zh|") + rawSrtText);
@@ -634,14 +655,14 @@ final class AiSubtitleTranslator {
                                 decodeVerifiedCompletionCache(rawCache, cues.size(), bilingual);
                         if (cachedSrt != null) {
                             if (!isSessionStillBound(a, sessionId, ticket, boundEpId)) return;
-                            writeUtf8(targetFile, cachedSrt);
+                            writeUtf8(derivedTargetFile, cachedSrt);
                             List<SrtCue> cachedCues = parseSrt(cachedSrt);
                             updateOverlayAndSingleTrackOnUi(
                                     a,
                                     ticket,
                                     sessionId,
                                     boundEpId,
-                                    targetFile,
+                                    derivedTargetFile,
                                     cachedCues,
                                     null,
                                     bilingual,
@@ -712,7 +733,7 @@ final class AiSubtitleTranslator {
                             if (isFirst || isMilestone || isLast) {
                                 String rendered = renderSrt(cues, translations, bilingual);
                                 if (!isSessionStillBound(a, sessionId, ticket, boundEpId)) return;
-                                writeUtf8(targetFile, rendered);
+                                writeUtf8(derivedTargetFile, rendered);
                                 boolean fullyDone =
                                         isLast
                                                 && shouldWriteCompletionCache(
@@ -751,7 +772,7 @@ final class AiSubtitleTranslator {
                                         ticket,
                                         sessionId,
                                         boundEpId,
-                                        targetFile,
+                                        derivedTargetFile,
                                         cues,
                                         translations.clone(),
                                         bilingual,
@@ -903,6 +924,10 @@ final class AiSubtitleTranslator {
     }
 
     private static void writeUtf8(File f, String content) throws Exception {
+        File parent = f.getParentFile();
+        if (parent != null && !parent.exists()) {
+            parent.mkdirs();
+        }
         try (OutputStream out = new FileOutputStream(f)) {
             out.write(content.getBytes(StandardCharsets.UTF_8));
         }

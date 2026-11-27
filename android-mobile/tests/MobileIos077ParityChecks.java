@@ -4206,7 +4206,310 @@ public final class MobileIos077ParityChecks {
                         && "百度的备用线路".equals(r7MixedOrder.get(3).name),
                 "R7 P2-3B: Baidu pinned moves Baidu ahead of trailer+Quark and aliased Quark lines while keeping pure direct slot 1 untouched");
 
+        // 21. Round-8 P1-1: Duplicate episode numbers MUST NEVER carry 42s onto wrong resource.
+        //     (A) Orig S02E02 at 42s -> alt site puts two seasons on the SAME line, both labeled
+        //         "第2集" -> failover returns null and forced resolveFailoverResumePositionMs is 0!
+        WatchHistory.Entry bmS02E02 = new WatchHistory.Entry();
+        bmS02E02.site = "orig_site";
+        bmS02E02.id = "multi_season_show";
+        bmS02E02.line = "夸克原画";
+        bmS02E02.lineId = "夸克原画";
+        bmS02E02.driveKey = NetdiskStore.DRIVE_QUARK;
+        bmS02E02.episode = "S02E02";
+        bmS02E02.episodeKey = WatchHistory.stableEpisodeKey("https://pan.quark.cn/s/orig_s02e02");
+        bmS02E02.index = 1;
+        bmS02E02.position = 42_000;
+        bmS02E02.duration = 240_000;
+
+        Cms.Line altTwoSeasonsSameLine = new Cms.Line();
+        altTwoSeasonsSameLine.lineId = "备用合集";
+        altTwoSeasonsSameLine.name = "备用合集";
+        altTwoSeasonsSameLine.rawName = "备用合集";
+        Cms.Episode altS1E1 = new Cms.Episode();
+        altS1E1.name = "第1集";
+        altS1E1.url = "https://alt.example/s1/e1.m3u8";
+        Cms.Episode altS1E2 = new Cms.Episode();
+        altS1E2.name = "第2集";
+        altS1E2.url = "https://alt.example/s1/e2.m3u8";
+        Cms.Episode altS2E1 = new Cms.Episode();
+        altS2E1.name = "第1集";
+        altS2E1.url = "https://alt.example/s2/e1.m3u8";
+        Cms.Episode altS2E2 = new Cms.Episode();
+        altS2E2.name = "第2集";
+        altS2E2.url = "https://alt.example/s2/e2.m3u8";
+        altTwoSeasonsSameLine.episodes.addAll(Arrays.asList(altS1E1, altS1E2, altS2E1, altS2E2));
+        Cms.Video altAmbiguousSeasonVideo = new Cms.Video();
+        altAmbiguousSeasonVideo.id = "alt_ambig";
+        altAmbiguousSeasonVideo.lines.add(altTwoSeasonsSameLine);
+
+        HistoryResumeMatcher.EpisodeMatch ambigFailover =
+                HistoryResumeMatcher.matchEpisodeForFailover(altAmbiguousSeasonVideo, bmS02E02);
+        int forcedAmbigFailoverPos =
+                HistoryResumeMatcher.resolveFailoverResumePositionMs(
+                        new HistoryResumeMatcher.EpisodeMatch(altTwoSeasonsSameLine, altS1E2, 100),
+                        bmS02E02);
+        check(
+                ambigFailover == null && forcedAmbigFailoverPos == 0,
+                "R8 P1-1A: S02E02 failover onto single-line two-season duplicate '第2集' rejects ambiguous match (0ms)");
+
+        //     (B) Same-site two un-fingerprinted proxy items both named "第2集": watched 2nd item
+        //         to 42s -> manually clicking 1st item MUST start at 0ms (never inherits 42000ms)!
+        Cms.Line dupNumProxyLine = new Cms.Line();
+        dupNumProxyLine.lineId = "本地代理线";
+        dupNumProxyLine.name = "本地代理线";
+        dupNumProxyLine.rawName = "本地代理线";
+        Cms.Episode dpEp1 = new Cms.Episode();
+        dpEp1.name = "第2集";
+        dpEp1.url = "http://127.0.0.1:8080/proxy/lease/ep2_first";
+        Cms.Episode dpEp2 = new Cms.Episode();
+        dpEp2.name = "第2集";
+        dpEp2.url = "http://127.0.0.1:8080/proxy/lease/ep2_second";
+        dupNumProxyLine.episodes.add(dpEp1);
+        dupNumProxyLine.episodes.add(dpEp2);
+        Cms.Video dupNumProxyVideo = new Cms.Video();
+        dupNumProxyVideo.id = "dup_num_proxy";
+        dupNumProxyVideo.lines.add(dupNumProxyLine);
+
+        WatchHistory.Entry bmDupNumProxy2 = new WatchHistory.Entry();
+        bmDupNumProxy2.site = "orig_site";
+        bmDupNumProxy2.id = "dup_num_proxy";
+        bmDupNumProxy2.line = "本地代理线";
+        bmDupNumProxy2.lineId = "本地代理线";
+        bmDupNumProxy2.episode = "第2集";
+        bmDupNumProxy2.episodeKey = WatchHistory.stableEpisodeKey(dpEp2.url); // "" (proxy)
+        bmDupNumProxy2.index = 1;
+        bmDupNumProxy2.position = 42_000;
+        bmDupNumProxy2.duration = 240_000;
+        check(
+                bmDupNumProxy2.episodeKey.isEmpty()
+                        && HistoryResumeMatcher.matchEpisode(dupNumProxyVideo, bmDupNumProxy2)
+                                == null
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        dupNumProxyLine, dpEp1, 0, bmDupNumProxy2)
+                                == 0
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        dupNumProxyLine, dpEp2, 1, bmDupNumProxy2)
+                                == 0,
+                "R8 P1-1B: same-site duplicate '第2集' without fingerprint never leaks 42000ms on manual tap or auto match");
+
+        //     (C) Positive controls: explicit S02E02, unique fingerprint among duplicate "第2集",
+        //         and cross-drive unique same episode ALL recover 42,000 ms!
+        Cms.Line explicitSeasonLine = new Cms.Line();
+        explicitSeasonLine.lineId = "百度合集";
+        explicitSeasonLine.name = "百度合集";
+        explicitSeasonLine.rawName = "百度合集";
+        Cms.Episode exS1E2 = new Cms.Episode();
+        exS1E2.name = "S01E02";
+        exS1E2.url = "https://pan.baidu.com/s/bd_s01e02";
+        Cms.Episode exS2E2 = new Cms.Episode();
+        exS2E2.name = "S02E02";
+        exS2E2.url = "https://pan.baidu.com/s/bd_s02e02";
+        explicitSeasonLine.episodes.add(exS1E2);
+        explicitSeasonLine.episodes.add(exS2E2);
+        Cms.Video explicitSeasonVideo = new Cms.Video();
+        explicitSeasonVideo.id = "alt_explicit_season";
+        explicitSeasonVideo.lines.add(explicitSeasonLine);
+
+        HistoryResumeMatcher.EpisodeMatch explicitS2Pick =
+                HistoryResumeMatcher.matchEpisodeForFailover(explicitSeasonVideo, bmS02E02);
+
+        Cms.Line dupNumFingerprintedLine = new Cms.Line();
+        dupNumFingerprintedLine.lineId = "指纹线";
+        dupNumFingerprintedLine.name = "指纹线";
+        dupNumFingerprintedLine.rawName = "指纹线";
+        Cms.Episode fpEp1 = new Cms.Episode();
+        fpEp1.name = "第2集";
+        fpEp1.url = "https://site.example/play?id=201";
+        Cms.Episode fpEp2 = new Cms.Episode();
+        fpEp2.name = "第2集";
+        fpEp2.url = "https://site.example/play?id=202";
+        dupNumFingerprintedLine.episodes.add(fpEp1);
+        dupNumFingerprintedLine.episodes.add(fpEp2);
+        WatchHistory.Entry bmFp2 = new WatchHistory.Entry();
+        bmFp2.site = "orig_site";
+        bmFp2.id = "fp_dup_num";
+        bmFp2.line = "指纹线";
+        bmFp2.lineId = "指纹线";
+        bmFp2.episode = "第2集";
+        bmFp2.episodeKey = WatchHistory.stableEpisodeKey(fpEp2.url);
+        bmFp2.index = 1;
+        bmFp2.position = 42_000;
+        bmFp2.duration = 240_000;
+
+        check(
+                explicitS2Pick != null
+                        && explicitS2Pick.episode == exS2E2
+                        && HistoryResumeMatcher.resolveFailoverResumePositionMs(
+                                        explicitS2Pick, bmS02E02)
+                                == 42_000
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        dupNumFingerprintedLine, fpEp2, 1, bmFp2)
+                                == 42_000
+                        && HistoryResumeMatcher.resolveResumePositionMs(
+                                        dupNumFingerprintedLine, fpEp1, 0, bmFp2)
+                                == 0
+                        && HistoryResumeMatcher.findMatchedEpisodeIndex(
+                                        dupNumFingerprintedLine, bmFp2)
+                                == 1,
+                "R8 P1-1C: explicit S02E02 failover, unique-fingerprinted duplicate '第2集', and cross-drive unique ep all recover 42000ms while wrong item stays 0ms");
+
+        // 22. Round-8 P1-2: Default syncHistory=true AND subscribe-only syncHistory=false BOTH
+        //     preserve Windows 0.7.3 WoGG episodeMediaId & 480,003 ms progress, strip legacy
+        //     episodeUrl, and NEVER leak an old losing record's episodeMediaId onto a newer
+        //     record for another episode!
+        String woggFile1Url = "https://pan.quark.cn/s/wogg_share_1?file=dup_part1";
+        String woggFile2Url = "https://pan.quark.cn/s/wogg_share_1?file=dup_part2";
+        // Windows 0.7.3 canonical episodeMediaId format: "mid:v1:" + sha256(canonical).sub(0,32)
+        String winMediaIdFile2 = computeWindowsV073MediaId(woggFile2Url);
+        JSONObject winWoggEntry =
+                new JSONObject()
+                        .put("site", "wogg")
+                        .put("id", "wogg_vod_480")
+                        .put("title", "玩偶双同名测试")
+                        .put("poster", "")
+                        .put("line", "夸克4K")
+                        .put("lineId", "wogg_quark_1")
+                        .put("episode", "4K正片.mkv")
+                        .put("episodeMediaId", winMediaIdFile2)
+                        .put(
+                                "episodeUrl",
+                                "https://dl-pc.example/tmp/file2.mkv?sign=secret_xyz&expires=999")
+                        .put("index", 1)
+                        .put("position", 480_003)
+                        .put("duration", 3_600_000)
+                        .put("updated", 5_000L);
+        String remoteWoggPayload =
+                new JSONObject()
+                        .put("schema", CloudSync.SCHEMA)
+                        .put("version", CloudSync.VERSION)
+                        .put("updated", 5_000L)
+                        .put("watch_history", new JSONArray().put(winWoggEntry))
+                        .put("favorites", new JSONArray())
+                        .put("tombstones", new JSONObject())
+                        .toString();
+
+        // Branch A: default syncHistory = true (syncSubscriptions=true, syncHistory=true)
+        CloudSync.MergeResult woggSyncOn =
+                CloudSync.merge(
+                        "[]",
+                        "[]",
+                        "{}",
+                        Collections.emptyList(),
+                        true,
+                        true,
+                        remoteWoggPayload,
+                        6_000L);
+        JSONArray syncOnOutHist =
+                new JSONObject(woggSyncOn.payloadJson).getJSONArray("watch_history");
+        JSONObject syncOnEntry = syncOnOutHist.getJSONObject(0);
+        JSONArray syncOnLocalHist = new JSONArray(woggSyncOn.historyJson);
+        JSONObject syncOnLocalEntry = syncOnLocalHist.getJSONObject(0);
+
+        // Branch B: subscribe-only (syncSubscriptions=true, syncHistory=false)
+        CloudSync.MergeResult woggSyncOff =
+                CloudSync.merge(
+                        "[]",
+                        "[]",
+                        "{}",
+                        Collections.emptyList(),
+                        true,
+                        false,
+                        remoteWoggPayload,
+                        6_000L);
+        JSONArray syncOffOutHist =
+                new JSONObject(woggSyncOff.payloadJson).getJSONArray("watch_history");
+        JSONObject syncOffEntry = syncOffOutHist.getJSONObject(0);
+
+        // Simulate Windows 0.7.3 WoGG matcher resolving duplicate-named "4K正片.mkv" files using
+        // ONLY the JSON output emitted by Android's two sync branches!
+        List<String> woggDupFileUrls = Arrays.asList(woggFile1Url, woggFile2Url);
+        int winMatchedIdxSyncOn =
+                resolveWindowsWoggDuplicateTargetIndex(syncOnEntry, woggDupFileUrls);
+        int winMatchedIdxSyncOff =
+                resolveWindowsWoggDuplicateTargetIndex(syncOffEntry, woggDupFileUrls);
+        check(
+                winMediaIdFile2.equals(syncOnEntry.optString("episodeMediaId", ""))
+                        && winMediaIdFile2.equals(syncOnLocalEntry.optString("episodeMediaId", ""))
+                        && winMediaIdFile2.equals(syncOffEntry.optString("episodeMediaId", ""))
+                        && syncOnEntry.optInt("position") == 480_003
+                        && syncOffEntry.optInt("position") == 480_003
+                        && !syncOnEntry.has("episodeUrl")
+                        && !syncOffEntry.has("episodeUrl")
+                        && !woggSyncOn.payloadJson.contains("secret_xyz")
+                        && !woggSyncOff.payloadJson.contains("secret_xyz")
+                        && winMatchedIdxSyncOn == 1
+                        && winMatchedIdxSyncOff == 1,
+                "R8 P1-2A: BOTH syncHistory=true and syncHistory=false preserve Windows WoGG episodeMediaId & 480003ms, locate 2nd duplicate file, and strip legacy episodeUrl");
+
+        // Branch C: Newer Android record for ANOTHER episode wins LWW (syncSubscriptions=false,
+        // syncHistory=true) -> MUST NOT inherit old losing record's episodeMediaId!
+        WatchHistory.Entry newerOtherEp = new WatchHistory.Entry();
+        newerOtherEp.site = "wogg";
+        newerOtherEp.id = "wogg_vod_480";
+        newerOtherEp.title = "玩偶双同名测试";
+        newerOtherEp.poster = "";
+        newerOtherEp.line = "夸克4K";
+        newerOtherEp.lineId = "wogg_quark_1";
+        newerOtherEp.driveKey = NetdiskStore.DRIVE_QUARK;
+        newerOtherEp.episode = "第2集";
+        newerOtherEp.episodeKey = WatchHistory.stableEpisodeKey("https://pan.quark.cn/s/ep2_new");
+        newerOtherEp.episodeMediaId = "";
+        newerOtherEp.index = 2;
+        newerOtherEp.position = 95_000;
+        newerOtherEp.duration = 3_600_000;
+        newerOtherEp.updated = 9_000L; // strictly newer than remote 5_000L
+        String localNewerJson = new JSONArray().put(newerOtherEp.json()).toString();
+        CloudSync.MergeResult newerWinsMerge =
+                CloudSync.merge(
+                        localNewerJson,
+                        "[]",
+                        "{}",
+                        Collections.emptyList(),
+                        false,
+                        true,
+                        remoteWoggPayload,
+                        10_000L);
+        JSONObject winningEntry =
+                new JSONObject(newerWinsMerge.payloadJson)
+                        .getJSONArray("watch_history")
+                        .getJSONObject(0);
+        // Also verify spoofed signed URL inside episodeMediaId is rejected by sanitizer
+        String spoofedMediaId =
+                WatchHistory.sanitizeEpisodeMediaId(
+                        "https://dl-pc.example/file.mkv?sign=leak&expires=123");
+        check(
+                "第2集".equals(winningEntry.optString("episode", ""))
+                        && winningEntry.optInt("position") == 95_000
+                        && winningEntry.optString("episodeMediaId", "").isEmpty()
+                        && newerOtherEp.episodeKey.equals(winningEntry.optString("episodeKey", ""))
+                        && spoofedMediaId.isEmpty(),
+                "R8 P1-2B: newer record for another episode winning merge does NOT inherit losing old episodeMediaId; spoofed URLs in episodeMediaId are stripped");
+
         pass(
-                "DriveOrder + R4/R5/R6/R7 P1-1..P2-3: lossless subscribe-only sync, ambiguous/failover resume, and host-first/trailer-mixed drive order verified");
+                "DriveOrder + R4..R8 P1-1..P2-3: duplicate-number disambiguation, Windows WoGG episodeMediaId sync preservation, and host-first drive order verified");
+    }
+
+    private static String computeWindowsV073MediaId(String canonicalUrl) throws Exception {
+        java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+        byte[] digest = md.digest(canonicalUrl.getBytes(StandardCharsets.UTF_8));
+        StringBuilder sb = new StringBuilder("mid:v1:");
+        for (int i = 0; i < 16; i++) {
+            sb.append(String.format(Locale.US, "%02x", digest[i] & 0xFF));
+        }
+        return sb.toString();
+    }
+
+    private static int resolveWindowsWoggDuplicateTargetIndex(
+            JSONObject exportedEntry, List<String> dupFileUrls) throws Exception {
+        String storedMediaId = exportedEntry.optString("episodeMediaId", "").trim();
+        if (storedMediaId.isEmpty()) return -1;
+        int matched = -1;
+        for (int i = 0; i < dupFileUrls.size(); i++) {
+            if (storedMediaId.equals(computeWindowsV073MediaId(dupFileUrls.get(i)))) {
+                if (matched >= 0) return -1; // ambiguous
+                matched = i;
+            }
+        }
+        return matched;
     }
 }

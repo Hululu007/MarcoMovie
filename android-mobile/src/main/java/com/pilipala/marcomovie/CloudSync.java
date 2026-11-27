@@ -901,7 +901,13 @@ final class CloudSync {
             WatchHistory.Entry cur = histMap.get(key);
             if (cur == null
                     || r.updated > cur.updated
-                    || (r.updated == cur.updated && r.position > cur.position)) {
+                    || (r.updated == cur.updated && r.position > cur.position)
+                    || (r.updated == cur.updated
+                            && r.position == cur.position
+                            && safeTrim(cur.episode).equals(safeTrim(r.episode))
+                            && safeTrim(cur.line).equals(safeTrim(r.line))
+                            && safeTrim(cur.episodeMediaId).isEmpty()
+                            && !safeTrim(r.episodeMediaId).isEmpty())) {
                 histMap.put(key, r);
             }
         }
@@ -1158,6 +1164,8 @@ final class CloudSync {
                     o.optString(
                             "episode", o.optString("episodeName", o.optString("episodeTitle", "")));
             e.episodeKey = o.optString("episodeKey", "").trim();
+            e.episodeMediaId =
+                    WatchHistory.sanitizeEpisodeMediaId(o.optString("episodeMediaId", ""));
             String legacyRemoteUrl = o.optString("episodeUrl", "").trim();
             if (e.episodeKey.isEmpty() && !legacyRemoteUrl.isEmpty()) {
                 e.episodeKey = HistoryResumeMatcher.stableEpisodeKey(legacyRemoteUrl);
@@ -1211,7 +1219,8 @@ final class CloudSync {
                     || !String.valueOf(x.line).equals(String.valueOf(y.line))
                     || !safeTrim(x.lineId).equals(safeTrim(y.lineId))
                     || !safeTrim(x.driveKey).equals(safeTrim(y.driveKey))
-                    || !safeTrim(x.episodeKey).equals(safeTrim(y.episodeKey))) {
+                    || !safeTrim(x.episodeKey).equals(safeTrim(y.episodeKey))
+                    || !safeTrim(x.episodeMediaId).equals(safeTrim(y.episodeMediaId))) {
                 return false;
             }
         }

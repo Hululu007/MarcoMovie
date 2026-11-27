@@ -99,6 +99,10 @@ public final class DandanplayProvider implements DanmuProvider {
                 }
             };
 
+    interface RateLimitObserver {
+        void onDispatchAcquired(String originKey, long monotonicMs);
+    }
+
     private final List<String> configuredOrigins;
     private final Set<String> originWhitelist;
     private final String appId;
@@ -106,6 +110,15 @@ public final class DandanplayProvider implements DanmuProvider {
     private final int maxConcurrency;
     private final long minRequestIntervalMs;
     private final ConcurrentHashMap<String, Long> domainNextAllowedMs = new ConcurrentHashMap<>();
+    private volatile RateLimitObserver rateLimitObserver;
+
+    void setRateLimitObserver(RateLimitObserver observer) {
+        this.rateLimitObserver = observer;
+    }
+
+    static long monotonicNowMs() {
+        return System.nanoTime() / 1_000_000L;
+    }
 
     public DandanplayProvider() {
         this(DEFAULT_SERVER_URLS, "", "", DEFAULT_MAX_CONCURRENCY, DEFAULT_MIN_REQUEST_INTERVAL_MS);
@@ -1002,26 +1015,36 @@ public final class DandanplayProvider implements DanmuProvider {
     // HTTP Transport, Rate Limiting, Optional Signature & Cancellation
     // -------------------------------------------------------------------------
 
+    /**
+     * Enforces per-origin monotonic rate limiting ({@link #minRequestIntervalMs} minimum spacing
+     * between consecutive dispatch acquisitions AND post-response cooldown floor, plus full HTTP
+     * 429 {@code Retry-After} backoff). Uses monotonic {@link System#nanoTime()} to avoid
+     * wall-clock skew.
+     */
     private void awaitDomainRateLimit(String rateLimitKey, CancellationToken token)
             throws IOException {
         if (minRequestIntervalMs <= 0L && !domainNextAllowedMs.containsKey(rateLimitKey)) return;
         while (true) {
             if (token != null) token.throwIfCancelled();
-            long now = System.currentTimeMillis();
+            long now = monotonicNowMs();
             Long allowedAt = domainNextAllowedMs.get(rateLimitKey);
-            long target = allowedAt == null ? 0L : allowedAt.longValue();
-            if (now >= target) {
+            long remainingMs = allowedAt == null ? 0L : (allowedAt.longValue() - now);
+            if (remainingMs <= 0L) {
                 long next = now + minRequestIntervalMs;
-                if (allowedAt == null) {
-                    if (domainNextAllowedMs.putIfAbsent(rateLimitKey, next) == null) {
-                        return;
+                boolean acquired =
+                        allowedAt == null
+                                ? domainNextAllowedMs.putIfAbsent(rateLimitKey, next) == null
+                                : domainNextAllowedMs.replace(rateLimitKey, allowedAt, next);
+                if (acquired) {
+                    RateLimitObserver observer = rateLimitObserver;
+                    if (observer != null) {
+                        observer.onDispatchAcquired(rateLimitKey, now);
                     }
-                } else if (domainNextAllowedMs.replace(rateLimitKey, allowedAt, next)) {
                     return;
                 }
                 continue;
             }
-            long sleepMs = Math.min(target - now, 50L);
+            long sleepMs = Math.min(remainingMs, 50L);
             try {
                 Thread.sleep(Math.max(1L, sleepMs));
             } catch (InterruptedException e) {
@@ -1031,18 +1054,23 @@ public final class DandanplayProvider implements DanmuProvider {
         }
     }
 
-    private void recordBackoff(String rateLimitKey, long retryAfterMs) {
-        long deadline = System.currentTimeMillis() + Math.max(minRequestIntervalMs, retryAfterMs);
+    private void advanceDomainNextAllowed(String rateLimitKey, long delayMs) {
+        if (delayMs <= 0L) return;
+        long deadline = monotonicNowMs() + delayMs;
         while (true) {
             Long prev = domainNextAllowedMs.get(rateLimitKey);
             if (prev == null) {
                 if (domainNextAllowedMs.putIfAbsent(rateLimitKey, deadline) == null) return;
-            } else if (prev.longValue() >= deadline) {
+            } else if (prev.longValue() - deadline >= 0L) {
                 return;
             } else if (domainNextAllowedMs.replace(rateLimitKey, prev, deadline)) {
                 return;
             }
         }
+    }
+
+    private void recordBackoff(String rateLimitKey, long retryAfterMs) {
+        advanceDomainNextAllowed(rateLimitKey, Math.max(minRequestIntervalMs, retryAfterMs));
     }
 
     private String executeHttp(
@@ -1144,6 +1172,12 @@ public final class DandanplayProvider implements DanmuProvider {
                 throw e;
             } finally {
                 if (token != null) token.removeCancelHook(cancelHook);
+                // Refresh post-response monotonic cooldown floor so slow cold-start TCP/TLS
+                // handshakes on request N cannot cause request N+1 to burst onto the upstream
+                // server below minRequestIntervalMs (never shortens an active 429 Retry-After).
+                if (minRequestIntervalMs > 0L && (token == null || !token.isCancelled())) {
+                    advanceDomainNextAllowed(originKey, minRequestIntervalMs);
+                }
                 conn.disconnect();
             }
         }

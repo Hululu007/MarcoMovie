@@ -347,6 +347,44 @@ final class HistoryResumeMatcher {
         return areTitlesCompatibleForEpKeyMatch(bmEp, candName, lineSize);
     }
 
+    /**
+     * Checks whether {@code target} is the unique compatible episode-number (and season, when
+     * specified) match for {@code bmEp} within {@code line}. Rejects ambiguous duplicate episode
+     * numbers such as two seasons both labeled "第2集" on one line or two un-fingerprinted proxy
+     * resources sharing "第2集".
+     */
+    private static boolean isUniqueEpisodeNumberMatch(
+            Cms.Line line, Cms.Episode target, String bmEp) {
+        if (line == null || line.episodes == null || target == null || bmEp == null) return false;
+        int bmEpNum = extractEpisodeNumber(bmEp);
+        if (bmEpNum <= 0) return false;
+        String targetName = target.name == null ? "" : target.name.trim();
+        if (targetName.isEmpty()) return false;
+        int lineSize = line.episodes.size();
+        if (hasEpisodeIdentityConflict(bmEp, targetName, lineSize)) return false;
+        if (extractEpisodeNumber(targetName) != bmEpNum) return false;
+
+        int bmSeason = extractSeasonNumber(bmEp);
+        int targetSeason = extractSeasonNumber(targetName);
+        int compatibleCount = 0;
+        int exactSeasonCount = 0;
+        for (Cms.Episode ep : line.episodes) {
+            if (ep == null) continue;
+            String epName = ep.name == null ? "" : ep.name.trim();
+            if (epName.isEmpty()) continue;
+            if (hasEpisodeIdentityConflict(bmEp, epName, lineSize)) continue;
+            if (extractEpisodeNumber(epName) != bmEpNum) continue;
+            compatibleCount++;
+            if (bmSeason > 0 && extractSeasonNumber(epName) == bmSeason) {
+                exactSeasonCount++;
+            }
+        }
+        if (bmSeason > 0 && exactSeasonCount > 0) {
+            return exactSeasonCount == 1 && targetSeason == bmSeason;
+        }
+        return compatibleCount == 1;
+    }
+
     static boolean matchesBookmarkSelection(
             Cms.Line line, Cms.Episode ep, int epIdx, WatchHistory.Entry bookmark) {
         if (line == null || ep == null || bookmark == null) return false;
@@ -377,22 +415,21 @@ final class HistoryResumeMatcher {
             return false;
         }
         if (!bmEp.isEmpty() && !candName.isEmpty()) {
+            // Disambiguation order after unique confirmed episodeKey:
+            // 1. Unique exact title match (rejects duplicate generic or duplicate numbered names)
+            if (candName.equalsIgnoreCase(bmEp) && !hasDuplicateEpisodeName(line, candName)) {
+                return true;
+            }
+            // 2. Unique compatible episode-number (and season) match within the line
+            if (isUniqueEpisodeNumberMatch(line, ep, bmEp)) {
+                return true;
+            }
             int bmEpNum = extractEpisodeNumber(bmEp);
             int candEpNum = extractEpisodeNumber(candName);
-            if (bmEpNum > 0 && candEpNum > 0) {
-                return true;
-            }
-            if ((bmEpNum > 0) != (candEpNum > 0)) {
+            if (bmEpNum > 0 || candEpNum > 0) {
                 return false;
             }
-            if (candName.equalsIgnoreCase(bmEp)) {
-                // Duplicate generic names (e.g. two proxy items both titled "播放") CANNOT confirm
-                // episode identity without a unique episodeKey match -> start from 0.
-                if (hasDuplicateEpisodeName(line, candName)) {
-                    return false;
-                }
-                return true;
-            }
+            // 3. Single-item movie title match
             if (lineSize == 1
                     && looksLikeMovieEpisode(bmEp)
                     && looksLikeMovieEpisode(candName)
@@ -419,9 +456,9 @@ final class HistoryResumeMatcher {
 
     /**
      * Resolves resume position for cross-source failover: carries progress ONLY when the matched
-     * episode on the alternative source has confirmed identity with {@code bookmark} (unique
-     * episodeKey, same explicit episode number/season, unique exact title/part, or both single-item
-     * movies). Never transfers progress onto a different or unconfirmed episode.
+     * episode on the alternative source has confirmed unique identity with {@code bookmark} (unique
+     * episodeKey, unique exact title/part, unique episode number/season, or both single-item
+     * movies). Never transfers progress onto a different or ambiguous duplicate episode.
      */
     static int resolveFailoverResumePositionMs(EpisodeMatch match, WatchHistory.Entry bookmark) {
         if (match == null || match.line == null || match.episode == null || bookmark == null) {
@@ -437,17 +474,23 @@ final class HistoryResumeMatcher {
         if (isConfirmedEpKeyMatch(match.line, match.episode, bmEp, bmEpKey)) {
             return bookmark.resume();
         }
+        String candEpKey = stableEpisodeKey(match.episode.url);
+        boolean keysPresentAndDiffer =
+                !bmEpKey.isEmpty() && !candEpKey.isEmpty() && !bmEpKey.equals(candEpKey);
+        if (keysPresentAndDiffer && lineHasAnotherEpKeyMatch(match.line, bmEpKey, match.episode)) {
+            return 0;
+        }
         if (!bmEp.isEmpty() && !candName.isEmpty()) {
-            int bmEpNum = extractEpisodeNumber(bmEp);
-            int candEpNum = extractEpisodeNumber(candName);
-            if (bmEpNum > 0 && candEpNum > 0) {
-                return bookmark.resume();
-            }
-            if ((bmEpNum > 0) != (candEpNum > 0)) {
-                return 0;
-            }
             if (candName.equalsIgnoreCase(bmEp) && !hasDuplicateEpisodeName(match.line, candName)) {
                 return bookmark.resume();
+            }
+            if (isUniqueEpisodeNumberMatch(match.line, match.episode, bmEp)) {
+                return bookmark.resume();
+            }
+            int bmEpNum = extractEpisodeNumber(bmEp);
+            int candEpNum = extractEpisodeNumber(candName);
+            if (bmEpNum > 0 || candEpNum > 0) {
+                return 0;
             }
             if (lineSize == 1
                     && looksLikeMovieEpisode(bmEp)
@@ -493,13 +536,12 @@ final class HistoryResumeMatcher {
                     }
                 }
             }
-            int bmEpNum = extractEpisodeNumber(bmEp);
-            if (bmEpNum > 0) {
+            if (extractEpisodeNumber(bmEp) > 0) {
                 for (int i = 0; i < lineSize; i++) {
                     Cms.Episode ep = line.episodes.get(i);
-                    if (ep == null || ep.name == null) continue;
-                    if (hasEpisodeIdentityConflict(bmEp, ep.name, lineSize)) continue;
-                    if (extractEpisodeNumber(ep.name) == bmEpNum) return i;
+                    if (isUniqueEpisodeNumberMatch(line, ep, bmEp)) {
+                        return i;
+                    }
                 }
             }
         }
@@ -590,21 +632,25 @@ final class HistoryResumeMatcher {
 
                 // 0. Confirmed unique non-sensitive canonical episodeKey match (requires uniqueness
                 //    in line and title compatibility so collisions never cross-inherit progress)
+                boolean hasOtherEpKeyMatch =
+                        !bmEpKey.isEmpty()
+                                && !candEpKey.isEmpty()
+                                && !bmEpKey.equals(candEpKey)
+                                && lineHasAnotherEpKeyMatch(line, bmEpKey, ep);
                 if (!driveConflict && isConfirmedEpKeyMatch(line, ep, bmEp, bmEpKey)) {
                     score = 220 + lineBonus + (bmIndex == i ? 10 : 0);
                 } else if (!identityConflict
+                        && !hasOtherEpKeyMatch
                         && !bmEp.isEmpty()
                         && bmEp.equalsIgnoreCase(candName)
-                        && !hasDuplicateEpisodeName(line, candName)
-                        && !(!bmEpKey.isEmpty()
-                                && !candEpKey.isEmpty()
-                                && !bmEpKey.equals(candEpKey)
-                                && lineHasAnotherEpKeyMatch(line, bmEpKey, ep))) {
+                        && !hasDuplicateEpisodeName(line, candName)) {
                     // 1. Unique exact episode name match
                     score = 140 + lineBonus + (sameLine && bmIndex == i ? 10 : 0);
-                } else if (!identityConflict) {
-                    // 2. Normalized episode number match (e.g. 第05集 <-> EP05 <-> S01E05 <-> 05)
-                    if (bmEpNum > 0 && candNum == bmEpNum && bmTrailer == candTrailer) {
+                } else if (!identityConflict && !hasOtherEpKeyMatch) {
+                    // 2. Unique normalized episode number (and season) match within the line
+                    //    (e.g. 第05集 <-> EP05 <-> S01E05 <-> 05; rejects duplicate "第2集" across
+                    //    multi-season single-line dumps or duplicate proxy items)
+                    if (isUniqueEpisodeNumberMatch(line, ep, bmEp) && bmTrailer == candTrailer) {
                         score = 100 + lineBonus;
                         int candSeason = extractSeasonNumber(candName);
                         if (bmSeason > 0 && candSeason > 0) {

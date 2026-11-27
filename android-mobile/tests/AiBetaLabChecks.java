@@ -2398,6 +2398,142 @@ public final class AiBetaLabChecks {
                             && beforeFailedSwap != null
                             && beforeFailedSwap.equals(afterFailedSwap),
                     "R5 P2-1: 4 writers x 16 commits (64/64) + concurrent readers observe 0 failures / 0 partial reads & failed swap preserves old value");
+
+            // 10. Round-8 P2-1: Plain online subtitle and AI derived bilingual/Chinese output use
+            //     strictly isolated cache files (online_subs_v1 vs online_subs_ai_v1). Original
+            //     bytes stay untouched, Media3 retains BOTH plain & AI tracks (switchable), MPV
+            //     emits 0 sub-remove on plain SID 5 on first AI mount, and subsequent AI mounts
+            //     replace ONLY the prior app-AI track while preserving plain + same-named source!
+            File subCacheRoot = Files.createTempDirectory("marco_r8_sub_isolation").toFile();
+            try {
+                File origPlainFile =
+                        OnlineSubtitleDanmakuService.resolveOriginalSubtitleCacheFile(
+                                subCacheRoot, "episode_01_en.srt");
+                File aiBiFile =
+                        OnlineSubtitleDanmakuService.resolveAiDerivedSubtitleCacheFile(
+                                subCacheRoot, "episode_01_en.srt", true);
+                File aiZhFile =
+                        OnlineSubtitleDanmakuService.resolveAiDerivedSubtitleCacheFile(
+                                subCacheRoot, "episode_01_en.srt", false);
+                File guardedRedirect =
+                        AiSubtitleTranslator.resolveSafeDerivedTargetFile(origPlainFile, true);
+
+                String plainSrtOriginal =
+                        "1\n00:00:01,000 --> 00:00:04,000\nOriginal English line one\n\n";
+                String aiBiSrt =
+                        "1\n00:00:01,000 --> 00:00:04,000\n中文第一句\nOriginal English line one\n\n";
+                String aiZhSrt = "1\n00:00:01,000 --> 00:00:04,000\n中文第一句\n\n";
+                Files.writeString(origPlainFile.toPath(), plainSrtOriginal, StandardCharsets.UTF_8);
+                Files.writeString(aiBiFile.toPath(), aiBiSrt, StandardCharsets.UTF_8);
+                Files.writeString(aiZhFile.toPath(), aiZhSrt, StandardCharsets.UTF_8);
+                String origAfterAiWrites =
+                        Files.readString(origPlainFile.toPath(), StandardCharsets.UTF_8);
+
+                String origUri = origPlainFile.toURI().toString();
+                String aiBiUri = aiBiFile.toURI().toString();
+                String aiZhUri = aiZhFile.toURI().toString();
+
+                // Media3: plain online track + same-named source track + 1st AI mount -> 3 tracks;
+                // 2nd AI mount (bi -> zh) replaces ONLY prior app-AI track -> still 3 tracks!
+                JSONObject m3Opts = new JSONObject();
+                MoviePlayer.upsertSubtitleTrackJson(
+                        m3Opts,
+                        origUri,
+                        "English (ASSRT)",
+                        "application/x-subrip",
+                        "marco_ext_sub_1");
+                MoviePlayer.upsertSubtitleTrackJson(
+                        m3Opts,
+                        "https://src.example/provider_ai.srt",
+                        AiSubtitleTranslator.AI_TRACK_NAME,
+                        "application/x-subrip",
+                        "");
+                MoviePlayer.upsertSubtitleTrackJson(
+                        m3Opts,
+                        aiBiUri,
+                        AiSubtitleTranslator.AI_TRACK_NAME,
+                        "application/x-subrip",
+                        "marco_ai_sub_2");
+                JSONArray m3AfterFirstAi = m3Opts.getJSONArray("subtitles");
+                boolean m3HasOrigAndAi =
+                        m3AfterFirstAi.length() == 3
+                                && origUri.equals(m3AfterFirstAi.getJSONObject(0).getString("url"))
+                                && "https://src.example/provider_ai.srt"
+                                        .equals(m3AfterFirstAi.getJSONObject(1).getString("url"))
+                                && aiBiUri.equals(m3AfterFirstAi.getJSONObject(2).getString("url"));
+
+                MoviePlayer.upsertSubtitleTrackJson(
+                        m3Opts,
+                        aiZhUri,
+                        AiSubtitleTranslator.AI_TRACK_NAME,
+                        "application/x-subrip",
+                        "marco_ai_sub_3");
+                JSONArray m3AfterSecondAi = m3Opts.getJSONArray("subtitles");
+                boolean m3SecondAiOnlyReplacedAppAi =
+                        m3AfterSecondAi.length() == 3
+                                && origUri.equals(m3AfterSecondAi.getJSONObject(0).getString("url"))
+                                && "https://src.example/provider_ai.srt"
+                                        .equals(m3AfterSecondAi.getJSONObject(1).getString("url"))
+                                && aiZhUri.equals(
+                                        m3AfterSecondAi.getJSONObject(2).getString("url"));
+
+                // MPV: plain online track at SID 5 + same-named different-source track at SID 6
+                // First AI mount -> 0 sub-remove on SID 5 or SID 6!
+                // Second AI mount (with priorAiSid=7) -> sub-remove ONLY SID 7!
+                List<JSONObject> mpvSubs = new ArrayList<>();
+                mpvSubs.add(
+                        new JSONObject()
+                                .put("id", 5)
+                                .put("type", "sub")
+                                .put("external", true)
+                                .put("external-filename", origUri)
+                                .put("title", "English (ASSRT)"));
+                mpvSubs.add(
+                        new JSONObject()
+                                .put("id", 6)
+                                .put("type", "sub")
+                                .put("external", true)
+                                .put("external-filename", "https://src.example/provider_ai.srt")
+                                .put("title", AiSubtitleTranslator.AI_TRACK_NAME));
+                List<String[]> mpvFirstAiCmds =
+                        MpvPlayer.planExternalSubtitleUpsertCommands(
+                                mpvSubs, aiBiUri, AiSubtitleTranslator.AI_TRACK_NAME, -1, "", true);
+                mpvSubs.add(
+                        new JSONObject()
+                                .put("id", 7)
+                                .put("type", "sub")
+                                .put("external", true)
+                                .put("external-filename", aiBiUri)
+                                .put("title", AiSubtitleTranslator.AI_TRACK_NAME));
+                List<String[]> mpvSecondAiCmds =
+                        MpvPlayer.planExternalSubtitleUpsertCommands(
+                                mpvSubs,
+                                aiZhUri,
+                                AiSubtitleTranslator.AI_TRACK_NAME,
+                                7,
+                                aiBiUri,
+                                true);
+
+                check(
+                        !origPlainFile.getCanonicalPath().equals(aiBiFile.getCanonicalPath())
+                                && guardedRedirect
+                                        .getCanonicalPath()
+                                        .equals(aiBiFile.getCanonicalPath())
+                                && plainSrtOriginal.equals(origAfterAiWrites)
+                                && m3HasOrigAndAi
+                                && m3SecondAiOnlyReplacedAppAi
+                                && mpvFirstAiCmds.size() == 1
+                                && "sub-add".equals(mpvFirstAiCmds.get(0)[0])
+                                && aiBiUri.equals(mpvFirstAiCmds.get(0)[1])
+                                && mpvSecondAiCmds.size() == 2
+                                && "sub-remove".equals(mpvSecondAiCmds.get(0)[0])
+                                && "7".equals(mpvSecondAiCmds.get(0)[1])
+                                && "sub-add".equals(mpvSecondAiCmds.get(1)[0])
+                                && aiZhUri.equals(mpvSecondAiCmds.get(1)[1]),
+                        "R8 P2-1: plain online subtitle and AI derived output use separate cache files; original bytes untouched; Media3 keeps both switchable; MPV never sub-removes plain SID 5 or same-named source SID 6");
+            } finally {
+                deleteRecursive(subCacheRoot);
+            }
         } finally {
             File[] files = tmpCacheDir.listFiles();
             if (files != null) for (File f : files) f.delete();
@@ -2720,6 +2856,17 @@ public final class AiBetaLabChecks {
                         && authSrc.contains("setOnUserDismissInitiated")
                         && sheetSrc.contains("dismissByUser()"),
                 "R4 P2-3/P1-3 static: zero residual Kimi/subscription claims in Auth Center UI, 15s foreground wait prompt aligned, MobileBottomSheet immediate user-dismiss wired");
+    }
+
+    private static void deleteRecursive(File f) {
+        if (f == null || !f.exists()) return;
+        if (f.isDirectory()) {
+            File[] children = f.listFiles();
+            if (children != null) {
+                for (File c : children) deleteRecursive(c);
+            }
+        }
+        f.delete();
     }
 
     private static boolean containsEmoji(String text) {

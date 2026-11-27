@@ -417,6 +417,48 @@ final class OnlineSubtitleDanmakuService {
         return true;
     }
 
+    static final String ORIGINAL_SUBTITLE_CACHE_DIR = "online_subs_v1";
+    static final String AI_DERIVED_SUBTITLE_CACHE_DIR = "online_subs_ai_v1";
+
+    static String sanitizeSubtitleCacheName(String fileName) {
+        String base =
+                fileName == null || fileName.trim().isEmpty() ? "subtitle.srt" : fileName.trim();
+        String safe = base.replaceAll("[^A-Za-z0-9._\\-\\u4e00-\\u9fa5]", "_");
+        return safe.isEmpty() ? "subtitle.srt" : safe;
+    }
+
+    /**
+     * Resolves the cache file for a downloaded plain/original online subtitle. Original subtitle
+     * files live under {@code online_subs_v1/} and are never overwritten by AI-derived outputs.
+     */
+    static File resolveOriginalSubtitleCacheFile(File cacheDir, String fileName) {
+        File subDir = new File(cacheDir, ORIGINAL_SUBTITLE_CACHE_DIR);
+        if (!subDir.exists()) subDir.mkdirs();
+        return new File(subDir, sanitizeSubtitleCacheName(fileName));
+    }
+
+    /**
+     * Resolves a dedicated cache file for an AI-translated derived subtitle under {@code
+     * online_subs_ai_v1/}, strictly separate from {@link #resolveOriginalSubtitleCacheFile} so
+     * generating AI bilingual/Chinese output preserves original subtitle bytes and track switching
+     * across Media3, MPV, and SystemPlayer.
+     */
+    static File resolveAiDerivedSubtitleCacheFile(
+            File cacheDir, String fileName, boolean bilingual) {
+        File aiDir = new File(cacheDir, AI_DERIVED_SUBTITLE_CACHE_DIR);
+        if (!aiDir.exists()) aiDir.mkdirs();
+        String safe = sanitizeSubtitleCacheName(fileName);
+        String stem = safe;
+        String ext = ".srt";
+        int dot = safe.lastIndexOf('.');
+        if (dot > 0) {
+            stem = safe.substring(0, dot);
+            ext = safe.substring(dot);
+        }
+        String suffix = bilingual ? "__marco_ai_bi" : "__marco_ai_zh";
+        return new File(aiDir, stem + suffix + ext);
+    }
+
     /** Downloads a selected online subtitle candidate, optionally AI-translates it, and attaches. */
     static void downloadAndAttachSubtitleAsync(
             final MainActivity a,
@@ -544,11 +586,8 @@ final class OnlineSubtitleDanmakuService {
 
                         if (!isSelectionStillActive(selection, stateProbe)) return;
 
-                        File subDir = new File(a.getCacheDir(), "online_subs_v1");
-                        if (!subDir.exists()) subDir.mkdirs();
-                        String safeName =
-                                fileName.replaceAll("[^A-Za-z0-9._\\-\\u4e00-\\u9fa5]", "_");
-                        final File outFile = new File(subDir, safeName);
+                        final File outFile =
+                                resolveOriginalSubtitleCacheFile(a.getCacheDir(), fileName);
                         try (OutputStream out = new FileOutputStream(outFile)) {
                             out.write(bytes);
                         }
@@ -559,7 +598,9 @@ final class OnlineSubtitleDanmakuService {
                                 bilingualAiTranslate
                                         && AiBetaGate.isUnlocked(a)
                                         && AiAssistantService.isConfigured(a)
-                                        && safeName.toLowerCase(Locale.ROOT).endsWith(".srt");
+                                        && outFile.getName()
+                                                .toLowerCase(Locale.ROOT)
+                                                .endsWith(".srt");
                         if (runAiBilingual) {
                             String showTitle =
                                     a.playbackControls != null
@@ -571,11 +612,16 @@ final class OnlineSubtitleDanmakuService {
                                     a.player != null && a.prepared
                                             ? Math.max(0L, a.player.getCurrentPosition())
                                             : 0L;
+                            boolean bilingualPref =
+                                    a.mobilePrefs().getBoolean(Prefs.SUBTITLE_BILINGUAL, true);
+                            final File aiDerivedFile =
+                                    resolveAiDerivedSubtitleCacheFile(
+                                            a.getCacheDir(), fileName, bilingualPref);
                             AiSubtitleTranslator.translateAndMountFullEpisodeAsync(
                                     a,
                                     showTitle,
                                     new String(bytes, "UTF-8"),
-                                    outFile,
+                                    aiDerivedFile,
                                     posMs,
                                     null,
                                     selection.sessionId,

@@ -55,6 +55,7 @@ final class WatchHistory {
         e.driveKey = src.driveKey;
         e.episode = src.episode;
         e.episodeKey = src.episodeKey;
+        e.episodeMediaId = src.episodeMediaId;
         e.episodeUrl = src.episodeUrl;
         e.index = src.index;
         e.position = src.position;
@@ -631,6 +632,33 @@ final class WatchHistory {
     }
 
     /**
+     * Validates a cross-platform stable non-streamable episode media ID (such as Windows/Flutter
+     * 0.7.3's {@code mid:v1:<sha256>} {@code episodeMediaId}) while rejecting raw URLs, signed
+     * query strings, or local proxy leases so credentials can never be smuggled through it.
+     */
+    static String sanitizeEpisodeMediaId(String raw) {
+        if (raw == null) return "";
+        String trimmed = raw.trim();
+        if (trimmed.isEmpty() || trimmed.length() > 160) return "";
+        if (isSensitiveOrEphemeralUrl(trimmed)) return "";
+        String lower = trimmed.toLowerCase(Locale.ROOT);
+        if (lower.contains("://")
+                || lower.indexOf('?') >= 0
+                || lower.indexOf('&') >= 0
+                || lower.indexOf('\n') >= 0
+                || lower.indexOf('\r') >= 0
+                || lower.contains("token=")
+                || lower.contains("sign=")
+                || lower.contains("auth_key=")
+                || lower.contains("password=")
+                || lower.contains("127.0.0.1")
+                || lower.contains("localhost")) {
+            return "";
+        }
+        return trimmed;
+    }
+
+    /**
      * Losslessly strips legacy sensitive playback URL fields from a raw history array without
      * truncating entries (e.g. > 60), dropping legacy {@code siteKey}/{@code vodId} schemas,
      * reordering entries, or removing cross-platform non-sensitive extension fields such as Windows
@@ -656,6 +684,16 @@ final class WatchHistory {
                 if (isSensitiveHistoryUrlKey(k)) {
                     if (legacyUrl.isEmpty()) {
                         legacyUrl = Cms.optSafeString(src, k);
+                    }
+                    continue;
+                }
+                if ("episodeMediaId".equals(k)) {
+                    String safeMediaId = sanitizeEpisodeMediaId(Cms.optSafeString(src, k));
+                    if (!safeMediaId.isEmpty()) {
+                        try {
+                            copy.put(k, safeMediaId);
+                        } catch (JSONException ignored) {
+                        }
                     }
                     continue;
                 }
@@ -743,7 +781,17 @@ final class WatchHistory {
     }
 
     static final class Entry {
-        String site, id, title, poster, line, lineId, driveKey, episode, episodeKey, episodeUrl;
+        String site,
+                id,
+                title,
+                poster,
+                line,
+                lineId,
+                driveKey,
+                episode,
+                episodeKey,
+                episodeMediaId,
+                episodeUrl;
         int index, position, duration;
         long updated;
 
@@ -788,6 +836,10 @@ final class WatchHistory {
             if (!effEpKey.isEmpty()) {
                 obj.put("episodeKey", effEpKey);
             }
+            String effEpMediaId = sanitizeEpisodeMediaId(episodeMediaId);
+            if (!effEpMediaId.isEmpty()) {
+                obj.put("episodeMediaId", effEpMediaId);
+            }
             return obj;
         }
 
@@ -822,6 +874,7 @@ final class WatchHistory {
                 e.driveKey = Cms.optSafeString(o, "driveKey");
                 e.episode = Cms.optSafeString(o, "episode");
                 e.episodeKey = Cms.optSafeString(o, "episodeKey");
+                e.episodeMediaId = sanitizeEpisodeMediaId(Cms.optSafeString(o, "episodeMediaId"));
                 String legacyUrl = Cms.optSafeString(o, "episodeUrl");
                 if (e.episodeKey.isEmpty() && !legacyUrl.isEmpty()) {
                     e.episodeKey = stableEpisodeKey(legacyUrl);
