@@ -841,6 +841,7 @@ class IosCastingRemoteStage extends StatefulWidget {
   final CastController controller;
   final String episodeLabel;
   final String? posterUrl;
+  final bool isPrivate;
   final VoidCallback onBack;
   final VoidCallback onSwitchDevice;
   final VoidCallback onExitCast;
@@ -856,6 +857,7 @@ class IosCastingRemoteStage extends StatefulWidget {
     required this.controller,
     required this.episodeLabel,
     this.posterUrl,
+    this.isPrivate = false,
     required this.onBack,
     required this.onSwitchDevice,
     required this.onExitCast,
@@ -959,6 +961,7 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
                             imageFilter: ImageFilter.blur(sigmaX: 28, sigmaY: 28),
                             child: PosterImage(
                               url: poster,
+                              isPrivate: widget.isPrivate,
                               fit: BoxFit.cover,
                               placeholder: const SizedBox.shrink(),
                             ),

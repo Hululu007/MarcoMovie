@@ -1959,6 +1959,127 @@ class DeploymentChecks(unittest.TestCase):
         pin_appear_idx = lg_swift.find('cardShadowView.transform = UIAccessibility.isReduceMotionEnabled')
         self.assertNotEqual(pin_appear_idx, -1)
 
+    def test_ios_0711_version_and_ipa_info_plist_validation_and_workflow_flags(self):
+        import json
+
+        flutter_dir = Path(__file__).resolve().parent
+        repo_root = flutter_dir.parent
+        versions = json.loads((flutter_dir / 'edition-versions.json').read_text(encoding='utf-8'))
+        ios_ver = versions['ios']
+        self.assertEqual(ios_ver['versionName'], '0.7.11')
+        self.assertEqual(ios_ver['buildNumber'], 104)
+
+        # validate_app accepts matching CFBundleShortVersionString + CFBundleVersion
+        # and rejects any mismatch in either version or build number.
+        (self.app / 'Runner').write_bytes(self.binary(0x0e0000))
+        (self.app / 'Info.plist').write_bytes(
+            plistlib.dumps(
+                {
+                    'MinimumOSVersion': '14.0',
+                    'CFBundleShortVersionString': '0.7.11',
+                    'CFBundleVersion': '104',
+                }
+            )
+        )
+        validate_app(self.app, max_min_ios='14.0', expected_version='0.7.11', expected_build='104')
+
+        with self.assertRaises(ValueError):
+            validate_app(self.app, max_min_ios='14.0', expected_version='0.7.10', expected_build='104')
+        with self.assertRaises(ValueError):
+            validate_app(self.app, max_min_ios='14.0', expected_version='0.7.11', expected_build='103')
+
+        # Both standard iOS and compat iOS14 workflow jobs must pass
+        # --expected-version and --expected-build to patch_ios_ipa.py.
+        wf = (repo_root / '.github' / 'workflows' / 'build-multiplatform.yml').read_text(encoding='utf-8')
+        self.assertGreaterEqual(wf.count('patch_ios_ipa.py'), 2)
+        self.assertGreaterEqual(wf.count('--expected-version'), 2)
+        self.assertGreaterEqual(wf.count('--expected-build'), 2)
+
+        # Native AVPlayer legible subtitle delegate + Liquid Glass safe-area popover checks.
+        av_swift = (flutter_dir / 'ios_native' / 'MarcoAvPlayerEngine.swift').read_text(encoding='utf-8')
+        lg_swift = (flutter_dir / 'ios_native' / 'MarcoLiquidGlass.swift').read_text(encoding='utf-8')
+        self.assertEqual(av_swift.count('{'), av_swift.count('}'))
+        self.assertEqual(lg_swift.count('{'), lg_swift.count('}'))
+        # P1-9 & R3-7: exact AVPlayerItemOutputPushDelegate signature, media handoff
+        # native-subtitle restoration, bitmap track protection, and PiP coordination.
+        self.assertIn('AVPlayerItemLegibleOutputPushDelegate', av_swift)
+        self.assertIn('AVPlayerItemLegibleOutput', av_swift)
+        self.assertIn('func outputSequenceWasFlushed(_ output: AVPlayerItemOutput)', av_swift)
+        self.assertNotIn('func outputSequenceWasFlushed(_ output: AVPlayerItemLegibleOutput)', av_swift)
+        self.assertIn('case "setSuppressNativeSubtitleRendering":', av_swift)
+        self.assertIn('private func applyEffectiveLegibleSuppression()', av_swift)
+        self.assertIn('suppressNativeSubtitleRenderingRequested', av_swift)
+        self.assertIn('suppressNativeSubtitleAllowNonText', av_swift)
+        self.assertIn('&& !isPipActiveOrStarting', av_swift)
+        self.assertIn('(suppressNativeSubtitleAllowNonText || liveTextTrackReadyToSuppress)', av_swift)
+        self.assertIn('suppressNativeSubtitleRendering: Bool = false', av_swift)
+        self.assertIn('suppressNativeSubtitleAllowNonText: Bool = false', av_swift)
+        self.assertIn('private enum LegibleTrackFormatKind: String', av_swift)
+        self.assertIn('private func classifyLegibleOption(', av_swift)
+        self.assertIn('option.mediaSubTypes', av_swift)
+        self.assertIn('if sawBitmap && !sawText && !sawUnknown', av_swift)
+        self.assertIn('entry["subtitleFormat"] = kind.rawValue', av_swift)
+        self.assertIn('entry["isBitmap"] = (kind == .bitmap)', av_swift)
+        self.assertIn('entry["isTextExtractable"] = NSNull()', av_swift)
+        stop_idx = av_swift.find('private func stopPlayback()')
+        self.assertNotEqual(stop_idx, -1)
+        stop_body = av_swift[stop_idx : stop_idx + 750]
+        self.assertIn('suppressNativeSubtitleRenderingRequested = false', stop_body)
+        self.assertIn('suppressNativeSubtitleAllowNonText = false', stop_body)
+        self.assertIn('legibleOutput?.suppressesPlayerRendering = false', stop_body)
+        self.assertIn('self.clearLegibleSubtitleState(forceEmit: true)', av_swift)
+        self.assertIn('"type": "subtitleCue"', av_swift)
+
+        # R3-1: MarcoNativeOptionSheetController.init must be `private init(` so
+        # private nested `OptionSection` is never exposed on a fileprivate/internal init.
+        sheet_cls_idx = lg_swift.find('private final class MarcoNativeOptionSheetController:')
+        self.assertNotEqual(sheet_cls_idx, -1)
+        sheet_cls_end = lg_swift.find('// MARK: - Native iOS 26 Liquid Glass Filter Sheet', sheet_cls_idx)
+        sheet_cls_body = lg_swift[sheet_cls_idx:sheet_cls_end]
+        self.assertIn('private struct OptionSection', sheet_cls_body)
+        self.assertIn('private init(\n    args: [String: Any],\n    parsedSections: [OptionSection]? = nil,', sheet_cls_body)
+        self.assertNotIn('\n  init(\n    args: [String: Any],\n    parsedSections: [OptionSection]? = nil,', sheet_cls_body)
+
+        # P2-15, R3-12 & R4-8: compute final popover/sheet presentation BEFORE
+        # instantiating controller, share one immutable coordinate baseline
+        # (`initialAnchorHostBounds` + `remappedAnchorRect`) across transition
+        # animation and completion callbacks (wide -> narrow -> wide), and
+        # always pass ascending sheet.detents ([.medium(), .large()]).
+        self.assertIn('safeAreaLayoutGuide.layoutFrame', sheet_cls_body)
+        self.assertIn('popover.canOverlapSourceViewRect = false', lg_swift)
+        self.assertIn('useSheetFallback: chosenArrow.isEmpty', lg_swift)
+        self.assertIn('isPopover: !useSheetFallback', lg_swift)
+        self.assertNotIn('[.large(), .medium()]', sheet_cls_body)
+        self.assertIn('sheet.detents = [.medium(), .large()]', sheet_cls_body)
+        self.assertIn('private let initialAnchorHostBounds: CGRect', sheet_cls_body)
+        self.assertIn('private func resolvedHostMetrics(', sheet_cls_body)
+        self.assertIn('private func remappedAnchorRect(for targetHostBounds: CGRect) -> CGRect?', sheet_cls_body)
+        self.assertIn('private func transitionPopoverToSheetFallbackIfNeeded()', sheet_cls_body)
+        self.assertIn('private func transitionSheetBackToPopoverIfNeeded()', sheet_cls_body)
+        present_idx = lg_swift.find('static func present(args: [String: Any], completion: @escaping FlutterResult)')
+        self.assertNotEqual(present_idx, -1)
+        present_body = lg_swift[present_idx : present_idx + 1200]
+        self.assertLess(
+            present_body.find('computePopoverLayout('),
+            present_body.find('MarcoNativeOptionSheetController('),
+        )
+        transition_idx = lg_swift.find('override func viewWillTransition(')
+        self.assertNotEqual(transition_idx, -1)
+        transition_body = lg_swift[transition_idx : transition_idx + 6000]
+        self.assertIn('self.resolvedHostMetrics(', transition_body)
+        self.assertIn('self.remappedAnchorRect(for: nextHostBounds)', transition_body)
+        self.assertIn('popover.sourceRect = plan.sourceRect', transition_body)
+        self.assertIn('self.transitionPopoverToSheetFallbackIfNeeded()', transition_body)
+        self.assertIn('self.transitionSheetBackToPopoverIfNeeded()', transition_body)
+        self.assertIn('sheet.detents = [.medium(), .large()]', transition_body)
+        self.assertIn('sheet.selectedDetentIdentifier = compactHeight ? .large : .medium', transition_body)
+        fallback_idx = sheet_cls_body.find('private func transitionPopoverToSheetFallbackIfNeeded()')
+        self.assertNotEqual(fallback_idx, -1)
+        fallback_body = sheet_cls_body[fallback_idx : fallback_idx + 1200]
+        self.assertIn('let remappedAnchor = remappedAnchorRect(for: metrics.bounds)', fallback_body)
+        self.assertIn('anchorRect: remappedAnchor', fallback_body)
+        self.assertNotIn('anchorRect: rawAnchorRect', fallback_body)
+
 
 if __name__ == '__main__':
     unittest.main()

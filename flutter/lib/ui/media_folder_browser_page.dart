@@ -402,7 +402,12 @@ class _MediaFolderBrowserPageState extends State<MediaFolderBrowserPage> {
                       height: 40,
                       child: PosterImage(
                         url: item.poster,
-                        title: item.title,
+                        title: (widget.site.isEffectivelyPrivate ||
+                                AiService.instance.isPrivacySessionActive)
+                            ? ''
+                            : item.title,
+                        isPrivate: widget.site.isEffectivelyPrivate ||
+                            AiService.instance.isPrivacySessionActive,
                         placeholder: Container(
                           color: AppleColors.systemIndigo.withValues(alpha: 0.14),
                           child: const Icon(

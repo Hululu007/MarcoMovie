@@ -623,7 +623,7 @@ void main() {
             episodeIndex: 0,
             createdAt: 250,
           ),
-          // Empty videoId falls back to title
+          // Empty videoId falls back to title within the same source domain
           _makeTask(
             id: 'fallback_b',
             siteKey: 's1',
@@ -635,7 +635,7 @@ void main() {
           ),
           _makeTask(
             id: 'fallback_a',
-            siteKey: 's2',
+            siteKey: 's1',
             videoId: '',
             title: '无ID合集',
             episodeName: '上集',
@@ -758,13 +758,13 @@ void main() {
         // Must settle cleanly (zero infinite/continuous animations)
         await tester.pumpAndSettle();
 
-        const groupKey = 'v\u0001s1\u0001series_1';
+        final groupKey = groupDownloadTasks([ep1]).first.key;
         expect(
-          find.byKey(const ValueKey('ios-dl-group-$groupKey')),
+          find.byKey(ValueKey('ios-dl-group-$groupKey')),
           findsOneWidget,
         );
         expect(
-          find.byKey(const ValueKey('ios-dl-group-progress-$groupKey')),
+          find.byKey(ValueKey('ios-dl-group-progress-$groupKey')),
           findsOneWidget,
         );
         expect(find.textContaining('已完成 1/3 集'), findsOneWidget);
@@ -780,7 +780,7 @@ void main() {
 
         // Tap series header -> expands to show all 3 episodes in order
         await tester.tap(
-          find.byKey(const ValueKey('ios-dl-group-header-$groupKey')),
+          find.byKey(ValueKey('ios-dl-group-header-$groupKey')),
         );
         await tester.pumpAndSettle();
         expect(find.byKey(const ValueKey('ios-dl-ep-s_ep1')), findsOneWidget);
@@ -815,10 +815,10 @@ void main() {
 
         // Group-level pause all (while ep2 is active) & delete group
         await tester.tap(
-          find.byKey(const ValueKey('ios-dl-group-toggle-$groupKey')),
+          find.byKey(ValueKey('ios-dl-group-toggle-$groupKey')),
         );
         await tester.tap(
-          find.byKey(const ValueKey('ios-dl-group-delete-$groupKey')),
+          find.byKey(ValueKey('ios-dl-group-delete-$groupKey')),
         );
         expect(pausedGroups, [groupKey]);
         expect(deletedGroups, [groupKey]);
@@ -832,13 +832,13 @@ void main() {
 
         // Now no active tasks in series -> group toggle triggers onResumeGroup
         await tester.tap(
-          find.byKey(const ValueKey('ios-dl-group-toggle-$groupKey')),
+          find.byKey(ValueKey('ios-dl-group-toggle-$groupKey')),
         );
         expect(resumedGroups, [groupKey]);
 
         // Tap header again -> collapses cleanly
         await tester.tap(
-          find.byKey(const ValueKey('ios-dl-group-header-$groupKey')),
+          find.byKey(ValueKey('ios-dl-group-header-$groupKey')),
         );
         await tester.pumpAndSettle();
         expect(find.byKey(const ValueKey('ios-dl-ep-s_ep1')), findsNothing);
@@ -944,9 +944,12 @@ void main() {
           find.byKey(const ValueKey('ios-download-groups-view')),
           findsOneWidget,
         );
-        const dramaGroupKey = 'v\u0001s1\u0001drama_1';
+        final dramaGroupKey = AdaptiveShell.offlineTaskGroupDomainKey(
+          service.tasks.firstWhere((t) => t.id == 'drama_1_ep1'),
+          currentConfig: storage.loadSavedConfig(),
+        );
         expect(
-          find.byKey(const ValueKey('ios-dl-group-$dramaGroupKey')),
+          find.byKey(ValueKey('ios-dl-group-$dramaGroupKey')),
           findsOneWidget,
         );
         expect(find.text('沉默的真相'), findsOneWidget);
@@ -955,7 +958,7 @@ void main() {
 
         // Tap whole-series delete -> CupertinoAlertDialog confirmation -> Cancel keeps series
         await tester.tap(
-          find.byKey(const ValueKey('ios-dl-group-delete-$dramaGroupKey')),
+          find.byKey(ValueKey('ios-dl-group-delete-$dramaGroupKey')),
         );
         await tester.pumpAndSettle();
         expect(find.text('删除整部剧集下载？'), findsOneWidget);
@@ -981,7 +984,7 @@ void main() {
         });
 
         await tester.tap(
-          find.byKey(const ValueKey('ios-dl-group-delete-$dramaGroupKey')),
+          find.byKey(ValueKey('ios-dl-group-delete-$dramaGroupKey')),
         );
         for (var i = 0; i < 6; i++) {
           await tester.pump(const Duration(milliseconds: 20));

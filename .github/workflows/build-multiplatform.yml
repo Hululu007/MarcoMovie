@@ -654,7 +654,7 @@ jobs:
             exit 1
           fi
           python3 ../scripts/prepare_ios_python_runtime.py embed --stage-dir build/python-runtime --app build/ios/iphoneos/Runner.app
-          python3 patch_ios_ipa.py --min-ios 15.0 build/ios/iphoneos/Runner.app
+          python3 patch_ios_ipa.py --min-ios 15.0 --expected-version "$VERSION" --expected-build "$BUILD_NUM" build/ios/iphoneos/Runner.app
           IPA_NAME="MarcoMovie-$VERSION-ios-unsigned.ipa"
           mkdir -p build/ios/ipa/Payload dist
           cp -r build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
@@ -784,7 +784,7 @@ jobs:
             exit 1
           fi
           python3 ../scripts/prepare_ios_python_runtime.py embed --stage-dir build/python-runtime --app build/ios/iphoneos/Runner.app
-          python3 patch_ios_ipa.py --min-ios 14.0 build/ios/iphoneos/Runner.app
+          python3 patch_ios_ipa.py --min-ios 14.0 --expected-version "$VERSION" --expected-build "$BUILD_NUM" build/ios/iphoneos/Runner.app
           IPA_NAME="MarcoMovie-$VERSION-ios14-unsigned.ipa"
           mkdir -p build/ios/ipa/Payload dist
           cp -r build/ios/iphoneos/Runner.app build/ios/ipa/Payload/

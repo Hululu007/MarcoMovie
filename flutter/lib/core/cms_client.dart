@@ -2651,10 +2651,14 @@ class CmsClient {
     }
 
     var preferredOrder = const ['quark', 'uc', 'baidu', 'ali'];
+    var prioritizeLoggedIn = true;
+    var hasCustomOrder = false;
     final loggedInProviders = <String>{};
     try {
       final storage = await StorageService.init();
       preferredOrder = storage.driveOrder;
+      prioritizeLoggedIn = storage.prioritizeLoggedInDrives;
+      hasCustomOrder = storage.hasCustomDriveOrder;
       if (storage.quarkCookie.trim().isNotEmpty) loggedInProviders.add('quark');
       if (storage.ucCookie.trim().isNotEmpty) loggedInProviders.add('uc');
       if (storage.baiduCookie.trim().isNotEmpty) loggedInProviders.add('baidu');
@@ -2668,12 +2672,15 @@ class CmsClient {
       if (provider == null) return 100;
       final orderIdx = preferredOrder.indexOf(provider);
       final rank = orderIdx < 0 ? 50 : orderIdx;
+      if (!prioritizeLoggedIn || loggedInProviders.isEmpty) {
+        return rank;
+      }
       return loggedInProviders.contains(provider) ? rank : 10 + rank;
     }
 
     final indexedShares = allUniqueShares.indexed.toList()
       ..sort((a, b) {
-        if (loggedInProviders.isNotEmpty) {
+        if (loggedInProviders.isNotEmpty || hasCustomOrder) {
           final cmp = sharePriority(a.$2).compareTo(sharePriority(b.$2));
           if (cmp != 0) return cmp;
         }

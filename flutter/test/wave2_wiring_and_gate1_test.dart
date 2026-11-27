@@ -490,12 +490,18 @@ void main() {
         );
         expect(find.byKey(const Key('ios-player-more-button')), findsOneWidget);
 
-        // Bottom-dock danmu settings button -> opens DanmuSettingsSheet popover
+        // Bottom-dock danmu/subtitle button -> opens unified popover -> tap danmu settings -> opens DanmuSettingsSheet cleanly
         final dockBtn = find.byKey(const ValueKey('ios-dock-action-danmu'));
         expect(dockBtn, findsOneWidget);
         await tester.tap(dockBtn);
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 350));
+        final danmuSettingsEntry = find.text('弹幕样式、字号与屏蔽设置');
+        if (danmuSettingsEntry.evaluate().isNotEmpty) {
+          await tester.tap(danmuSettingsEntry);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 350));
+        }
         expect(find.byType(DanmuSettingsSheet), findsOneWidget);
 
         // Toggling the danmu switch inside DanmuSettingsSheet enables danmu
@@ -1184,11 +1190,17 @@ void main() {
         final firstCache = initialLayer.segmentCache!;
         expect(firstCache.isDisposed, isFalse);
 
-        // Open DanmuSettingsSheet and update serverUrls live (triggers _rebuildDanmuPipeline
-        // on the production debugDanmuProvider == null branch!).
+        // Open DanmuSettingsSheet via unified danmu/subtitle popover and update serverUrls live
+        // (triggers _rebuildDanmuPipeline on the production debugDanmuProvider == null branch!).
         await tester.tap(find.byKey(const ValueKey('ios-dock-action-danmu')));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 350));
+        final danmuSettingsEntry = find.text('弹幕样式、字号与屏蔽设置');
+        if (danmuSettingsEntry.evaluate().isNotEmpty) {
+          await tester.tap(danmuSettingsEntry);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 350));
+        }
 
         final serverField = find.descendant(
           of: find.byType(DanmuSettingsSheet),

@@ -1,5 +1,6 @@
 // Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -576,6 +577,7 @@ class VideoKernel {
     required String hwdec,
     VideoKernelMode? mode,
     WindowsPlaybackEngine windowsEngine = WindowsPlaybackEngine.mpv,
+    bool useIosMdk = false,
     String kernelStrategy = 'exo',
     MdkNativeBackend? debugMdkBackend,
   }) {
@@ -618,9 +620,15 @@ class VideoKernel {
       );
     }
 
+    final canCreateIosMdk = defaultTargetPlatform == TargetPlatform.iOS &&
+        useIosMdk &&
+        (!Platform.environment.containsKey('FLUTTER_TEST') ||
+            debugMdkBackend != null);
+
     if (!kIsWeb &&
-        defaultTargetPlatform == TargetPlatform.windows &&
-        windowsEngine == WindowsPlaybackEngine.mdk) {
+        ((defaultTargetPlatform == TargetPlatform.windows &&
+                windowsEngine == WindowsPlaybackEngine.mdk) ||
+            canCreateIosMdk)) {
       final mdkPlayer = MdkPlatformPlayer(
         kernelStrategy: kernelStrategy,
         debugBackend: debugMdkBackend,

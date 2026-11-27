@@ -412,11 +412,12 @@ class ConfigCenterBridge {
 
       if (discoveredOrder != null &&
           discoveredOrder.isNotEmpty &&
-          (overwriteExisting ||
-              storage.driveOrder.join(',') ==
-                  const ['quark', 'uc', 'baidu', 'ali'].join(','))) {
+          (overwriteExisting || !storage.hasCustomDriveOrder)) {
         if (discoveredOrder.join(',') != storage.driveOrder.join(',')) {
-          await storage.setDriveOrder(discoveredOrder);
+          await storage.setDriveOrder(
+            discoveredOrder,
+            markCustomized: false,
+          );
           updatedOrder = true;
         }
       }

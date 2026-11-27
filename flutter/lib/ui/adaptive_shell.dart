@@ -48,6 +48,7 @@ import '../core/wogg_source.dart';
 import '../core/work_aggregation.dart';
 import 'apple_theme.dart';
 import 'ios_ai_lab_sheets.dart';
+import 'ios_launch_splash.dart';
 import 'cloud_sync_panel.dart';
 import 'curated_discovery_section.dart';
 import 'detail_screen.dart';
@@ -55,6 +56,7 @@ import 'ios_filter_sheet.dart';
 import 'ios_glass_popover.dart' show activeIosGlassPopoverCount;
 import 'ios_ai_settings_page.dart';
 import 'ios_download_groups_view.dart';
+import 'ios_drive_priority_sheet.dart';
 import 'ios_history_poster_wall.dart';
 import 'ios_liquid_glass.dart';
 import 'ios_press_slide_menu.dart';
@@ -74,6 +76,7 @@ import 'netdisk_sheet.dart';
 import 'official_channel_notice.dart';
 import 'onboarding/onboarding_prefs.dart';
 import 'onboarding/onboarding_screen.dart';
+import 'player/ios_player_toolbar_sheet.dart';
 import 'player_screen.dart';
 import 'poster_expand_route.dart';
 import 'poster_image.dart';
@@ -82,6 +85,379 @@ import 'source_verification_dialog.dart';
 import 'spider_extensions_panel.dart';
 import 'windows_appearance.dart';
 part 'windows_shell.dart';
+/// Immutable per-task privacy & grouping identity resolved once per refresh by
+/// [OfflineDownloadsResolver].
+class OfflineTaskResolution {
+  final CmsSite playbackSite;
+  final CmsSite? canonicalSite;
+  final bool isIntrinsicPrivate;
+  final String groupDomainKey;
+
+  const OfflineTaskResolution({
+    required this.playbackSite,
+    required this.canonicalSite,
+    required this.isIntrinsicPrivate,
+    required this.groupDomainKey,
+  });
+}
+
+/// Shared per-refresh source index and per-task resolution cache for offline
+/// downloads filtering, grouping, cover privacy checks, and playback queues.
+///
+/// Builds key/subscription indices in a single pass (`O(sites)`) and caches
+/// each [DownloadTask]'s [OfflineTaskResolution] for the duration of the
+/// refresh so filtering + grouping + row rendering never rescans all sites per
+/// task (`O(sites + tasks)` instead of `O(tasks * sites)`).
+class OfflineDownloadsResolver {
+  final bool privacySessionUnlocked;
+  final Map<String, List<SubscriptionEntry>> _subsById;
+  final Map<String, List<CmsSite>> _sitesByKey;
+  final Set<String> _subIdsWithSites;
+  final Map<DownloadTask, OfflineTaskResolution> _cache =
+      Map<DownloadTask, OfflineTaskResolution>.identity();
+  int _siteReadCount;
+
+  OfflineDownloadsResolver._({
+    required this.privacySessionUnlocked,
+    required Map<String, List<SubscriptionEntry>> subsById,
+    required Map<String, List<CmsSite>> sitesByKey,
+    required Set<String> subIdsWithSites,
+    required int initialSiteReads,
+  })  : _subsById = subsById,
+        _sitesByKey = sitesByKey,
+        _subIdsWithSites = subIdsWithSites,
+        _siteReadCount = initialSiteReads;
+
+  /// Total site inspections performed during index construction and per-task
+  /// candidate lookup.
+  int get siteReadCount => _siteReadCount;
+
+  factory OfflineDownloadsResolver.build({
+    CmsConfig? currentConfig,
+    StorageService? storage,
+    Iterable<SubscriptionEntry>? subscriptions,
+    Iterable<CmsSite>? allKnownSites,
+    required bool privacySessionUnlocked,
+  }) {
+    final effectiveSubs = subscriptions?.toList(growable: false) ??
+        storage?.getSubscriptions() ??
+        const <SubscriptionEntry>[];
+    final subsById = <String, List<SubscriptionEntry>>{};
+    for (final s in effectiveSubs) {
+      final id = s.id.trim();
+      if (id.isEmpty) continue;
+      subsById.putIfAbsent(id, () => <SubscriptionEntry>[]).add(s);
+    }
+
+    final knownSites = allKnownSites?.toList(growable: false) ??
+        storage?.loadAllKnownSitesForOfflinePrivacy() ??
+        const <CmsSite>[];
+    final sitesByKey = <String, List<CmsSite>>{};
+    final subIdsWithSites = <String>{};
+    final seenCandidateSigs = <String>{};
+    var reads = 0;
+
+    void indexCandidate(CmsSite s) {
+      reads++;
+      final subId = s.subscriptionId.trim();
+      final normApi = AdaptiveShell._normalizeOfflineSiteApi(s.api);
+      final normSourceApi = AdaptiveShell._normalizeOfflineSiteApi(s.sourceApi);
+      final sig =
+          '$subId|${s.key}|${s.sourceKey}|$normApi|$normSourceApi|${s.type}|${s.isEffectivelyPrivate}|${s.group}';
+      if (!seenCandidateSigs.add(sig)) return;
+      if (subId.isNotEmpty) {
+        subIdsWithSites.add(subId);
+      }
+      if (s.key.isNotEmpty) {
+        sitesByKey.putIfAbsent(s.key, () => <CmsSite>[]).add(s);
+      }
+      if (s.sourceKey.isNotEmpty && s.sourceKey != s.key) {
+        sitesByKey.putIfAbsent(s.sourceKey, () => <CmsSite>[]).add(s);
+      }
+    }
+
+    if (currentConfig != null) {
+      for (final s in currentConfig.sites) {
+        indexCandidate(s);
+      }
+    }
+    for (final s in knownSites) {
+      indexCandidate(s);
+    }
+
+    return OfflineDownloadsResolver._(
+      privacySessionUnlocked: privacySessionUnlocked,
+      subsById: subsById,
+      sitesByKey: sitesByKey,
+      subIdsWithSites: subIdsWithSites,
+      initialSiteReads: reads,
+    );
+  }
+
+  OfflineTaskResolution resolve(DownloadTask task) {
+    final cached = _cache[task];
+    if (cached != null) return cached;
+
+    final stored = task.sourceSite;
+    final taskEffectiveApi = AdaptiveShell._normalizeOfflineSiteApi(
+      (stored != null && stored.api.trim().isNotEmpty)
+          ? stored.api
+          : task.siteApi,
+    );
+    final taskOriginalApi = AdaptiveShell._normalizeOfflineSiteApi(
+      (stored != null && stored.sourceApi.trim().isNotEmpty)
+          ? stored.sourceApi
+          : taskEffectiveApi,
+    );
+    final rawTaskApi = AdaptiveShell._normalizeOfflineSiteApi(task.siteApi);
+    final taskApiSet = <String>{
+      if (taskEffectiveApi.isNotEmpty) taskEffectiveApi,
+      if (taskOriginalApi.isNotEmpty) taskOriginalApi,
+      if (rawTaskApi.isNotEmpty) rawTaskApi,
+    };
+    final taskType = stored?.type ?? task.siteType;
+    final taskSubId = (stored?.subscriptionId ?? '').trim();
+    final taskHasApiOverride = stored != null &&
+        stored.originalApi != null &&
+        AdaptiveShell._normalizeOfflineSiteApi(stored.originalApi!).isNotEmpty &&
+        AdaptiveShell._normalizeOfflineSiteApi(stored.originalApi!) !=
+            AdaptiveShell._normalizeOfflineSiteApi(stored.api);
+
+    final matchingSubs = taskSubId.isEmpty
+        ? const <SubscriptionEntry>[]
+        : (_subsById[taskSubId] ?? const <SubscriptionEntry>[]);
+    final subConfirmedPrivate =
+        matchingSubs.any((s) => s.isEffectivelyPrivate);
+    final subConfirmedPublic = matchingSubs.isNotEmpty &&
+        matchingSubs.every((s) => !s.isEffectivelyPrivate);
+
+    final keySet = <String>{
+      task.siteKey,
+      if (stored != null) stored.key,
+      if (stored != null && stored.sourceKey.isNotEmpty) stored.sourceKey,
+    }..removeWhere((e) => e.isEmpty);
+
+    final keyMatches = <CmsSite>[];
+    final seenSites = Set<CmsSite>.identity();
+    for (final key in keySet) {
+      final bucket = _sitesByKey[key];
+      if (bucket == null) continue;
+      for (final s in bucket) {
+        _siteReadCount++;
+        if (seenSites.add(s)) {
+          keyMatches.add(s);
+        }
+      }
+    }
+
+    Set<String> siteApiSet(CmsSite s) => <String>{
+          AdaptiveShell._normalizeOfflineSiteApi(s.api),
+          AdaptiveShell._normalizeOfflineSiteApi(s.sourceApi),
+        }..removeWhere((e) => e.isEmpty);
+
+    bool hasApiOverride(CmsSite s) {
+      if (s.originalApi == null) return false;
+      final orig = AdaptiveShell._normalizeOfflineSiteApi(s.originalApi!);
+      final cur = AdaptiveShell._normalizeOfflineSiteApi(s.api);
+      return orig.isNotEmpty && orig != cur;
+    }
+
+    bool matchesApiAndType(CmsSite s) {
+      final sApis = siteApiSet(s);
+      if (!sApis.any(taskApiSet.contains)) return false;
+      if (taskType < 0 || s.type == taskType) return true;
+      // SiteOverride.applyTo may alter `s.type` when overriding `api`; match
+      // via the immutable original `sourceApi` when an API override is active
+      // on either the live site or the stored snapshot.
+      if (hasApiOverride(s) || taskHasApiOverride) {
+        final origNorm = AdaptiveShell._normalizeOfflineSiteApi(s.sourceApi);
+        if (origNorm.isNotEmpty && taskApiSet.contains(origNorm)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    List<CmsSite> narrowed = keyMatches;
+    if (narrowed.isNotEmpty && taskSubId.isNotEmpty) {
+      final subMatches = narrowed
+          .where((s) => s.subscriptionId.trim() == taskSubId)
+          .toList();
+      if (subMatches.isNotEmpty) {
+        narrowed = subMatches;
+      } else if (matchingSubs.isNotEmpty) {
+        narrowed = const <CmsSite>[];
+      } else if (taskApiSet.isNotEmpty) {
+        narrowed = narrowed
+            .where((s) => s.subscriptionId.trim().isEmpty)
+            .toList();
+      } else {
+        narrowed = const <CmsSite>[];
+      }
+    }
+    final preApiNarrowed = narrowed;
+    if (narrowed.isNotEmpty && taskApiSet.isNotEmpty) {
+      narrowed = narrowed.where(matchesApiAndType).toList();
+    } else if (narrowed.isNotEmpty && taskType >= 0) {
+      narrowed = narrowed.where((s) => s.type == taskType).toList();
+    }
+
+    final anyPrivateMatch = narrowed.any((s) => s.isEffectivelyPrivate);
+    final distinctOrigins = <String>{
+      for (final s in narrowed)
+        '${s.type}|${AdaptiveShell._normalizeOfflineSiteApi(s.sourceApi)}|${AdaptiveShell._normalizeOfflineSiteApi(s.api)}|${s.subscriptionId.trim()}|${s.isEffectivelyPrivate}',
+    };
+    final hasConflictingMatches = distinctOrigins.length > 1;
+    final hasPreApiConflict = narrowed.isEmpty && preApiNarrowed.isNotEmpty;
+
+    final bool identityConfirmedPublic;
+    if (stored != null) {
+      if (stored.isEffectivelyPrivate ||
+          subConfirmedPrivate ||
+          anyPrivateMatch ||
+          hasConflictingMatches ||
+          hasPreApiConflict) {
+        identityConfirmedPublic = false;
+      } else if (narrowed.isNotEmpty) {
+        identityConfirmedPublic = true;
+      } else {
+        final subHasNoParsedSites = subConfirmedPublic &&
+            matchingSubs.every((s) => s.rawContent.trim().isEmpty) &&
+            !_subIdsWithSites.contains(taskSubId);
+        identityConfirmedPublic = subHasNoParsedSites;
+      }
+    } else {
+      final legacyApiCorroborated = taskApiSet.isNotEmpty ||
+          (keyMatches.length == 1 &&
+              narrowed.length == 1 &&
+              siteApiSet(narrowed.first).isEmpty &&
+              (taskType < 0 || narrowed.first.type == taskType));
+      identityConfirmedPublic = !subConfirmedPrivate &&
+          narrowed.isNotEmpty &&
+          !anyPrivateMatch &&
+          !hasConflictingMatches &&
+          legacyApiCorroborated;
+    }
+
+    final isIntrinsicPrivate = !identityConfirmedPublic;
+    final effectivePrivate = privacySessionUnlocked || isIntrinsicPrivate;
+    final canonicalSite =
+        (narrowed.isNotEmpty && !hasConflictingMatches) ? narrowed.first : null;
+    final base = stored ?? canonicalSite;
+    final playbackSite = base != null
+        ? base.copyWith(isPrivate: effectivePrivate)
+        : CmsSite(
+            key: task.siteKey,
+            name: task.siteName,
+            type: task.siteType,
+            api: task.siteApi,
+            isPrivate: effectivePrivate,
+          );
+
+    // Anchor group identity on the confirmed original source (`sourceKey` +
+    // `sourceApi` / `originalApi` + `subscriptionId` + canonical `type`) so
+    // episodes downloaded before and after an API override stay in one group
+    // and one playback queue, while distinct subscriptions, siteTypes, and URL
+    // paths (such as `/media` vs `/media/`) remain strictly isolated.
+    final originSite = canonicalSite ?? stored;
+    final originSubId =
+        (originSite != null && originSite.subscriptionId.trim().isNotEmpty)
+            ? originSite.subscriptionId.trim()
+            : (stored?.subscriptionId ?? '').trim();
+    final originSourceKey =
+        (originSite != null && originSite.sourceKey.isNotEmpty)
+            ? originSite.sourceKey
+            : task.siteKey;
+    final rawOriginApi =
+        (originSite != null && originSite.sourceApi.trim().isNotEmpty)
+            ? originSite.sourceApi
+            : ((originSite != null && originSite.api.trim().isNotEmpty)
+                ? originSite.api
+                : task.siteApi);
+    final normOriginApi = AdaptiveShell._normalizeOfflineSiteApi(rawOriginApi);
+    final originType = originSite?.type ?? task.siteType;
+    final privacyDomain = isIntrinsicPrivate ? 'priv' : 'pub';
+
+    final String groupDomainKey;
+    if (task.sourceSite == null &&
+        normOriginApi.isEmpty &&
+        originSubId.isEmpty) {
+      groupDomainKey = 'unconfirmed\u0001${task.id}';
+    } else {
+      final originSig =
+          '$privacyDomain\u0001$originSubId\u0001$originType\u0001$normOriginApi\u0001$originSourceKey';
+      final videoId = task.videoId.trim();
+      if (videoId.isNotEmpty) {
+        groupDomainKey = 'v\u0001$originSig\u0001$videoId';
+      } else {
+        final title = task.title.trim();
+        groupDomainKey =
+            title.isNotEmpty ? 't\u0001$originSig\u0001$title' : 'u\u0001${task.id}';
+      }
+    }
+
+    final result = OfflineTaskResolution(
+      playbackSite: playbackSite,
+      canonicalSite: canonicalSite,
+      isIntrinsicPrivate: isIntrinsicPrivate,
+      groupDomainKey: groupDomainKey,
+    );
+    _cache[task] = result;
+    return result;
+  }
+
+  bool isPrivate(DownloadTask task) =>
+      resolve(task).playbackSite.isEffectivelyPrivate;
+
+  String groupKeyOf(DownloadTask task) => resolve(task).groupDomainKey;
+
+  List<DownloadTask> filterVisible(Iterable<DownloadTask> tasks) {
+    if (privacySessionUnlocked) {
+      return List<DownloadTask>.of(tasks);
+    }
+    return <DownloadTask>[
+      for (final t in tasks)
+        if (!isPrivate(t)) t,
+    ];
+  }
+
+  ({CmsSite site, List<DownloadTask> queue, int startIndex}) buildPlaybackQueue(
+    DownloadTask tapped,
+    Iterable<DownloadTask> sameGroupCompleted,
+  ) {
+    final tappedRes = resolve(tapped);
+    final tappedSite = tappedRes.playbackSite;
+    if (!privacySessionUnlocked && tappedSite.isEffectivelyPrivate) {
+      return (site: tappedSite, queue: const <DownloadTask>[], startIndex: -1);
+    }
+    final tappedGroupKey = tappedRes.groupDomainKey;
+
+    final filtered = <DownloadTask>[];
+    for (final item in sameGroupCompleted) {
+      if (item.filePath.isEmpty || item.lineName != tapped.lineName) continue;
+      final itemRes = resolve(item);
+      if (!tappedSite.isEffectivelyPrivate) {
+        if (itemRes.playbackSite.isEffectivelyPrivate) continue;
+      } else if (!privacySessionUnlocked) {
+        continue;
+      }
+      if (itemRes.groupDomainKey != tappedGroupKey) continue;
+      filtered.add(item);
+    }
+    filtered.sort((a, b) {
+      final epCmp = a.episodeIndex.compareTo(b.episodeIndex);
+      if (epCmp != 0) return epCmp;
+      return a.createdAt.compareTo(b.createdAt);
+    });
+    final start = filtered.indexWhere((x) => x.id == tapped.id);
+    return (
+      site: tappedSite,
+      queue: filtered,
+      startIndex: start,
+    );
+  }
+}
+
 /// Apple HIG adaptive shell:
 /// - macOS / iPadOS / Desktop (`width >= 700`): Translucent sidebar with traffic-light inset & source card
 /// - iOS (`width < 700`): Frosted-glass top navigation bar and translucent Cupertino bottom tab bar
@@ -130,6 +506,192 @@ class AdaptiveShell extends StatefulWidget {
 
   static const Duration defaultWindowCloseBudget =
       Duration(milliseconds: 1400);
+
+  /// Normalizes only the case-insensitive URI parts (scheme, host, default
+  /// HTTP/HTTPS port, and bare root `/`) while preserving exact case and
+  /// non-root trailing slashes in path, query, and fragment so distinct
+  /// endpoints such as `/media` vs `/media/` or case-differing paths remain
+  /// completely separate.
+  static String _normalizeOfflineSiteApi(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return '';
+    final parsed = Uri.tryParse(trimmed);
+    if (parsed != null && parsed.hasScheme && parsed.hasAuthority) {
+      final scheme = parsed.scheme.toLowerCase();
+      final host = parsed.host.toLowerCase();
+      final isDefaultPort = !parsed.hasPort ||
+          (scheme == 'http' && parsed.port == 80) ||
+          (scheme == 'https' && parsed.port == 443);
+      final authority = parsed.userInfo.isNotEmpty
+          ? '${parsed.userInfo}@$host${isDefaultPort ? '' : ':${parsed.port}'}'
+          : '$host${isDefaultPort ? '' : ':${parsed.port}'}';
+      final path = parsed.path == '/' ? '' : parsed.path;
+      final query = parsed.hasQuery ? '?${parsed.query}' : '';
+      final fragment = parsed.hasFragment ? '#${parsed.fragment}' : '';
+      return '$scheme://$authority$path$query$fragment';
+    }
+    return trimmed == '/' ? '' : trimmed;
+  }
+
+  /// Builds a shared per-refresh index and per-task resolution cache so
+  /// filtering, grouping, privacy checks, and playback queue construction over
+  /// large task/site lists run in linear time (`O(sites + tasks)`) while always
+  /// reflecting the latest subscription/privacy/override state.
+  @visibleForTesting
+  static OfflineDownloadsResolver createOfflineDownloadsResolver({
+    CmsConfig? currentConfig,
+    StorageService? storage,
+    Iterable<SubscriptionEntry>? subscriptions,
+    Iterable<CmsSite>? allKnownSites,
+    required bool privacySessionUnlocked,
+  }) =>
+      OfflineDownloadsResolver.build(
+        currentConfig: currentConfig,
+        storage: storage,
+        subscriptions: subscriptions,
+        allKnownSites: allKnownSites,
+        privacySessionUnlocked: privacySessionUnlocked,
+      );
+
+  /// Records the site-inspection count of the most recent Downloads list
+  /// refresh in `_buildDownloadsList` for regression tests verifying linear
+  /// scaling across large task/site sets.
+  @visibleForTesting
+  static int debugLastDownloadsRefreshSiteReads = 0;
+
+  /// Reconstructs the playback [CmsSite] for a single offline [DownloadTask],
+  /// verifying saved `sourceSite`, original source identity (`sourceKey` /
+  /// `sourceApi`), `siteApi`, `siteType`, and `subscriptionId` against all
+  /// matching candidates in [currentConfig] and ALL persisted subscriptions
+  /// (including disabled subscriptions and overridden/hidden sites via
+  /// [storage] / [subscriptions] / [allKnownSites]). Never re-trusts a stale
+  /// `sourceSite.isPrivate == false` when no current matching public site can
+  /// be confirmed; fails closed (`isPrivate: true`) on missing, disabled-private,
+  /// ambiguous, or conflicting identity.
+  @visibleForTesting
+  static CmsSite resolveOfflinePlaybackSite(
+    DownloadTask task, {
+    CmsConfig? currentConfig,
+    StorageService? storage,
+    Iterable<SubscriptionEntry>? subscriptions,
+    Iterable<CmsSite>? allKnownSites,
+    bool privacySessionUnlocked = false,
+    OfflineDownloadsResolver? resolver,
+  }) {
+    final effectiveResolver = resolver ??
+        OfflineDownloadsResolver.build(
+          currentConfig: currentConfig,
+          storage: storage,
+          subscriptions: subscriptions,
+          allKnownSites: allKnownSites,
+          privacySessionUnlocked: privacySessionUnlocked,
+        );
+    return effectiveResolver.resolve(task).playbackSite;
+  }
+
+  /// Returns whether a single offline [DownloadTask] must be treated as private
+  /// under the canonical per-item identity rules.
+  @visibleForTesting
+  static bool isOfflineTaskPrivate(
+    DownloadTask task, {
+    CmsConfig? currentConfig,
+    StorageService? storage,
+    Iterable<SubscriptionEntry>? subscriptions,
+    Iterable<CmsSite>? allKnownSites,
+    bool privacySessionUnlocked = false,
+    OfflineDownloadsResolver? resolver,
+  }) {
+    final effectiveResolver = resolver ??
+        OfflineDownloadsResolver.build(
+          currentConfig: currentConfig,
+          storage: storage,
+          subscriptions: subscriptions,
+          allKnownSites: allKnownSites,
+          privacySessionUnlocked: privacySessionUnlocked,
+        );
+    return effectiveResolver.isPrivate(task);
+  }
+
+  /// Computes a source- and privacy-domain-isolated grouping key for [task]
+  /// anchored on the confirmed canonical original source identity (`sourceKey`
+  /// and `sourceApi` / `originalApi`) so editing a site's API override never
+  /// splits episodes of the same series, while two subscriptions reusing the
+  /// same `siteKey` and `videoId`, distinct endpoints like `/media` vs
+  /// `/media/`, empty `videoId` movies with different titles, or same `videoId`
+  /// across different `siteType`s remain strictly isolated.
+  @visibleForTesting
+  static String offlineTaskGroupDomainKey(
+    DownloadTask task, {
+    CmsConfig? currentConfig,
+    StorageService? storage,
+    Iterable<SubscriptionEntry>? subscriptions,
+    Iterable<CmsSite>? allKnownSites,
+    OfflineDownloadsResolver? resolver,
+  }) {
+    final effectiveResolver = resolver ??
+        OfflineDownloadsResolver.build(
+          currentConfig: currentConfig,
+          storage: storage,
+          subscriptions: subscriptions,
+          allKnownSites: allKnownSites,
+          privacySessionUnlocked: false,
+        );
+    return effectiveResolver.groupKeyOf(task);
+  }
+
+  /// Filters the offline downloads list using the exact same per-item privacy
+  /// identity rules used by playback and episode switching, sharing a single
+  /// source index across all [tasks].
+  @visibleForTesting
+  static List<DownloadTask> filterVisibleOfflineTasks(
+    Iterable<DownloadTask> tasks, {
+    CmsConfig? currentConfig,
+    StorageService? storage,
+    Iterable<SubscriptionEntry>? subscriptions,
+    Iterable<CmsSite>? allKnownSites,
+    required bool privacySessionUnlocked,
+    OfflineDownloadsResolver? resolver,
+  }) {
+    if (privacySessionUnlocked) {
+      return List<DownloadTask>.of(tasks);
+    }
+    final effectiveResolver = resolver ??
+        OfflineDownloadsResolver.build(
+          currentConfig: currentConfig,
+          storage: storage,
+          subscriptions: subscriptions,
+          allKnownSites: allKnownSites,
+          privacySessionUnlocked: false,
+        );
+    return effectiveResolver.filterVisible(tasks);
+  }
+
+  /// Builds a privacy-safe offline playback queue for [tapped] from
+  /// [sameGroupCompleted], reusing the exact list grouping key
+  /// ([offlineTaskGroupDomainKey]) anchored on confirmed original source
+  /// identity and verifying EVERY episode individually via a shared resolver.
+  @visibleForTesting
+  static ({CmsSite site, List<DownloadTask> queue, int startIndex})
+      buildOfflinePlaybackQueue(
+    DownloadTask tapped,
+    Iterable<DownloadTask> sameGroupCompleted, {
+    CmsConfig? currentConfig,
+    StorageService? storage,
+    Iterable<SubscriptionEntry>? subscriptions,
+    Iterable<CmsSite>? allKnownSites,
+    required bool privacySessionUnlocked,
+    OfflineDownloadsResolver? resolver,
+  }) {
+    final effectiveResolver = resolver ??
+        OfflineDownloadsResolver.build(
+          currentConfig: currentConfig,
+          storage: storage,
+          subscriptions: subscriptions,
+          allKnownSites: allKnownSites,
+          privacySessionUnlocked: privacySessionUnlocked,
+        );
+    return effectiveResolver.buildPlaybackQueue(tapped, sameGroupCompleted);
+  }
 
   @visibleForTesting
   static Future<void> runWindowCloseSequence({
@@ -524,7 +1086,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               symbol: 'icloud.and.arrow.up',
               section: 1,
             ),
-          if (isIosAiFeatureSupported && AiService.instance.isLabUnlocked)
+          if (!_privateSessionUnlocked &&
+              isIosAiFeatureSupported &&
+              AiService.instance.isLabUnlocked)
             const IosNativeMenuItem(
               id: 'ai_assistant',
               title: 'AI 观影实验室',
@@ -648,6 +1212,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         unawaited(_openCloudSyncCenter(iosBackLabel: '设置'));
         return;
       case 'ai_assistant':
+        if (_privateSessionUnlocked) return;
         unawaited(
           _trackSecondaryRoute<void>(
             () => pushIosAiSettingsPage(context, backLabel: '设置'),
@@ -841,7 +1406,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         );
       }
     }
-    unawaited(_loadInstalledVersion());
+    unawaited(CuratedDiscoveryService.warmFromDisk());
+    _installedVersionFuture = _loadInstalledVersion();
     if (!kIsWeb &&
         defaultTargetPlatform == TargetPlatform.iOS &&
         !OhosRuntime.isOhos &&
@@ -1210,13 +1776,218 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
   }
 
+  final Set<Timer> _startupTimers = <Timer>{};
+
+  Future<T> _awaitCancellableTimeout<T>(
+    Future<T> future,
+    Duration timeout,
+    T Function() onTimeout,
+  ) {
+    final completer = Completer<T>();
+    Timer? timer;
+    timer = Timer(timeout, () {
+      _startupTimers.remove(timer);
+      if (!completer.isCompleted) {
+        completer.complete(onTimeout());
+      }
+    });
+    _startupTimers.add(timer);
+    future.then(
+      (value) {
+        timer?.cancel();
+        _startupTimers.remove(timer);
+        if (!completer.isCompleted) {
+          completer.complete(value);
+        }
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        timer?.cancel();
+        _startupTimers.remove(timer);
+        if (!completer.isCompleted) {
+          completer.completeError(error, stackTrace);
+        }
+      },
+    );
+    return completer.future;
+  }
+
+  Future<String> _resolveInstalledAppVersion() async {
+    final info = await _resolveInstalledAppVersionInfo();
+    if (info.displayVersion.isNotEmpty) return info.displayVersion;
+    final cur = _currentAppVersion.trim();
+    if (cur.isNotEmpty && cur != '读取中' && cur != '未知') {
+      return cur;
+    }
+    return '';
+  }
+
+  bool _hasCompletedInitialSetup(OnboardingPrefs prefs) =>
+      _hasExistingLocalUserData() ||
+      prefs.doneVersion >= OnboardingPrefs.currentVersion;
+
   Future<void> _runStartupPrompts() async {
     if (!mounted) return;
     if (_isWindowsPostUpdateNoticeHost) {
       await _runWindowsPostUpdateNoticePrompt();
       if (!mounted) return;
     }
-    await _runFirstLaunchPrompts();
+    await _runUnifiedStartupPromptCoordinator();
+  }
+
+  Future<void> _runUnifiedStartupPromptCoordinator() async {
+    if (_startupOnboardingChecked || !mounted) return;
+    _startupOnboardingChecked = true;
+    if (widget.storage.isSubscriptionsCorrupted ||
+        widget.storage.isHistoryCorrupted) {
+      return;
+    }
+    final OnboardingPrefs? loadedPrefs;
+    try {
+      loadedPrefs = await _awaitCancellableTimeout<OnboardingPrefs?>(
+        OnboardingPrefs.load(),
+        const Duration(seconds: 3),
+        () => null,
+      );
+    } catch (e) {
+      debugPrint('OnboardingPrefs load skipped on cold launch: $e');
+      return;
+    }
+    if (loadedPrefs == null || !mounted) return;
+    final prefs = loadedPrefs;
+
+    final isIosPostUpdateHost =
+        defaultTargetPlatform == TargetPlatform.iOS && !OhosRuntime.isOhos;
+    final hasCompletedSetup = _hasCompletedInitialSetup(prefs);
+    final hasPostUpdateCandidateState =
+        hasCompletedSetup || prefs.lastSeenAppVersion.isNotEmpty;
+
+    // 1. iOS post-update welcome check for existing / previously stamped installs.
+    // Kept strictly independent of `officialChannelNoticeVersion` vs `doneVersion`
+    // so:
+    //  - Windows fresh installs that just confirmed the Windows notice still
+    //    proceed to OnboardingScreen.
+    //  - iOS fresh installs whose OnboardingScreen was interrupted after
+    //    confirming OfficialChannelNoticeDialog resume OnboardingScreen on next
+    //    launch without re-popping the notice or post-update welcome on the same build.
+    if (isIosPostUpdateHost && hasPostUpdateCandidateState) {
+      final installedInfo = await _awaitCancellableTimeout<
+          ({String displayVersion, String versionToken})>(
+        _installedVersionFuture ?? _resolveInstalledAppVersionInfo(),
+        const Duration(seconds: 3),
+        () => (
+          displayVersion: (_currentAppVersion != '读取中' &&
+                  _currentAppVersion != '未知')
+              ? _currentAppVersion
+              : '',
+          versionToken: _installedVersionToken,
+        ),
+      );
+      if (!mounted ||
+          widget.storage.isSubscriptionsCorrupted ||
+          widget.storage.isHistoryCorrupted) {
+        return;
+      }
+      final displayVersion = installedInfo.displayVersion.trim();
+      final versionToken = installedInfo.versionToken.trim().isNotEmpty
+          ? installedInfo.versionToken.trim()
+          : displayVersion;
+      if (versionToken.isNotEmpty) {
+        await prefs.migrateLegacyBareVersionTokenIfNeeded(versionToken);
+        if (!mounted) return;
+      }
+      var showedPostUpdate = false;
+      if (displayVersion.isNotEmpty && versionToken.isNotEmpty) {
+        showedPostUpdate = await _maybeShowPostUpdateWelcomeIfNeeded(
+          prefs: prefs,
+          displayVersion: displayVersion,
+          versionToken: versionToken,
+        );
+      }
+      if (!mounted) return;
+      // Existing users (with data or finished onboarding), or installs that
+      // just saw PostUpdateWelcomeDialog, stop here cleanly.
+      if (hasCompletedSetup || showedPostUpdate) {
+        return;
+      }
+    } else if (hasCompletedSetup) {
+      return;
+    }
+
+    // 2. First-run Official Channel safety notice (only when not yet acknowledged).
+    if (prefs.shouldShowOfficialChannelNotice() && !_officialNoticeOpen) {
+      final frameReady = Completer<void>();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!frameReady.isCompleted) frameReady.complete();
+      });
+      await frameReady.future;
+      if (!mounted ||
+          _officialNoticeOpen ||
+          _hasCompletedInitialSetup(prefs) ||
+          widget.storage.isSubscriptionsCorrupted ||
+          widget.storage.isHistoryCorrupted) {
+        return;
+      }
+      _officialNoticeOpen = true;
+      var acknowledged = false;
+      var persisted = false;
+      try {
+        acknowledged = await showOfficialChannelNoticeDialog(
+          context,
+          urlOpener: widget.onOpenExternalUrlForTest,
+          onConfirm: () async {
+            persisted = await prefs.markOfficialChannelNoticeSeen();
+            var token = _installedVersionToken.trim();
+            if (token.isEmpty && isIosPostUpdateHost) {
+              final resolved = await _awaitCancellableTimeout<
+                  ({String displayVersion, String versionToken})>(
+                _installedVersionFuture ?? _resolveInstalledAppVersionInfo(),
+                const Duration(milliseconds: 500),
+                () => (
+                  displayVersion: (_currentAppVersion != '读取中' &&
+                          _currentAppVersion != '未知')
+                      ? _currentAppVersion
+                      : '',
+                  versionToken: _installedVersionToken,
+                ),
+              );
+              token = resolved.versionToken.trim().isNotEmpty
+                  ? resolved.versionToken.trim()
+                  : resolved.displayVersion.trim();
+            }
+            if (token.isEmpty &&
+                _currentAppVersion != '读取中' &&
+                _currentAppVersion != '未知') {
+              token = _currentAppVersion.trim();
+            }
+            if (token.isNotEmpty) {
+              await prefs.markPostUpdateNoticeSeen(token);
+            }
+            return persisted;
+          },
+        );
+      } finally {
+        _officialNoticeOpen = false;
+      }
+      if (acknowledged && !persisted) {
+        debugPrint(
+          'OfficialChannelNotice: acknowledged for current session; preference write did not persist.',
+        );
+      }
+      if (!mounted || !acknowledged) return;
+    }
+
+    // 3. First-run Onboarding (independent of OfficialChannelNoticeSeen so
+    // Windows fresh installs and interrupted iOS first-run onboarding both enter).
+    if (OhosRuntime.isOhos || !prefs.shouldShowOnboarding()) return;
+    if (_hasExistingLocalUserData() ||
+        widget.storage.isSubscriptionsCorrupted ||
+        widget.storage.isHistoryCorrupted) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _onboardingRouteOpen) return;
+      unawaited(_openOnboardingRoute(preloadedPrefs: prefs));
+    });
   }
 
   Future<void> _runWindowsPostUpdateNoticePrompt() async {
@@ -1293,86 +2064,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         'WindowsPostUpdateNotice: acknowledged for current session; preference write did not persist.',
       );
     }
-  }
-
-  Future<void> _runFirstLaunchPrompts() async {
-    if (_startupOnboardingChecked || !mounted) return;
-    _startupOnboardingChecked = true;
-    // Only launch first-run prompts on fresh installs without existing configs
-    // (never hijack corruption recovery alerts or upgraded installations).
-    if (_config != null ||
-        widget.storage.getSubscriptions().isNotEmpty ||
-        widget.storage.isSubscriptionsCorrupted ||
-        widget.storage.isHistoryCorrupted) {
-      return;
-    }
-    final OnboardingPrefs prefs;
-    try {
-      prefs = await OnboardingPrefs.load().timeout(const Duration(seconds: 3));
-    } catch (e) {
-      debugPrint('OnboardingPrefs load skipped on cold launch: $e');
-      return;
-    }
-    if (!mounted) return;
-    if (_config != null ||
-        widget.storage.getSubscriptions().isNotEmpty ||
-        widget.storage.isSubscriptionsCorrupted ||
-        widget.storage.isHistoryCorrupted) {
-      return;
-    }
-    final isFreshInstall = prefs.doneVersion < OnboardingPrefs.currentVersion;
-    if (isFreshInstall &&
-        prefs.shouldShowOfficialChannelNotice() &&
-        !_officialNoticeOpen) {
-      final frameReady = Completer<void>();
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!frameReady.isCompleted) frameReady.complete();
-      });
-      await frameReady.future;
-      if (!mounted ||
-          _officialNoticeOpen ||
-          _config != null ||
-          widget.storage.getSubscriptions().isNotEmpty ||
-          widget.storage.isSubscriptionsCorrupted ||
-          widget.storage.isHistoryCorrupted) {
-        return;
-      }
-      _officialNoticeOpen = true;
-      var acknowledged = false;
-      var persisted = false;
-      try {
-        acknowledged = await showOfficialChannelNoticeDialog(
-          context,
-          urlOpener: widget.onOpenExternalUrlForTest,
-          onConfirm: () async {
-            persisted = await prefs.markOfficialChannelNoticeSeen();
-            if (_currentAppVersion != '读取中' && _currentAppVersion != '未知') {
-              await prefs.markPostUpdateNoticeSeen(_currentAppVersion);
-            }
-            return persisted;
-          },
-        );
-      } finally {
-        _officialNoticeOpen = false;
-      }
-      if (acknowledged && !persisted) {
-        debugPrint(
-          'OfficialChannelNotice: acknowledged for current session; preference write did not persist.',
-        );
-      }
-      if (!mounted || !acknowledged) return;
-    }
-    if (OhosRuntime.isOhos || !prefs.shouldShowOnboarding()) return;
-    if (_config != null ||
-        widget.storage.getSubscriptions().isNotEmpty ||
-        widget.storage.isSubscriptionsCorrupted ||
-        widget.storage.isHistoryCorrupted) {
-      return;
-    }
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _onboardingRouteOpen) return;
-      unawaited(_openOnboardingRoute(preloadedPrefs: prefs));
-    });
   }
 
   bool _isSettingsOriginActive(
@@ -2271,6 +2962,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     activeIosGlassPopoverCount.removeListener(_onRootOverlayVisibilityChanged);
     AiLabPasscodeStore.instance.removeListener(_onWindowsAiLabStateChanged);
     AiService.instance.removeListener(_onWindowsAiLabStateChanged);
+    AiService.instance.setPrivacySessionActive(false);
     if (_useRootNativeTabChrome) {
       unawaited(IosLiquidGlassBridge.setRootTabVisible(false, animated: false));
     }
@@ -2311,6 +3003,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       );
     }
     _installedVersionTimer?.cancel();
+    for (final t in _startupTimers) {
+      t.cancel();
+    }
+    _startupTimers.clear();
     _cancelCatalogue();
     if (_liveAbort != null && !_liveAbort!.isCompleted) _liveAbort!.complete();
     if (_liveProbeAbort != null && !_liveProbeAbort!.isCompleted) {
@@ -2499,17 +3195,27 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     final candidates = videos
         .where((v) => !v.id.startsWith('netdisk_qr:') && v.title.trim().isNotEmpty)
-        .take(6);
-    for (final v in candidates) {
-      unawaited(
-        PosterLoader.loadHdByTitle(
-          v.title,
-          rawUrl: v.poster,
-          year: v.year,
-          strictHero: true,
-        ).catchError((_) => Uint8List(0)),
-      );
-    }
+        .take(6)
+        .toList(growable: false);
+    // Warm direct CMS poster URLs immediately so visible cards render first,
+    // then run heavier external HD upgrades after initial shelves settle.
+    PosterLoader.prefetchUrls(
+      candidates.map((v) => v.poster),
+      limit: 6,
+    );
+    Future<void>.delayed(const Duration(milliseconds: 900), () {
+      if (!mounted) return;
+      for (final v in candidates.take(4)) {
+        unawaited(
+          PosterLoader.loadHdByTitle(
+            v.title,
+            rawUrl: v.poster,
+            year: v.year,
+            strictHero: true,
+          ).catchError((_) => Uint8List(0)),
+        );
+      }
+    });
   }
 
   Color _resolveHeroAmbientColor(CmsVideo video, ApplePalette palette) {
@@ -3706,8 +4412,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             sourceBorderRadius: isFullBleedHero ? 0.0 : sourceRadius,
             sourceCardId: sourceCardId,
             posterUrl: effectivePosterUrl,
-            title: site.isEffectivelyPrivate ? '' : video.title,
-            year: site.isEffectivelyPrivate ? '' : video.year,
+            title: (site.isEffectivelyPrivate || _privateSessionUnlocked)
+                ? ''
+                : video.title,
+            year: (site.isEffectivelyPrivate || _privateSessionUnlocked)
+                ? ''
+                : video.year,
+            isPrivate: site.isEffectivelyPrivate || _privateSessionUnlocked,
             isFullBleedHero: isFullBleedHero,
             strictHighResPoster: isFullBleedHero,
             forBackdrop: isLandscapeCuratedCard,
@@ -6327,12 +7038,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                     alignment: const Alignment(0.0, -0.08),
                                     child: PosterImage(
                                       url: featured.poster,
-                                      title: site.isEffectivelyPrivate
+                                      title: (_privateSessionUnlocked ||
+                                              site.isEffectivelyPrivate)
                                           ? ''
                                           : featured.title,
-                                      year: site.isEffectivelyPrivate
+                                      year: (_privateSessionUnlocked ||
+                                              site.isEffectivelyPrivate)
                                           ? ''
                                           : featured.year,
+                                      isPrivate: _privateSessionUnlocked ||
+                                          site.isEffectivelyPrivate,
                                       highRes: true,
                                       strictHighRes: true,
                                       fit: BoxFit.cover,
@@ -7823,8 +8538,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         ),
                         child: PosterImage(
                           url: featured.poster,
-                          title: featured.title,
-                          year: featured.year,
+                          title: (_privateSessionUnlocked ||
+                                  site.isEffectivelyPrivate)
+                              ? ''
+                              : featured.title,
+                          year: (_privateSessionUnlocked ||
+                                  site.isEffectivelyPrivate)
+                              ? ''
+                              : featured.year,
+                          isPrivate: _privateSessionUnlocked ||
+                              site.isEffectivelyPrivate,
                           highRes: !isWindowsDesktopUi,
                           forBackdrop: true,
                           placeholder: const SizedBox.shrink(),
@@ -7883,12 +8606,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               ],
                               child: PosterImage(
                                 url: featured.poster,
-                                title: site.isEffectivelyPrivate
+                                title: (_privateSessionUnlocked ||
+                                        site.isEffectivelyPrivate)
                                     ? ''
                                     : featured.title,
-                                year: site.isEffectivelyPrivate
+                                year: (_privateSessionUnlocked ||
+                                        site.isEffectivelyPrivate)
                                     ? ''
                                     : featured.year,
+                                isPrivate: _privateSessionUnlocked ||
+                                    site.isEffectivelyPrivate,
                                 highRes: true,
                                 strictHighRes: true,
                                 placeholder: _buildPosterPlaceholder(),
@@ -8813,12 +9540,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                 )
                               : PosterImage(
                                   url: video.poster,
-                                  title: site.isEffectivelyPrivate
+                                  title: (_privateSessionUnlocked ||
+                                          site.isEffectivelyPrivate)
                                       ? ''
                                       : video.title,
-                                  year: site.isEffectivelyPrivate
+                                  year: (_privateSessionUnlocked ||
+                                          site.isEffectivelyPrivate)
                                       ? ''
                                       : video.year,
+                                  isPrivate: _privateSessionUnlocked ||
+                                      site.isEffectivelyPrivate,
                                   placeholder: _buildPosterPlaceholder(),
                                 ),
                           if (badge != null && badge.isNotEmpty)
@@ -9039,6 +9770,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _searchSubscription?.cancel();
     _searchResults.clear();
     _searchController.clear();
+    AiService.instance.setPrivacySessionActive(true);
     setState(() {
       _privateSessionUnlocked = true;
       _privacyPortalAnimating = true;
@@ -9046,6 +9778,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _tabIndex = 0;
       _windowsPage = 'home';
     });
+    _syncNativeDockMenuItemsIfMounted();
     _syncRootTabVisibility(animated: true);
     _reloadSavedConfig();
   }
@@ -9053,12 +9786,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   void _exitPrivacySpace() {
     HapticFeedback.lightImpact();
     widget.storage.clearPrivateVideoSkipRecords();
+    PosterLoader.clearPrivateCache();
     _searchSubscription?.cancel();
     _searchResults.clear();
     _searchController.clear();
+    AiService.instance.setPrivacySessionActive(false);
     setState(() {
       _privateSessionUnlocked = false;
     });
+    _syncNativeDockMenuItemsIfMounted();
     _reloadSavedConfig(bypassHomeSnapshot: true);
   }
 
@@ -9671,6 +10407,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           setState(() {
             _privateSessionUnlocked = false;
           });
+          AiService.instance.setPrivacySessionActive(false);
+          PosterLoader.clearPrivateCache();
+          _syncNativeDockMenuItemsIfMounted();
           _reloadSavedConfig();
         },
         child: const Text(
@@ -9815,6 +10554,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           _privateSessionUnlocked = true;
                           _activeSite = s;
                         });
+                        AiService.instance.setPrivacySessionActive(true);
+                        _syncNativeDockMenuItemsIfMounted();
                         _loadSiteHome();
                       },
                     );
@@ -9843,6 +10584,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             _tabIndex = 1;
                             _windowsPage = 'live';
                           });
+                          AiService.instance.setPrivacySessionActive(true);
+                          _syncNativeDockMenuItemsIfMounted();
                           final idx = _visibleLives.indexWhere(
                             (l) => l.url == privateLives[i].url,
                           );
@@ -12110,7 +12853,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   Widget _buildDownloadsList({required bool useSidebar}) {
     final service = DownloadService.instance;
     return AnimatedBuilder(
-      animation: service,
+      animation: Listenable.merge(<Listenable>[
+        service,
+        widget.storage.configRevisionNotifier,
+      ]),
       builder: (context, _) {
         if (service.isInitializing) {
           return const Center(child: CupertinoActivityIndicator(radius: 12));
@@ -12123,7 +12869,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             ),
           );
         }
-        final tasks = service.tasks;
+        final liveConfig = widget.storage.loadSavedConfig();
+        final resolver = AdaptiveShell.createOfflineDownloadsResolver(
+          currentConfig: liveConfig,
+          storage: widget.storage,
+          privacySessionUnlocked: _privateSessionUnlocked,
+        );
+        final tasks = resolver.filterVisible(service.tasks);
+        // Pre-populate per-task resolutions once for this refresh so grouping,
+        // privacy checks, and row builds reuse cached results with 0 extra
+        // site scans, and record the total site-read count for tests.
+        for (final t in tasks) {
+          resolver.resolve(t);
+        }
+        AdaptiveShell.debugLastDownloadsRefreshSiteReads = resolver.siteReadCount;
         if (tasks.isEmpty) {
           return Center(
             child: Column(
@@ -12156,7 +12915,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             ),
           );
         }
-        final active = service.activeCount;
+        final active = tasks.where((t) => t.isActive).length;
         final hasPaused = tasks.any((t) => t.status == DownloadStatus.paused);
         return ListView(
           padding: EdgeInsets.only(bottom: useSidebar ? 24 : 124),
@@ -12175,10 +12934,22 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     ),
                     const Spacer(),
                     CupertinoButton(
+                      key: const ValueKey('ios-downloads-bulk-toggle'),
                       padding: EdgeInsets.zero,
                       minSize: 26,
-                      onPressed:
-                          active > 0 ? service.pauseAll : service.resumeAll,
+                      onPressed: active > 0
+                          ? () => service.pauseTasks(
+                                tasks
+                                    .where((t) => t.isActive)
+                                    .map((t) => t.id),
+                              )
+                          : () => service.resumeTasks(
+                                tasks
+                                    .where(
+                                      (t) => t.status == DownloadStatus.paused,
+                                    )
+                                    .map((t) => t.id),
+                              ),
                       child: Text(
                         active > 0 ? '全部暂停' : '全部继续',
                         style: const TextStyle(
@@ -12194,8 +12965,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               IosDownloadGroupsView(
                 key: const ValueKey('ios-download-groups-view'),
                 tasks: tasks,
-                singleRowBuilder: _buildDownloadRow,
+                singleRowBuilder: (t) => _buildDownloadRow(t, resolver: resolver),
                 placeholderBuilder: _buildPosterPlaceholder,
+                groupKeyBuilder: resolver.groupKeyOf,
+                isTaskPrivate: (t) =>
+                    _privateSessionUnlocked || resolver.isPrivate(t),
                 onPlay: _playDownloaded,
                 onPause: (t) => service.pause(t.id),
                 onResume: (t) => service.resume(t.id),
@@ -12208,7 +12982,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               )
             else
               AppleGroupedSection(
-                children: [for (final t in tasks) _buildDownloadRow(t)],
+                children: [
+                  for (final t in tasks) _buildDownloadRow(t, resolver: resolver),
+                ],
               ),
             if (service.rootPath.isNotEmpty)
               Padding(
@@ -12226,10 +13002,22 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       },
     );
   }
-  Widget _buildDownloadRow(DownloadTask t) {
+  Widget _buildDownloadRow(
+    DownloadTask t, {
+    OfflineDownloadsResolver? resolver,
+  }) {
     final service = DownloadService.instance;
     final done = t.status == DownloadStatus.completed;
     final failed = t.status == DownloadStatus.failed;
+    final isTaskPrivate = _privateSessionUnlocked ||
+        (resolver != null
+            ? resolver.isPrivate(t)
+            : AdaptiveShell.isOfflineTaskPrivate(
+                t,
+                currentConfig: _config,
+                storage: widget.storage,
+                privacySessionUnlocked: _privateSessionUnlocked,
+              ));
     final statusColor = failed
         ? AppleColors.systemRed
         : (done ? AppleColors.systemGreen : ApplePalette.of(context).labelSecondary);
@@ -12262,7 +13050,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   height: 56,
                   child: PosterImage(
                     url: t.poster,
-                    title: t.title,
+                    title: isTaskPrivate ? '' : t.title,
+                    isPrivate: isTaskPrivate,
                     placeholder: _buildPosterPlaceholder(),
                   ),
                 ),
@@ -12397,18 +13186,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
   }
   void _playDownloaded(DownloadTask t) {
-    final completed = DownloadService.instance
-        .completedFor(t.siteKey, t.videoId)
-        .where((x) => x.lineName == t.lineName && x.filePath.isNotEmpty)
-        .toList();
-    if (completed.isEmpty) return;
-    final start = completed.indexWhere((x) => x.id == t.id);
-    final site = CmsSite(
-      key: t.siteKey,
-      name: t.siteName,
-      type: t.siteType,
-      api: t.siteApi,
+    final completedAll = DownloadService.instance.tasks
+        .where((x) => x.status == DownloadStatus.completed)
+        .toList()
+      ..sort((a, b) => a.episodeIndex.compareTo(b.episodeIndex));
+    final built = AdaptiveShell.buildOfflinePlaybackQueue(
+      t,
+      completedAll,
+      currentConfig: widget.storage.loadSavedConfig(),
+      storage: widget.storage,
+      privacySessionUnlocked: _privateSessionUnlocked,
     );
+    if (built.queue.isEmpty) return;
+    final start = built.startIndex;
+    final site = built.site;
     final video = CmsVideo(
       id: t.videoId,
       title: t.title,
@@ -12417,7 +13208,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         CmsLine(
           name: t.lineName,
           episodes: [
-            for (final x in completed)
+            for (final x in built.queue)
               CmsEpisode(name: x.episodeName, url: x.filePath),
           ],
         ),
@@ -13460,6 +14251,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           '大容量预读缓冲',
           '画面比例',
           '画质与线路',
+          '默认播放来源与盘序',
+          '切换盘序',
+          '网盘顺序',
           '4K',
           '1080P',
         ],
@@ -13467,6 +14261,29 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           IosPlaybackEngineSettingsSection(
             storage: storage,
             onChanged: refresh,
+          ),
+          const SizedBox(height: 20),
+          IosSettingsGroup(
+            header: '默认播放来源与网盘排序',
+            footer: '自定义默认首选网盘（夸克 / UC / 百度 / 阿里）与手动拖拽排序，打开影片详情时将自动命中排在前面的可用网盘线路。',
+            children: [
+              IosSettingsRow(
+                key: const ValueKey('ios-settings-open-drive-priority'),
+                icon: CupertinoIcons.arrow_up_arrow_down_circle_fill,
+                iconColor: AppleColors.systemBlue,
+                title: '默认播放来源与盘序',
+                trailingText: formatPlaybackSourcePrioritySummary(storage),
+                showChevron: true,
+                onTap: () async {
+                  await showPlaybackSourcePrioritySheet(
+                    context,
+                    storage,
+                    onChanged: refresh,
+                  );
+                  refresh();
+                },
+              ),
+            ],
           ),
           const SizedBox(height: 20),
           choices(
@@ -13596,11 +14413,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         SettingsPane(
           'hud',
           '播放界面与手势',
-          '起播规格提示、细进度条、跳过倒计时与双击手势',
+          '自定义底部工具栏按钮排序、细进度条、跳过倒计时与双击手势',
           CupertinoIcons.hand_draw_fill,
           AppleColors.systemBlue,
           sectionGroup: 'ia-playback',
           keywords: const [
+            '工具栏',
+            '按钮排序',
+            '自定义工具栏',
             '两侧双击手势',
             '长按倍速松手恢复',
             '隐藏控制栏时显示细进度条',
@@ -13608,7 +14428,34 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             '起播规格提示',
             '跳过片头/片尾 3 秒倒计时',
           ],
-          content: IosPlayerHudSettingsSection(onChanged: refresh),
+          content: stack([
+            if (isIosNative) ...[
+              IosSettingsGroup(
+                header: '播放器工具栏按钮与排序',
+                footer: '自由添加、移除或拖拽排序播放页底部的快捷按钮（默认包含选集、线路、倍速、弹幕/字幕、画面、播放器、音轨、片头片尾、更多）。',
+                children: [
+                  IosSettingsRow(
+                    key: const ValueKey('ios-settings-customize-player-toolbar'),
+                    icon: CupertinoIcons.slider_horizontal_below_rectangle,
+                    iconColor: AppleColors.systemBlue,
+                    title: '自定义播放器工具栏按钮',
+                    trailingText: '${storage.iosPlayerToolbarItems.length} 项',
+                    showChevron: true,
+                    onTap: () async {
+                      await showIosPlayerToolbarCustomizeSheet(
+                        context,
+                        storage: storage,
+                        onChanged: (_) => refresh(),
+                      );
+                      refresh();
+                    },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+            ],
+            IosPlayerHudSettingsSection(onChanged: refresh),
+          ]),
         ),
       // ─────────────────────────── 外观与主页 ───────────────────────────
       SettingsPane(
@@ -13842,7 +14689,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         ]),
       ),
       // ────────────────────────────── 通用 ──────────────────────────────
-      if (isIosNative)
+      if (isIosNative && !_privateSessionUnlocked)
         SettingsPane(
           'ai',
           'AI 观影实验室',
@@ -15265,75 +16112,135 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }
 
   String _currentAppVersion = '读取中';
+  String _installedVersionToken = '';
+  Future<({String displayVersion, String versionToken})>? _installedVersionFuture;
   Timer? _installedVersionTimer;
 
-  Future<String> _resolveInstalledAppVersion() async {
+  bool _hasExistingLocalUserData() {
+    if (_config != null) return true;
+    if (widget.storage.getSubscriptions().isNotEmpty) return true;
+    if (widget.storage.getWatchHistory().isNotEmpty) return true;
+    if (widget.storage.getFavorites().isNotEmpty) return true;
+    if (widget.storage.hasAnyNetdiskLoggedIn) return true;
+    return false;
+  }
+
+  Future<({String displayVersion, String versionToken})>
+      _resolveInstalledAppVersionInfo() async {
     if (OhosRuntime.isOhos) {
       final ohosPkg = await OhosRuntime.getPackageInfo();
       if (ohosPkg != null && ohosPkg.version.isNotEmpty) {
-        return ohosPkg.version;
+        final v = ohosPkg.version.trim();
+        return (displayVersion: v, versionToken: v);
       }
     }
     try {
       final info = await PackageInfo.fromPlatform();
-      if (info.version.trim().isNotEmpty) {
-        return info.version.trim();
+      final v = info.version.trim();
+      if (v.isNotEmpty) {
+        final token = OnboardingPrefs.normalizeVersionToken(
+          v,
+          buildNumber: info.buildNumber,
+        );
+        return (
+          displayVersion: v,
+          versionToken: token.isNotEmpty ? token : v,
+        );
       }
     } catch (_) {}
-    return '';
+    return (displayVersion: '', versionToken: '');
   }
 
-  Future<void> _loadInstalledVersion() async {
+  Future<({String displayVersion, String versionToken})>
+      _loadInstalledVersion() async {
     _installedVersionTimer = Timer(const Duration(seconds: 3), () {
-      if (mounted) setState(() => _currentAppVersion = '未知');
+      if (mounted && _currentAppVersion == '读取中') {
+        setState(() => _currentAppVersion = '未知');
+      }
     });
     try {
-      final version = await _resolveInstalledAppVersion();
+      final resolved = await _resolveInstalledAppVersionInfo();
       _installedVersionTimer?.cancel();
+      final version = resolved.displayVersion;
+      final token = resolved.versionToken;
       if (mounted) {
-        setState(
-          () => _currentAppVersion = version.isNotEmpty ? version : '未知',
-        );
-        if (version.isNotEmpty &&
-            defaultTargetPlatform == TargetPlatform.iOS &&
-            !OhosRuntime.isOhos) {
-          unawaited(_maybeShowPostUpdateWelcomeIfNeeded(version));
-        }
+        setState(() {
+          _currentAppVersion = version.isNotEmpty ? version : '未知';
+          _installedVersionToken = token;
+        });
       }
+      return resolved;
     } catch (_) {
       _installedVersionTimer?.cancel();
       if (mounted) setState(() => _currentAppVersion = '未知');
+      return (displayVersion: '', versionToken: '');
     }
   }
 
-  Future<void> _maybeShowPostUpdateWelcomeIfNeeded(String version) async {
+  Future<bool> _maybeShowPostUpdateWelcomeIfNeeded({
+    required OnboardingPrefs prefs,
+    required String displayVersion,
+    required String versionToken,
+  }) async {
     try {
-      final prefs = await OnboardingPrefs.load();
-      if (!mounted || !prefs.shouldShowPostUpdateNotice(version)) return;
+      if (widget.storage.isSubscriptionsCorrupted ||
+          widget.storage.isHistoryCorrupted) {
+        return false;
+      }
+      final inFlutterTest =
+          !kIsWeb && Platform.environment.containsKey('FLUTTER_TEST');
+      if (inFlutterTest &&
+          prefs.lastSeenAppVersion.isEmpty &&
+          !OnboardingPrefs.debugEnablePostUpdateAutoPopInTest) {
+        return false;
+      }
+      final existingUser = _hasExistingLocalUserData();
+      if (!mounted ||
+          !prefs.shouldShowPostUpdateNotice(
+            versionToken,
+            hasExistingUserData: existingUser,
+          )) {
+        return false;
+      }
       final frameReady = Completer<void>();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!frameReady.isCompleted) frameReady.complete();
       });
       await frameReady.future;
+      // Wait for IosLaunchCurtainHost's real completion event instead of a
+      // hardcoded 420 ms sleep so the dialog never races behind the curtain.
+      await IosLaunchCurtainHost.waitUntilCurtainCompleted();
       if (!mounted ||
           _officialNoticeOpen ||
           _onboardingRouteOpen ||
-          !prefs.shouldShowPostUpdateNotice(version)) {
-        return;
+          _privateSessionUnlocked ||
+          !prefs.shouldShowPostUpdateNotice(
+            versionToken,
+            hasExistingUserData: _hasExistingLocalUserData(),
+          )) {
+        return false;
       }
       _officialNoticeOpen = true;
       try {
         await showPostUpdateWelcomeDialog(
           context,
-          version: version,
+          version: displayVersion,
           urlOpener: widget.onOpenExternalUrlForTest,
-          onConfirm: () => prefs.markPostUpdateNoticeSeen(version),
+          onConfirm: () async {
+            final saved = await prefs.markPostUpdateNoticeSeen(versionToken);
+            if (prefs.shouldShowOfficialChannelNotice()) {
+              await prefs.markOfficialChannelNoticeSeen();
+            }
+            return saved;
+          },
         );
+        return true;
       } finally {
         _officialNoticeOpen = false;
       }
     } catch (e) {
       debugPrint('PostUpdateWelcomeDialog skipped: $e');
+      return false;
     }
   }
 
@@ -18223,22 +19130,29 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       return;
                     }
                     if (inPrivacyMode) {
+                      AiService.instance.setPrivacySessionActive(true);
                       setState(() {
                         _privateSessionUnlocked = true;
                         _selectedPrivateSiteKey = s.key;
                         _activeSite = s;
                       });
                     } else {
+                      final wasPrivate = _privateSessionUnlocked;
                       widget.storage.setSelectedSiteKey(s.key);
                       unawaited(CmsClient.retainScriptSessions(
                         (_config?.scriptOwners ?? const <CmsSite>[])
                             .where((site) => !site.isEffectivelyPrivate),
                       ));
+                      AiService.instance.setPrivacySessionActive(false);
+                      if (wasPrivate) {
+                        PosterLoader.clearPrivateCache();
+                      }
                       setState(() {
                         _privateSessionUnlocked = false;
                         _activeSite = s;
                       });
                     }
+                    _syncNativeDockMenuItemsIfMounted();
                     _loadSiteHome();
                   },
                 ),
@@ -18291,7 +19205,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             allSites.any((s) => s.isCatPaw) ? _showCatPawSettings : null,
         onLibraryAdded: () {
           if (!initialIsPrivate) {
+            if (_privateSessionUnlocked) {
+              PosterLoader.clearPrivateCache();
+            }
             _privateSessionUnlocked = false;
+            AiService.instance.setPrivacySessionActive(false);
+            _syncNativeDockMenuItemsIfMounted();
           }
           _reloadSavedConfig();
         },

@@ -18,6 +18,7 @@ import '../core/netdisk_session.dart';
 import '../core/storage_service.dart';
 import '../core/quark_account.dart';
 import 'apple_theme.dart';
+import 'ios_drive_priority_sheet.dart';
 import 'ios_liquid_glass.dart';
 import 'ios_settings.dart';
 import 'local_qr_code.dart';
@@ -764,9 +765,23 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
     }
   }
 
+  Future<void> _openDrivePriorityEditor() async {
+    await showPlaybackSourcePrioritySheet(
+      context,
+      widget.storage,
+      onSyncExternal: () =>
+          _syncAllConfigCenters(pullFromExternal: false, pushToExternal: true),
+      onChanged: () {
+        widget.onChanged?.call();
+        if (mounted) setState(() {});
+      },
+    );
+    if (mounted) setState(() {});
+  }
+
   @override
   Widget build(BuildContext context) {
-    final orderLabels = widget.storage.driveOrder.map((k) {
+    final orderLabels = widget.storage.effectiveDriveOrder.map((k) {
       return switch (k) {
         'quark' => '夸父',
         'uc' => '优汐',
@@ -775,6 +790,11 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
         _ => k,
       };
     }).join(' > ');
+    final sourceMode = PlaybackSourcePriorityMode.fromStorage(widget.storage);
+    final priorityBannerTitle =
+        sourceMode == PlaybackSourcePriorityMode.netdiskFirst
+        ? '默认网盘优先：$orderLabels'
+        : '默认来源：${sourceMode.titleZh}（兜底：$orderLabels）';
 
     if (usesWindowsAppearance(context)) {
       return Column(
@@ -876,27 +896,31 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
               ),
               const SizedBox(width: 8),
               Expanded(
-                child: Text(
-                  '盘序优先：$orderLabels',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: palette.labelPrimary,
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w700,
+                child: GestureDetector(
+                  key: const ValueKey('netdisk-banner-open-priority'),
+                  onTap: _openDrivePriorityEditor,
+                  behavior: HitTestBehavior.opaque,
+                  child: Text(
+                    priorityBannerTitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: palette.labelPrimary,
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                 ),
               ),
-              if (!widget.embedInIosScaffold || !useNativeIos26) ...[
-                const SizedBox(width: 8),
-                AppleCapsuleButton(
-                  icon: CupertinoIcons.refresh,
-                  label: '切换盘序',
-                  compact: true,
-                  useBackdrop: false,
-                  onPressed: _rotateDriveOrder,
-                ),
-              ],
+              const SizedBox(width: 8),
+              AppleCapsuleButton(
+                key: const ValueKey('netdisk-open-priority-editor-btn'),
+                icon: CupertinoIcons.slider_horizontal_3,
+                label: '默认来源与盘序',
+                compact: true,
+                useBackdrop: false,
+                onPressed: _openDrivePriorityEditor,
+              ),
             ],
           ),
           const SizedBox(height: 8),
@@ -1053,19 +1077,19 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
         trailing: useNativeIos26
             ? IosNativeGlassButton(
                 style: 'capsule',
-                symbol: 'arrow.triangle.2.circlepath',
-                label: '切换盘序',
+                symbol: 'slider.horizontal.3',
+                label: '来源排序',
                 symbolSize: 13,
                 height: 36,
                 maxWidth: 132,
-                accessibilityLabel: '切换盘序',
-                onTap: _rotateDriveOrder,
+                accessibilityLabel: '默认播放来源与盘序',
+                onTap: _openDrivePriorityEditor,
                 fallback: AppleCapsuleButton(
-                  icon: CupertinoIcons.refresh,
-                  label: '切换盘序',
+                  icon: CupertinoIcons.slider_horizontal_3,
+                  label: '来源排序',
                   compact: true,
                   useBackdrop: false,
-                  onPressed: _rotateDriveOrder,
+                  onPressed: _openDrivePriorityEditor,
                 ),
               )
             : null,

@@ -41,13 +41,20 @@ class AiSubtitleTranslationResult {
   final Map<String, String> glossary;
   final bool bilingual;
   final String srtContent;
+  final int translatedCount;
+  final int totalCount;
 
   const AiSubtitleTranslationResult({
     required this.cues,
     required this.glossary,
     required this.bilingual,
     required this.srtContent,
-  });
+    int? translatedCount,
+    int? totalCount,
+  })  : translatedCount = translatedCount ?? cues.length,
+        totalCount = totalCount ?? cues.length;
+
+  bool get hasUntranslatedRemainder => translatedCount < totalCount;
 }
 
 /// Character card inside Scenario 2: Zero-Spoiler Episode Companion.
@@ -156,6 +163,46 @@ class AiMoodSommelierResult {
     required this.tastePortrait,
     required this.picks,
   });
+}
+
+/// Result of grounded zero-spoiler Watch Brief & Worldbuilding Guide.
+@immutable
+class AiWatchBriefResult {
+  final String oneLineHook;
+  final List<String> highlights;
+  final List<String> backgroundContext;
+  final String viewingNote;
+
+  const AiWatchBriefResult({
+    required this.oneLineHook,
+    required this.highlights,
+    required this.backgroundContext,
+    this.viewingNote = '',
+  });
+
+  String get viewingTip => viewingNote;
+}
+
+/// Result of Post-Credits & Edition Guide (`片尾彩蛋与版本指南`).
+@immutable
+class AiPostCreditsResult {
+  final String status;
+  final bool hasCreditsScene;
+  final String badgeLabelZh;
+  final String stingerSummaryZh;
+  final String versionTipZh;
+
+  const AiPostCreditsResult({
+    required this.status,
+    required this.hasCreditsScene,
+    required this.badgeLabelZh,
+    required this.stingerSummaryZh,
+    this.versionTipZh = '',
+  });
+
+  String get badgeZh => badgeLabelZh;
+  String get timingGuideZh => stingerSummaryZh;
+  String get editionNotesZh => versionTipZh;
 }
 
 /// Executable one-tap remediation action returned by Scenario 5: AI Diagnostics.
@@ -388,8 +435,10 @@ class AiLabService {
     return sb.toString();
   }
 
-  /// Translates [cues] (up to [maxCues] per batch window) with automatic
-  /// character/proper-noun glossary extraction & lock so names never drift.
+  /// Translates [cues] starting at [startIndex] (up to [maxCues] cues per batch
+  /// when `maxCues > 0`, or the entire timeline when `maxCues <= 0`) while
+  /// ALWAYS preserving the full timeline and untranslated original text for any
+  /// remaining cues (e.g. cue #121 through the final cue of a full movie).
   Future<AiSubtitleTranslationResult> translateSubtitleCues({
     required String seriesTitle,
     String episodeLabel = '',
@@ -398,6 +447,7 @@ class AiLabService {
     Map<String, String> existingGlossary = const <String, String>{},
     bool isPrivateSpace = false,
     int chunkSize = 28,
+    int startIndex = 0,
     int maxCues = 120,
   }) async {
     _ensureReady(isPrivateSpace: isPrivateSpace);
@@ -413,15 +463,20 @@ class AiLabService {
         glossary: <String, String>{},
         bilingual: true,
         srtContent: '',
+        translatedCount: 0,
+        totalCount: 0,
       );
     }
 
-    final bounded = cues.take(maxCues).toList(growable: false);
+    final safeStart = startIndex.clamp(0, cues.length);
+    final batchLimit = maxCues <= 0 ? (cues.length - safeStart) : maxCues;
+    final batchEnd = (safeStart + batchLimit).clamp(safeStart, cues.length);
     final mergedGlossary = Map<String, String>.of(existingGlossary);
-    final translated = List<AiSubtitleCue>.of(bounded);
+    final translated = List<AiSubtitleCue>.of(cues);
 
-    for (int offset = 0; offset < bounded.length; offset += chunkSize) {
-      final slice = bounded.skip(offset).take(chunkSize).toList();
+    for (int offset = safeStart; offset < batchEnd; offset += chunkSize) {
+      final chunkEnd = (offset + chunkSize).clamp(offset, batchEnd);
+      final slice = translated.sublist(offset, chunkEnd);
       final glossaryHint = mergedGlossary.isEmpty
           ? '如出现人名/专有名词请在 glossary 字段建立固定译名表。'
           : '请严格沿用本剧既有译名表：${jsonEncode(mergedGlossary)}';
@@ -481,12 +536,17 @@ class AiLabService {
       }
     }
 
+    final translatedTotal = translated
+        .where((c) => c.translatedText.trim().isNotEmpty)
+        .length;
     final srt = serializeToSrt(translated, bilingual: bilingual);
     return AiSubtitleTranslationResult(
-      cues: translated,
-      glossary: mergedGlossary,
+      cues: List<AiSubtitleCue>.unmodifiable(translated),
+      glossary: Map<String, String>.unmodifiable(mergedGlossary),
       bilingual: bilingual,
       srtContent: srt,
+      translatedCount: translatedTotal,
+      totalCount: translated.length,
     );
   }
 
@@ -524,6 +584,203 @@ class AiLabService {
     final sec = ((map['offsetSeconds'] as num?)?.toDouble() ?? 0.0).clamp(-300.0, 300.0);
     final reason = (map['reason'] ?? '根据首句台词与片头时长估算').toString().trim();
     return (offsetSeconds: sec, reasonZh: reason);
+  }
+
+  /// Translates a single live subtitle cue emitted by an embedded video subtitle
+  /// stream so real-time bilingual subtitles render immediately on screen.
+  Future<String> translateLiveSubtitleLine({
+    required String seriesTitle,
+    required String rawLine,
+    bool isPrivateSpace = false,
+  }) async {
+    _ensureReady(isPrivateSpace: isPrivateSpace);
+    final clean = rawLine
+        .replaceAll(RegExp(r'<[^>]+>|\{\\[^}]*\}'), '')
+        .trim();
+    if (clean.isEmpty) return '';
+    // Skip lines that are already predominantly Chinese.
+    final cjkCount = RegExp(r'[\u4e00-\u9fff]').allMatches(clean).length;
+    if (cjkCount >= 2 && cjkCount * 2 >= clean.length) {
+      return clean;
+    }
+    final res = await _ai.complete(
+      feature: 'ai_sub_live_v1',
+      systemPrompt: '你是影视实时字幕翻译器。将输入的单句台词翻译为自然简练的简体中文对白，'
+          '直接输出译文纯文本，不要引号、不要解释、严禁输出任何网址。',
+      userPrompt: '《$seriesTitle》台词：$clean',
+      modelOverride: _ai.config.effectiveFastModel,
+      temperature: 0.15,
+      maxTokens: 160,
+      useCache: true,
+      isPrivateSession: isPrivateSpace,
+    );
+    final zh = res.text.trim();
+    if (zh.isEmpty || AiService.containsForbiddenUrl(zh)) return '';
+    return zh;
+  }
+
+  void _ensureWatchBriefEnabled() {
+    if (!_ai.config.spoilerFreeRecapEnabled) {
+      throw const AiServiceException(
+        AiErrorCode.disabled,
+        '「零剧透看点与观影导览」开关已关闭，可在 AI 实验室设置中开启',
+      );
+    }
+  }
+
+  /// Generates a 100% metadata-grounded, zero-spoiler Watch Brief (`看点与设定科普`)
+  /// without ever fabricating unverified timecode dialogue.
+  Future<AiWatchBriefResult> generateWatchBrief({
+    required String title,
+    String year = '',
+    String area = '',
+    String actors = '',
+    String genreOrRemarks = '',
+    String overview = '',
+    bool isPrivateSpace = false,
+  }) async {
+    _ensureReady(isPrivateSpace: isPrivateSpace);
+    _ensureWatchBriefEnabled();
+    final res = await _ai.complete(
+      feature: 'ai_watch_brief_v1',
+      systemPrompt: '你是专业资深影评导览员。请严格基于作品真实公开信息生成零剧透观影导览，'
+          '绝不编造未核实的台词原句，绝不泄露结局与关键反转！'
+          '仅输出合法 JSON：{"oneLineHook":"28字内一句话零剧透吸引点","highlights":["看点1","看点2"],"background":["时代/科幻世界观或创作背景科普1","科普2"],"viewingNote":"50字内适合人群与视听观赏建议"}。'
+          '严禁输出任何网址。',
+      userPrompt: '片名：《$title》${year.trim().isNotEmpty ? " ($year)" : ""}\n'
+          '类型/标签：${genreOrRemarks.trim().isEmpty ? "未知" : genreOrRemarks.trim()}\n'
+          '地区：${area.trim().isEmpty ? "未知" : area.trim()}\n'
+          '主创/演员：${actors.trim().isEmpty ? "未知" : actors.trim()}\n'
+          '简介：${overview.trim().isEmpty ? "暂无" : overview.trim()}',
+      temperature: 0.3,
+      maxTokens: 700,
+      isPrivateSession: isPrivateSpace,
+    );
+    final slice = AiService.extractJsonObjectSlice(res.text);
+    if (slice == null) {
+      throw const AiServiceException(AiErrorCode.malformedResponse, '未能解析看点导览内容');
+    }
+    final map = jsonDecode(slice) as Map<String, dynamic>;
+    List<String> parseListOrString(Object? raw) {
+      if (raw is List) {
+        return raw
+            .map((e) => (e ?? '').toString().trim())
+            .where((s) => s.isNotEmpty)
+            .toList(growable: false);
+      }
+      final s = (raw ?? '').toString().trim();
+      return s.isEmpty ? const <String>[] : <String>[s];
+    }
+
+    final hook = (map['oneLineHook'] ?? '').toString().trim();
+    final highlights = parseListOrString(map['highlights']);
+    final background = parseListOrString(
+      map['background'] ?? map['backgroundContext'],
+    );
+    final tip =
+        (map['viewingNote'] ?? map['viewingTip'] ?? '').toString().trim();
+    final joinedCheck = [hook, ...highlights, ...background, tip].join(' ');
+    if (AiService.containsForbiddenUrl(joinedCheck)) {
+      throw const AiServiceException(AiErrorCode.unsafeOutputRejected, '内容未通过安全校验');
+    }
+    return AiWatchBriefResult(
+      oneLineHook: hook.isNotEmpty
+          ? hook
+          : (highlights.isNotEmpty ? highlights.first : '《$title》零剧透观影导览'),
+      highlights: highlights,
+      backgroundContext: background,
+      viewingNote: tip,
+    );
+  }
+
+  /// Checks whether a film/series has mid/post-credits scenes (`片尾彩蛋`) and
+  /// notable edition differences (`IMAX / 导演剪辑版 / 加长版`) without spoiling plot.
+  Future<AiPostCreditsResult> checkPostCreditsGuide({
+    required String title,
+    String year = '',
+    String overview = '',
+    bool isPrivateSpace = false,
+  }) async {
+    _ensureReady(isPrivateSpace: isPrivateSpace);
+    _ensureWatchBriefEnabled();
+    final res = await _ai.complete(
+      feature: 'ai_post_credits_v1',
+      systemPrompt: '你是影院片尾彩蛋与版本考据助手。请针对该影视作品给出准确的片尾彩蛋提示（严禁剧透彩蛋具体反转或结局细节，仅说明有无彩蛋、数量及出现位置如字幕前/全部字幕后；若不确定请诚实说明）以及常见版本差异（如 IMAX 画幅、导演剪辑版、加长版）。'
+          '仅输出合法 JSON：{"status":"has_stinger 或 none 或 uncertain","badge":"简短结论如：含片尾彩蛋 / 无片尾彩蛋 / 视发行版而定","stingerSummary":"80字内等待位置建议（零剧透）","versionTip":"80字内版本或视听规格观赏建议"}。'
+          '严禁输出任何网址。',
+      userPrompt: '作品：《$title》${year.trim().isNotEmpty ? " ($year)" : ""}\n'
+          '简介参考：${overview.trim().isEmpty ? "无" : overview.trim()}',
+      temperature: 0.2,
+      maxTokens: 520,
+      isPrivateSession: isPrivateSpace,
+    );
+    final slice = AiService.extractJsonObjectSlice(res.text);
+    if (slice == null) {
+      throw const AiServiceException(AiErrorCode.malformedResponse, '未能解析彩蛋提示');
+    }
+    final map = jsonDecode(slice) as Map<String, dynamic>;
+    final rawStatus = (map['status'] ?? '').toString().trim().toLowerCase();
+    final hasCredits = rawStatus == 'has_stinger' || map['hasCredits'] == true;
+    final status = (rawStatus == 'has_stinger' ||
+            rawStatus == 'none' ||
+            rawStatus == 'uncertain')
+        ? rawStatus
+        : (map.containsKey('hasCredits')
+              ? (hasCredits ? 'has_stinger' : 'none')
+              : 'uncertain');
+    final defaultBadge = status == 'has_stinger'
+        ? '含片尾彩蛋'
+        : (status == 'none' ? '无片尾彩蛋' : '彩蛋视发行版本而定');
+    final badge = (map['badge'] ?? defaultBadge).toString().trim();
+    final guide =
+        (map['stingerSummary'] ?? map['timingGuide'] ?? '').toString().trim();
+    final notes =
+        (map['versionTip'] ?? map['editionNotes'] ?? '').toString().trim();
+    if (AiService.containsForbiddenUrl(guide) ||
+        AiService.containsForbiddenUrl(notes)) {
+      throw const AiServiceException(AiErrorCode.unsafeOutputRejected, '内容未通过安全校验');
+    }
+    return AiPostCreditsResult(
+      status: status,
+      hasCreditsScene: hasCredits,
+      badgeLabelZh: badge.isEmpty ? defaultBadge : badge,
+      stingerSummaryZh: guide.isEmpty ? '正片结束后可直接退场或按需欣赏配乐。' : guide,
+      versionTipZh: notes,
+    );
+  }
+
+  /// Free-form grounded Q&A about the current movie/series with optional
+  /// anti-spoiler lock.
+  Future<String> askAboutWork({
+    required String title,
+    String year = '',
+    String overview = '',
+    required String question,
+    bool spoilerFree = true,
+    bool isPrivateSpace = false,
+  }) async {
+    _ensureReady(isPrivateSpace: isPrivateSpace);
+    _ensureWatchBriefEnabled();
+    final q = question.trim();
+    if (q.isEmpty) return '';
+    final res = await _ai.complete(
+      feature: 'ai_work_qa_v1',
+      systemPrompt: '你是博学克制的私人观影问答助手。请围绕当前作品回答用户提问，'
+          '${spoilerFree ? "严格遵守【防剧透模式】：绝不透露结局、凶手身份或未发生的关键反转；" : ""}'
+          '对于无法核实的细节请坦诚告知，绝不编造虚假台词。控制在 220 字以内，纯文本分段清晰，严禁输出任何网址。',
+      userPrompt: '当前作品：《$title》${year.trim().isNotEmpty ? " ($year)" : ""}\n'
+          '简介参考：${overview.trim().isEmpty ? "无" : overview.trim()}\n'
+          '用户提问：$q',
+      temperature: 0.35,
+      maxTokens: 650,
+      useCache: true,
+      isPrivateSession: isPrivateSpace,
+    );
+    final text = res.text.trim();
+    if (AiService.containsForbiddenUrl(text)) {
+      throw const AiServiceException(AiErrorCode.unsafeOutputRejected, '回答未通过安全校验');
+    }
+    return text;
   }
 
   // ─────────────────────────────────────────────────────────────────────────

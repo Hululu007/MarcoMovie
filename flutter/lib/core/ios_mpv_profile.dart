@@ -2,6 +2,7 @@
 import 'package:media_kit/media_kit.dart';
 
 import 'ios_avplayer_controller.dart';
+import 'mdk_platform_player.dart';
 
 typedef MpvPropertySetter = Future<void> Function(String key, String value);
 
@@ -174,6 +175,56 @@ class IosMpvProfile {
     return physicalMemoryBytes >= highRamPhysicalBytesThreshold;
   }
 
+  static final RegExp _dolbyVisionTokenRe = RegExp(
+    r'(?:杜比视界|Dolby[\s._\-]*Vision|\bDoVi\b|\bdvhe\b|\bdvh1\b|(?:^|[\s._\-\[\(【（])DV(?=$|[\s._\-\]\)】）]))',
+    caseSensitive: false,
+  );
+
+  static final RegExp _uhd10BitTokenRe = RegExp(
+    r'(?:\b2160[pP]\b|\b4K\b|HDR10\+?|(?<!\w)HDR(?!\w)|\b10[\s._\-]*bit\b|\bRemux\b|原盘)',
+    caseSensitive: false,
+  );
+
+  /// Detects whether stream/file metadata indicates Dolby Vision (`Profile 5 / 7 / 8`
+  /// `ICtCp` / `dovi`) where iOS OpenGL ES `libmpv` (built without `libplacebo`)
+  /// would render green/purple unless routed to Apple `AVPlayer` or Metal `MDK`.
+  static bool isLikelyDolbyVisionMedia({
+    String url = '',
+    String episodeName = '',
+    String lineName = '',
+    String videoTitle = '',
+    String videoRemarks = '',
+  }) {
+    final combined = '$episodeName $lineName $videoTitle $videoRemarks $url';
+    return _dolbyVisionTokenRe.hasMatch(combined);
+  }
+
+  /// Detects 4K / 10-bit HDR / Dolby Vision streams that benefit from Metal +
+  /// zero-copy `VideoToolbox` (`MDK`) when `AVPlayer` cannot open the container
+  /// (e.g. `.mkv` / `.webm` / `.ts` netdisk originals).
+  static bool prefersIosMetalMdkWhenAvPlayerUnsupported({
+    String url = '',
+    String episodeName = '',
+    String lineName = '',
+    String videoTitle = '',
+    String videoRemarks = '',
+  }) {
+    if (isLikelyDolbyVisionMedia(
+      url: url,
+      episodeName: episodeName,
+      lineName: lineName,
+      videoTitle: videoTitle,
+      videoRemarks: videoRemarks,
+    )) {
+      return true;
+    }
+    final combined = '$episodeName $lineName $videoTitle $videoRemarks $url';
+    if (_uhd10BitTokenRe.hasMatch(combined)) return true;
+    final lowerUrl = url.toLowerCase();
+    final lowerEp = episodeName.toLowerCase();
+    return lowerUrl.contains('.mkv') || lowerEp.endsWith('.mkv');
+  }
+
   /// Pure policy predicate deciding whether iOS `libmpv` should run in
   /// low-power thermal mode (`hdr-compute-peak=no`, `dither-depth=no`,
   /// `video-sync=audio`). Activates as soon as thermal pressure reaches `.fair`
@@ -269,6 +320,14 @@ class IosMpvProfile {
       'cache': 'yes',
       'cache-on-disk': 'no',
       'hwdec': hwdec,
+      // Critical on iOS OpenGL ES (`EAGLContext`): overrides media-kit's
+      // 10-bit -> 33 MB `BGRA` fallback so `VTDecompressionSession` outputs
+      // hardware-scaled planar `NV12` zero-copy at full 60fps instead of
+      // stalling in ~8fps slow motion on 4K 10-bit HEVC streams.
+      'hwdec-image-format': 'nv12',
+      'vd-lavc-threads': '0',
+      'vd-lavc-dr': 'yes',
+      'framedrop': 'vo',
       'demuxer-max-bytes': '${tier.maxBytes}',
       'demuxer-max-back-bytes': '${tier.maxBackBytes}',
       'demuxer-readahead-secs': '${tier.readaheadSecs}',
@@ -343,6 +402,9 @@ class IosMpvProfile {
   static MpvPropertySetter? _resolveSetter(Player player) {
     final platform = player.platform;
     if (platform is NativePlayer) {
+      return platform.setProperty;
+    }
+    if (platform is MdkPlatformPlayer) {
       return platform.setProperty;
     }
     return null;

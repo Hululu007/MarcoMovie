@@ -513,6 +513,7 @@ abstract final class AiModelCatalogFetcher {
     Map<String, String> extraHeaders = const <String, String>{},
     http.Client? httpClient,
     Duration timeout = const Duration(seconds: 12),
+    void Function()? verifyAuthorizedBeforeHop,
   }) async {
     var trimmed = baseUrl.trim();
     while (trimmed.endsWith('/')) {
@@ -588,8 +589,22 @@ abstract final class AiModelCatalogFetcher {
 
     final ephemeral = httpClient == null;
     final client = httpClient ?? http.Client();
+    Future<http.Response> sendNoRedirectGet(
+      Uri target,
+      Map<String, String> reqHeaders,
+    ) async {
+      verifyAuthorizedBeforeHop?.call();
+      final req = http.Request('GET', target)
+        ..followRedirects = false
+        ..maxRedirects = 0
+        ..headers.addAll(reqHeaders);
+      final streamed = await client.send(req).timeout(timeout);
+      return http.Response.fromStream(streamed).timeout(timeout);
+    }
+
     try {
-      final resp = await client.get(modelsUri, headers: headers).timeout(timeout);
+      final resp = await sendNoRedirectGet(modelsUri, headers);
+      verifyAuthorizedBeforeHop?.call();
       final rawBody = utf8.decode(resp.bodyBytes, allowMalformed: true);
       if (resp.statusCode < 200 || resp.statusCode >= 300) {
         // Fallback for Ollama servers where `/v1/models` might not be exposed
@@ -597,12 +612,11 @@ abstract final class AiModelCatalogFetcher {
         if (protocol == AiApiProtocol.openaiCompatible &&
             isLoopbackAiBaseUrl(trimmed)) {
           final fallbackUri = parsed.replace(path: '/api/tags', query: '');
-          final fallbackResp = await client
-              .get(
-                fallbackUri,
-                headers: const <String, String>{'Accept': 'application/json'},
-              )
-              .timeout(timeout);
+          final fallbackResp = await sendNoRedirectGet(
+            fallbackUri,
+            const <String, String>{'Accept': 'application/json'},
+          );
+          verifyAuthorizedBeforeHop?.call();
           if (fallbackResp.statusCode >= 200 && fallbackResp.statusCode < 300) {
             return _parseModelList(
               utf8.decode(fallbackResp.bodyBytes, allowMalformed: true),

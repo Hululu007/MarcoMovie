@@ -75,17 +75,31 @@ class AiModelOption {
   final String displayName;
   final String description;
   final int priority;
+  final bool isLocalFallback;
 
   const AiModelOption({
     required this.id,
     String? displayName,
     this.description = '',
     this.priority = 1000,
+    this.isLocalFallback = false,
   }) : displayName = (displayName == null || displayName == '') ? id : displayName;
 
   bool get hasDistinctDisplayName =>
       displayName.trim().isNotEmpty &&
       displayName.trim().toLowerCase() != id.trim().toLowerCase();
+
+  AiModelOption copyWithPriority(
+    int nextPriority, {
+    bool? isLocalFallback,
+  }) =>
+      AiModelOption(
+        id: id,
+        displayName: displayName,
+        description: description,
+        priority: nextPriority,
+        isLocalFallback: isLocalFallback ?? this.isLocalFallback,
+      );
 }
 
 /// OAuth 2.0 PKCE session credentials for ChatGPT Plus / Pro / Team subscription
@@ -255,7 +269,8 @@ class AiConfig {
 
   List<AiCustomSkill> get effectiveSkills => <AiCustomSkill>[
         ...AiCustomSkill.defaultBuiltInSkills,
-        ...customSkills,
+        for (final s in customSkills)
+          if (!AiCustomSkill.retiredBuiltInSkillIds.contains(s.id)) s,
       ];
 
   /// Secondary lightweight model for batch filename cleanup; falls back to [model].
@@ -420,6 +435,323 @@ class AiMonthlyUsage {
   }
 }
 
+/// Single recorded AI invocation entry for the detailed usage history view and
+/// local rolling 5-hour / 7-day subscription window tracking.
+@immutable
+class AiUsageLogEntry {
+  final int timestampMs;
+  final String feature;
+  final String model;
+  final String authModeId;
+  final int promptTokens;
+  final int completionTokens;
+  final int latencyMs;
+  final bool fromCache;
+
+  const AiUsageLogEntry({
+    required this.timestampMs,
+    required this.feature,
+    required this.model,
+    this.authModeId = 'api_key',
+    this.promptTokens = 0,
+    this.completionTokens = 0,
+    this.latencyMs = 0,
+    this.fromCache = false,
+  });
+
+  int get totalTokens => promptTokens + completionTokens;
+
+  String get featureLabelZh => switch (feature) {
+    'ping' => '连接测试',
+    'nl_search_v1' => '自然语言找片',
+    'title_clean_v1' => '标题智能清洗',
+    'ai_sub_v1' => '外挂字幕精译',
+    'ai_sub_live_v1' => '内封实时双语字幕',
+    'ai_sub_offset_v1' => '字幕时间轴校准',
+    'ai_watch_brief_v1' => '零剧透看点与设定科普',
+    'ai_post_credits_v1' => '片尾彩蛋与版本提示',
+    'ai_work_qa_v1' => '自由观影问答',
+    'ai_sommelier_v1' => '观影口味策展',
+    'ai_ep_curate_v1' => '剧集智能编排',
+    'ai_diag_v1' => '播放与源智能排障',
+    _ => feature.startsWith('skill:') ? '自定义技能' : 'AI 助手调用',
+  };
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'ts': timestampMs,
+        'f': feature,
+        'm': model,
+        'auth': authModeId,
+        'in': promptTokens,
+        'out': completionTokens,
+        'ms': latencyMs,
+        if (fromCache) 'cache': true,
+      };
+
+  factory AiUsageLogEntry.fromJson(Map<String, dynamic> json) {
+    return AiUsageLogEntry(
+      timestampMs: (json['ts'] as num?)?.toInt() ?? 0,
+      feature: (json['f'] ?? '').toString().trim(),
+      model: (json['m'] ?? '').toString().trim(),
+      authModeId: (json['auth'] ?? 'api_key').toString().trim(),
+      promptTokens: ((json['in'] as num?)?.toInt() ?? 0).clamp(0, 1 << 30),
+      completionTokens: ((json['out'] as num?)?.toInt() ?? 0).clamp(0, 1 << 30),
+      latencyMs: ((json['ms'] as num?)?.toInt() ?? 0).clamp(0, 600000),
+      fromCache: json['cache'] == true,
+    );
+  }
+}
+
+/// Rate-limit window state (e.g. 5-hour primary window or 7-day weekly window)
+/// reported by ChatGPT Plus / Pro / Team subscription headers or `/wham/usage`.
+@immutable
+class AiSubscriptionQuotaWindow {
+  final int windowSeconds;
+  final double? usedPercent;
+  final int resetAtEpochSec;
+
+  const AiSubscriptionQuotaWindow({
+    required this.windowSeconds,
+    this.usedPercent,
+    this.resetAtEpochSec = 0,
+  });
+
+  bool get hasServerPercent => usedPercent != null;
+
+  double get clampedPercent => (usedPercent ?? 0.0).clamp(0.0, 100.0);
+
+  String resetCountdownZh(DateTime now) {
+    if (resetAtEpochSec <= 0) return '';
+    final remSec = resetAtEpochSec - (now.millisecondsSinceEpoch ~/ 1000);
+    if (remSec <= 0) return '即将重置';
+    if (remSec >= 86400) {
+      final days = remSec ~/ 86400;
+      final hours = (remSec % 86400) ~/ 3600;
+      return hours > 0 ? '$days天$hours小时后重置' : '$days天后重置';
+    }
+    if (remSec >= 3600) {
+      final hours = remSec ~/ 3600;
+      final mins = (remSec % 3600) ~/ 60;
+      return mins > 0 ? '$hours小时$mins分后重置' : '$hours小时后重置';
+    }
+    final mins = remSec ~/ 60;
+    return '${mins < 1 ? 1 : mins}分钟后重置';
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'windowSeconds': windowSeconds,
+        if (usedPercent != null) 'usedPercent': usedPercent,
+        'resetAtEpochSec': resetAtEpochSec,
+      };
+
+  factory AiSubscriptionQuotaWindow.fromJson(Map<String, dynamic> json) {
+    final rawPct = json['usedPercent'];
+    return AiSubscriptionQuotaWindow(
+      windowSeconds: (json['windowSeconds'] as num?)?.toInt() ?? 18000,
+      usedPercent: rawPct is num ? rawPct.toDouble().clamp(0.0, 100.0) : null,
+      resetAtEpochSec: (json['resetAtEpochSec'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+/// Snapshot of ChatGPT Subscription 5-hour & 7-day weekly quota windows.
+@immutable
+class AiSubscriptionQuotaSnapshot {
+  final String accountKey;
+  final String planType;
+  final AiSubscriptionQuotaWindow fiveHourWindow;
+  final AiSubscriptionQuotaWindow weeklyWindow;
+  final int updatedAtEpochMs;
+
+  const AiSubscriptionQuotaSnapshot({
+    this.accountKey = '',
+    this.planType = '',
+    this.fiveHourWindow =
+        const AiSubscriptionQuotaWindow(windowSeconds: 18000),
+    this.weeklyWindow = const AiSubscriptionQuotaWindow(windowSeconds: 604800),
+    required this.updatedAtEpochMs,
+  });
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        if (accountKey.isNotEmpty) 'accountKey': accountKey,
+        'planType': planType,
+        'fiveHourWindow': fiveHourWindow.toJson(),
+        'weeklyWindow': weeklyWindow.toJson(),
+        'updatedAtEpochMs': updatedAtEpochMs,
+      };
+
+  factory AiSubscriptionQuotaSnapshot.fromJson(Map<String, dynamic> json) {
+    final fh = json['fiveHourWindow'];
+    final wk = json['weeklyWindow'];
+    return AiSubscriptionQuotaSnapshot(
+      accountKey: (json['accountKey'] ?? '').toString().trim(),
+      planType: (json['planType'] ?? '').toString().trim(),
+      fiveHourWindow: fh is Map
+          ? AiSubscriptionQuotaWindow.fromJson(Map<String, dynamic>.from(fh))
+          : const AiSubscriptionQuotaWindow(windowSeconds: 18000),
+      weeklyWindow: wk is Map
+          ? AiSubscriptionQuotaWindow.fromJson(Map<String, dynamic>.from(wk))
+          : const AiSubscriptionQuotaWindow(windowSeconds: 604800),
+      updatedAtEpochMs: (json['updatedAtEpochMs'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+/// Snapshot of a BYO-API provider's account balance / credit quota (e.g.
+/// OpenAI/OneAPI/NewAPI billing, OpenRouter credits, DeepSeek balance,
+/// Moonshot/SiliconFlow balance) when exposed by the configured endpoint.
+@immutable
+class AiApiBalanceSnapshot {
+  final String endpointKey;
+  final String accountKey;
+  final bool supported;
+  final bool isUnlimited;
+  final String currency;
+  final double? remaining;
+  final double? totalGranted;
+  final double? totalUsed;
+  final String sourceLabel;
+  final int updatedAtEpochMs;
+
+  const AiApiBalanceSnapshot({
+    required this.endpointKey,
+    this.accountKey = '',
+    required this.supported,
+    this.isUnlimited = false,
+    this.currency = '',
+    this.remaining,
+    this.totalGranted,
+    this.totalUsed,
+    this.sourceLabel = '',
+    required this.updatedAtEpochMs,
+  });
+
+  bool get isUnitUnknown => currency.trim().isEmpty;
+
+  String get currencySymbol => switch (currency.trim().toUpperCase()) {
+        'CNY' || 'RMB' => '¥',
+        'USD' => r'$',
+        'EUR' => '€',
+        'GBP' => '£',
+        _ => '',
+      };
+
+  String formatAmount(double value) {
+    final safe = value.isFinite ? value : 0.0;
+    final neg = safe < 0;
+    final absVal = safe.abs();
+    final cur = currency.trim().toUpperCase();
+    final isTokenUnit = cur == 'TOKENS' || cur == 'TOKEN';
+    final formatted = (isTokenUnit ||
+            (absVal >= 10000 && (absVal - absVal.roundToDouble()).abs() < 1e-6))
+        ? absVal.round().toString()
+        : ((absVal > 0 && absVal < 0.01)
+            ? absVal.toStringAsFixed(4)
+            : absVal.toStringAsFixed(2));
+    final sign = neg ? '-' : '';
+    final sym = currencySymbol;
+    if (sym.isNotEmpty) {
+      return '$sign$sym$formatted';
+    }
+    if (isTokenUnit) return '$sign$formatted tokens';
+    if (cur == 'CREDITS' || cur == 'POINTS') return '$sign$formatted 积分';
+    return cur.isEmpty ? '$sign$formatted' : '$sign$formatted $cur';
+  }
+
+  String get _unknownUnitSuffix => isUnitUnknown ? '（单位未知）' : '';
+
+  double? get effectiveRemaining {
+    if (remaining != null) return remaining;
+    if (totalGranted != null && totalUsed != null) {
+      final diff = totalGranted! - totalUsed!;
+      return diff < 0 ? 0.0 : diff;
+    }
+    return null;
+  }
+
+  double? get usedRatio {
+    if (!supported || isUnlimited) return null;
+    if (totalGranted == null || totalGranted! <= 0) return null;
+    final used = totalUsed ??
+        (remaining != null ? (totalGranted! - remaining!) : null);
+    if (used == null) return null;
+    return (used / totalGranted!).clamp(0.0, 1.0);
+  }
+
+  String get headlineTextZh {
+    if (!supported) return '当前接口未公开余额查询';
+    if (isUnlimited) return '无限额度';
+    final rem = effectiveRemaining;
+    if (rem != null) return '剩余 ${formatAmount(rem)}$_unknownUnitSuffix';
+    if (totalGranted != null) {
+      return '额度上限 ${formatAmount(totalGranted!)}$_unknownUnitSuffix';
+    }
+    if (totalUsed != null) return '已用 ${formatAmount(totalUsed!)}$_unknownUnitSuffix';
+    return '已获取账户状态';
+  }
+
+  String get detailSubtitleZh {
+    if (!supported) {
+      return '部分官方接口或自建代理未开放余额 API，不影响正常使用，可前往服务商控制台查看';
+    }
+    if (isUnlimited) {
+      if (totalUsed != null && totalUsed! > 0) {
+        return '已累计消耗 ${formatAmount(totalUsed!)}$_unknownUnitSuffix · 额度无上限';
+      }
+      return '该 API 密钥已配置为无限额度';
+    }
+    if (effectiveRemaining == null &&
+        totalGranted != null &&
+        totalUsed == null) {
+      final unitNote = isUnitUnknown ? '，计费单位未知' : '';
+      return '用量接口未返回，仅显示账户额度上限$unitNote（来源：$sourceLabel）';
+    }
+    final parts = <String>[];
+    if (totalUsed != null) {
+      parts.add('已用 ${formatAmount(totalUsed!)}');
+    }
+    if (totalGranted != null && totalGranted! > 0) {
+      parts.add('总额 ${formatAmount(totalGranted!)}');
+    }
+    if (parts.isNotEmpty) {
+      final suffix = isUnitUnknown ? ' · 单位未知' : '';
+      return '${parts.join(' / ')}$suffix';
+    }
+    if (sourceLabel.isNotEmpty) {
+      return isUnitUnknown ? '来源：$sourceLabel · 单位未知' : '来源：$sourceLabel';
+    }
+    return isUnitUnknown ? '已从当前 API 接口同步余额（单位未知）' : '已从当前 API 接口同步余额';
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'endpointKey': endpointKey,
+        if (accountKey.isNotEmpty) 'accountKey': accountKey,
+        'supported': supported,
+        'isUnlimited': isUnlimited,
+        'currency': currency,
+        if (remaining != null) 'remaining': remaining,
+        if (totalGranted != null) 'totalGranted': totalGranted,
+        if (totalUsed != null) 'totalUsed': totalUsed,
+        'sourceLabel': sourceLabel,
+        'updatedAtEpochMs': updatedAtEpochMs,
+      };
+
+  factory AiApiBalanceSnapshot.fromJson(Map<String, dynamic> json) {
+    return AiApiBalanceSnapshot(
+      endpointKey: (json['endpointKey'] ?? '').toString().trim(),
+      accountKey: (json['accountKey'] ?? '').toString().trim(),
+      supported: json['supported'] == true,
+      isUnlimited: json['isUnlimited'] == true,
+      currency: (json['currency'] ?? '').toString().trim(),
+      remaining: (json['remaining'] as num?)?.toDouble(),
+      totalGranted: (json['totalGranted'] as num?)?.toDouble(),
+      totalUsed: (json['totalUsed'] as num?)?.toDouble(),
+      sourceLabel: (json['sourceLabel'] ?? '').toString().trim(),
+      updatedAtEpochMs: (json['updatedAtEpochMs'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
 /// Result returned by a single [AiService.complete] invocation.
 @immutable
 class AiCompletionResult {
@@ -445,12 +777,14 @@ class AiConnectionTestResult {
   final int latencyMs;
   final String modelReply;
   final String messageZh;
+  final bool stale;
 
   const AiConnectionTestResult({
     required this.ok,
     required this.latencyMs,
     this.modelReply = '',
     required this.messageZh,
+    this.stale = false,
   });
 }
 
@@ -476,17 +810,22 @@ class AiService extends ChangeNotifier {
   static const String prefsConfigKey = 'marco_ai_config_v1';
   static const String prefsProfilesKey = 'marco_ai_profiles_v1';
   static const String prefsUsageKey = 'marco_ai_usage_v1';
+  static const String prefsUsageHistoryKey = 'marco_ai_usage_history_v1';
+  static const String prefsRollingUsageKey = 'marco_ai_rolling_usage_v1';
+  static const String prefsSubQuotaKey = 'marco_ai_sub_quota_v1';
+  static const String prefsApiBalanceKey = 'marco_ai_api_balance_v1';
   static const String prefsCacheKey = 'marco_ai_cache_v1';
   static const String secureApiKeySlot = 'marco_ai_api_key_v1';
   static const String secureOAuthSessionSlot = 'marco_ai_oauth_session_v1';
   static const String secureLabTokenSlot = 'marco_ai_lab_token_v1';
   static const String secureProfileSecretPrefix = 'marco_ai_profile_secret_';
   static const int maxCacheEntries = 200;
+  static const int maxUsageHistoryEntries = 200;
 
   // Official public PKCE client parameters for user-initiated ChatGPT
   // subscription sign-in (aligned with OpenMinis / Codex CLI PKCE spec).
   static const String codexClientId = 'app_EMoamEEZ73f0CkXaXp7hrann';
-  static const String codexClientVersion = '0.159.0';
+  static const String codexClientVersion = '0.116.0';
   static const int codexLoopbackPort = 1455;
   static const String codexRedirectUri = 'http://localhost:1455/auth/callback';
   static const String _defaultCodexAuthorizeEndpoint =
@@ -495,6 +834,10 @@ class AiService extends ChangeNotifier {
       'https://auth.openai.com/oauth/token';
   static const String _defaultCodexModelsEndpoint =
       'https://chatgpt.com/backend-api/codex/models';
+  static const String _defaultChatgptWebModelsEndpoint =
+      'https://chatgpt.com/backend-api/models';
+  static const String _defaultCodexUsageEndpoint =
+      'https://chatgpt.com/backend-api/wham/usage';
   static const String _defaultCodexResponsesEndpoint =
       'https://chatgpt.com/backend-api/codex/responses';
   static const String _jwtAuthClaimNamespace = 'https://api.openai.com/auth';
@@ -534,20 +877,98 @@ class AiService extends ChangeNotifier {
     AiModelOption(
       id: 'gpt-5.4',
       displayName: 'GPT-5.4',
-      description: '最新旗舰通用与推理模型',
+      description: '最新旗舰通用与深度推理模型',
       priority: 1,
     ),
     AiModelOption(
       id: 'gpt-5.3-codex',
       displayName: 'GPT-5.3 Codex',
-      description: '高速结构化理解与分析模型',
+      description: '高速结构化理解与精准分析模型',
       priority: 2,
+    ),
+    AiModelOption(
+      id: 'gpt-5.2',
+      displayName: 'GPT-5.2',
+      description: '均衡高智商通用对话与推理模型',
+      priority: 3,
+    ),
+    AiModelOption(
+      id: 'gpt-5.2-codex',
+      displayName: 'GPT-5.2 Codex',
+      description: '指令遵循与复杂结构化输出增强版',
+      priority: 4,
+    ),
+    AiModelOption(
+      id: 'gpt-5.1',
+      displayName: 'GPT-5.1',
+      description: '稳定旗舰多场景通用模型',
+      priority: 5,
+    ),
+    AiModelOption(
+      id: 'gpt-5.1-codex-max',
+      displayName: 'GPT-5.1 Codex Max',
+      description: '长上下文与高强度推理模型',
+      priority: 6,
+    ),
+    AiModelOption(
+      id: 'gpt-5.1-codex-mini',
+      displayName: 'GPT-5.1 Codex Mini',
+      description: '高性价比轻量快速订阅模型',
+      priority: 7,
+    ),
+    AiModelOption(
+      id: 'gpt-5',
+      displayName: 'GPT-5',
+      description: 'GPT-5 标准订阅模型',
+      priority: 8,
+    ),
+    AiModelOption(
+      id: 'gpt-5-mini',
+      displayName: 'GPT-5 Mini',
+      description: '低延迟省额度日常问答与字幕翻译模型',
+      priority: 9,
+    ),
+    AiModelOption(
+      id: 'gpt-5-pro',
+      displayName: 'GPT-5 Pro',
+      description: 'Pro 订阅高阶深度思考模型',
+      priority: 10,
+    ),
+    AiModelOption(
+      id: 'o3',
+      displayName: 'o3',
+      description: 'OpenAI 深度逻辑推理模型',
+      priority: 11,
+    ),
+    AiModelOption(
+      id: 'o4-mini',
+      displayName: 'o4-mini',
+      description: '极速轻量推理模型（省 5h 额度）',
+      priority: 12,
+    ),
+    AiModelOption(
+      id: 'gpt-4.1',
+      displayName: 'GPT-4.1',
+      description: '高准确度长文本与双语精译模型',
+      priority: 13,
+    ),
+    AiModelOption(
+      id: 'gpt-4.1-mini',
+      displayName: 'GPT-4.1 Mini',
+      description: '极速标题清洗与实时双语字幕首选',
+      priority: 14,
+    ),
+    AiModelOption(
+      id: 'gpt-4o',
+      displayName: 'GPT-4o',
+      description: '经典自然语言多领域理解模型',
+      priority: 15,
     ),
     AiModelOption(
       id: 'codex-mini-latest',
       displayName: 'Codex Mini',
       description: '轻量极速低延迟模型（适合标题清洗）',
-      priority: 3,
+      priority: 16,
     ),
   ];
 
@@ -564,6 +985,7 @@ class AiService extends ChangeNotifier {
   DateTime Function() _clock;
   String? _codexTokenEndpointOverride;
   String? _codexModelsEndpointOverride;
+  String? _codexUsageEndpointOverride;
   String? _codexResponsesEndpointOverride;
   GitHubCopilotDeviceFlow _copilotFlow;
 
@@ -574,11 +996,39 @@ class AiService extends ChangeNotifier {
   bool? _debugLabUnlockedOverride;
   bool? _debugExperimentalOAuthOverride;
   List<AiModelOption> _discoveredModels = const <AiModelOption>[];
+  String _discoveredModelsScopeKey = '';
   AiMonthlyUsage? _usage;
+  List<AiUsageLogEntry> _usageHistory = <AiUsageLogEntry>[];
+  List<({int ts, int inTok, int outTok, String auth})> _rollingUsageEvents =
+      <({int ts, int inTok, int outTok, String auth})>[];
+  AiSubscriptionQuotaSnapshot? _subscriptionQuota;
+  AiApiBalanceSnapshot? _apiBalance;
+  bool _privacySessionActive = false;
+  int _outboundAuthEpoch = 0;
+  int _oauthSessionGen = 0;
+  int _byoCredentialGen = 0;
+  int _byoEndpointGen = 0;
+  Future<void>? _oauthKeychainChain;
+  int _oauthKeychainTailToken = 0;
+  int _oauthKeychainWriteSeq = 0;
+  Future<void>? _apiKeyKeychainChain;
+  int _apiKeyKeychainTailToken = 0;
+  int _apiKeySlotWriteSeq = 0;
+  final Map<String, int> _profileSecretWriteSeq = <String, int>{};
+  int _balanceEpoch = 0;
+  int _quotaEpoch = 0;
+  final Map<String, int> _balanceBackoffUntilMs = <String, int>{};
+  final Map<String, Future<AiApiBalanceSnapshot?>> _inFlightApiBalance =
+      <String, Future<AiApiBalanceSnapshot?>>{};
+  Future<AiSubscriptionQuotaSnapshot?>? _inFlightSubQuota;
+  String _inFlightSubQuotaKey = '';
   final LinkedHashMap<String, String> _cache = LinkedHashMap<String, String>();
   bool _loaded = false;
   Future<void>? _loadFuture;
   Future<AiOAuthSession>? _inFlightTokenRefresh;
+  String _inFlightTokenRefreshAccountKey = '';
+  int _inFlightTokenRefreshGen = -1;
+  String? _codexWebModelsEndpointOverride;
 
   AiService({
     http.Client? httpClient,
@@ -595,6 +1045,7 @@ class AiService extends ChangeNotifier {
   }
 
   void _onPasscodeStoreChanged() {
+    _outboundAuthEpoch++;
     notifyListeners();
   }
 
@@ -624,16 +1075,77 @@ class AiService extends ChangeNotifier {
     if (p == null) return null;
     return AiLabTokenClaims(rawToken: _passcodeStore.storedToken, payload: p);
   }
-  List<AiModelOption> get discoveredModels => _discoveredModels;
+  List<AiModelOption> get discoveredModels {
+    if (_discoveredModels.isEmpty) return const <AiModelOption>[];
+    if (_discoveredModelsScopeKey.isNotEmpty &&
+        _discoveredModelsScopeKey != _currentActiveModelCatalogScopeKey) {
+      return const <AiModelOption>[];
+    }
+    return _discoveredModels;
+  }
+
+  /// Monotonic generation bumped whenever OAuth sign-in / sign-out / account
+  /// switch changes the active subscription session.
+  int get oauthSessionGen => _oauthSessionGen;
+
+  String _computeModelCatalogScopeKey({
+    required AiConfig config,
+    required AiAuthMode authMode,
+    required String apiKey,
+    AiOAuthSession? oauthSession,
+  }) {
+    if (authMode == AiAuthMode.codexOAuth) {
+      return 'codex|${oauthAccountKey(oauthSession ?? _oauthSession)}';
+    }
+    final ep = normalizeApiBalanceEndpointKey(config.baseUrl);
+    final trimmedKey = apiKey.trim();
+    final keyHash = trimmedKey.isEmpty
+        ? ''
+        : sha256.convert(utf8.encode(trimmedKey)).toString();
+    return 'byo|${authMode.id}|${config.protocol.id}|$ep|$keyHash';
+  }
+
+  String get _currentActiveModelCatalogScopeKey => _computeModelCatalogScopeKey(
+        config: _config,
+        authMode: activeAuthMode,
+        apiKey: _apiKey,
+      );
+
+  void _clearDiscoveredModels() {
+    _discoveredModels = const <AiModelOption>[];
+    _discoveredModelsScopeKey = '';
+  }
   int get cachedEntryCount => _cache.length;
 
   bool get _enforcesPasscodeInService =>
       _passcodeStore.effectiveTargetPlatform == 'ios';
 
+  bool get isPrivacySessionActive => _privacySessionActive;
+
+  /// Hard circuit-breaker toggled by the shell whenever Privacy Space is
+  /// entered or exited so no background AI/OAuth/balance request can ever fire
+  /// during a private session.
+  void setPrivacySessionActive(bool active) {
+    if (_privacySessionActive == active) return;
+    _privacySessionActive = active;
+    _outboundAuthEpoch++;
+    if (active) {
+      _balanceEpoch++;
+      _quotaEpoch++;
+      _inFlightApiBalance.clear();
+      _inFlightSubQuota = null;
+      _inFlightSubQuotaKey = '';
+      _inFlightTokenRefresh = null;
+      _inFlightTokenRefreshAccountKey = '';
+      _inFlightTokenRefreshGen = -1;
+    }
+    notifyListeners();
+  }
+
   /// True when the experimental AI Viewing Lab gate has been unlocked via a
   /// valid, platform-matching, non-expired Ed25519 passcode (`MMAILAB1...`).
   bool get isLabUnlocked {
-    if (OhosRuntime.isOhos) return false;
+    if (OhosRuntime.isOhos || _privacySessionActive) return false;
     if (_debugLabUnlockedOverride != null) return _debugLabUnlockedOverride!;
     return _passcodeStore.isUnlockedAt(_clock());
   }
@@ -644,12 +1156,18 @@ class AiService extends ChangeNotifier {
     if (_debugExperimentalOAuthOverride != null) {
       return _debugExperimentalOAuthOverride!;
     }
+    if (_debugLabUnlockedOverride == true) return true;
     final p = activePasscodePayload;
-    if (p != null) return p.experimentalOAuth;
-    return _debugLabUnlockedOverride == true;
+    return p != null && p.experimentalOAuth;
   }
 
   void _ensureLabGateAuthorized({bool requireExperimentalOAuth = false}) {
+    if (_privacySessionActive) {
+      throw const AiServiceException(
+        AiErrorCode.privacySpaceBlocked,
+        '隐私空间已硬性禁用所有外部 AI 网络请求',
+      );
+    }
     if (!isLabUnlocked) {
       throw const AiServiceException(
         AiErrorCode.disabled,
@@ -660,6 +1178,70 @@ class AiService extends ChangeNotifier {
       throw const AiServiceException(
         AiErrorCode.unauthorized,
         '当前内测口令未开放实验性 OpenAI OAuth 权限，请使用个人 API 密钥或更换口令',
+      );
+    }
+  }
+
+  bool get _shouldEnforcePasscodeGate =>
+      _enforcesPasscodeInService ||
+      _passcodeStore.hasStoredToken ||
+      _debugLabUnlockedOverride != null ||
+      _debugExperimentalOAuthOverride != null;
+
+  void _ensureOutboundAuthorized({
+    required bool isPrivateSession,
+    required bool requireExperimentalOAuth,
+  }) {
+    if (isPrivateSession || _privacySessionActive) {
+      throw const AiServiceException(
+        AiErrorCode.privacySpaceBlocked,
+        '隐私空间已硬性禁用所有外部 AI 网络请求',
+      );
+    }
+    if (OhosRuntime.isOhos) {
+      throw const AiServiceException(
+        AiErrorCode.disabled,
+        '当前平台暂不支持 AI 助手',
+      );
+    }
+    if (_shouldEnforcePasscodeGate) {
+      _ensureLabGateAuthorized(
+        requireExperimentalOAuth: requireExperimentalOAuth,
+      );
+    }
+  }
+
+  /// Re-verifies authorization session & live credentials right before any
+  /// follow-up network dispatch or late state write-back.
+  void _assertOutboundStillAuthorized({
+    required int capturedAuthEpoch,
+    required bool isPrivateSession,
+    required bool requireExperimentalOAuth,
+    int? capturedOAuthGen,
+    String? expectedOAuthAccountKey,
+  }) {
+    _ensureOutboundAuthorized(
+      isPrivateSession: isPrivateSession,
+      requireExperimentalOAuth: requireExperimentalOAuth,
+    );
+    if (capturedAuthEpoch != _outboundAuthEpoch) {
+      throw const AiServiceException(
+        AiErrorCode.unauthorized,
+        '授权会话状态已变更，已中止后续请求与结果写回',
+      );
+    }
+    if (capturedOAuthGen != null && capturedOAuthGen != _oauthSessionGen) {
+      throw const AiServiceException(
+        AiErrorCode.unauthorized,
+        '订阅账号登录状态已变更，已中止旧会话请求',
+      );
+    }
+    if (expectedOAuthAccountKey != null &&
+        expectedOAuthAccountKey.isNotEmpty &&
+        oauthAccountKey(_oauthSession) != expectedOAuthAccountKey) {
+      throw const AiServiceException(
+        AiErrorCode.unauthorized,
+        '当前订阅账号已切换，已丢弃旧账号响应',
       );
     }
   }
@@ -725,6 +1307,81 @@ class AiService extends ChangeNotifier {
     return current;
   }
 
+  List<AiUsageLogEntry> get usageHistory =>
+      List<AiUsageLogEntry>.unmodifiable(_usageHistory);
+
+  static String oauthAccountKey(AiOAuthSession? session) {
+    if (session == null || !session.isValid) return '';
+    final acc = session.accountId.trim().toLowerCase();
+    final email = session.email.trim().toLowerCase();
+    if (acc.isNotEmpty || email.isNotEmpty) {
+      return '$acc|$email';
+    }
+    return sha256.convert(utf8.encode(session.accessToken.trim())).toString();
+  }
+
+  static String computeApiBalanceAccountKey(String baseUrl, String apiKey) {
+    final ep = normalizeApiBalanceEndpointKey(baseUrl);
+    final k = apiKey.trim();
+    if (ep.isEmpty || k.isEmpty) return '';
+    return sha256.convert(utf8.encode('$ep|$k')).toString();
+  }
+
+  AiSubscriptionQuotaSnapshot? get subscriptionQuota {
+    final snap = _subscriptionQuota;
+    if (snap == null) return null;
+    final activeKey = oauthAccountKey(_oauthSession);
+    if (activeKey.isEmpty) return null;
+    if (snap.accountKey.isNotEmpty && snap.accountKey != activeKey) {
+      return null;
+    }
+    return snap;
+  }
+
+  /// Latest BYO-API account balance snapshot matching the currently configured
+  /// `baseUrl` (case-preserving path) AND active API key fingerprint, or `null`
+  /// if not yet queried or if endpoint/key changed.
+  AiApiBalanceSnapshot? get apiBalance {
+    final snap = _apiBalance;
+    if (snap == null) return null;
+    final epKey = normalizeApiBalanceEndpointKey(_config.baseUrl);
+    final acctKey = computeApiBalanceAccountKey(_config.baseUrl, _apiKey);
+    if (epKey.isEmpty || acctKey.isEmpty) return null;
+    if (snap.endpointKey != epKey) return null;
+    if (snap.accountKey.isNotEmpty && snap.accountKey != acctKey) return null;
+    return snap;
+  }
+
+  /// Computes local non-cached request count and total tokens within [window]
+  /// (e.g. `Duration(hours: 5)` for 5h window and `Duration(days: 7)` for weekly)
+  /// from the dedicated 7-day rolling ledger (decoupled from the 200-item UI log).
+  ({int requests, int promptTokens, int completionTokens, int totalTokens})
+      rollingWindowUsage(
+    Duration window, {
+    bool codexOAuthOnly = false,
+  }) {
+    final nowMs = _clock().millisecondsSinceEpoch;
+    final cutoffMs = _clock().subtract(window).millisecondsSinceEpoch;
+    var reqs = 0;
+    var inTok = 0;
+    var outTok = 0;
+    for (final entry in _rollingUsageEvents) {
+      if (entry.ts < cutoffMs || entry.ts > nowMs) continue;
+      if (codexOAuthOnly && entry.auth != AiAuthMode.codexOAuth.id) {
+        continue;
+      }
+      reqs++;
+      inTok += entry.inTok;
+      outTok += entry.outTok;
+    }
+    return (
+      requests: reqs,
+      promptTokens: inTok,
+      completionTokens: outTok,
+      totalTokens: inTok + outTok,
+    );
+  }
+
   /// Replaces transport/storage/clock dependencies on [AiService.instance] for
   /// deterministic widget and unit tests without touching disk or real network.
   @visibleForTesting
@@ -735,6 +1392,8 @@ class AiService extends ChangeNotifier {
     DateTime Function()? clock,
     String? codexTokenEndpoint,
     String? codexModelsEndpoint,
+    String? codexWebModelsEndpoint,
+    String? codexUsageEndpoint,
     String? codexResponsesEndpoint,
     bool? labUnlockedForTest = true,
     bool? experimentalOAuthForTest,
@@ -755,6 +1414,12 @@ class AiService extends ChangeNotifier {
     if (codexModelsEndpoint != null) {
       _codexModelsEndpointOverride = codexModelsEndpoint;
     }
+    if (codexWebModelsEndpoint != null) {
+      _codexWebModelsEndpointOverride = codexWebModelsEndpoint;
+    }
+    if (codexUsageEndpoint != null) {
+      _codexUsageEndpointOverride = codexUsageEndpoint;
+    }
     if (codexResponsesEndpoint != null) {
       _codexResponsesEndpointOverride = codexResponsesEndpoint;
     }
@@ -764,13 +1429,37 @@ class AiService extends ChangeNotifier {
       _profiles = <AiProviderProfile>[];
       _apiKey = '';
       _oauthSession = null;
-      _discoveredModels = const <AiModelOption>[];
+      _clearDiscoveredModels();
       _usage = null;
+      _usageHistory = <AiUsageLogEntry>[];
+      _rollingUsageEvents = <({int ts, int inTok, int outTok, String auth})>[];
+      _subscriptionQuota = null;
+      _apiBalance = null;
+      _privacySessionActive = false;
+      _outboundAuthEpoch++;
+      _oauthSessionGen++;
+      _byoCredentialGen++;
+      _byoEndpointGen++;
+      _oauthKeychainChain = null;
+      _oauthKeychainTailToken++;
+      _oauthKeychainWriteSeq = 0;
+      _apiKeyKeychainChain = null;
+      _apiKeyKeychainTailToken++;
+      _apiKeySlotWriteSeq = 0;
+      _profileSecretWriteSeq.clear();
+      _balanceEpoch++;
+      _quotaEpoch++;
+      _balanceBackoffUntilMs.clear();
+      _inFlightApiBalance.clear();
+      _inFlightSubQuota = null;
+      _inFlightSubQuotaKey = '';
       _cache.clear();
       _copilotFlow.clearSessionCache();
       _loaded = false;
       _loadFuture = null;
       _inFlightTokenRefresh = null;
+      _inFlightTokenRefreshAccountKey = '';
+      _inFlightTokenRefreshGen = -1;
     }
     _debugLabUnlockedOverride = labUnlockedForTest;
     _debugExperimentalOAuthOverride = experimentalOAuthForTest;
@@ -789,6 +1478,8 @@ class AiService extends ChangeNotifier {
     _clock = DateTime.now;
     _codexTokenEndpointOverride = null;
     _codexModelsEndpointOverride = null;
+    _codexWebModelsEndpointOverride = null;
+    _codexUsageEndpointOverride = null;
     _codexResponsesEndpointOverride = null;
     _copilotFlow = GitHubCopilotDeviceFlow.instance;
     _copilotFlow.clearSessionCache();
@@ -798,12 +1489,36 @@ class AiService extends ChangeNotifier {
     _oauthSession = null;
     _debugLabUnlockedOverride = null;
     _debugExperimentalOAuthOverride = null;
-    _discoveredModels = const <AiModelOption>[];
+    _clearDiscoveredModels();
     _usage = null;
+    _usageHistory = <AiUsageLogEntry>[];
+    _rollingUsageEvents = <({int ts, int inTok, int outTok, String auth})>[];
+    _subscriptionQuota = null;
+    _apiBalance = null;
+    _privacySessionActive = false;
+    _outboundAuthEpoch++;
+    _oauthSessionGen++;
+    _byoCredentialGen++;
+    _byoEndpointGen++;
+    _oauthKeychainChain = null;
+    _oauthKeychainTailToken++;
+    _oauthKeychainWriteSeq = 0;
+    _apiKeyKeychainChain = null;
+    _apiKeyKeychainTailToken++;
+    _apiKeySlotWriteSeq = 0;
+    _profileSecretWriteSeq.clear();
+    _balanceEpoch++;
+    _quotaEpoch++;
+    _balanceBackoffUntilMs.clear();
+    _inFlightApiBalance.clear();
+    _inFlightSubQuota = null;
+    _inFlightSubQuotaKey = '';
     _cache.clear();
     _loaded = false;
     _loadFuture = null;
     _inFlightTokenRefresh = null;
+    _inFlightTokenRefreshAccountKey = '';
+    _inFlightTokenRefreshGen = -1;
     notifyListeners();
   }
 
@@ -853,6 +1568,84 @@ class AiService extends ChangeNotifier {
         _usage = AiMonthlyUsage(monthKey: expectedMonth);
       }
 
+      _usageHistory = <AiUsageLogEntry>[];
+      final rawHistory = prefs.getString(prefsUsageHistoryKey);
+      if (rawHistory != null && rawHistory.trim().isNotEmpty) {
+        try {
+          final decodedHistory = jsonDecode(rawHistory);
+          if (decodedHistory is List) {
+            for (final item in decodedHistory) {
+              if (item is Map) {
+                _usageHistory.add(
+                  AiUsageLogEntry.fromJson(Map<String, dynamic>.from(item)),
+                );
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      _rollingUsageEvents = <({int ts, int inTok, int outTok, String auth})>[];
+      final sevenDayCutoffMs =
+          _clock().subtract(const Duration(days: 7)).millisecondsSinceEpoch;
+      final rawRolling = prefs.getString(prefsRollingUsageKey);
+      if (rawRolling != null && rawRolling.trim().isNotEmpty) {
+        try {
+          final decodedRolling = jsonDecode(rawRolling);
+          if (decodedRolling is List) {
+            for (final item in decodedRolling) {
+              if (item is List && item.length >= 4) {
+                final ts = (item[0] as num?)?.toInt() ?? 0;
+                if (ts < sevenDayCutoffMs) continue;
+                _rollingUsageEvents.add((
+                  ts: ts,
+                  inTok: ((item[1] as num?)?.toInt() ?? 0).clamp(0, 1 << 30),
+                  outTok: ((item[2] as num?)?.toInt() ?? 0).clamp(0, 1 << 30),
+                  auth: (item[3] ?? 'api_key').toString().trim(),
+                ));
+              }
+            }
+          }
+        } catch (_) {}
+      } else if (_usageHistory.isNotEmpty) {
+        for (final h in _usageHistory) {
+          if (!h.fromCache && h.timestampMs >= sevenDayCutoffMs) {
+            _rollingUsageEvents.add((
+              ts: h.timestampMs,
+              inTok: h.promptTokens,
+              outTok: h.completionTokens,
+              auth: h.authModeId,
+            ));
+          }
+        }
+      }
+
+      _subscriptionQuota = null;
+      final rawSubQuota = prefs.getString(prefsSubQuotaKey);
+      if (rawSubQuota != null && rawSubQuota.trim().isNotEmpty) {
+        try {
+          final decodedQuota = jsonDecode(rawSubQuota);
+          if (decodedQuota is Map) {
+            _subscriptionQuota = AiSubscriptionQuotaSnapshot.fromJson(
+              Map<String, dynamic>.from(decodedQuota),
+            );
+          }
+        } catch (_) {}
+      }
+
+      _apiBalance = null;
+      final rawApiBalance = prefs.getString(prefsApiBalanceKey);
+      if (rawApiBalance != null && rawApiBalance.trim().isNotEmpty) {
+        try {
+          final decodedBal = jsonDecode(rawApiBalance);
+          if (decodedBal is Map) {
+            _apiBalance = AiApiBalanceSnapshot.fromJson(
+              Map<String, dynamic>.from(decodedBal),
+            );
+          }
+        } catch (_) {}
+      }
+
       _cache.clear();
       final rawCache = prefs.getString(prefsCacheKey);
       if (rawCache != null && rawCache.trim().isNotEmpty) {
@@ -890,6 +1683,10 @@ class AiService extends ChangeNotifier {
       }
 
       try {
+        final pendingApiKeychain = _apiKeyKeychainChain;
+        if (pendingApiKeychain != null) {
+          await pendingApiKeychain.catchError((_) {});
+        }
         String? storedKey;
         final activeId = _config.activeProfileId.trim();
         if (activeId.isNotEmpty) {
@@ -904,6 +1701,10 @@ class AiService extends ChangeNotifier {
       }
 
       try {
+        final pendingOAuthKeychain = _oauthKeychainChain;
+        if (pendingOAuthKeychain != null) {
+          await pendingOAuthKeychain.catchError((_) {});
+        }
         final storedOAuth = await _secureBackend.read(secureOAuthSessionSlot);
         if (storedOAuth != null && storedOAuth.trim().isNotEmpty) {
           final parsedOAuth = jsonDecode(storedOAuth);
@@ -985,80 +1786,257 @@ class AiService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Writes or deletes the API key strictly inside [SecureStorageBackend]
-  /// (iOS Keychain) and NEVER in [SharedPreferences].
-  Future<void> setApiKey(String rawKey) async {
-    await ensureLoaded();
-    final trimmed = rawKey.trim();
-    _apiKey = trimmed;
-    final activeId = _config.activeProfileId.trim();
-    if (trimmed.isEmpty) {
-      await _secureBackend.delete(secureApiKeySlot);
-      if (activeId.isNotEmpty) {
-        await _secureBackend.delete('$secureProfileSecretPrefix$activeId');
+  /// Monotonic generation bumped whenever BYO endpoint, protocol, auth mode,
+  /// active profile, or API key changes.
+  int get byoEndpointGen => _byoEndpointGen;
+
+  /// Serializes writes and deletes targeting [secureApiKeySlot] and
+  /// `$secureProfileSecretPrefix<id>` so rapid key edits or clears never
+  /// commit out of order on a slow Keychain backend.
+  Future<void> _enqueueApiKeyKeychainOp(Future<void> Function() op) {
+    final prev = _apiKeyKeychainChain;
+    final token = ++_apiKeyKeychainTailToken;
+    final run = (prev == null
+            ? Future<void>.sync(op)
+            : prev.catchError((_) {}).then((_) => op()))
+        .whenComplete(() {
+      if (_apiKeyKeychainTailToken == token) {
+        _apiKeyKeychainChain = null;
       }
-    } else {
-      await _secureBackend.write(secureApiKeySlot, trimmed);
-      if (activeId.isNotEmpty) {
-        await _secureBackend.write('$secureProfileSecretPrefix$activeId', trimmed);
+    });
+    _apiKeyKeychainChain = run.catchError((_) {});
+    return run;
+  }
+
+  /// Waits for all queued OAuth and BYO API-key Keychain operations to settle.
+  @visibleForTesting
+  Future<void> waitForPendingKeychainOpsForTest() async {
+    while (_oauthKeychainChain != null || _apiKeyKeychainChain != null) {
+      final pendingOAuth = _oauthKeychainChain;
+      if (pendingOAuth != null) {
+        await pendingOAuth.catchError((_) {});
+      }
+      final pendingApi = _apiKeyKeychainChain;
+      if (pendingApi != null) {
+        await pendingApi.catchError((_) {});
       }
     }
+  }
+
+  /// Writes or deletes the API key strictly inside [SecureStorageBackend]
+  /// (iOS Keychain) and NEVER in [SharedPreferences], serializing writes and
+  /// deletes in submission order.
+  Future<void> setApiKey(String rawKey) async {
+    if (!_loaded) {
+      await ensureLoaded();
+    }
+    final trimmed = rawKey.trim();
+    if (_apiKey != trimmed) {
+      _byoCredentialGen++;
+      _byoEndpointGen++;
+      _balanceEpoch++;
+      _inFlightApiBalance.clear();
+      _apiBalance = null;
+      _clearDiscoveredModels();
+    }
+    _apiKey = trimmed;
+    final activeId = _config.activeProfileId.trim();
+    final myApiSeq = ++_apiKeySlotWriteSeq;
+    final int myProfileSeq;
+    if (activeId.isNotEmpty) {
+      myProfileSeq = (_profileSecretWriteSeq[activeId] ?? 0) + 1;
+      _profileSecretWriteSeq[activeId] = myProfileSeq;
+    } else {
+      myProfileSeq = 0;
+    }
     notifyListeners();
+    await _enqueueApiKeyKeychainOp(() async {
+      if (myApiSeq == _apiKeySlotWriteSeq) {
+        if (trimmed.isEmpty) {
+          await _secureBackend.delete(secureApiKeySlot);
+        } else {
+          await _secureBackend.write(secureApiKeySlot, trimmed);
+        }
+      }
+      if (activeId.isNotEmpty &&
+          myProfileSeq == _profileSecretWriteSeq[activeId]) {
+        final profileSlot = '$secureProfileSecretPrefix$activeId';
+        if (trimmed.isEmpty) {
+          await _secureBackend.delete(profileSlot);
+        } else {
+          await _secureBackend.write(profileSlot, trimmed);
+        }
+      }
+    });
+  }
+
+  /// Serializes writes and deletes targeting [secureOAuthSessionSlot] so an
+  /// earlier slow write can never finish after a subsequent logout or account
+  /// switch and resurrect a stale account on the next cold start.
+  Future<void> _enqueueOAuthKeychainOp(Future<void> Function() op) {
+    final prev = _oauthKeychainChain;
+    final token = ++_oauthKeychainTailToken;
+    final run = (prev == null
+            ? Future<void>.sync(op)
+            : prev.catchError((_) {}).then((_) => op()))
+        .whenComplete(() {
+      if (_oauthKeychainTailToken == token) {
+        _oauthKeychainChain = null;
+      }
+    });
+    _oauthKeychainChain = run.catchError((_) {});
+    return run;
   }
 
   /// Saves or clears the OAuth subscription session strictly inside Keychain.
+  /// Always advances `_oauthSessionGen`, clears any prior in-flight refresh,
+  /// and serializes Keychain write/delete operations in submission order so a
+  /// slow write for account A can never overwrite a later logout or account B.
   Future<void> setOAuthSession(AiOAuthSession? session) async {
-    await ensureLoaded();
-    if (session == null || !session.isValid) {
-      _oauthSession = null;
-      await _secureBackend.delete(secureOAuthSessionSlot);
-    } else {
-      _oauthSession = session;
+    if (!_loaded) {
+      await ensureLoaded();
+    }
+    final prevKey = oauthAccountKey(_oauthSession);
+    final nextKey = oauthAccountKey(session);
+    _oauthSessionGen++;
+    _inFlightTokenRefresh = null;
+    _inFlightTokenRefreshAccountKey = '';
+    _inFlightTokenRefreshGen = -1;
+    if (prevKey != nextKey) {
+      _quotaEpoch++;
+      _inFlightSubQuota = null;
+      _inFlightSubQuotaKey = '';
+      if (_subscriptionQuota != null &&
+          _subscriptionQuota!.accountKey != nextKey) {
+        _subscriptionQuota = null;
+      }
+      _clearDiscoveredModels();
+    }
+    final nextSession =
+        (session == null || !session.isValid) ? null : session;
+    _oauthSession = nextSession;
+    final mySeq = ++_oauthKeychainWriteSeq;
+    notifyListeners();
+    await _enqueueOAuthKeychainOp(() async {
+      if (mySeq != _oauthKeychainWriteSeq) return;
+      if (nextSession == null) {
+        await _secureBackend.delete(secureOAuthSessionSlot);
+      } else {
+        await _secureBackend.write(
+          secureOAuthSessionSlot,
+          jsonEncode(nextSession.toJson()),
+        );
+      }
+    });
+  }
+
+  /// Writes a refreshed OAuth session strictly for the same account & generation
+  /// without resetting `_oauthSessionGen` or `_quotaEpoch`, serialized through
+  /// the same Keychain slot queue as [setOAuthSession].
+  Future<void> _persistRefreshedOAuthSession(
+    AiOAuthSession updated, {
+    required int expectedAuthEpoch,
+    required int expectedOAuthGen,
+    required String expectedAccountKey,
+  }) async {
+    _assertOutboundStillAuthorized(
+      capturedAuthEpoch: expectedAuthEpoch,
+      isPrivateSession: false,
+      requireExperimentalOAuth: true,
+      capturedOAuthGen: expectedOAuthGen,
+      expectedOAuthAccountKey: expectedAccountKey,
+    );
+    final mySeq = ++_oauthKeychainWriteSeq;
+    await _enqueueOAuthKeychainOp(() async {
+      _assertOutboundStillAuthorized(
+        capturedAuthEpoch: expectedAuthEpoch,
+        isPrivateSession: false,
+        requireExperimentalOAuth: true,
+        capturedOAuthGen: expectedOAuthGen,
+        expectedOAuthAccountKey: expectedAccountKey,
+      );
+      if (mySeq != _oauthKeychainWriteSeq) return;
+      _oauthSession = updated;
       await _secureBackend.write(
         secureOAuthSessionSlot,
-        jsonEncode(session.toJson()),
+        jsonEncode(updated.toJson()),
       );
-    }
+    });
     notifyListeners();
   }
 
   /// Signs out of the current OAuth subscription account and clears Keychain.
   Future<void> signOutOAuth() async {
     await setOAuthSession(null);
-    _discoveredModels = const <AiModelOption>[];
+    _subscriptionQuota = null;
+    _clearDiscoveredModels();
+    if (!OhosRuntime.isOhos) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove(prefsSubQuotaKey);
+      } catch (_) {}
+    }
     notifyListeners();
   }
 
   /// Reads the stored secret for a specific [profileId] from [SecureStorageBackend].
   Future<String> readProfileSecret(String profileId) async {
-    await ensureLoaded();
+    if (!_loaded) {
+      await ensureLoaded();
+    }
     final id = profileId.trim();
     if (id.isEmpty) return '';
+    final pendingApiKeychain = _apiKeyKeychainChain;
+    if (pendingApiKeychain != null) {
+      await pendingApiKeychain.catchError((_) {});
+    }
     final secret = await _secureBackend.read('$secureProfileSecretPrefix$id');
     return (secret ?? '').trim();
   }
 
   /// Persists or clears the secret for [profileId] in [SecureStorageBackend].
   Future<void> setProfileSecret(String profileId, String rawSecret) async {
-    await ensureLoaded();
+    if (!_loaded) {
+      await ensureLoaded();
+    }
     final id = profileId.trim();
     if (id.isEmpty) return;
     final trimmed = rawSecret.trim();
     final slot = '$secureProfileSecretPrefix$id';
-    if (trimmed.isEmpty) {
-      await _secureBackend.delete(slot);
-    } else {
-      await _secureBackend.write(slot, trimmed);
-    }
-    if (_config.activeProfileId.trim() == id) {
+    final myProfileSeq = (_profileSecretWriteSeq[id] ?? 0) + 1;
+    _profileSecretWriteSeq[id] = myProfileSeq;
+    final isActive = _config.activeProfileId.trim() == id;
+    int? myApiSeq;
+    if (isActive) {
+      final changed = _apiKey != trimmed;
       _apiKey = trimmed;
-      if (trimmed.isEmpty) {
-        await _secureBackend.delete(secureApiKeySlot);
-      } else {
-        await _secureBackend.write(secureApiKeySlot, trimmed);
+      if (changed) {
+        _byoCredentialGen++;
+        _byoEndpointGen++;
+        _balanceEpoch++;
+        _inFlightApiBalance.clear();
+        _apiBalance = null;
+        _clearDiscoveredModels();
       }
+      myApiSeq = ++_apiKeySlotWriteSeq;
     }
     notifyListeners();
+    await _enqueueApiKeyKeychainOp(() async {
+      if (myProfileSeq == _profileSecretWriteSeq[id]) {
+        if (trimmed.isEmpty) {
+          await _secureBackend.delete(slot);
+        } else {
+          await _secureBackend.write(slot, trimmed);
+        }
+      }
+      if (myApiSeq != null && myApiSeq == _apiKeySlotWriteSeq) {
+        if (trimmed.isEmpty) {
+          await _secureBackend.delete(secureApiKeySlot);
+        } else {
+          await _secureBackend.write(secureApiKeySlot, trimmed);
+        }
+      }
+    });
   }
 
   Future<void> _persistProfiles() async {
@@ -1103,24 +2081,38 @@ class AiService extends ChangeNotifier {
     if (secret != null) {
       final trimmed = secret.trim();
       final slot = '$secureProfileSecretPrefix$id';
-      if (trimmed.isEmpty) {
-        await _secureBackend.delete(slot);
-      } else {
-        await _secureBackend.write(slot, trimmed);
-      }
+      final myProfileSeq = (_profileSecretWriteSeq[id] ?? 0) + 1;
+      _profileSecretWriteSeq[id] = myProfileSeq;
+      await _enqueueApiKeyKeychainOp(() async {
+        if (myProfileSeq != _profileSecretWriteSeq[id]) return;
+        if (trimmed.isEmpty) {
+          await _secureBackend.delete(slot);
+        } else {
+          await _secureBackend.write(slot, trimmed);
+        }
+      });
     }
 
     if (activate || _config.activeProfileId.trim() == id) {
       final effectiveSecret = secret != null
           ? secret.trim()
-          : (await _secureBackend.read('$secureProfileSecretPrefix$id') ?? '')
-              .trim();
+          : await readProfileSecret(id);
       _apiKey = effectiveSecret;
-      if (effectiveSecret.isEmpty) {
-        await _secureBackend.delete(secureApiKeySlot);
-      } else {
-        await _secureBackend.write(secureApiKeySlot, effectiveSecret);
-      }
+      _byoCredentialGen++;
+      _byoEndpointGen++;
+      _balanceEpoch++;
+      _inFlightApiBalance.clear();
+      _apiBalance = null;
+      _clearDiscoveredModels();
+      final myApiSeq = ++_apiKeySlotWriteSeq;
+      await _enqueueApiKeyKeychainOp(() async {
+        if (myApiSeq != _apiKeySlotWriteSeq) return;
+        if (effectiveSecret.isEmpty) {
+          await _secureBackend.delete(secureApiKeySlot);
+        } else {
+          await _secureBackend.write(secureApiKeySlot, effectiveSecret);
+        }
+      });
       _config = _config.copyWith(
         enabled: enableAiWhenActivating ? true : _config.enabled,
         protocol: normalized.protocol,
@@ -1144,19 +2136,29 @@ class AiService extends ChangeNotifier {
     String profileId, {
     bool enableAi = false,
   }) async {
-    await ensureLoaded();
+    if (!_loaded) {
+      await ensureLoaded();
+    }
     final id = profileId.trim();
     final target = _profiles.where((p) => p.id == id).firstOrNull;
     if (target == null) return;
-    final stored =
-        (await _secureBackend.read('$secureProfileSecretPrefix$id') ?? '')
-            .trim();
+    final stored = await readProfileSecret(id);
     _apiKey = stored;
-    if (stored.isEmpty) {
-      await _secureBackend.delete(secureApiKeySlot);
-    } else {
-      await _secureBackend.write(secureApiKeySlot, stored);
-    }
+    _byoCredentialGen++;
+    _byoEndpointGen++;
+    _balanceEpoch++;
+    _inFlightApiBalance.clear();
+    _apiBalance = null;
+    _clearDiscoveredModels();
+    final myApiSeq = ++_apiKeySlotWriteSeq;
+    await _enqueueApiKeyKeychainOp(() async {
+      if (myApiSeq != _apiKeySlotWriteSeq) return;
+      if (stored.isEmpty) {
+        await _secureBackend.delete(secureApiKeySlot);
+      } else {
+        await _secureBackend.write(secureApiKeySlot, stored);
+      }
+    });
     _config = _config.copyWith(
       enabled: enableAi ? true : _config.enabled,
       protocol: target.protocol,
@@ -1175,11 +2177,18 @@ class AiService extends ChangeNotifier {
   /// Deletes a saved provider profile and scrubs its secret from
   /// [SecureStorageBackend].
   Future<void> deleteProfile(String profileId) async {
-    await ensureLoaded();
+    if (!_loaded) {
+      await ensureLoaded();
+    }
     final id = profileId.trim();
     if (id.isEmpty) return;
     _profiles.removeWhere((p) => p.id == id);
-    await _secureBackend.delete('$secureProfileSecretPrefix$id');
+    final myProfileSeq = (_profileSecretWriteSeq[id] ?? 0) + 1;
+    _profileSecretWriteSeq[id] = myProfileSeq;
+    await _enqueueApiKeyKeychainOp(() async {
+      if (myProfileSeq != _profileSecretWriteSeq[id]) return;
+      await _secureBackend.delete('$secureProfileSecretPrefix$id');
+    });
     await _persistProfiles();
 
     if (_config.activeProfileId.trim() == id) {
@@ -1188,7 +2197,14 @@ class AiService extends ChangeNotifier {
         return;
       }
       _apiKey = '';
-      await _secureBackend.delete(secureApiKeySlot);
+      _byoCredentialGen++;
+      _byoEndpointGen++;
+      _clearDiscoveredModels();
+      final myApiSeq = ++_apiKeySlotWriteSeq;
+      await _enqueueApiKeyKeychainOp(() async {
+        if (myApiSeq != _apiKeySlotWriteSeq) return;
+        await _secureBackend.delete(secureApiKeySlot);
+      });
       _config = _config.copyWith(
         activeProfileId: '',
         baseUrl: '',
@@ -1210,21 +2226,15 @@ class AiService extends ChangeNotifier {
     AiAuthMode? authModeOverride,
     bool isPrivateSession = false,
   }) async {
-    if (isPrivateSession) {
-      throw const AiServiceException(
-        AiErrorCode.privacySpaceBlocked,
-        '隐私空间已硬性禁用所有外部 AI 网络请求',
-      );
-    }
     await ensureLoaded();
     final cfg = configOverride ?? _config;
     final mode = authModeOverride ??
         (configOverride != null ? cfg.authMode : activeAuthMode);
-    if (_enforcesPasscodeInService) {
-      _ensureLabGateAuthorized(
-        requireExperimentalOAuth: mode == AiAuthMode.codexOAuth,
-      );
-    }
+    _ensureOutboundAuthorized(
+      isPrivateSession: isPrivateSession,
+      requireExperimentalOAuth: mode == AiAuthMode.codexOAuth,
+    );
+    final authEpoch = _outboundAuthEpoch;
     if (mode == AiAuthMode.codexOAuth) {
       final opts = await fetchAvailableModelOptions(
         configOverride: cfg.copyWith(authMode: AiAuthMode.codexOAuth),
@@ -1243,6 +2253,11 @@ class AiService extends ChangeNotifier {
         httpClient: _injectedHttpClient,
         clock: _clock,
       );
+      _assertOutboundStillAuthorized(
+        capturedAuthEpoch: authEpoch,
+        isPrivateSession: isPrivateSession,
+        requireExperimentalOAuth: false,
+      );
       key = session.token;
       baseUrl = session.apiBaseUrl;
       extraHeaders.addAll(GitHubCopilotDeviceFlow.standardCopilotHeaders);
@@ -1252,20 +2267,56 @@ class AiService extends ChangeNotifier {
       extraHeaders['X-Title'] = 'Marco Movie';
     }
 
-    return AiModelCatalogFetcher.fetchModels(
+    final models = await AiModelCatalogFetcher.fetchModels(
       protocol: cfg.protocol,
       baseUrl: baseUrl,
       apiKey: key,
       authMode: mode,
       extraHeaders: extraHeaders,
       httpClient: _injectedHttpClient,
+      verifyAuthorizedBeforeHop: () => _assertOutboundStillAuthorized(
+        capturedAuthEpoch: authEpoch,
+        isPrivateSession: isPrivateSession,
+        requireExperimentalOAuth: false,
+      ),
     );
+    _assertOutboundStillAuthorized(
+      capturedAuthEpoch: authEpoch,
+      isPrivateSession: isPrivateSession,
+      requireExperimentalOAuth: false,
+    );
+    return models;
   }
 
   /// Persists non-secret [AiConfig] to [SharedPreferences].
   Future<void> saveConfig(AiConfig next) async {
-    await ensureLoaded();
+    if (!_loaded) {
+      await ensureLoaded();
+    }
+    final endpointOrAuthChanged =
+        normalizeApiBalanceEndpointKey(_config.baseUrl) !=
+            normalizeApiBalanceEndpointKey(next.baseUrl) ||
+        _config.protocol != next.protocol ||
+        _config.authMode != next.authMode;
+    final profileChanged =
+        _config.activeProfileId.trim() != next.activeProfileId.trim();
+    if (endpointOrAuthChanged ||
+        profileChanged ||
+        _config.model.trim() != next.model.trim()) {
+      _byoCredentialGen++;
+    }
+    if (endpointOrAuthChanged || profileChanged) {
+      _byoEndpointGen++;
+    }
+    if (endpointOrAuthChanged) {
+      _balanceEpoch++;
+      _inFlightApiBalance.clear();
+    }
     _config = next;
+    if (_discoveredModels.isNotEmpty &&
+        _discoveredModelsScopeKey != _currentActiveModelCatalogScopeKey) {
+      _clearDiscoveredModels();
+    }
     if (!OhosRuntime.isOhos) {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(prefsConfigKey, jsonEncode(_config.toJson()));
@@ -1389,7 +2440,12 @@ class AiService extends ChangeNotifier {
   /// `1455` and awaits the OAuth redirect from Safari / `SFSafariViewController`.
   Future<AiPendingOAuthLogin> startInteractiveCodexLogin() async {
     await ensureLoaded();
-    _ensureLabGateAuthorized(requireExperimentalOAuth: true);
+    _ensureOutboundAuthorized(
+      isPrivateSession: false,
+      requireExperimentalOAuth: true,
+    );
+    final startAuthEpoch = _outboundAuthEpoch;
+    final startOAuthGen = _oauthSessionGen;
     final pkce = createCodexPkceRequest();
     final servers = <HttpServer>[];
     final completer = Completer<AiOAuthSession>();
@@ -1414,15 +2470,32 @@ class AiService extends ChangeNotifier {
         return;
       }
 
+      // Re-verify privacy space, live passcode, exp_oauth & auth session BEFORE
+      // accepting the callback or dispatching the token exchange!
+      AiServiceException? gateViolation;
+      try {
+        _assertOutboundStillAuthorized(
+          capturedAuthEpoch: startAuthEpoch,
+          isPrivateSession: false,
+          requireExperimentalOAuth: true,
+          capturedOAuthGen: startOAuthGen,
+        );
+      } on AiServiceException catch (e) {
+        gateViolation = e;
+      }
+
       final errorParam = (uri.queryParameters['error'] ?? '').trim();
       final code = (uri.queryParameters['code'] ?? '').trim();
       final returnedState = (uri.queryParameters['state'] ?? '').trim();
 
-      final okHtml = errorParam.isEmpty &&
+      final okHtml = gateViolation == null &&
+          errorParam.isEmpty &&
           code.isNotEmpty &&
           (returnedState.isEmpty || returnedState == pkce.state);
 
-      req.response.statusCode = okHtml ? HttpStatus.ok : HttpStatus.badRequest;
+      req.response.statusCode = gateViolation != null
+          ? HttpStatus.forbidden
+          : (okHtml ? HttpStatus.ok : HttpStatus.badRequest);
       req.response.headers.contentType =
           ContentType('text', 'html', charset: 'utf-8');
       req.response.write(
@@ -1442,6 +2515,10 @@ class AiService extends ChangeNotifier {
       await closeServers();
 
       if (completer.isCompleted) return;
+      if (gateViolation != null) {
+        completer.completeError(gateViolation);
+        return;
+      }
       if (!okHtml) {
         completer.completeError(
           AiServiceException(
@@ -1457,6 +2534,8 @@ class AiService extends ChangeNotifier {
           code: code,
           codeVerifier: pkce.codeVerifier,
           redirectUri: pkce.redirectUri,
+          expectedAuthEpoch: startAuthEpoch,
+          expectedOAuthGen: startOAuthGen,
         );
         if (!completer.isCompleted) {
           completer.complete(session);
@@ -1614,7 +2693,18 @@ class AiService extends ChangeNotifier {
     required String code,
     required String codeVerifier,
     String redirectUri = codexRedirectUri,
+    int? expectedAuthEpoch,
+    int? expectedOAuthGen,
   }) async {
+    await ensureLoaded();
+    final capturedAuthEpoch = expectedAuthEpoch ?? _outboundAuthEpoch;
+    final capturedOAuthGen = expectedOAuthGen ?? _oauthSessionGen;
+    _assertOutboundStillAuthorized(
+      capturedAuthEpoch: capturedAuthEpoch,
+      isPrivateSession: false,
+      requireExperimentalOAuth: true,
+      capturedOAuthGen: capturedOAuthGen,
+    );
     final tokenUri =
         Uri.parse(_codexTokenEndpointOverride ?? _defaultCodexTokenEndpoint);
     final payload = <String, String>{
@@ -1632,6 +2722,12 @@ class AiService extends ChangeNotifier {
       },
       bodyJson: jsonEncode(payload),
       timeout: const Duration(seconds: 25),
+    );
+    _assertOutboundStillAuthorized(
+      capturedAuthEpoch: capturedAuthEpoch,
+      isPrivateSession: false,
+      requireExperimentalOAuth: true,
+      capturedOAuthGen: capturedOAuthGen,
     );
     final raw = utf8.decode(resp.bodyBytes, allowMalformed: true);
     if (resp.statusCode < 200 || resp.statusCode >= 300) {
@@ -1665,20 +2761,58 @@ class AiService extends ChangeNotifier {
       planType: claims.planType,
       email: claims.email,
     );
-    await _activateOAuthSession(session);
+    await _activateOAuthSession(
+      session,
+      expectedAuthEpoch: capturedAuthEpoch,
+      expectedOAuthGen: capturedOAuthGen,
+    );
     return session;
   }
 
-  Future<void> _activateOAuthSession(AiOAuthSession session) async {
+  Future<void> _activateOAuthSession(
+    AiOAuthSession session, {
+    int? expectedAuthEpoch,
+    int? expectedOAuthGen,
+  }) async {
+    final authEpoch = expectedAuthEpoch ?? _outboundAuthEpoch;
+    final preGen = expectedOAuthGen ?? _oauthSessionGen;
+    _assertOutboundStillAuthorized(
+      capturedAuthEpoch: authEpoch,
+      isPrivateSession: false,
+      requireExperimentalOAuth: true,
+      capturedOAuthGen: preGen,
+    );
     await setOAuthSession(session);
+    final activeGen = _oauthSessionGen;
+    final activeAcct = oauthAccountKey(session);
     List<AiModelOption> models = const <AiModelOption>[];
     try {
+      _assertOutboundStillAuthorized(
+        capturedAuthEpoch: authEpoch,
+        isPrivateSession: false,
+        requireExperimentalOAuth: true,
+        capturedOAuthGen: activeGen,
+        expectedOAuthAccountKey: activeAcct,
+      );
       models = await fetchAvailableModelOptions(
         configOverride: _config.copyWith(authMode: AiAuthMode.codexOAuth),
       );
     } catch (_) {
-      models = fallbackCodexModels;
-      _discoveredModels = models;
+      models = List<AiModelOption>.unmodifiable([
+        for (final fb in fallbackCodexModels)
+          fb.copyWithPriority(fb.priority, isLocalFallback: true),
+      ]);
+      if (authEpoch == _outboundAuthEpoch && activeGen == _oauthSessionGen) {
+        _discoveredModels = models;
+        _discoveredModelsScopeKey = 'codex|$activeAcct';
+      }
+    }
+    if (authEpoch != _outboundAuthEpoch ||
+        activeGen != _oauthSessionGen ||
+        _privacySessionActive ||
+        (_shouldEnforcePasscodeGate &&
+            (!isLabUnlocked || !isExperimentalOAuthAllowed))) {
+      return;
     }
     final currentModel = _config.model.trim();
     final modelValid = currentModel.isNotEmpty &&
@@ -1698,8 +2832,18 @@ class AiService extends ChangeNotifier {
   }
 
   /// Returns a valid [AiOAuthSession], refreshing via `refresh_token` if needed.
-  Future<AiOAuthSession> ensureFreshOAuthSession({bool forceRefresh = false}) async {
+  /// Strictly isolates in-flight refresh by `(accountKey, _oauthSessionGen)` so
+  /// signing out or switching accounts can never reuse or write back a stale
+  /// account's token.
+  Future<AiOAuthSession> ensureFreshOAuthSession({
+    bool forceRefresh = false,
+    bool isPrivateSession = false,
+  }) async {
     await ensureLoaded();
+    _ensureOutboundAuthorized(
+      isPrivateSession: isPrivateSession,
+      requireExperimentalOAuth: true,
+    );
     final current = _oauthSession;
     if (current == null || !current.isValid) {
       throw const AiServiceException(
@@ -1719,21 +2863,49 @@ class AiService extends ChangeNotifier {
       }
       return current;
     }
-    if (_inFlightTokenRefresh != null) {
+    final acctKey = oauthAccountKey(current);
+    final sessionGen = _oauthSessionGen;
+    final authEpoch = _outboundAuthEpoch;
+    if (_inFlightTokenRefresh != null &&
+        _inFlightTokenRefreshAccountKey == acctKey &&
+        _inFlightTokenRefreshGen == sessionGen) {
       return _inFlightTokenRefresh!;
     }
-    final fut = _doRefreshOAuthToken(current);
+    final fut = _doRefreshOAuthToken(
+      current,
+      capturedAuthEpoch: authEpoch,
+      capturedOAuthGen: sessionGen,
+      expectedAccountKey: acctKey,
+      isPrivateSession: isPrivateSession,
+    );
     _inFlightTokenRefresh = fut;
+    _inFlightTokenRefreshAccountKey = acctKey;
+    _inFlightTokenRefreshGen = sessionGen;
     try {
       return await fut;
     } finally {
       if (identical(_inFlightTokenRefresh, fut)) {
         _inFlightTokenRefresh = null;
+        _inFlightTokenRefreshAccountKey = '';
+        _inFlightTokenRefreshGen = -1;
       }
     }
   }
 
-  Future<AiOAuthSession> _doRefreshOAuthToken(AiOAuthSession current) async {
+  Future<AiOAuthSession> _doRefreshOAuthToken(
+    AiOAuthSession current, {
+    required int capturedAuthEpoch,
+    required int capturedOAuthGen,
+    required String expectedAccountKey,
+    required bool isPrivateSession,
+  }) async {
+    _assertOutboundStillAuthorized(
+      capturedAuthEpoch: capturedAuthEpoch,
+      isPrivateSession: isPrivateSession,
+      requireExperimentalOAuth: true,
+      capturedOAuthGen: capturedOAuthGen,
+      expectedOAuthAccountKey: expectedAccountKey,
+    );
     final tokenUri =
         Uri.parse(_codexTokenEndpointOverride ?? _defaultCodexTokenEndpoint);
     final resp = await _postBareJson(
@@ -1748,6 +2920,15 @@ class AiService extends ChangeNotifier {
         'refresh_token': current.refreshToken,
       }),
       timeout: const Duration(seconds: 20),
+    );
+    // Re-check auth session, privacy state, passcode & account generation BEFORE
+    // persisting or returning the refreshed token.
+    _assertOutboundStillAuthorized(
+      capturedAuthEpoch: capturedAuthEpoch,
+      isPrivateSession: isPrivateSession,
+      requireExperimentalOAuth: true,
+      capturedOAuthGen: capturedOAuthGen,
+      expectedOAuthAccountKey: expectedAccountKey,
     );
     final raw = utf8.decode(resp.bodyBytes, allowMalformed: true);
     if (resp.statusCode < 200 || resp.statusCode >= 300) {
@@ -1784,7 +2965,12 @@ class AiService extends ChangeNotifier {
       planType: claims.planType.isNotEmpty ? claims.planType : current.planType,
       email: claims.email.isNotEmpty ? claims.email : current.email,
     );
-    await setOAuthSession(updated);
+    await _persistRefreshedOAuthSession(
+      updated,
+      expectedAuthEpoch: capturedAuthEpoch,
+      expectedOAuthGen: capturedOAuthGen,
+      expectedAccountKey: expectedAccountKey,
+    );
     return updated;
   }
 
@@ -1844,6 +3030,94 @@ class AiService extends ChangeNotifier {
     return Uri.parse('$trimmed/models');
   }
 
+  Future<List<AiModelOption>> _finalizeCodexModelOptions(
+    String primaryRaw, {
+    required Map<String, String> headers,
+    required int capturedAuthEpoch,
+    required int capturedOAuthGen,
+    required String expectedOAuthAccountKey,
+    required bool isPrivateSession,
+  }) async {
+    _assertOutboundStillAuthorized(
+      capturedAuthEpoch: capturedAuthEpoch,
+      isPrivateSession: isPrivateSession,
+      requireExperimentalOAuth: true,
+      capturedOAuthGen: capturedOAuthGen,
+      expectedOAuthAccountKey: expectedOAuthAccountKey,
+    );
+    final models = parseModelsResponse(primaryRaw, isCodex: true);
+    final merged = <AiModelOption>[...models];
+    final seenIds = <String>{
+      for (final m in merged) m.id.toLowerCase(),
+    };
+    final webModelsEndpoint = _codexWebModelsEndpointOverride ??
+        (_codexModelsEndpointOverride == null
+            ? _defaultChatgptWebModelsEndpoint
+            : null);
+    if (webModelsEndpoint != null && webModelsEndpoint.isNotEmpty) {
+      void verifySecondaryCatalogAuth() => _assertOutboundStillAuthorized(
+            capturedAuthEpoch: capturedAuthEpoch,
+            isPrivateSession: isPrivateSession,
+            requireExperimentalOAuth: true,
+            capturedOAuthGen: capturedOAuthGen,
+            expectedOAuthAccountKey: expectedOAuthAccountKey,
+          );
+      // Re-verify right before dispatching the 2nd catalog request!
+      verifySecondaryCatalogAuth();
+      try {
+        final webResp = await _getWithTimeout(
+          Uri.parse(webModelsEndpoint),
+          headers: headers,
+          timeout: const Duration(seconds: 8),
+          verifyAuthorizedBeforeHop: verifySecondaryCatalogAuth,
+          allowSameOriginRedirects: true,
+        );
+        verifySecondaryCatalogAuth();
+        if (webResp.statusCode >= 200 && webResp.statusCode < 300) {
+          final webRaw = utf8.decode(webResp.bodyBytes, allowMalformed: true);
+          final webModels = parseModelsResponse(webRaw, isCodex: true);
+          for (final wm in webModels) {
+            if (seenIds.add(wm.id.toLowerCase())) {
+              merged.add(wm);
+            }
+          }
+        }
+      } on AiServiceException catch (e) {
+        // Abort immediately on authorization / privacy / gate invalidation,
+        // while tolerating transient network/timeout errors on the secondary
+        // catalog so primary-only models remain intact.
+        if (e.code == AiErrorCode.privacySpaceBlocked ||
+            e.code == AiErrorCode.disabled ||
+            e.code == AiErrorCode.unauthorized) {
+          rethrow;
+        }
+      } catch (_) {}
+    }
+    _assertOutboundStillAuthorized(
+      capturedAuthEpoch: capturedAuthEpoch,
+      isPrivateSession: isPrivateSession,
+      requireExperimentalOAuth: true,
+      capturedOAuthGen: capturedOAuthGen,
+      expectedOAuthAccountKey: expectedOAuthAccountKey,
+    );
+    for (final fb in fallbackCodexModels) {
+      if (seenIds.add(fb.id.toLowerCase())) {
+        merged.add(
+          fb.copyWithPriority(500 + fb.priority, isLocalFallback: true),
+        );
+      }
+    }
+    _discoveredModels = merged.isNotEmpty
+        ? List<AiModelOption>.unmodifiable(merged)
+        : List<AiModelOption>.unmodifiable([
+            for (final fb in fallbackCodexModels)
+              fb.copyWithPriority(fb.priority, isLocalFallback: true),
+          ]);
+    _discoveredModelsScopeKey = 'codex|$expectedOAuthAccountKey';
+    notifyListeners();
+    return _discoveredModels;
+  }
+
   /// Fetches live available models (rich [AiModelOption] entries) for either
   /// ChatGPT Subscription OAuth or the configured API-key provider.
   Future<List<AiModelOption>> fetchAvailableModelOptions({
@@ -1851,22 +3125,28 @@ class AiService extends ChangeNotifier {
     String? apiKeyOverride,
     bool isPrivateSession = false,
   }) async {
-    if (isPrivateSession) {
-      throw const AiServiceException(
-        AiErrorCode.privacySpaceBlocked,
-        '隐私空间已硬性禁用所有外部 AI 网络请求',
-      );
-    }
     await ensureLoaded();
     final cfg = configOverride ?? _config;
-    if (_enforcesPasscodeInService) {
-      _ensureLabGateAuthorized(
-        requireExperimentalOAuth: cfg.authMode == AiAuthMode.codexOAuth,
-      );
-    }
+    final requireOAuth = cfg.authMode == AiAuthMode.codexOAuth;
+    _ensureOutboundAuthorized(
+      isPrivateSession: isPrivateSession,
+      requireExperimentalOAuth: requireOAuth,
+    );
+    final authEpoch = _outboundAuthEpoch;
 
-    if (cfg.authMode == AiAuthMode.codexOAuth) {
-      final session = await ensureFreshOAuthSession();
+    if (requireOAuth) {
+      final session = await ensureFreshOAuthSession(
+        isPrivateSession: isPrivateSession,
+      );
+      final oauthGen = _oauthSessionGen;
+      final acctKey = oauthAccountKey(session);
+      _assertOutboundStillAuthorized(
+        capturedAuthEpoch: authEpoch,
+        isPrivateSession: isPrivateSession,
+        requireExperimentalOAuth: true,
+        capturedOAuthGen: oauthGen,
+        expectedOAuthAccountKey: acctKey,
+      );
       final baseModelsUrl =
           _codexModelsEndpointOverride ?? _defaultCodexModelsEndpoint;
       final uri = Uri.parse(baseModelsUrl).replace(
@@ -1874,46 +3154,58 @@ class AiService extends ChangeNotifier {
           'client_version': codexClientVersion,
         },
       );
-      final headers = <String, String>{
-        'Accept': 'application/json',
-        'Authorization': 'Bearer ${session.accessToken}',
-        'Originator': 'codex_cli_rs',
-        'User-Agent': 'codex_cli_rs/$codexClientVersion (iOS; arm64)',
-        if (session.accountId.isNotEmpty)
-          'Chatgpt-Account-Id': session.accountId,
-      };
-      final resp = await _getWithTimeout(
+      Map<String, String> buildHeaders(AiOAuthSession s) => <String, String>{
+            'Accept': 'application/json',
+            'Authorization': 'Bearer ${s.accessToken}',
+            'Originator': 'codex_cli_rs',
+            'User-Agent': 'codex_cli_rs/$codexClientVersion (iOS; arm64)',
+            if (s.accountId.isNotEmpty) 'Chatgpt-Account-Id': s.accountId,
+          };
+      var activeHeaders = buildHeaders(session);
+      void verifyCodexCatalogAuth() => _assertOutboundStillAuthorized(
+            capturedAuthEpoch: authEpoch,
+            isPrivateSession: isPrivateSession,
+            requireExperimentalOAuth: true,
+            capturedOAuthGen: oauthGen,
+            expectedOAuthAccountKey: acctKey,
+          );
+      var resp = await _getWithTimeout(
         uri,
-        headers: headers,
+        headers: activeHeaders,
         timeout: Duration(seconds: cfg.timeoutSeconds),
+        verifyAuthorizedBeforeHop: verifyCodexCatalogAuth,
+        allowSameOriginRedirects: true,
       );
-      final raw = utf8.decode(resp.bodyBytes, allowMalformed: true);
+      verifyCodexCatalogAuth();
+      var raw = utf8.decode(resp.bodyBytes, allowMalformed: true);
       if (resp.statusCode == 401 && session.refreshToken.isNotEmpty) {
-        final refreshed = await ensureFreshOAuthSession(forceRefresh: true);
-        final retryResp = await _getWithTimeout(
-          uri,
-          headers: <String, String>{
-            ...headers,
-            'Authorization': 'Bearer ${refreshed.accessToken}',
-          },
-          timeout: Duration(seconds: cfg.timeoutSeconds),
+        final refreshed = await ensureFreshOAuthSession(
+          forceRefresh: true,
+          isPrivateSession: isPrivateSession,
         );
-        final retryRaw = utf8.decode(retryResp.bodyBytes, allowMalformed: true);
-        if (retryResp.statusCode < 200 || retryResp.statusCode >= 300) {
-          throw _buildHttpError(retryResp.statusCode, retryRaw);
-        }
-        final models = parseModelsResponse(retryRaw, isCodex: true);
-        _discoveredModels = models.isNotEmpty ? models : fallbackCodexModels;
-        notifyListeners();
-        return _discoveredModels;
+        verifyCodexCatalogAuth();
+        activeHeaders = buildHeaders(refreshed);
+        resp = await _getWithTimeout(
+          uri,
+          headers: activeHeaders,
+          timeout: Duration(seconds: cfg.timeoutSeconds),
+          verifyAuthorizedBeforeHop: verifyCodexCatalogAuth,
+          allowSameOriginRedirects: true,
+        );
+        verifyCodexCatalogAuth();
+        raw = utf8.decode(resp.bodyBytes, allowMalformed: true);
       }
       if (resp.statusCode < 200 || resp.statusCode >= 300) {
         throw _buildHttpError(resp.statusCode, raw);
       }
-      final models = parseModelsResponse(raw, isCodex: true);
-      _discoveredModels = models.isNotEmpty ? models : fallbackCodexModels;
-      notifyListeners();
-      return _discoveredModels;
+      return _finalizeCodexModelOptions(
+        raw,
+        headers: activeHeaders,
+        capturedAuthEpoch: authEpoch,
+        capturedOAuthGen: oauthGen,
+        expectedOAuthAccountKey: acctKey,
+        isPrivateSession: isPrivateSession,
+      );
     }
 
     final key = (apiKeyOverride ?? _apiKey).trim();
@@ -1939,11 +3231,29 @@ class AiService extends ChangeNotifier {
       case AiApiProtocol.geminiGenerateContent:
         headers['x-goog-api-key'] = key;
     }
+    final capturedByoEndpointGen = _byoEndpointGen;
+    void verifyByoCatalogStillCurrent() {
+      _assertOutboundStillAuthorized(
+        capturedAuthEpoch: authEpoch,
+        isPrivateSession: isPrivateSession,
+        requireExperimentalOAuth: false,
+      );
+      if (_byoEndpointGen != capturedByoEndpointGen) {
+        throw const AiServiceException(
+          AiErrorCode.unconfigured,
+          'AI 配置已变更，已放弃旧的模型列表请求',
+        );
+      }
+    }
+
     final resp = await _getWithTimeout(
       uri,
       headers: headers,
       timeout: Duration(seconds: cfg.timeoutSeconds),
+      verifyAuthorizedBeforeHop: verifyByoCatalogStillCurrent,
+      allowSameOriginRedirects: true,
     );
+    verifyByoCatalogStillCurrent();
     final raw = utf8.decode(resp.bodyBytes, allowMalformed: true);
     if (resp.statusCode < 200 || resp.statusCode >= 300) {
       throw _buildHttpError(resp.statusCode, raw);
@@ -1958,7 +3268,13 @@ class AiService extends ChangeNotifier {
         '接口未返回可选模型列表，请手动输入模型 ID',
       );
     }
+    verifyByoCatalogStillCurrent();
     _discoveredModels = models;
+    _discoveredModelsScopeKey = _computeModelCatalogScopeKey(
+      config: cfg,
+      authMode: cfg.authMode,
+      apiKey: key,
+    );
     notifyListeners();
     return models;
   }
@@ -2003,9 +3319,11 @@ class AiService extends ChangeNotifier {
       }
       if (entry is! Map) continue;
       if (isCodex) {
+        if (entry['is_deprecated'] == true || entry['deprecated'] == true) {
+          continue;
+        }
         final vis = (entry['visibility'] ?? '').toString().trim().toLowerCase();
-        if (const <String>{'hide', 'hidden', 'internal', 'none'}
-            .contains(vis)) {
+        if (vis == 'internal') {
           continue;
         }
       }
@@ -2066,13 +3384,27 @@ class AiService extends ChangeNotifier {
   }
 
   /// Resolves user-typed display names (e.g. `GPT 6.1 Terra` -> `gpt-6.1-terra`
-  /// when present in discovered catalog, or slugified on Codex OAuth) so human
-  /// model labels don't unnecessarily trigger `invalid model ID`.
-  String resolveCanonicalModelId(String rawModel, {required bool isCodex}) {
+  /// when present in the scoped discovered catalog for the SAME service and
+  /// credentials, or slugified on Codex OAuth) so human model labels don't
+  /// unnecessarily trigger `invalid model ID` while never leaking another
+  /// service's cached model IDs onto a different endpoint or credential set.
+  String resolveCanonicalModelId(
+    String rawModel, {
+    required bool isCodex,
+    String? catalogScopeKey,
+  }) {
     final trimmed = rawModel.trim();
     if (trimmed.isEmpty) return '';
     final lower = trimmed.toLowerCase();
-    for (final m in <AiModelOption>[..._discoveredModels, ...fallbackCodexModels]) {
+    final expectedScope = catalogScopeKey ?? _currentActiveModelCatalogScopeKey;
+    final hasMatchingCatalog = _discoveredModels.isNotEmpty &&
+        _discoveredModelsScopeKey.isNotEmpty &&
+        _discoveredModelsScopeKey == expectedScope;
+    final candidates = <AiModelOption>[
+      if (hasMatchingCatalog) ..._discoveredModels,
+      if (isCodex) ...fallbackCodexModels,
+    ];
+    for (final m in candidates) {
       if (m.id.toLowerCase() == lower ||
           m.displayName.trim().toLowerCase() == lower) {
         return m.id;
@@ -2099,24 +3431,938 @@ class AiService extends ChangeNotifier {
   Future<void> _recordUsage({
     required int promptTokens,
     required int completionTokens,
+    String feature = '',
+    String model = '',
+    String authModeId = 'api_key',
+    int latencyMs = 0,
+    bool fromCache = false,
   }) async {
-    final month = currentMonthKey;
-    final prev = monthlyUsage;
-    final updated = AiMonthlyUsage(
-      monthKey: month,
-      promptTokens: prev.promptTokens + (promptTokens < 0 ? 0 : promptTokens),
-      completionTokens:
-          prev.completionTokens + (completionTokens < 0 ? 0 : completionTokens),
-      requestCount: prev.requestCount + 1,
+    final safeIn = promptTokens < 0 ? 0 : promptTokens;
+    final safeOut = completionTokens < 0 ? 0 : completionTokens;
+    final nowMs = _clock().millisecondsSinceEpoch;
+    if (!fromCache) {
+      final month = currentMonthKey;
+      final prev = monthlyUsage;
+      final updated = AiMonthlyUsage(
+        monthKey: month,
+        promptTokens: prev.promptTokens + safeIn,
+        completionTokens: prev.completionTokens + safeOut,
+        requestCount: prev.requestCount + 1,
+      );
+      _usage = updated;
+      _rollingUsageEvents.add((
+        ts: nowMs,
+        inTok: safeIn,
+        outTok: safeOut,
+        auth: authModeId,
+      ));
+      final sevenDayCutoffMs =
+          _clock().subtract(const Duration(days: 7)).millisecondsSinceEpoch;
+      _rollingUsageEvents.removeWhere((e) => e.ts < sevenDayCutoffMs);
+    }
+    _usageHistory.insert(
+      0,
+      AiUsageLogEntry(
+        timestampMs: nowMs,
+        feature: feature,
+        model: model,
+        authModeId: authModeId,
+        promptTokens: safeIn,
+        completionTokens: safeOut,
+        latencyMs: latencyMs,
+        fromCache: fromCache,
+      ),
     );
-    _usage = updated;
+    if (_usageHistory.length > maxUsageHistoryEntries) {
+      _usageHistory.removeRange(maxUsageHistoryEntries, _usageHistory.length);
+    }
     if (!OhosRuntime.isOhos) {
       try {
         final prefs = await SharedPreferences.getInstance();
-        await prefs.setString(prefsUsageKey, jsonEncode(updated.toJson()));
+        if (_usage != null) {
+          await prefs.setString(prefsUsageKey, jsonEncode(_usage!.toJson()));
+        }
+        await prefs.setString(
+          prefsUsageHistoryKey,
+          jsonEncode([for (final e in _usageHistory) e.toJson()]),
+        );
+        await prefs.setString(
+          prefsRollingUsageKey,
+          jsonEncode([
+            for (final e in _rollingUsageEvents)
+              <Object>[e.ts, e.inTok, e.outTok, e.auth],
+          ]),
+        );
       } catch (_) {}
     }
     notifyListeners();
+  }
+
+  /// Clears stored usage call logs (optionally resetting current month & rolling counters).
+  Future<void> clearUsageHistory({bool resetMonthlyCounters = false}) async {
+    await ensureLoaded();
+    _usageHistory = <AiUsageLogEntry>[];
+    if (resetMonthlyCounters) {
+      _usage = AiMonthlyUsage(monthKey: currentMonthKey);
+      _rollingUsageEvents = <({int ts, int inTok, int outTok, String auth})>[];
+    }
+    if (!OhosRuntime.isOhos) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove(prefsUsageHistoryKey);
+        if (resetMonthlyCounters) {
+          await prefs.remove(prefsRollingUsageKey);
+          if (_usage != null) {
+            await prefs.setString(prefsUsageKey, jsonEncode(_usage!.toJson()));
+          }
+        }
+      } catch (_) {}
+    }
+    notifyListeners();
+  }
+
+  Future<void> _updateSubscriptionQuotaSnapshot(
+    AiSubscriptionQuotaSnapshot next,
+  ) async {
+    _subscriptionQuota = next;
+    if (!OhosRuntime.isOhos) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(prefsSubQuotaKey, jsonEncode(next.toJson()));
+      } catch (_) {}
+    }
+    notifyListeners();
+  }
+
+  /// Extracts 5-hour (`primary`) and 7-day (`secondary`) subscription quota
+  /// windows from `chatgpt.com/backend-api/codex/responses` HTTP headers.
+  void _captureCodexRateLimitHeaders(
+    Map<String, String> rawHeaders, {
+    String fallbackPlanType = '',
+    String accountKey = '',
+  }) {
+    if (rawHeaders.isEmpty) return;
+    final activeKey = accountKey.isNotEmpty
+        ? accountKey
+        : oauthAccountKey(_oauthSession);
+    if (activeKey.isEmpty || activeKey != oauthAccountKey(_oauthSession)) {
+      return;
+    }
+    final lower = <String, String>{
+      for (final e in rawHeaders.entries) e.key.toLowerCase(): e.value.trim(),
+    };
+    final pPct = double.tryParse(lower['x-codex-primary-used-percent'] ?? '');
+    final sPct = double.tryParse(lower['x-codex-secondary-used-percent'] ?? '');
+    if (pPct == null && sPct == null) return;
+    final nowSec = _clock().millisecondsSinceEpoch ~/ 1000;
+    int parseReset(String prefix) {
+      final at = int.tryParse(lower['$prefix-reset-at'] ?? '');
+      if (at != null && at > 0) return at;
+      final after = int.tryParse(lower['$prefix-reset-after-seconds'] ?? '');
+      if (after != null && after > 0) return nowSec + after;
+      return 0;
+    }
+
+    final pMins = int.tryParse(lower['x-codex-primary-window-minutes'] ?? '');
+    final sMins = int.tryParse(lower['x-codex-secondary-window-minutes'] ?? '');
+    final prev = subscriptionQuota;
+    final snap = AiSubscriptionQuotaSnapshot(
+      accountKey: activeKey,
+      planType: (lower['x-codex-plan-type'] ?? '').isNotEmpty
+          ? lower['x-codex-plan-type']!
+          : (fallbackPlanType.isNotEmpty
+                ? fallbackPlanType
+                : (prev?.planType ?? '')),
+      fiveHourWindow: AiSubscriptionQuotaWindow(
+        windowSeconds: (pMins != null && pMins > 0) ? pMins * 60 : 18000,
+        usedPercent: pPct?.clamp(0.0, 100.0) ?? prev?.fiveHourWindow.usedPercent,
+        resetAtEpochSec: parseReset('x-codex-primary') > 0
+            ? parseReset('x-codex-primary')
+            : (prev?.fiveHourWindow.resetAtEpochSec ?? 0),
+      ),
+      weeklyWindow: AiSubscriptionQuotaWindow(
+        windowSeconds: (sMins != null && sMins > 0) ? sMins * 60 : 604800,
+        usedPercent: sPct?.clamp(0.0, 100.0) ?? prev?.weeklyWindow.usedPercent,
+        resetAtEpochSec: parseReset('x-codex-secondary') > 0
+            ? parseReset('x-codex-secondary')
+            : (prev?.weeklyWindow.resetAtEpochSec ?? 0),
+      ),
+      updatedAtEpochMs: _clock().millisecondsSinceEpoch,
+    );
+    unawaited(_updateSubscriptionQuotaSnapshot(snap));
+  }
+
+  /// Queries `https://chatgpt.com/backend-api/wham/usage` to fetch live 5-hour
+  /// and 7-day weekly subscription quota windows for the signed-in OAuth account.
+  /// Strictly enforces privacy space, live passcode validity, `exp_oauth`,
+  /// account isolation, single-flight coalescing, and late-response discard.
+  Future<AiSubscriptionQuotaSnapshot?> refreshSubscriptionQuota({
+    bool isPrivateSession = false,
+  }) async {
+    await ensureLoaded();
+    if (isPrivateSession || _privacySessionActive || OhosRuntime.isOhos) {
+      return null;
+    }
+    if (_shouldEnforcePasscodeGate &&
+        (!isLabUnlocked || !isExperimentalOAuthAllowed)) {
+      return null;
+    }
+    final current = _oauthSession;
+    if (current == null || !current.isValid) return null;
+    final acctKey = oauthAccountKey(current);
+    if (acctKey.isEmpty) return null;
+
+    if (_inFlightSubQuota != null && _inFlightSubQuotaKey == acctKey) {
+      return _inFlightSubQuota!;
+    }
+    final epoch = _quotaEpoch;
+    final authEpoch = _outboundAuthEpoch;
+    final oauthGen = _oauthSessionGen;
+    bool quotaStillAuthorized() =>
+        epoch == _quotaEpoch &&
+        authEpoch == _outboundAuthEpoch &&
+        oauthGen == _oauthSessionGen &&
+        !_privacySessionActive &&
+        oauthAccountKey(_oauthSession) == acctKey &&
+        (!_shouldEnforcePasscodeGate ||
+            (isLabUnlocked && isExperimentalOAuthAllowed));
+    final fut = () async {
+      try {
+        final session = await ensureFreshOAuthSession(
+          isPrivateSession: isPrivateSession,
+        );
+        if (!quotaStillAuthorized()) {
+          return null;
+        }
+        final uri = Uri.parse(
+          _codexUsageEndpointOverride ?? _defaultCodexUsageEndpoint,
+        );
+        final resp = await _getWithTimeout(
+          uri,
+          headers: <String, String>{
+            'Accept': 'application/json',
+            'Authorization': 'Bearer ${session.accessToken}',
+            'Originator': 'codex_cli_rs',
+            'User-Agent': 'codex_cli_rs/$codexClientVersion (iOS; arm64)',
+            if (session.accountId.isNotEmpty)
+              'Chatgpt-Account-Id': session.accountId,
+          },
+          timeout: const Duration(seconds: 12),
+          verifyAuthorizedBeforeHop: () {
+            if (!quotaStillAuthorized()) {
+              throw const AiServiceException(
+                AiErrorCode.privacySpaceBlocked,
+                '当前授权状态已变更，已中止额度查询',
+              );
+            }
+          },
+          allowSameOriginRedirects: true,
+        );
+        if (!quotaStillAuthorized()) {
+          return null;
+        }
+        if (resp.statusCode < 200 || resp.statusCode >= 300) {
+          return subscriptionQuota;
+        }
+        final decoded = jsonDecode(
+          utf8.decode(resp.bodyBytes, allowMalformed: true),
+        );
+        if (decoded is! Map) return subscriptionQuota;
+        final plan =
+            (decoded['plan_type'] ?? session.planType).toString().trim();
+        final rl = decoded['rate_limit'];
+        AiSubscriptionQuotaWindow parseWin(
+          Object? rawWin,
+          int defaultWindowSec,
+        ) {
+          if (rawWin is! Map) {
+            return AiSubscriptionQuotaWindow(windowSeconds: defaultWindowSec);
+          }
+          final pct = (rawWin['used_percent'] as num?)?.toDouble();
+          final winSec =
+              (rawWin['limit_window_seconds'] as num?)?.toInt() ??
+                  defaultWindowSec;
+          final nowSec = _clock().millisecondsSinceEpoch ~/ 1000;
+          final resetAt = (rawWin['reset_at'] as num?)?.toInt() ??
+              ((rawWin['reset_after_seconds'] as num?) != null
+                  ? nowSec + (rawWin['reset_after_seconds'] as num).toInt()
+                  : 0);
+          return AiSubscriptionQuotaWindow(
+            windowSeconds: winSec,
+            usedPercent: pct?.clamp(0.0, 100.0),
+            resetAtEpochSec: resetAt,
+          );
+        }
+
+        final primaryRaw = rl is Map ? rl['primary_window'] : null;
+        final secondaryRaw = rl is Map ? rl['secondary_window'] : null;
+        final snap = AiSubscriptionQuotaSnapshot(
+          accountKey: acctKey,
+          planType: plan,
+          fiveHourWindow: parseWin(primaryRaw, 18000),
+          weeklyWindow: parseWin(secondaryRaw, 604800),
+          updatedAtEpochMs: _clock().millisecondsSinceEpoch,
+        );
+        await _updateSubscriptionQuotaSnapshot(snap);
+        return snap;
+      } catch (_) {
+        return quotaStillAuthorized() ? subscriptionQuota : null;
+      }
+    }();
+    _inFlightSubQuota = fut;
+    _inFlightSubQuotaKey = acctKey;
+    try {
+      return await fut;
+    } finally {
+      if (identical(_inFlightSubQuota, fut)) {
+        _inFlightSubQuota = null;
+        _inFlightSubQuotaKey = '';
+      }
+    }
+  }
+
+  /// Canonical cache key (`scheme://authority/CaseSensitivePath`) scoping cached
+  /// API balance snapshots strictly to the active Base URL while preserving
+  /// case-sensitive tenant paths (e.g. `/TenantA/v1` vs `/tenanta/v1`).
+  static String normalizeApiBalanceEndpointKey(String rawBaseUrl) {
+    var trimmed = rawBaseUrl.trim();
+    while (trimmed.endsWith('/')) {
+      trimmed = trimmed.substring(0, trimmed.length - 1);
+    }
+    if (trimmed.isEmpty) return '';
+    final lower = trimmed.toLowerCase();
+    for (final suffix in const <String>[
+      '/chat/completions',
+      '/responses',
+      '/messages',
+    ]) {
+      if (lower.endsWith(suffix)) {
+        trimmed = trimmed.substring(0, trimmed.length - suffix.length);
+        break;
+      }
+    }
+    final parsed = Uri.tryParse(trimmed);
+    if (parsed == null ||
+        !parsed.hasAuthority ||
+        parsed.host.trim().isEmpty ||
+        parsed.userInfo.isNotEmpty ||
+        (parsed.scheme != 'https' && parsed.scheme != 'http')) {
+      return '';
+    }
+    var path = parsed.path;
+    while (path.endsWith('/')) {
+      path = path.substring(0, path.length - 1);
+    }
+    return '${parsed.scheme.toLowerCase()}://${parsed.authority.toLowerCase()}$path';
+  }
+
+  static double? _parseBalanceNum(Object? raw) {
+    if (raw is num) {
+      final v = raw.toDouble();
+      return v.isFinite ? v : null;
+    }
+    if (raw is String) {
+      final clean = raw.trim().replaceAll(',', '');
+      if (clean.isEmpty) return null;
+      final v = double.tryParse(clean);
+      return (v != null && v.isFinite) ? v : null;
+    }
+    return null;
+  }
+
+  static double? _parseNonNegativeBalanceNum(Object? raw) {
+    final v = _parseBalanceNum(raw);
+    if (v == null || v < 0) return null;
+    return v;
+  }
+
+  static int _parseRetryAfterSeconds(String? rawHeader, DateTime now) {
+    final raw = (rawHeader ?? '').trim();
+    if (raw.isEmpty) return 60;
+    final secs = int.tryParse(raw);
+    if (secs != null) {
+      return secs.clamp(5, 600);
+    }
+    try {
+      final dt = HttpDate.parse(raw);
+      final diff = dt.difference(now).inSeconds;
+      return diff.clamp(5, 600);
+    } catch (_) {
+      return 60;
+    }
+  }
+
+  static bool _isExplicitUnlimitedPayload(Map<String, dynamic> map) {
+    if (map['unlimited_quota'] == true ||
+        map['is_unlimited'] == true ||
+        map['unlimited'] == true) {
+      return true;
+    }
+    final rawStatus = (map['quota_type'] ?? map['plan_quota'] ?? '')
+        .toString()
+        .trim()
+        .toLowerCase();
+    return rawStatus == 'unlimited' || rawStatus == 'infinite';
+  }
+
+  static String _normalizeBillingUnit(Object? raw) {
+    final s = (raw ?? '').toString().trim().toUpperCase();
+    if (s.isEmpty) return '';
+    return switch (s) {
+      'RMB' || '￥' || '¥' || 'CNY' => 'CNY',
+      r'$' || 'USD' || r'US$' => 'USD',
+      'EUR' || '€' => 'EUR',
+      'GBP' || '£' => 'GBP',
+      'TOKEN' || 'TOKENS' => 'TOKENS',
+      'CREDIT' || 'CREDITS' => 'CREDITS',
+      'POINT' || 'POINTS' => 'POINTS',
+      _ => s,
+    };
+  }
+
+  static String _officialHostCurrencyEvidence(String endpointKey) {
+    final host = Uri.tryParse(endpointKey)?.host.toLowerCase() ?? '';
+    return switch (host) {
+      'api.openai.com' || 'openrouter.ai' => 'USD',
+      'api.deepseek.com' ||
+      'api.siliconflow.cn' ||
+      'api.moonshot.cn' ||
+      'dashscope.aliyuncs.com' ||
+      'open.bigmodel.cn' =>
+        'CNY',
+      _ => '',
+    };
+  }
+
+  static String _resolveBillingCurrency(
+    Map<String, dynamic> primary,
+    Map<String, dynamic>? outer, {
+    required String endpointKey,
+    bool hasTokenField = false,
+  }) {
+    final explicit = _normalizeBillingUnit(
+      primary['currency'] ??
+          primary['unit'] ??
+          primary['quota_unit'] ??
+          outer?['currency'] ??
+          outer?['unit'] ??
+          outer?['quota_unit'],
+    );
+    if (explicit.isNotEmpty) return explicit;
+    if (hasTokenField) return 'TOKENS';
+    return _officialHostCurrencyEvidence(endpointKey);
+  }
+
+  /// Parses balance / credit payloads returned by common OpenAI-compatible
+  /// relays & official providers (Credit Grants, Billing Subscription,
+  /// OpenRouter Credits/Key, DeepSeek User Balance, Moonshot, SiliconFlow).
+  /// Never guesses USD or unlimited without explicit payload or official-host
+  /// evidence; returns empty `currency` so UI explicitly marks unknown units.
+  @visibleForTesting
+  static AiApiBalanceSnapshot? parseApiBalancePayload(
+    Object? decoded, {
+    required String endpointKey,
+    String accountKey = '',
+    required String sourceKind,
+    required int nowMs,
+  }) {
+    if (decoded is! Map) return null;
+    final map = Map<String, dynamic>.from(decoded);
+    final dataObj = map['data'];
+    final dataMap = dataObj is Map ? Map<String, dynamic>.from(dataObj) : null;
+
+    switch (sourceKind) {
+      case 'credit_grants':
+        final unlimited = _isExplicitUnlimitedPayload(map);
+        final granted = _parseNonNegativeBalanceNum(map['total_granted']) ??
+            _parseNonNegativeBalanceNum(map['total_tokens']);
+        final used = _parseNonNegativeBalanceNum(map['total_used']) ??
+            _parseNonNegativeBalanceNum(map['used_tokens']);
+        final avail = _parseBalanceNum(map['total_available']) ??
+            _parseBalanceNum(map['remaining_tokens']);
+        final hasTokenField = map.containsKey('total_tokens') ||
+            map.containsKey('used_tokens') ||
+            map.containsKey('remaining_tokens');
+        if (!unlimited && granted == null && used == null && avail == null) {
+          return null;
+        }
+        final resolvedCurrency = _resolveBillingCurrency(
+          map,
+          null,
+          endpointKey: endpointKey,
+          hasTokenField: hasTokenField,
+        );
+        return AiApiBalanceSnapshot(
+          endpointKey: endpointKey,
+          accountKey: accountKey,
+          supported: true,
+          isUnlimited: unlimited,
+          currency: resolvedCurrency,
+          remaining: unlimited ? null : avail,
+          totalGranted: unlimited ? null : granted,
+          totalUsed: used,
+          sourceLabel: 'Credit Grants',
+          updatedAtEpochMs: nowMs,
+        );
+
+      case 'billing_subscription':
+        final unlimited = _isExplicitUnlimitedPayload(map);
+        final hardLimit = _parseNonNegativeBalanceNum(map['hard_limit_usd']) ??
+            _parseNonNegativeBalanceNum(map['system_hard_limit_usd']) ??
+            _parseNonNegativeBalanceNum(map['soft_limit_usd']) ??
+            _parseNonNegativeBalanceNum(map['hard_limit']) ??
+            _parseNonNegativeBalanceNum(map['total_tokens']);
+        final hasTokenField = map.containsKey('total_tokens') &&
+            !map.containsKey('hard_limit_usd');
+        if (!unlimited && hardLimit == null) return null;
+        // Do NOT treat OpenAI-compatibility field names (`billing_subscription`,
+        // `has_payment_method`, `hard_limit_usd`) as proof of USD on generic
+        // relays (e.g. New API / One API may report RMB or relay units in those
+        // fields). Require explicit payload unit or official-host evidence.
+        final resolvedCurrency = _resolveBillingCurrency(
+          map,
+          null,
+          endpointKey: endpointKey,
+          hasTokenField: hasTokenField,
+        );
+        // Never fabricate remaining = hardLimit before `/billing/usage` succeeds
+        // and never assume large finite quotas are unlimited!
+        return AiApiBalanceSnapshot(
+          endpointKey: endpointKey,
+          accountKey: accountKey,
+          supported: true,
+          isUnlimited: unlimited,
+          currency: resolvedCurrency,
+          remaining: null,
+          totalGranted: unlimited ? null : hardLimit,
+          totalUsed: null,
+          sourceLabel: 'Billing Subscription',
+          updatedAtEpochMs: nowMs,
+        );
+
+      case 'credits':
+        final target = dataMap ?? map;
+        final unlimited = _isExplicitUnlimitedPayload(target) ||
+            _isExplicitUnlimitedPayload(map);
+        final totalCredits = _parseNonNegativeBalanceNum(target['total_credits']) ??
+            _parseNonNegativeBalanceNum(target['limit']) ??
+            _parseNonNegativeBalanceNum(target['total_tokens']);
+        final totalUsage = _parseNonNegativeBalanceNum(target['total_usage']) ??
+            _parseNonNegativeBalanceNum(target['usage']) ??
+            _parseNonNegativeBalanceNum(target['used_tokens']);
+        final limitRem = _parseBalanceNum(target['limit_remaining']) ??
+            _parseBalanceNum(target['remaining']) ??
+            _parseBalanceNum(target['remaining_tokens']);
+        final hasTokenField = target.containsKey('total_tokens') ||
+            target.containsKey('remaining_tokens') ||
+            target.containsKey('used_tokens');
+        if (!unlimited &&
+            totalCredits == null &&
+            totalUsage == null &&
+            limitRem == null) {
+          return null;
+        }
+        final rem = unlimited
+            ? null
+            : (limitRem ??
+                ((totalCredits != null && totalUsage != null)
+                    ? (totalCredits - totalUsage).clamp(0.0, double.infinity)
+                    : null));
+        return AiApiBalanceSnapshot(
+          endpointKey: endpointKey,
+          accountKey: accountKey,
+          supported: true,
+          isUnlimited: unlimited,
+          currency: _resolveBillingCurrency(
+            target,
+            map,
+            endpointKey: endpointKey,
+            hasTokenField: hasTokenField,
+          ),
+          remaining: rem,
+          totalGranted: unlimited ? null : totalCredits,
+          totalUsed: totalUsage,
+          sourceLabel: 'Credits API',
+          updatedAtEpochMs: nowMs,
+        );
+
+      case 'user_balance':
+        final infos = map['balance_infos'];
+        if (infos is List && infos.isNotEmpty) {
+          for (final item in infos) {
+            if (item is! Map) continue;
+            final itemMap = Map<String, dynamic>.from(item);
+            final totalBal = _parseBalanceNum(itemMap['total_balance']) ??
+                _parseBalanceNum(itemMap['available_balance']);
+            if (totalBal == null) continue;
+            return AiApiBalanceSnapshot(
+              endpointKey: endpointKey,
+              accountKey: accountKey,
+              supported: true,
+              currency: _resolveBillingCurrency(
+                itemMap,
+                map,
+                endpointKey: endpointKey,
+              ),
+              remaining: totalBal,
+              sourceLabel: 'User Balance',
+              updatedAtEpochMs: nowMs,
+            );
+          }
+        }
+        final topTarget = dataMap ?? map;
+        final unlimited = _isExplicitUnlimitedPayload(topTarget) ||
+            _isExplicitUnlimitedPayload(map);
+        final topAvail = _parseBalanceNum(topTarget['available_balance']) ??
+            _parseBalanceNum(topTarget['total_balance']) ??
+            _parseBalanceNum(topTarget['balance']) ??
+            _parseBalanceNum(topTarget['remaining_tokens']);
+        final hasTokenField = topTarget.containsKey('remaining_tokens');
+        if (!unlimited && topAvail == null) return null;
+        return AiApiBalanceSnapshot(
+          endpointKey: endpointKey,
+          accountKey: accountKey,
+          supported: true,
+          isUnlimited: unlimited,
+          currency: _resolveBillingCurrency(
+            topTarget,
+            map,
+            endpointKey: endpointKey,
+            hasTokenField: hasTokenField,
+          ),
+          remaining: unlimited ? null : topAvail,
+          sourceLabel: 'User Balance',
+          updatedAtEpochMs: nowMs,
+        );
+
+      case 'users_me_balance':
+      case 'user_info':
+        final target = dataMap ?? map;
+        final unlimited = _isExplicitUnlimitedPayload(target) ||
+            _isExplicitUnlimitedPayload(map);
+        final avail = _parseBalanceNum(target['available_balance']) ??
+            _parseBalanceNum(target['totalBalance']) ??
+            _parseBalanceNum(target['total_balance']) ??
+            _parseBalanceNum(target['balance']) ??
+            _parseBalanceNum(target['chargeBalance']) ??
+            _parseBalanceNum(target['remaining_tokens']);
+        final hasTokenField = target.containsKey('remaining_tokens');
+        if (!unlimited && avail == null) return null;
+        return AiApiBalanceSnapshot(
+          endpointKey: endpointKey,
+          accountKey: accountKey,
+          supported: true,
+          isUnlimited: unlimited,
+          currency: _resolveBillingCurrency(
+            target,
+            map,
+            endpointKey: endpointKey,
+            hasTokenField: hasTokenField,
+          ),
+          remaining: unlimited ? null : avail,
+          sourceLabel: sourceKind == 'users_me_balance'
+              ? 'Account Balance'
+              : 'Account Info',
+          updatedAtEpochMs: nowMs,
+        );
+    }
+    return null;
+  }
+
+  Future<({http.Response? response, bool redirected, bool networkFailed})>
+      _getSameOriginNoRedirect(
+    Uri uri, {
+    required Map<String, String> headers,
+    required Duration timeout,
+  }) async {
+    final client = _injectedHttpClient ?? http.Client();
+    final ownsClient = _injectedHttpClient == null;
+    try {
+      final req = http.Request('GET', uri)
+        ..followRedirects = false
+        ..headers.addAll(headers);
+      final streamed = await client.send(req).timeout(timeout);
+      final resp = await http.Response.fromStream(streamed).timeout(timeout);
+      if (resp.statusCode >= 300 && resp.statusCode < 400) {
+        return (response: null, redirected: true, networkFailed: false);
+      }
+      return (response: resp, redirected: false, networkFailed: false);
+    } catch (_) {
+      return (response: null, redirected: false, networkFailed: true);
+    } finally {
+      if (ownsClient) {
+        client.close();
+      }
+    }
+  }
+
+  Future<void> _updateApiBalanceSnapshot(AiApiBalanceSnapshot next) async {
+    _apiBalance = next;
+    if (!OhosRuntime.isOhos) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(prefsApiBalanceKey, jsonEncode(next.toJson()));
+      } catch (_) {}
+    }
+    notifyListeners();
+  }
+
+  /// Best-effort same-origin balance query for BYO-API mode (`AiAuthMode.apiKey`).
+  /// Enforces privacy space, passcode gate, account/key/case-sensitive path
+  /// isolation, single-flight coalescing, 429 Retry-After backoff, and
+  /// late-response discard.
+  Future<AiApiBalanceSnapshot?> refreshApiBalance({
+    AiConfig? configOverride,
+    String? apiKeyOverride,
+    bool force = false,
+    bool isPrivateSession = false,
+  }) async {
+    if (isPrivateSession || _privacySessionActive || OhosRuntime.isOhos) {
+      return null;
+    }
+    await ensureLoaded();
+    if (_shouldEnforcePasscodeGate && !isLabUnlocked) {
+      return null;
+    }
+    final cfg = configOverride ?? _config;
+    if (cfg.authMode != AiAuthMode.apiKey) return null;
+    final epKey = normalizeApiBalanceEndpointKey(cfg.baseUrl);
+    final effectiveKey = (apiKeyOverride ?? _apiKey).trim();
+    if (epKey.isEmpty || effectiveKey.isEmpty) return null;
+    final acctKey = computeApiBalanceAccountKey(cfg.baseUrl, effectiveKey);
+
+    final now = _clock();
+    final nowMs = now.millisecondsSinceEpoch;
+    final backoffUntil = _balanceBackoffUntilMs[acctKey];
+    if (backoffUntil != null && nowMs < backoffUntil) {
+      return apiBalance;
+    }
+
+    final existingInFlight = _inFlightApiBalance[acctKey];
+    if (existingInFlight != null) {
+      return existingInFlight;
+    }
+
+    final cached = _apiBalance;
+    if (!force &&
+        cached != null &&
+        cached.endpointKey == epKey &&
+        cached.accountKey == acctKey &&
+        (nowMs - cached.updatedAtEpochMs).abs() < 60000) {
+      return cached;
+    }
+
+    final epoch = _balanceEpoch;
+    final authEpoch = _outboundAuthEpoch;
+    bool isStale() =>
+        epoch != _balanceEpoch ||
+        authEpoch != _outboundAuthEpoch ||
+        _privacySessionActive ||
+        (_shouldEnforcePasscodeGate && !isLabUnlocked);
+
+    final fut = () async {
+      if (cfg.protocol != AiApiProtocol.openaiCompatible) {
+        final unsupported = AiApiBalanceSnapshot(
+          endpointKey: epKey,
+          accountKey: acctKey,
+          supported: false,
+          sourceLabel: cfg.protocol.labelZh,
+          updatedAtEpochMs: nowMs,
+        );
+        if (!isStale()) await _updateApiBalanceSnapshot(unsupported);
+        return isStale() ? null : unsupported;
+      }
+
+      var apiRoot = cfg.baseUrl.trim();
+      while (apiRoot.endsWith('/')) {
+        apiRoot = apiRoot.substring(0, apiRoot.length - 1);
+      }
+      final lowerRoot = apiRoot.toLowerCase();
+      for (final suffix in const <String>[
+        '/chat/completions',
+        '/responses',
+        '/messages',
+      ]) {
+        if (lowerRoot.endsWith(suffix)) {
+          apiRoot = apiRoot.substring(0, apiRoot.length - suffix.length);
+          break;
+        }
+      }
+      final parsedRoot = Uri.tryParse(apiRoot);
+      if (parsedRoot == null || !parsedRoot.hasAuthority) return null;
+      final hasVersionPath = RegExp(r'/v\d+(?:beta)?$', caseSensitive: false)
+          .hasMatch(parsedRoot.path);
+      final versionedRoot = hasVersionPath ? apiRoot : '$apiRoot/v1';
+      final noV1Root = hasVersionPath
+          ? apiRoot.replaceFirst(
+              RegExp(r'/v\d+(?:beta)?$', caseSensitive: false),
+              '',
+            )
+          : apiRoot;
+
+      final headers = <String, String>{
+        'Accept': 'application/json',
+        'Authorization': 'Bearer $effectiveKey',
+      };
+      const probeTimeout = Duration(seconds: 4);
+
+      final seenUris = <String>{};
+      final probes = <({String kind, Uri uri})>[];
+      void addProbe(String kind, String rawUrl) {
+        final u = Uri.tryParse(rawUrl);
+        if (u == null ||
+            u.host.toLowerCase() != parsedRoot.host.toLowerCase() ||
+            u.scheme.toLowerCase() != parsedRoot.scheme.toLowerCase()) {
+          return;
+        }
+        if (seenUris.add(u.toString())) {
+          probes.add((kind: kind, uri: u));
+        }
+      }
+
+      addProbe('credit_grants', '$versionedRoot/dashboard/billing/credit_grants');
+      addProbe(
+        'billing_subscription',
+        '$versionedRoot/dashboard/billing/subscription',
+      );
+      addProbe('credits', '$apiRoot/credits');
+      addProbe('user_balance', '$noV1Root/user/balance');
+      addProbe('users_me_balance', '$versionedRoot/users/me/balance');
+      addProbe('user_info', '$versionedRoot/user/info');
+
+      for (final probe in probes) {
+        if (isStale()) return null;
+        final res = await _getSameOriginNoRedirect(
+          probe.uri,
+          headers: headers,
+          timeout: probeTimeout,
+        );
+        if (isStale()) return null;
+        if (res.redirected) continue;
+        if (res.networkFailed || res.response == null) {
+          // Host unreachable / timed out: stop hammering remaining probes.
+          return apiBalance;
+        }
+        final resp = res.response!;
+        if (resp.statusCode == 429) {
+          final retrySec = _parseRetryAfterSeconds(
+            resp.headers['retry-after'],
+            _clock(),
+          );
+          _balanceBackoffUntilMs[acctKey] =
+              _clock().millisecondsSinceEpoch + retrySec * 1000;
+          return apiBalance;
+        }
+        if (resp.statusCode == 401) {
+          // Invalid API key: stop probing immediately.
+          return apiBalance;
+        }
+        if (resp.statusCode < 200 || resp.statusCode >= 300) {
+          continue;
+        }
+        Object? decoded;
+        try {
+          decoded =
+              jsonDecode(utf8.decode(resp.bodyBytes, allowMalformed: true));
+        } catch (_) {
+          continue;
+        }
+        final rawParsed = parseApiBalancePayload(
+          decoded,
+          endpointKey: epKey,
+          accountKey: acctKey,
+          sourceKind: probe.kind,
+          nowMs: nowMs,
+        );
+        if (rawParsed == null) continue;
+        var parsed = rawParsed;
+
+        if (probe.kind == 'billing_subscription' &&
+            !parsed.isUnlimited &&
+            parsed.totalGranted != null) {
+          final startDate =
+              '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-01';
+          final tomorrow = now.add(const Duration(days: 1));
+          final endDate =
+              '${tomorrow.year.toString().padLeft(4, '0')}-${tomorrow.month.toString().padLeft(2, '0')}-${tomorrow.day.toString().padLeft(2, '0')}';
+          final usageUri = Uri.tryParse(
+            '$versionedRoot/dashboard/billing/usage?start_date=$startDate&end_date=$endDate',
+          );
+          if (usageUri != null &&
+              usageUri.host.toLowerCase() == parsedRoot.host.toLowerCase()) {
+            if (isStale()) return null;
+            final usageRes = await _getSameOriginNoRedirect(
+              usageUri,
+              headers: headers,
+              timeout: probeTimeout,
+            );
+            if (isStale()) return null;
+            final usageResp = usageRes.response;
+            if (usageResp != null && usageResp.statusCode == 429) {
+              final retrySec = _parseRetryAfterSeconds(
+                usageResp.headers['retry-after'],
+                _clock(),
+              );
+              _balanceBackoffUntilMs[acctKey] =
+                  _clock().millisecondsSinceEpoch + retrySec * 1000;
+            } else if (usageResp != null &&
+                usageResp.statusCode >= 200 &&
+                usageResp.statusCode < 300) {
+              try {
+                final usageDecoded = jsonDecode(
+                  utf8.decode(usageResp.bodyBytes, allowMalformed: true),
+                );
+                if (usageDecoded is Map) {
+                  final rawCents =
+                      _parseNonNegativeBalanceNum(usageDecoded['total_usage']);
+                  if (rawCents != null) {
+                    final usedUsd = rawCents / 100.0;
+                    final remUsd = (parsed.totalGranted! - usedUsd)
+                        .clamp(0.0, double.infinity);
+                    parsed = AiApiBalanceSnapshot(
+                      endpointKey: epKey,
+                      accountKey: acctKey,
+                      supported: true,
+                      isUnlimited: false,
+                      currency: parsed.currency,
+                      remaining: remUsd,
+                      totalGranted: parsed.totalGranted,
+                      totalUsed: usedUsd,
+                      sourceLabel: 'Billing Subscription',
+                      updatedAtEpochMs: nowMs,
+                    );
+                  }
+                }
+              } catch (_) {}
+            }
+          }
+        }
+
+        if (isStale()) return null;
+        await _updateApiBalanceSnapshot(parsed);
+        return parsed;
+      }
+
+      if (isStale()) return null;
+      final unsupported = AiApiBalanceSnapshot(
+        endpointKey: epKey,
+        accountKey: acctKey,
+        supported: false,
+        sourceLabel: cfg.protocol.labelZh,
+        updatedAtEpochMs: nowMs,
+      );
+      await _updateApiBalanceSnapshot(unsupported);
+      return unsupported;
+    }();
+
+    _inFlightApiBalance[acctKey] = fut;
+    try {
+      return await fut;
+    } finally {
+      if (identical(_inFlightApiBalance[acctKey], fut)) {
+        _inFlightApiBalance.remove(acctKey);
+      }
+    }
   }
 
   /// Computes deterministic SHA-256 cache key over `feature + protocol + model + prompt`.
@@ -2203,15 +4449,77 @@ class AiService extends ChangeNotifier {
     return _forbiddenUrlLikeRe.hasMatch(value);
   }
 
+  static bool _isRedirectStatus(int statusCode) =>
+      statusCode == 301 ||
+      statusCode == 302 ||
+      statusCode == 303 ||
+      statusCode == 307 ||
+      statusCode == 308;
+
+  static bool _isSameOriginUri(Uri a, Uri b) {
+    final schemeA = a.scheme.toLowerCase();
+    final schemeB = b.scheme.toLowerCase();
+    if (schemeA != schemeB) return false;
+    if (a.host.toLowerCase() != b.host.toLowerCase()) return false;
+    final portA = a.hasPort ? a.port : (schemeA == 'https' ? 443 : 80);
+    final portB = b.hasPort ? b.port : (schemeB == 'https' ? 443 : 80);
+    return portA == portB && b.userInfo.isEmpty;
+  }
+
   Future<http.Response> _getWithTimeout(
     Uri uri, {
     required Map<String, String> headers,
     required Duration timeout,
+    VoidCallback? verifyAuthorizedBeforeHop,
+    bool allowSameOriginRedirects = false,
+    int maxRedirects = 3,
   }) async {
     final ephemeral = _injectedHttpClient == null;
     final client = _injectedHttpClient ?? http.Client();
+    final capturedAuthEpoch = _outboundAuthEpoch;
+    void verifyHopAuth() {
+      if (verifyAuthorizedBeforeHop != null) {
+        verifyAuthorizedBeforeHop();
+      } else {
+        _assertOutboundStillAuthorized(
+          capturedAuthEpoch: capturedAuthEpoch,
+          isPrivateSession: false,
+          requireExperimentalOAuth: false,
+        );
+      }
+    }
+
     try {
-      return await client.get(uri, headers: headers).timeout(timeout);
+      var currentUri = uri;
+      for (var hop = 0; ; hop++) {
+        verifyHopAuth();
+        final req = http.Request('GET', currentUri)
+          ..followRedirects = false
+          ..maxRedirects = 0
+          ..headers.addAll(headers);
+        final streamed = await client.send(req).timeout(timeout);
+        final resp = await http.Response.fromStream(streamed).timeout(timeout);
+        if (!allowSameOriginRedirects || !_isRedirectStatus(resp.statusCode)) {
+          return resp;
+        }
+        // Re-verify live authorization immediately upon receiving a redirect
+        // BEFORE checking or dispatching any follow-up hop.
+        verifyHopAuth();
+        if (hop >= maxRedirects) {
+          return resp;
+        }
+        final location = (resp.headers['location'] ?? '').trim();
+        if (location.isEmpty) {
+          return resp;
+        }
+        final nextUri = currentUri.resolve(location);
+        if (!_isSameOriginUri(currentUri, nextUri)) {
+          return resp;
+        }
+        currentUri = nextUri;
+      }
+    } on AiServiceException {
+      rethrow;
     } on TimeoutException {
       throw const AiServiceException(
         AiErrorCode.timeout,
@@ -2230,6 +4538,8 @@ class AiService extends ChangeNotifier {
   /// Sends a POST request with raw UTF-8 `bodyBytes` so strict backends (such
   /// as `chatgpt.com/backend-api/codex/responses` and Responses gateways)
   /// receive bare `Content-Type: application/json` without `; charset=utf-8`.
+  /// Always disables automatic HTTP redirects so credentials or prompts can
+  /// never follow an unverified redirect hop.
   Future<http.Response> _postBareJson(
     Uri uri, {
     required Map<String, String> headers,
@@ -2240,10 +4550,14 @@ class AiService extends ChangeNotifier {
     final client = _injectedHttpClient ?? http.Client();
     try {
       final req = http.Request('POST', uri)
+        ..followRedirects = false
+        ..maxRedirects = 0
         ..headers.addAll(headers)
         ..bodyBytes = utf8.encode(bodyJson);
       final streamed = await client.send(req).timeout(timeout);
       return await http.Response.fromStream(streamed).timeout(timeout);
+    } on AiServiceException {
+      rethrow;
     } on TimeoutException {
       throw const AiServiceException(
         AiErrorCode.timeout,
@@ -2276,18 +4590,6 @@ class AiService extends ChangeNotifier {
     AiAuthMode? authModeOverride,
     bool ignoreEnabledFlag = false,
   }) async {
-    if (isPrivateSession) {
-      throw const AiServiceException(
-        AiErrorCode.privacySpaceBlocked,
-        '隐私空间已硬性禁用所有外部 AI 网络请求',
-      );
-    }
-    if (OhosRuntime.isOhos) {
-      throw const AiServiceException(
-        AiErrorCode.disabled,
-        '当前平台暂不支持 AI 助手',
-      );
-    }
     await ensureLoaded();
 
     final cfg = configOverride ?? _config;
@@ -2295,11 +4597,10 @@ class AiService extends ChangeNotifier {
     final mode = authModeOverride ??
         (configOverride != null ? cfg.authMode : activeAuthMode);
     final isCodexMode = mode == AiAuthMode.codexOAuth;
-    if (_enforcesPasscodeInService) {
-      _ensureLabGateAuthorized(
-        requireExperimentalOAuth: isCodexMode,
-      );
-    }
+    _ensureOutboundAuthorized(
+      isPrivateSession: isPrivateSession,
+      requireExperimentalOAuth: isCodexMode,
+    );
     if (!ignoreEnabledFlag && !cfg.enabled) {
       throw const AiServiceException(
         AiErrorCode.disabled,
@@ -2310,9 +4611,15 @@ class AiService extends ChangeNotifier {
     final rawModel = (modelOverride != null && modelOverride.trim().isNotEmpty)
         ? modelOverride.trim()
         : cfg.model.trim();
+    final requestCatalogScopeKey = _computeModelCatalogScopeKey(
+      config: cfg,
+      authMode: mode,
+      apiKey: rawKey,
+    );
     final effectiveModel = resolveCanonicalModelId(
       rawModel,
       isCodex: isCodexMode,
+      catalogScopeKey: requestCatalogScopeKey,
     );
 
     if (effectiveModel.isEmpty) {
@@ -2365,6 +4672,7 @@ class AiService extends ChangeNotifier {
     if (isCodexMode) {
       return _completeViaCodexSubscription(
         cfg: cfg,
+        feature: feature,
         model: effectiveModel,
         systemPrompt: systemPrompt,
         userPrompt: userPrompt,
@@ -2487,6 +4795,17 @@ class AiService extends ChangeNotifier {
         };
     }
 
+    final authEpoch = _outboundAuthEpoch;
+    final byoGen = _byoCredentialGen;
+    void assertByoConfigUnchanged() {
+      if (byoGen != _byoCredentialGen) {
+        throw const AiServiceException(
+          AiErrorCode.unauthorized,
+          '接口地址或凭据已变更，已中止旧配置请求',
+        );
+      }
+    }
+
     final sw = Stopwatch()..start();
     var response = await _postBareJson(
       uri,
@@ -2494,11 +4813,18 @@ class AiService extends ChangeNotifier {
       bodyJson: jsonEncode(body),
       timeout: Duration(seconds: cfg.timeoutSeconds),
     );
+    _assertOutboundStillAuthorized(
+      capturedAuthEpoch: authEpoch,
+      isPrivateSession: isPrivateSession,
+      requireExperimentalOAuth: false,
+    );
+    assertByoConfigUnchanged();
     var status = response.statusCode;
     var rawBody = utf8.decode(response.bodyBytes, allowMalformed: true);
 
     // Auto-adapt if a reasoning model on a custom OpenAI-compatible gateway
-    // rejects `max_tokens` or `temperature` with HTTP 400.
+    // rejects `max_tokens` or `temperature` with HTTP 400. Re-verify auth
+    // and BYO credential generation strictly BEFORE sending the retry request!
     if (status == 400 &&
         cfg.protocol == AiApiProtocol.openaiCompatible &&
         !isResponsesEndpoint &&
@@ -2507,6 +4833,12 @@ class AiService extends ChangeNotifier {
           r'max_tokens|max_completion_tokens|temperature|unsupported_parameter|unsupported_value',
           caseSensitive: false,
         ).hasMatch(rawBody)) {
+      _assertOutboundStillAuthorized(
+        capturedAuthEpoch: authEpoch,
+        isPrivateSession: isPrivateSession,
+        requireExperimentalOAuth: false,
+      );
+      assertByoConfigUnchanged();
       final retryBody = Map<String, dynamic>.of(body)
         ..remove('max_tokens')
         ..remove('temperature')
@@ -2517,6 +4849,12 @@ class AiService extends ChangeNotifier {
         bodyJson: jsonEncode(retryBody),
         timeout: Duration(seconds: cfg.timeoutSeconds),
       );
+      _assertOutboundStillAuthorized(
+        capturedAuthEpoch: authEpoch,
+        isPrivateSession: isPrivateSession,
+        requireExperimentalOAuth: false,
+      );
+      assertByoConfigUnchanged();
       status = response.statusCode;
       rawBody = utf8.decode(response.bodyBytes, allowMalformed: true);
     }
@@ -2537,9 +4875,19 @@ class AiService extends ChangeNotifier {
             fallbackPromptChars: systemPrompt.length + userPrompt.length,
           );
 
+    _assertOutboundStillAuthorized(
+      capturedAuthEpoch: authEpoch,
+      isPrivateSession: isPrivateSession,
+      requireExperimentalOAuth: false,
+    );
+    assertByoConfigUnchanged();
     await _recordUsage(
       promptTokens: parsed.promptTokens,
       completionTokens: parsed.completionTokens,
+      feature: feature,
+      model: effectiveModel,
+      authModeId: mode.id,
+      latencyMs: sw.elapsedMilliseconds,
     );
 
     if (useCache && parsed.text.trim().isNotEmpty) {
@@ -2562,13 +4910,24 @@ class AiService extends ChangeNotifier {
 
   Future<AiCompletionResult> _completeViaCodexSubscription({
     required AiConfig cfg,
+    required String feature,
     required String model,
     required String systemPrompt,
     required String userPrompt,
     required String cacheKey,
     required bool useCache,
   }) async {
+    final authEpoch = _outboundAuthEpoch;
     var session = await ensureFreshOAuthSession();
+    final oauthGen = _oauthSessionGen;
+    final acctKey = oauthAccountKey(session);
+    _assertOutboundStillAuthorized(
+      capturedAuthEpoch: authEpoch,
+      isPrivateSession: false,
+      requireExperimentalOAuth: true,
+      capturedOAuthGen: oauthGen,
+      expectedOAuthAccountKey: acctKey,
+    );
     final uri = Uri.parse(
       _codexResponsesEndpointOverride ?? _defaultCodexResponsesEndpoint,
     );
@@ -2625,16 +4984,42 @@ class AiService extends ChangeNotifier {
       bodyJson: bodyJson,
       timeout: Duration(seconds: cfg.timeoutSeconds),
     );
+    _assertOutboundStillAuthorized(
+      capturedAuthEpoch: authEpoch,
+      isPrivateSession: false,
+      requireExperimentalOAuth: true,
+      capturedOAuthGen: oauthGen,
+      expectedOAuthAccountKey: acctKey,
+    );
     if (resp.statusCode == 401 && session.refreshToken.isNotEmpty) {
       session = await ensureFreshOAuthSession(forceRefresh: true);
+      _assertOutboundStillAuthorized(
+        capturedAuthEpoch: authEpoch,
+        isPrivateSession: false,
+        requireExperimentalOAuth: true,
+        capturedOAuthGen: oauthGen,
+        expectedOAuthAccountKey: acctKey,
+      );
       resp = await _postBareJson(
         uri,
         headers: buildCodexHeaders(session),
         bodyJson: bodyJson,
         timeout: Duration(seconds: cfg.timeoutSeconds),
       );
+      _assertOutboundStillAuthorized(
+        capturedAuthEpoch: authEpoch,
+        isPrivateSession: false,
+        requireExperimentalOAuth: true,
+        capturedOAuthGen: oauthGen,
+        expectedOAuthAccountKey: acctKey,
+      );
     }
     sw.stop();
+    _captureCodexRateLimitHeaders(
+      resp.headers,
+      fallbackPlanType: session.planType,
+      accountKey: oauthAccountKey(session),
+    );
 
     final rawBody = utf8.decode(resp.bodyBytes, allowMalformed: true);
     if (resp.statusCode < 200 || resp.statusCode >= 300) {
@@ -2645,9 +5030,20 @@ class AiService extends ChangeNotifier {
       rawBody,
       fallbackPromptChars: systemPrompt.length + userPrompt.length,
     );
+    _assertOutboundStillAuthorized(
+      capturedAuthEpoch: authEpoch,
+      isPrivateSession: false,
+      requireExperimentalOAuth: true,
+      capturedOAuthGen: oauthGen,
+      expectedOAuthAccountKey: acctKey,
+    );
     await _recordUsage(
       promptTokens: parsed.promptTokens,
       completionTokens: parsed.completionTokens,
+      feature: feature,
+      model: model,
+      authModeId: AiAuthMode.codexOAuth.id,
+      latencyMs: sw.elapsedMilliseconds,
     );
     if (useCache && parsed.text.trim().isNotEmpty) {
       _cache.remove(cacheKey);
@@ -3008,6 +5404,18 @@ class AiService extends ChangeNotifier {
     AiAuthMode? authModeOverride,
     bool isPrivateSession = false,
   }) async {
+    await ensureLoaded();
+    final startByoGen = _byoCredentialGen;
+    final startOAuthGen = _oauthSessionGen;
+    final startAuthEpoch = _outboundAuthEpoch;
+    final mode = authModeOverride ??
+        (configOverride != null ? configOverride.authMode : activeAuthMode);
+    bool isTestStale() =>
+        startAuthEpoch != _outboundAuthEpoch ||
+        (mode == AiAuthMode.codexOAuth
+            ? startOAuthGen != _oauthSessionGen
+            : startByoGen != _byoCredentialGen);
+
     final sw = Stopwatch()..start();
     try {
       final res = await complete(
@@ -3025,6 +5433,14 @@ class AiService extends ChangeNotifier {
         ignoreEnabledFlag: true,
       );
       sw.stop();
+      if (isTestStale()) {
+        return AiConnectionTestResult(
+          ok: false,
+          latencyMs: sw.elapsedMilliseconds,
+          messageZh: '接口配置已变更，旧测试结果已丢弃',
+          stale: true,
+        );
+      }
       final ms = res.latencyMs > 0 ? res.latencyMs : sw.elapsedMilliseconds;
       var preview = res.text.replaceAll(RegExp(r'\s+'), ' ').trim();
       if (containsForbiddenUrl(preview)) {
@@ -3044,6 +5460,7 @@ class AiService extends ChangeNotifier {
         ok: false,
         latencyMs: sw.elapsedMilliseconds,
         messageZh: e.messageZh,
+        stale: isTestStale(),
       );
     } catch (_) {
       sw.stop();
@@ -3051,6 +5468,7 @@ class AiService extends ChangeNotifier {
         ok: false,
         latencyMs: sw.elapsedMilliseconds,
         messageZh: '连接测试失败，请检查接口配置与网络状态',
+        stale: isTestStale(),
       );
     }
   }

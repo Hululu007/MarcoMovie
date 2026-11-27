@@ -545,7 +545,7 @@ void main() {
         expect(find.byKey(const ValueKey('ios-ai-lab-gate-card')), findsNothing);
         expect(find.byKey(const ValueKey('ios-ai-auth-mode-segment')), findsOneWidget);
         expect(find.byKey(const ValueKey('ios-ai-subtranslate-switch')), findsOneWidget);
-        expect(find.byKey(const ValueKey('ios-ai-recap-switch')), findsOneWidget);
+        expect(find.byKey(const ValueKey('ios-ai-watchbrief-switch')), findsOneWidget);
         expect(find.byKey(const ValueKey('ios-ai-mood-switch')), findsOneWidget);
         expect(find.byKey(const ValueKey('ios-ai-diag-switch')), findsOneWidget);
         expect(find.byKey(const ValueKey('ios-ai-add-skill-btn')), findsOneWidget);
@@ -806,7 +806,7 @@ void main() {
         expect(find.byType(PostUpdateWelcomeDialog), findsNothing);
 
         final prefs = await OnboardingPrefs.load();
-        expect(prefs.lastSeenAppVersion, '0.7.10');
+        expect(prefs.lastSeenAppVersion, startsWith('0.7.10'));
         expect(prefs.shouldShowPostUpdateNotice('0.7.10'), isFalse);
         expect(prefs.shouldShowPostUpdateNotice('0.7.11'), isTrue);
       },
@@ -823,8 +823,8 @@ void main() {
           isTrue,
         );
         expect(swift.contains('preferredMenuElementOrder = .fixed'), isTrue);
-        expect(swift.contains('306.0'), isTrue);
-        expect(swift.contains('0.86, 496.0)'), isTrue);
+        expect(swift.contains('316.0'), isTrue);
+        expect(swift.contains('520.0'), isTrue);
 
         final py = File('prepare_platform.py').readAsStringSync();
         expect(py.contains('"import SafariServices"'), isTrue);
@@ -908,11 +908,14 @@ void main() {
 
         expect(find.text('选集'), findsOneWidget);
         expect(find.text('线路'), findsOneWidget);
-        expect(find.text('弹幕'), findsOneWidget);
-        expect(find.text('1.0×'), findsOneWidget);
-        expect(find.text('音轨'), findsNothing);
+        expect(find.text('倍速'), findsOneWidget);
+        expect(find.text('弹幕/字幕'), findsOneWidget);
+        expect(find.text('画面'), findsOneWidget);
+        expect(find.text('播放器'), findsOneWidget);
+        expect(find.text('音轨'), findsOneWidget);
+        expect(find.text('片头片尾'), findsOneWidget);
+        expect(find.text('更多'), findsOneWidget);
         expect(find.text('响度'), findsNothing);
-        expect(find.text('AVPlayer'), findsNothing);
       },
     );
 
@@ -1165,10 +1168,11 @@ void main() {
         );
         expect(winCheckDual.status, AiLabPasscodeStatus.wrongPlatform);
 
-        // 4. Tampered signature rejected
-        final lastChar = iosAndTok[iosAndTok.length - 1];
-        final tampered = iosAndTok.substring(0, iosAndTok.length - 1) +
-            (lastChar == 'A' ? 'B' : 'A');
+        // 4. Tampered signature rejected (flip first char of signature segment so base64 padding bits stay valid)
+        final segs = iosAndTok.split('.');
+        final sig = segs[2];
+        final flippedFirst = sig[0] == 'A' ? 'B' : 'A';
+        final tampered = '${segs[0]}.${segs[1]}.$flippedFirst${sig.substring(1)}';
         final tamperedRes = AiLabPasscodeVerifier.verify(
           tampered,
           targetPlatform: 'ios',

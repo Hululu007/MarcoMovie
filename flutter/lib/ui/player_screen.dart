@@ -11,7 +11,6 @@ import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart' show SubtitleViewState;
 import '../core/ai_lab_features.dart';
-import '../core/ai_lab_gate.dart';
 import '../core/ai_service.dart';
 import '../core/anime4k_controller.dart';
 import '../core/bluray_iso_proxy.dart';
@@ -70,6 +69,7 @@ import 'player/desktop_player_hud.dart';
 import 'player/gesture_state_machine.dart';
 import 'player/ios_cast_panel.dart';
 import 'player/ios_player_chrome.dart';
+import 'player/ios_player_toolbar_sheet.dart';
 import 'player/player_hud_prefs.dart';
 import 'player/skip_countdown.dart';
 import 'player/sleep_timer.dart';
@@ -197,6 +197,16 @@ class PlayerScreen extends StatefulWidget {
   @visibleForTesting
   final VideoKernel Function(WindowsPlaybackEngine engine)?
       debugWindowsKernelFactory;
+  @visibleForTesting
+  final VideoKernel Function(bool useIosMdk)? debugIosKernelFactory;
+  @visibleForTesting
+  final List<AiSubtitleCue>? debugInitialAiOverlayCues;
+  @visibleForTesting
+  final ValueChanged<Future<void> Function(AiCuratedPick)>?
+      debugOnBindSwitchPickForTest;
+  @visibleForTesting
+  final ValueChanged<Map<String, Object?> Function()>?
+      debugOnBindStateInspectorForTest;
 
   const PlayerScreen({
     super.key,
@@ -236,6 +246,10 @@ class PlayerScreen extends StatefulWidget {
     this.debugLiveVideoOutputStream,
     this.debugWinQualityController,
     this.debugWindowsKernelFactory,
+    this.debugIosKernelFactory,
+    this.debugInitialAiOverlayCues,
+    this.debugOnBindSwitchPickForTest,
+    this.debugOnBindStateInspectorForTest,
   });
 
   /// The resolver already applies origin rules and explicit playback headers.
@@ -245,6 +259,329 @@ class PlayerScreen extends StatefulWidget {
     httpHeaders: Map<String, String>.of(episode.headers),
     start: start,
   );
+
+  static ({int? season, int episode})? _extractSeasonEpisodeFromText(
+    String rawText,
+  ) {
+    final trimmed = rawText.trim();
+    if (trimmed.isEmpty) return null;
+
+    // 1. Explicit English Season + Episode (`S01E09`, `S2.EP09`, `S01 E09`).
+    final seMatch = RegExp(
+      r'(?:^|[^A-Za-z0-9])S\s*0*(\d{1,3})\s*[._\-\s]*E(?:P)?\s*0*(\d{1,4})(?=$|[^0-9])',
+      caseSensitive: false,
+    ).firstMatch(trimmed);
+    if (seMatch != null) {
+      final s = int.tryParse(seMatch.group(1)!);
+      final e = int.tryParse(seMatch.group(2)!);
+      if (s != null && e != null) return (season: s, episode: e);
+    }
+
+    // 2. `1x09` / `2x09` notation.
+    final xMatch = RegExp(
+      r'(?:^|[^A-Za-z0-9])0*(\d{1,2})[xX]0*(\d{1,4})(?=$|[^0-9])',
+    ).firstMatch(trimmed);
+    if (xMatch != null) {
+      final s = int.tryParse(xMatch.group(1)!);
+      final e = int.tryParse(xMatch.group(2)!);
+      if (s != null && e != null) return (season: s, episode: e);
+    }
+
+    // Extract optional standalone season marker (`第2季` / `Season 2` / `S02`).
+    int? parsedSeason;
+    final cnSeason = RegExp(
+      r'第\s*([0-9一二三四五六七八九十百零〇]+)\s*[季部]',
+    ).firstMatch(trimmed);
+    if (cnSeason != null) {
+      parsedSeason = EpisodeScraper.parseChineseOrArabicNumber(
+        cnSeason.group(1)!,
+      );
+    } else {
+      final enSeason = RegExp(
+        r'(?:^|[^A-Za-z0-9])(?:Season|S)\s*0*(\d{1,3})(?=$|[^0-9])',
+        caseSensitive: false,
+      ).firstMatch(trimmed);
+      if (enSeason != null) {
+        parsedSeason = int.tryParse(enSeason.group(1)!);
+      }
+    }
+
+    // 3. Chinese episode marker (`第9集`, `第二季 第09集`).
+    final cnEp = RegExp(
+      r'第\s*([0-9一二三四五六七八九十百零〇]+)\s*[集话期回]',
+    ).firstMatch(trimmed);
+    if (cnEp != null) {
+      final e = EpisodeScraper.parseChineseOrArabicNumber(cnEp.group(1)!);
+      if (e != null) return (season: parsedSeason, episode: e);
+    }
+
+    // 4. Standalone `EP09` / `E09`.
+    final epMatch = RegExp(
+      r'(?:^|[^A-Za-z0-9])EP?\s*0*(\d{1,4})(?=$|[^0-9])',
+      caseSensitive: false,
+    ).firstMatch(trimmed);
+    if (epMatch != null) {
+      final e = int.tryParse(epMatch.group(1)!);
+      if (e != null) return (season: parsedSeason, episode: e);
+    }
+
+    // 5. Bare episode number (`09`).
+    final bareNum = RegExp(r'^0*(\d{1,4})$').firstMatch(trimmed);
+    if (bareNum != null) {
+      final e = int.tryParse(bareNum.group(1)!);
+      if (e != null) return (season: parsedSeason, episode: e);
+    }
+
+    return null;
+  }
+
+  static ({int? season, int episode})? _extractSeasonEpisodeFromEpisode(
+    CmsEpisode ep,
+  ) {
+    if (ep.sourceEpisodeNumber != null && ep.sourceEpisodeNumber! > 0) {
+      return (
+        season: ep.sourceSeasonNumber,
+        episode: ep.sourceEpisodeNumber!,
+      );
+    }
+    if (!ep.nameIsGenerated) {
+      final fromName = _extractSeasonEpisodeFromText(ep.name);
+      if (fromName != null) return fromName;
+    }
+    if (ep.originalFileName.trim().isNotEmpty) {
+      final fromOrig = _extractSeasonEpisodeFromText(ep.originalFileName);
+      if (fromOrig != null) return fromOrig;
+    }
+    return null;
+  }
+
+  /// Resolves a single unambiguous episode index in [eps] matching [history]
+  /// using strict 3-tier precedence:
+  ///   1. Stable media identity (`WatchHistoryEntry.effectiveMediaId`),
+  ///      preserving identity even when duplicate-named files (e.g. `video.mkv`)
+  ///      are reordered;
+  ///   2. Complete `(season, episode)` match (so `S01E09` never matches `S02E09`),
+  ///      requiring a unique candidate;
+  ///   3. Unique exact name match (never guessing across duplicate-named files
+  ///      such as two `video.mkv` without a matching media ID).
+  static int? _matchRecommendedEpisodeIndex(
+    List<CmsEpisode> eps,
+    WatchHistoryEntry history, {
+    required bool sameLine,
+  }) {
+    if (eps.isEmpty) return null;
+    final cleanMediaId = history.effectiveMediaId;
+    final histName = history.episode.trim();
+    final histNameLower = histName.toLowerCase();
+
+    // Tier 1: Stable media identity (highest priority).
+    if (cleanMediaId.isNotEmpty) {
+      final mediaMatches = <int>[
+        for (var i = 0; i < eps.length; i++)
+          if (WatchHistoryEntry.matchesEpisodeUrl(cleanMediaId, eps[i].url)) i,
+      ];
+      if (mediaMatches.length == 1) {
+        return mediaMatches.first;
+      }
+      if (mediaMatches.length > 1) {
+        if (histNameLower.isNotEmpty) {
+          final narrowed = mediaMatches
+              .where((i) => eps[i].name.trim().toLowerCase() == histNameLower)
+              .toList();
+          if (narrowed.length == 1) return narrowed.first;
+        }
+        return null;
+      }
+    }
+
+    // Tier 2: Complete (season, episode) match.
+    final histSE = _extractSeasonEpisodeFromText(histName);
+    if (histSE != null) {
+      final seMatches = <int>[
+        for (var i = 0; i < eps.length; i++)
+          if (() {
+            final epSE = _extractSeasonEpisodeFromEpisode(eps[i]);
+            return epSE != null &&
+                epSE.episode == histSE.episode &&
+                epSE.season == histSE.season;
+          }())
+            i,
+      ];
+      if (seMatches.length == 1) {
+        return seMatches.first;
+      }
+      if (seMatches.length > 1 && histNameLower.isNotEmpty) {
+        final exact = seMatches
+            .where((i) => eps[i].name.trim().toLowerCase() == histNameLower)
+            .toList();
+        if (exact.length == 1) return exact.first;
+      }
+      return null;
+    }
+
+    // Tier 3: Unique exact episode name (refuses ambiguous duplicate names).
+    if (histNameLower.isNotEmpty) {
+      final nameMatches = <int>[
+        for (var i = 0; i < eps.length; i++)
+          if (!eps[i].nameIsGenerated &&
+              eps[i].name.trim().toLowerCase() == histNameLower)
+            i,
+      ];
+      if (nameMatches.length == 1) {
+        final candidate = eps[nameMatches.first];
+        // On the same line, if history recorded a stable media ID and the sole
+        // same-named file carries a different stable media ID, do not guess.
+        if (sameLine &&
+            cleanMediaId.isNotEmpty &&
+            candidate.url.trim().isNotEmpty &&
+            !WatchHistoryEntry.matchesEpisodeUrl(cleanMediaId, candidate.url)) {
+          return null;
+        }
+        return nameMatches.first;
+      }
+    }
+
+    return null;
+  }
+
+  /// Resolves the target line, episode index, and resume position for an AI
+  /// recommended pick switch. Matches stable media identity first, then
+  /// complete `(season, episode)`, then unique exact episode name; restores
+  /// [historyEntry.resumePosition] ONLY on an unambiguous match, otherwise
+  /// falls back cleanly to `(targetLine, 0, resumeMs: 0)`.
+  @visibleForTesting
+  static ({int lineIndex, int episodeIndex, int resumeMs})
+      resolveRecommendedSwitchTarget({
+    required List<CmsLine> playableLines,
+    required int recommendedLineIndex,
+    WatchHistoryEntry? historyEntry,
+  }) {
+    if (playableLines.isEmpty) {
+      return (lineIndex: 0, episodeIndex: 0, resumeMs: 0);
+    }
+    final safeRecLine = recommendedLineIndex.clamp(0, playableLines.length - 1);
+    if (historyEntry == null ||
+        historyEntry.complete ||
+        historyEntry.resumePosition <= 0) {
+      return (lineIndex: safeRecLine, episodeIndex: 0, resumeMs: 0);
+    }
+
+    final cleanLineId = historyEntry.lineId.trim();
+    final cleanLineName = historyEntry.line.trim();
+    final cleanMediaId = historyEntry.effectiveMediaId;
+
+    int? matchedLineIdx;
+    if (cleanLineId.isNotEmpty) {
+      final idMatches = <int>[
+        for (var i = 0; i < playableLines.length; i++)
+          if (playableLines[i].id.trim() == cleanLineId) i,
+      ];
+      if (idMatches.length == 1) {
+        matchedLineIdx = idMatches.first;
+      } else if (idMatches.length > 1 && cleanMediaId.isNotEmpty) {
+        final narrowed = idMatches
+            .where(
+              (i) => playableLines[i].episodes.any(
+                (e) => WatchHistoryEntry.matchesEpisodeUrl(cleanMediaId, e.url),
+              ),
+            )
+            .toList();
+        if (narrowed.length == 1) matchedLineIdx = narrowed.first;
+      }
+    }
+    if (matchedLineIdx == null && cleanLineName.isNotEmpty) {
+      final nameMatches = <int>[
+        for (var i = 0; i < playableLines.length; i++)
+          if (playableLines[i].name.trim() == cleanLineName) i,
+      ];
+      if (nameMatches.length == 1) {
+        matchedLineIdx = nameMatches.first;
+      } else if (nameMatches.length > 1 && cleanMediaId.isNotEmpty) {
+        final narrowed = nameMatches
+            .where(
+              (i) => playableLines[i].episodes.any(
+                (e) => WatchHistoryEntry.matchesEpisodeUrl(cleanMediaId, e.url),
+              ),
+            )
+            .toList();
+        if (narrowed.length == 1) matchedLineIdx = narrowed.first;
+      }
+    }
+
+    List<(int, int)> findGlobalMediaIdHits() {
+      if (cleanMediaId.isEmpty) return const <(int, int)>[];
+      final hits = <(int, int)>[];
+      for (var li = 0; li < playableLines.length; li++) {
+        final eps = playableLines[li].episodes;
+        for (var ei = 0; ei < eps.length; ei++) {
+          if (WatchHistoryEntry.matchesEpisodeUrl(cleanMediaId, eps[ei].url)) {
+            hits.add((li, ei));
+          }
+        }
+      }
+      return hits;
+    }
+
+    if (matchedLineIdx != null) {
+      final matchedEp = _matchRecommendedEpisodeIndex(
+        playableLines[matchedLineIdx].episodes,
+        historyEntry,
+        sameLine: true,
+      );
+      if (matchedEp != null) {
+        return (
+          lineIndex: matchedLineIdx,
+          episodeIndex: matchedEp,
+          resumeMs: historyEntry.resumePosition,
+        );
+      }
+      final globalHits = findGlobalMediaIdHits();
+      if (globalHits.length == 1) {
+        return (
+          lineIndex: globalHits.first.$1,
+          episodeIndex: globalHits.first.$2,
+          resumeMs: historyEntry.resumePosition,
+        );
+      }
+      return (lineIndex: matchedLineIdx, episodeIndex: 0, resumeMs: 0);
+    }
+
+    // Old line no longer exists (or history had no recorded line).
+    // First scan ALL playable lines for a unique stable media identity so a
+    // same-named unrelated file on the recommended line (e.g. `video.mkv`)
+    // never steals the resume position from the real historical file on
+    // another playable line.
+    if (cleanMediaId.isNotEmpty) {
+      final globalHits = findGlobalMediaIdHits();
+      if (globalHits.length == 1) {
+        return (
+          lineIndex: globalHits.first.$1,
+          episodeIndex: globalHits.first.$2,
+          resumeMs: historyEntry.resumePosition,
+        );
+      }
+      if (globalHits.length > 1) {
+        return (lineIndex: safeRecLine, episodeIndex: 0, resumeMs: 0);
+      }
+    }
+
+    // No playable line holds the original stable media ID: fall back to
+    // complete (season, episode) or unique exact episode name on the
+    // recommended line; ambiguous candidates start cleanly from 0.
+    final fallbackMatchedEp = _matchRecommendedEpisodeIndex(
+      playableLines[safeRecLine].episodes,
+      historyEntry,
+      sameLine: false,
+    );
+    if (fallbackMatchedEp != null) {
+      return (
+        lineIndex: safeRecLine,
+        episodeIndex: fallbackMatchedEp,
+        resumeMs: historyEntry.resumePosition,
+      );
+    }
+    return (lineIndex: safeRecLine, episodeIndex: 0, resumeMs: 0);
+  }
 
   /// Formats an actionable Chinese diagnostic message when a live IPTV stream
   /// fails, surfacing upstream HTTP failure codes (e.g. 404/403/502) recorded
@@ -648,6 +985,183 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _userPausedPlayback = false;
   bool _pausedEngineInvalidated = false;
   bool _ohosRenderedFirstFrame = false;
+  bool _switchingIosKernel = false;
+  late List<String> _iosToolbarItems;
+
+  // Universal cross-engine AI Subtitle Overlay state (renders identically on AVPlayer, MDK & MPV).
+  final ValueNotifier<int> _aiSubtitleClockMsNotifier = ValueNotifier<int>(0);
+  final ValueNotifier<int> _aiSubtitleStateRevision = ValueNotifier<int>(0);
+  List<AiSubtitleCue> _aiOverlayCues = const <AiSubtitleCue>[];
+  Map<String, String> _aiOverlayGlossary = const <String, String>{};
+  List<AiSubtitleCue> _aiStudioDraftCues = const <AiSubtitleCue>[];
+  Map<String, String> _aiStudioDraftGlossary = const <String, String>{};
+  Duration _aiStudioDraftOffset = Duration.zero;
+  bool _aiStudioDraftMatchesOverlay = false;
+  int _aiOverlayMountGen = 0;
+  String _aiOverlayMediaKey = '';
+  int _aiSubtitleMediaGen = 0;
+  bool _aiOverlayBilingual = true;
+  Duration _aiOverlayOffset = Duration.zero;
+  String _aiOverlayLabel = '';
+  bool _aiLiveEmbeddedTranslateEnabled = false;
+  bool _avConfirmedTextSubtitleTrackForSession = false;
+  String? _avConfirmedTextSubtitleTrackId;
+  String? _lastAvSelectedSubtitleTrackId;
+  String _lastAvSubtitleTrackSignature = '';
+  String _aiLiveRawLine = '';
+  String _aiLiveTranslatedLine = '';
+  int _aiLiveTranslateGen = 0;
+  bool _aiNonTextTrackNotifiedForSession = false;
+  int _iosAutoFallbackCountForOpen = 0;
+
+  bool get _isPrivateBackdrop =>
+      _activeSite.isEffectivelyPrivate ||
+      widget.site.isEffectivelyPrivate ||
+      AiService.instance.isPrivacySessionActive;
+
+  String get _currentAiSubtitleMediaKey =>
+      '${_activeSite.key}::${_activeVideo.id}::$_episodeIndex';
+
+  AiSubtitleSessionState? get _currentAiSubtitleSessionSnapshot {
+    if (_aiOverlayMediaKey != _currentAiSubtitleMediaKey) return null;
+    if (_aiOverlayCues.isEmpty &&
+        _aiOverlayGlossary.isEmpty &&
+        _aiStudioDraftCues.isEmpty &&
+        !_aiLiveEmbeddedTranslateEnabled &&
+        _aiOverlayOffset == Duration.zero) {
+      return null;
+    }
+    final hasMountedOverlay = _aiOverlayCues.isNotEmpty;
+    return AiSubtitleSessionState(
+      cues: _aiOverlayCues,
+      glossary: _aiOverlayGlossary,
+      bilingual: _aiOverlayBilingual,
+      offset: _aiOverlayOffset,
+      label: _aiOverlayLabel,
+      overlayActive: hasMountedOverlay,
+      liveEmbeddedTranslateEnabled: _aiLiveEmbeddedTranslateEnabled,
+      draftCues: _aiStudioDraftCues.isNotEmpty
+          ? _aiStudioDraftCues
+          : _aiOverlayCues,
+      draftGlossary: _aiStudioDraftGlossary.isNotEmpty
+          ? _aiStudioDraftGlossary
+          : _aiOverlayGlossary,
+      draftOffset: _aiStudioDraftMatchesOverlay
+          ? _aiOverlayOffset
+          : _aiStudioDraftOffset,
+      draftMatchesOverlay: hasMountedOverlay && _aiStudioDraftMatchesOverlay,
+    );
+  }
+
+  bool _canExtractCurrentAvSubtitleText(IosAvPlayerController avCtrl) {
+    if (avCtrl.currentSubtitleHasNonTextSamples &&
+        avCtrl.activeSubtitleLines.isEmpty) {
+      return false;
+    }
+    IosAvPlayerTrack? selected;
+    for (final t in avCtrl.subtitleTracks) {
+      if (t.selected) {
+        selected = t;
+        break;
+      }
+    }
+    if (selected != null) {
+      if (selected.subtitleFormat == IosAvSubtitleFormat.bitmap ||
+          selected.isBitmap ||
+          selected.isTextExtractable == false ||
+          MdkPlatformPlayer.isBitmapSubtitleCodec(selected.title)) {
+        return false;
+      }
+      if (selected.subtitleFormat == IosAvSubtitleFormat.text ||
+          selected.isTextExtractable == true) {
+        return true;
+      }
+      // Unknown format: keep native subtitle rendering visible until THIS
+      // selected track actually emits real text lines.
+      return avCtrl.activeSubtitleLines.isNotEmpty ||
+          (_avConfirmedTextSubtitleTrackId != null &&
+              _avConfirmedTextSubtitleTrackId == selected.id);
+    }
+    return avCtrl.activeSubtitleLines.isNotEmpty ||
+        _avConfirmedTextSubtitleTrackForSession;
+  }
+
+  ({bool suppress, bool allowNonText}) _resolveAvNativeSubtitleSuppression(
+    IosAvPlayerController avCtrl,
+  ) {
+    if (avCtrl.isPipActive || avCtrl.isPipStarting) {
+      return (suppress: false, allowNonText: false);
+    }
+    // Explicit external SRT / AI full-track overlay replaces native rendering
+    // even when the embedded track is graphical/bitmap (PGS/VobSub).
+    if (_aiOverlayCues.isNotEmpty) {
+      return (suppress: true, allowNonText: true);
+    }
+    // Live embedded translation only suppresses native rendering when the
+    // selected track is text-extractable; graphical tracks stay natively visible.
+    if (_aiLiveEmbeddedTranslateEnabled) {
+      return (
+        suppress: _canExtractCurrentAvSubtitleText(avCtrl),
+        allowNonText: false,
+      );
+    }
+    return (suppress: false, allowNonText: false);
+  }
+
+  void _syncAvPlayerSubtitleSuppression({bool force = false}) {
+    if (!_usingAvPlayer) return;
+    final avCtrl = _iosAvPlayerController;
+    if (avCtrl == null) return;
+    final decision = _resolveAvNativeSubtitleSuppression(avCtrl);
+    unawaited(
+      avCtrl.setSuppressNativeSubtitleRendering(
+        decision.suppress,
+        allowNonText: decision.allowNonText,
+        force: force,
+      ),
+    );
+  }
+
+  void _clearAiLiveSubtitleLine({bool notify = true}) {
+    final changed =
+        _aiLiveRawLine.isNotEmpty || _aiLiveTranslatedLine.isNotEmpty;
+    _aiLiveRawLine = '';
+    _aiLiveTranslatedLine = '';
+    _aiLiveTranslateGen++;
+    if (notify && changed) {
+      _aiSubtitleStateRevision.value++;
+    }
+  }
+
+  List<String> get _currentActiveEmbeddedSubtitleLines {
+    if (_usingAvPlayer) {
+      return _iosAvPlayerController?.activeSubtitleLines ?? const <String>[];
+    }
+    try {
+      return _player.state.subtitle;
+    } catch (_) {
+      return const <String>[];
+    }
+  }
+
+  bool get _hasActiveAiSubtitleOverlay =>
+      _aiOverlayCues.isNotEmpty || _aiLiveEmbeddedTranslateEnabled;
+
+  bool get _isMultiVersionMovie =>
+      !_isLiveStream &&
+      EpisodeScraper.isLikelyMultiVersionMovie(
+        _currentLine.episodes,
+        videoTitle: _activeVideo.title,
+        videoTag: _activeVideo.tag,
+        videoRemarks: _activeVideo.remarks,
+        override: _episodeScrapeOverride,
+      );
+
+  String get _activeIosEngineBadgeLabel {
+    if (_usingAvPlayer) return 'AVPlayer';
+    if (_videoKernel.isMdk) return 'MDK';
+    return 'MPV';
+  }
 
   static String _avGravityForFit(BoxFit fit) => switch (fit) {
     BoxFit.cover => 'resizeAspectFill',
@@ -1294,6 +1808,33 @@ class _PlayerScreenState extends State<PlayerScreen>
       isPrivate: _activeSite.isEffectivelyPrivate,
     );
     _alwaysShowClock = widget.storage.playerAlwaysShowClock;
+    if (widget.debugInitialAiOverlayCues != null &&
+        widget.debugInitialAiOverlayCues!.isNotEmpty) {
+      _aiOverlayMediaKey = _currentAiSubtitleMediaKey;
+      _aiOverlayCues =
+          List<AiSubtitleCue>.unmodifiable(widget.debugInitialAiOverlayCues!);
+      _aiOverlayBilingual = true;
+      _aiOverlayLabel = 'AI 双语字幕';
+      _aiSubtitleStateRevision.value++;
+    }
+    widget.debugOnBindSwitchPickForTest?.call(_switchToRecommendedPick);
+    widget.debugOnBindStateInspectorForTest?.call(() => <String, Object?>{
+          'activeSiteKey': _activeSite.key,
+          'activeVideoId': _activeVideo.id,
+          'activeVideoTitle': _activeVideo.title,
+          'skipIntroSec': _skipIntroSec,
+          'skipOutroSec': _skipOutroSec,
+          'crossSiteSourceIds': _crossSiteSources
+              .map((s) => '${s.site.key}:${s.videoId}')
+              .toList(growable: false),
+          'crossSiteDetailKeys': _crossSiteDetails.keys.toList(growable: false),
+          'aiOverlayCueCount': _aiOverlayCues.length,
+          'aiOverlayGlossary': Map<String, String>.of(_aiOverlayGlossary),
+          'aiOverlayOffsetMs': _aiOverlayOffset.inMilliseconds,
+          'aiLiveRawLine': _aiLiveRawLine,
+          'aiLiveTranslatedLine': _aiLiveTranslatedLine,
+          'aiLiveEnabled': _aiLiveEmbeddedTranslateEnabled,
+        });
     _ownsWinQualityController = widget.debugWinQualityController == null;
     _winQualityController =
         widget.debugWinQualityController ?? WindowsVideoQualityController();
@@ -1389,6 +1930,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _iosEngineMode = IosPlaybackEngineMode.fromId(
       widget.storage.iosPlaybackEngineMode,
     );
+    _iosToolbarItems = List<String>.of(widget.storage.iosPlayerToolbarItems);
     _iosHdrToneMapping = IosHdrToneMappingMode.fromId(
       widget.storage.iosHdrToneMappingMode,
     );
@@ -1445,6 +1987,30 @@ class _PlayerScreenState extends State<PlayerScreen>
           _onIosThermalPressureChanged();
         }),
       );
+      _iosAvSubscriptions.add(
+        avCtrl.onSubtitleCueChanged.listen((cue) {
+          if (!mounted || !_usingAvPlayer || !_allowEvents) return;
+          String? selectedId;
+          for (final t in avCtrl.subtitleTracks) {
+            if (t.selected) {
+              selectedId = t.id;
+              break;
+            }
+          }
+          if (cue.lines.isNotEmpty) {
+            _avConfirmedTextSubtitleTrackForSession = true;
+            _avConfirmedTextSubtitleTrackId = selectedId;
+          } else if (cue.hasNativeSamples) {
+            _avConfirmedTextSubtitleTrackForSession = false;
+            _avConfirmedTextSubtitleTrackId = null;
+          }
+          _syncAvPlayerSubtitleSuppression();
+          _handleEmbeddedSubtitleLines(
+            cue.lines,
+            nonTextSamples: cue.hasNativeSamples,
+          );
+        }),
+      );
       unawaited(_initIosAvPlayerTelemetry());
     } else if (_isIosPlayerPlatform) {
       unawaited(_primeIosSystemVolume());
@@ -1474,13 +2040,19 @@ class _PlayerScreenState extends State<PlayerScreen>
         WindowsImmersiveFrame.darkSurfaceDepth.value += 1;
       });
     }
+    final initIosMdk = _isIosPlayerPlatform &&
+        !_isLiveStream &&
+        _iosEngineMode == IosPlaybackEngineMode.mdk &&
+        (widget.debugPlayer == null || widget.debugIosKernelFactory != null);
     _videoKernel = widget.debugWindowsKernelFactory?.call(_windowsEngine) ??
+        widget.debugIosKernelFactory?.call(initIosMdk) ??
         VideoKernel.create(
           debugPlayer: widget.debugPlayer,
           debugVideoSurface: widget.debugVideoSurface,
           hwdec: _hardwareDecoder(_playerKernel),
           windowsEngine: _windowsEngine,
           kernelStrategy: _playerKernel,
+          useIosMdk: initIosMdk,
         );
     _player = _videoKernel.player;
     _playerDisposed = false;
@@ -1768,7 +2340,65 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   String get _currentMdkMediaKey =>
-      '${_activeSite.key}::${_activeVideo.id}::$_lineIndex::$_episodeIndex::${_activeMediaUri.isNotEmpty ? _activeMediaUri : _currentEpisode.url}';
+      '${_activeSite.key}::${_activeVideo.id}::$_lineIndex::$_episodeIndex';
+
+  void _syncAiSubtitleClockMs(int posMs) {
+    final safe = posMs < 0 ? 0 : posMs;
+    if (_aiSubtitleClockMsNotifier.value != safe) {
+      _aiSubtitleClockMsNotifier.value = safe;
+    }
+  }
+
+  void _handleEmbeddedSubtitleLines(
+    List<String> lines, {
+    bool nonTextSamples = false,
+  }) {
+    if (!mounted ||
+        !_allowEvents ||
+        !_aiLiveEmbeddedTranslateEnabled ||
+        !_canUsePlayerAi) {
+      return;
+    }
+    final joined = lines
+        .map((l) => l.trim())
+        .where((l) => l.isNotEmpty)
+        .join('\n')
+        .trim();
+    if (joined.isEmpty && nonTextSamples && !_aiNonTextTrackNotifiedForSession) {
+      _aiNonTextTrackNotifiedForSession = true;
+      _showHud('当前内嵌字幕轨为图形/非文本字幕，无法提取文本实时翻译，请切换文本字幕轨或导入外挂 .srt/.ass');
+    }
+    if (joined == _aiLiveRawLine) return;
+    _aiLiveRawLine = joined;
+    final reqGen = ++_aiLiveTranslateGen;
+    final capturedMediaKey = _currentAiSubtitleMediaKey;
+    final capturedMediaGen = _aiSubtitleMediaGen;
+    if (joined.isEmpty) {
+      if (_aiLiveTranslatedLine.isNotEmpty) {
+        _aiLiveTranslatedLine = '';
+      }
+      _aiSubtitleStateRevision.value++;
+      return;
+    }
+    _aiLiveTranslatedLine = '';
+    _aiSubtitleStateRevision.value++;
+    unawaited(() async {
+      try {
+        final zh = await AiLabService.instance.translateLiveSubtitleLine(
+          seriesTitle: _activeVideo.title,
+          rawLine: joined,
+        );
+        if (!mounted ||
+            reqGen != _aiLiveTranslateGen ||
+            capturedMediaKey != _currentAiSubtitleMediaKey ||
+            capturedMediaGen != _aiSubtitleMediaGen) {
+          return;
+        }
+        _aiLiveTranslatedLine = zh.trim();
+        _aiSubtitleStateRevision.value++;
+      } catch (_) {}
+    }());
+  }
 
   int _resolveFallbackResumePositionMs() {
     if (_isLiveStream) return 0;
@@ -1979,6 +2609,18 @@ class _PlayerScreenState extends State<PlayerScreen>
       _probeCurrentEpisodeContainerTags(_playSession);
     }));
 
+    try {
+      _playerSubscriptions.add(boundPlayer.stream.subtitle.listen((lines) {
+        if (!mounted ||
+            !identical(boundPlayer, _player) ||
+            _usingAvPlayer ||
+            !_allowEvents) {
+          return;
+        }
+        _handleEmbeddedSubtitleLines(lines);
+      }));
+    } catch (_) {}
+
     _playerSubscriptions.add(boundPlayer.stream.position.listen((pos) {
       if (!mounted ||
           !identical(boundPlayer, _player) ||
@@ -2083,6 +2725,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       } else {
         _position = nextPos;
       }
+      _syncAiSubtitleClockMs(nextPos.inMilliseconds);
       _embySession?.update(pos.inMilliseconds, !_playing);
       if (!OhosRuntime.isOhos && _danmuSettings.effectiveEnabled) {
         _danmuCache?.onPlaybackTick(nextPos.inMilliseconds, playing: _playing);
@@ -2412,6 +3055,33 @@ class _PlayerScreenState extends State<PlayerScreen>
                 persist: false,
                 resumeMsOverride: resumePosMs,
                 customToast: 'MDK 引擎不支持当前流，已自动切回 MPV 播放',
+              ),
+            );
+            return;
+          }
+        }
+        if (_isIosPlayerPlatform &&
+            _videoKernel.isMdk &&
+            (widget.debugPlayer == null ||
+                widget.debugIosKernelFactory != null)) {
+          if (_switchingIosKernel ||
+              _mdkFallbackTriggeredSession == _playSession) {
+            return;
+          }
+          final mediaKey = _currentMdkMediaKey;
+          if (_iosAutoFallbackCountForOpen < 1 &&
+              !_mdkAutoFallbackMediaKeys.contains(mediaKey)) {
+            _iosAutoFallbackCountForOpen++;
+            _mdkFallbackTriggeredSession = _playSession;
+            _mdkAutoFallbackMediaKeys.add(mediaKey);
+            final resumePosMs = _resolveFallbackResumePositionMs();
+            unawaited(
+              _switchIosEngineMode(
+                IosPlaybackEngineMode.mpv,
+                persist: false,
+                isAutoFallback: true,
+                resumeMsOverride: resumePosMs,
+                customToast: 'MDK 引擎不支持当前流，已自动切换至 MPV 播放',
               ),
             );
             return;
@@ -2891,6 +3561,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _position = (_pendingResumeMs > 0 && nextPos.inMilliseconds < 2000)
           ? Duration(milliseconds: _pendingResumeMs)
           : nextPos;
+      _syncAiSubtitleClockMs(_position.inMilliseconds);
     }
 
     if (!_isLiveStream && nextDur > Duration.zero && _pendingResumeMs > 0) {
@@ -3086,11 +3757,39 @@ class _PlayerScreenState extends State<PlayerScreen>
       _wasAvCompleted = false;
     }
 
+    final pipTransitioned = ctrl.isPipActive != _lastIosPipActive ||
+        ctrl.isPipStarting != _lastAvPipStarting;
     if (ctrl.isPipActive != _lastIosPipActive) {
       _lastIosPipActive = ctrl.isPipActive;
       _syncMobileSystemBars(force: true);
     }
     _lastAvPipStarting = ctrl.isPipStarting;
+    String? nextSelectedSubTrackId;
+    for (final t in ctrl.subtitleTracks) {
+      if (t.selected) {
+        nextSelectedSubTrackId = t.id;
+        break;
+      }
+    }
+    final nextSubTrackSig = ctrl.subtitleTracks
+        .map(
+          (t) =>
+              '${t.id}:${t.selected}:${t.subtitleFormat.name}:${t.isBitmap}:${t.isTextExtractable}',
+        )
+        .join('|');
+    final subTracksChanged = nextSubTrackSig != _lastAvSubtitleTrackSignature;
+    if (nextSelectedSubTrackId != _lastAvSelectedSubtitleTrackId) {
+      _lastAvSelectedSubtitleTrackId = nextSelectedSubTrackId;
+      _avConfirmedTextSubtitleTrackForSession = false;
+      _avConfirmedTextSubtitleTrackId = null;
+    }
+    if (subTracksChanged) {
+      _lastAvSubtitleTrackSignature = nextSubTrackSig;
+    }
+    if (pipTransitioned || subTracksChanged) {
+      _syncAvPlayerSubtitleSuppression();
+      _aiSubtitleStateRevision.value++;
+    }
     _lastAvPipPossible = ctrl.isPipPossible;
     _lastAvAirPlayActive = ctrl.isAirPlayActive;
 
@@ -3223,6 +3922,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!mounted || avCtrl == null || !_usingAvPlayer || _fallbackInFlight) {
       return;
     }
+    if (_iosAutoFallbackCountForOpen >= 1) {
+      _failPlayback(event.reason);
+      return;
+    }
+    _iosAutoFallbackCountForOpen++;
     _fallbackInFlight = true;
     _clearPendingAutoStartPip();
     _sessionForceAvPlayerForPip = false;
@@ -3246,7 +3950,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     try {
       await avCtrl.stop();
       if (!mounted || session != _playSession) return;
-      _showHud(_sanitizeFallbackReason(event.reason));
+      final wantMdk = _shouldUseIosMdkForMedia(url);
+      await _ensureIosUnderlyingKernel(wantMdk: wantMdk);
+      if (!mounted || session != _playSession) return;
+      _showHud(
+        wantMdk
+            ? '检测到高规格/杜比视界封装，已自动切换 Metal MDK 硬解播放'
+            : _sanitizeFallbackReason(event.reason),
+      );
       await _applyPlayerKernel(_playerKernel);
       if (!mounted || session != _playSession || url.isEmpty) return;
       await _changeMedia(session, () async {
@@ -3278,40 +3989,239 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
-  Future<void> _toggleIosEngine() async {
+  bool _shouldUseIosMdkForMedia(String url) {
+    if (!_isIosPlayerPlatform || _isLiveStream) return false;
+    if (widget.debugPlayer != null && widget.debugIosKernelFactory == null) {
+      return false;
+    }
+    if (_mdkAutoFallbackMediaKeys.contains(_currentMdkMediaKey)) {
+      return false;
+    }
+    if (_effectiveIosEngineMode == IosPlaybackEngineMode.mdk) {
+      return true;
+    }
+    if (_effectiveIosEngineMode == IosPlaybackEngineMode.mpv) {
+      return false;
+    }
+    return IosMpvProfile.prefersIosMetalMdkWhenAvPlayerUnsupported(
+      url: url,
+      episodeName: _currentEpisode.name,
+      lineName: _currentLine.name,
+    );
+  }
+
+  Future<void> _ensureIosUnderlyingKernel({required bool wantMdk}) async {
     if (!_isIosPlayerPlatform) return;
-    final nextMode = _iosEngineMode == IosPlaybackEngineMode.avPlayer
-        ? IosPlaybackEngineMode.mpv
-        : IosPlaybackEngineMode.avPlayer;
-    if (nextMode == IosPlaybackEngineMode.avPlayer &&
-        _lastAvExternalAudioUrl.isNotEmpty) {
-      _showHud('当前片源包含独立外挂音轨，需使用 MPV 内核');
+    if (widget.debugPlayer != null && widget.debugIosKernelFactory == null) {
       return;
     }
-    if (nextMode == IosPlaybackEngineMode.avPlayer) {
+    if (_videoKernel.isMdk == wantMdk || _switchingIosKernel) return;
+    _switchingIosKernel = true;
+    try {
+      final keepVolume = _engineVolume100;
+      final activePlatform = _player.platform;
+      if (activePlatform is MdkPlatformPlayer) {
+        activePlatform.cancelPendingOpen();
+      }
+      _detachLiveVideoOutputObservers();
+      for (final sub in _playerSubscriptions) {
+        unawaited(sub.cancel());
+      }
+      _playerSubscriptions.clear();
+      final oldPlayer = _player;
+      try {
+        await oldPlayer.stop();
+      } catch (_) {}
+      if (!_playerDisposed) {
+        _playerDisposed = true;
+        try {
+          await oldPlayer.dispose();
+        } catch (_) {}
+      }
+      if (!mounted) return;
+      final nextKernel = widget.debugIosKernelFactory?.call(wantMdk) ??
+          VideoKernel.create(
+            debugVideoSurface: widget.debugVideoSurface,
+            hwdec: _hardwareDecoder(_playerKernel),
+            windowsEngine: _windowsEngine,
+            kernelStrategy: _playerKernel,
+            useIosMdk: wantMdk,
+          );
+      _videoKernel = nextKernel;
+      _player = nextKernel.player;
+      _playerDisposed = false;
+      _attachPlayerStreams();
+      _playerConfiguration = _applyPlayerKernel(_playerKernel);
+      await _playerConfiguration;
+      if (!mounted) return;
+      await _player.setVolume(keepVolume);
+      if (!wantMdk &&
+          _anime4kController.isIosLightweightAvailableForPlayer(_player)) {
+        unawaited(_initAnime4kAfterKernel());
+      }
+    } finally {
+      _switchingIosKernel = false;
+    }
+  }
+
+  Future<void> _switchIosEngineMode(
+    IosPlaybackEngineMode nextMode, {
+    bool persist = true,
+    bool isAutoFallback = false,
+    int? resumeMsOverride,
+    String? customToast,
+  }) async {
+    if (!_isIosPlayerPlatform) return;
+    if (nextMode == IosPlaybackEngineMode.avPlayer &&
+        _lastAvExternalAudioUrl.isNotEmpty) {
+      _showHud('当前片源包含独立外挂音轨，需使用 MDK 或 MPV 内核');
+      return;
+    }
+    if (nextMode == IosPlaybackEngineMode.avPlayer && !_isLiveStream) {
       final precheck = IosAvPlayerController.checkUrlCompatibility(
         _activeStreamUrl,
         episodeName: _currentEpisode.name,
         lineName: _currentLine.name,
       );
       if (!precheck.supported) {
-        _showHud(precheck.reason ?? '当前格式不支持 Apple 原生 AVPlayer');
+        _showHud(precheck.reason ?? '当前格式不支持 Apple 原生 AVPlayer，建议使用 MDK 或 MPV');
         return;
       }
     }
-    final keepPos = _position.inMilliseconds >= 1000
-        ? _position.inMilliseconds
-        : _lastKnownPositionMs;
+    if (nextMode == IosPlaybackEngineMode.mdk && !isAutoFallback) {
+      _mdkFallbackTriggeredSession = -1;
+      _mdkAutoFallbackMediaKeys.remove(_currentMdkMediaKey);
+    }
+    final keepPos = resumeMsOverride ??
+        (_position.inMilliseconds >= 1000
+            ? _position.inMilliseconds
+            : _lastKnownPositionMs);
     _clearPendingAutoStartPip();
     setState(() {
       _sessionForceAvPlayerForPip = false;
       _iosEngineMode = nextMode;
     });
-    await widget.storage.setIosPlaybackEngineMode(nextMode.id);
+    if (persist) {
+      await widget.storage.setIosPlaybackEngineMode(nextMode.id);
+    }
     if (!mounted) return;
-    _showHud('已切换至 ${nextMode.labelZh}');
+    _showHud(customToast ?? '已切换至 ${nextMode.labelZh}');
     _syncMobileSystemBars(force: true);
-    unawaited(_openCurrentEpisode(resumeMs: keepPos));
+    unawaited(
+      _openCurrentEpisode(
+        resumeMs: keepPos,
+        isAutoFallback: isAutoFallback,
+      ),
+    );
+  }
+
+  Future<void> _toggleIosEngine() async {
+    if (!_isIosPlayerPlatform) return;
+    final nextMode = switch (_iosEngineMode) {
+      IosPlaybackEngineMode.avPlayer => IosPlaybackEngineMode.mdk,
+      IosPlaybackEngineMode.mdk => IosPlaybackEngineMode.mpv,
+      IosPlaybackEngineMode.mpv => IosPlaybackEngineMode.avPlayer,
+    };
+    await _switchIosEngineMode(nextMode);
+  }
+
+  void _showIosEnginePickerSheet({Rect? anchorRect}) {
+    if (!_isIosPlayerPlatform) return;
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    final activeMode = _usingAvPlayer
+        ? IosPlaybackEngineMode.avPlayer
+        : (_videoKernel.isMdk
+              ? IosPlaybackEngineMode.mdk
+              : IosPlaybackEngineMode.mpv);
+    final options = <AppleNativePickerOption<IosPlaybackEngineMode>>[
+      AppleNativePickerOption<IosPlaybackEngineMode>(
+        value: IosPlaybackEngineMode.avPlayer,
+        title: 'Apple 原生 AVPlayer',
+        subtitle: '系统零拷贝硬解 · 超低发热 · 支持画中画',
+        symbol: 'play.rectangle.fill',
+        checked: activeMode == IosPlaybackEngineMode.avPlayer,
+      ),
+      if (!_isLiveStream)
+        AppleNativePickerOption<IosPlaybackEngineMode>(
+          value: IosPlaybackEngineMode.mdk,
+          title: 'MDK (Metal 4K 杜比视界)',
+          subtitle: 'Apple Metal 硬解 · 解决 4K 杜比 MKV 偏绿与慢放',
+          symbol: 'sparkles.tv.fill',
+          checked: activeMode == IosPlaybackEngineMode.mdk,
+        ),
+      AppleNativePickerOption<IosPlaybackEngineMode>(
+        value: IosPlaybackEngineMode.mpv,
+        title: 'MPV 全能解码',
+        subtitle: '全封装兼容 · 支持人声响度增强与轻超分',
+        symbol: 'cpu',
+        checked: activeMode == IosPlaybackEngineMode.mpv,
+      ),
+    ];
+    if (_canUseNativeIosSheet) {
+      final session = _playSession;
+      unawaited(() async {
+        final picked = await showAppleNativeOptionSheet<IosPlaybackEngineMode>(
+          context,
+          title: '选择播放内核',
+          forceOpaque: _effectiveSheetForceOpaque,
+          anchorRect: anchorRect,
+          forceDark: true,
+          options: options,
+          fallback: () async {
+            _showIosEngineFallbackPopover(options, anchorRect: anchorRect);
+            return null;
+          },
+        );
+        if (!mounted || session != _playSession || picked == null) return;
+        await _switchIosEngineMode(picked);
+      }());
+      return;
+    }
+    _showIosEngineFallbackPopover(options, anchorRect: anchorRect);
+  }
+
+  void _showIosEngineFallbackPopover(
+    List<AppleNativePickerOption<IosPlaybackEngineMode>> options, {
+    Rect? anchorRect,
+  }) {
+    showIosGlassPopover<void>(
+      context: context,
+      anchorRect: anchorRect,
+      title: '选择播放内核',
+      maxWidth: 300,
+      maxHeight: 320,
+      forceDark: true,
+      builder: (ctx) => ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.all(4),
+        children: [
+          AppleGroupedSection(
+            children: [
+              for (final opt in options)
+                AppleGroupedTile(
+                  icon: CupertinoIcons.play_rectangle_fill,
+                  iconBgColor: opt.checked
+                      ? AppleColors.systemBlue
+                      : AppleColors.groupedTertiary,
+                  title: opt.title,
+                  subtitle: opt.subtitle,
+                  trailing: opt.checked
+                      ? const Icon(
+                          CupertinoIcons.checkmark_alt,
+                          color: AppleColors.systemBlue,
+                          size: 18,
+                        )
+                      : null,
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    unawaited(_switchIosEngineMode(opt.value));
+                  },
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   void _showVocalLoudnessSheet({Rect? anchorRect}) {
@@ -3556,7 +4466,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _outroSkippedForSession = false;
       return;
     }
-    if (_autoNext) {
+    if (_autoNext && !_isMultiVersionMovie) {
       final nextIdx = _adjacentVisibleEpisodeIndex(1);
       if (nextIdx != null) {
         _stepEpisode(1);
@@ -3614,7 +4524,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           _failedQualityUrls.contains(normalized)) {
         continue;
       }
-      final rank = _rankVariantQuality(candidate);
+      final rank = StorageService.rankQualityVariantScore(candidate);
       if (rank > bestRank) {
         best = candidate;
         bestRank = rank;
@@ -3901,7 +4811,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     bool useAlternateLiveUa = false,
     bool preferUdpRtsp = false,
     bool armPendingPipForThisSession = false,
+    bool isAutoFallback = false,
   }) async {
+    if (!isAutoFallback) {
+      _iosAutoFallbackCountForOpen = 0;
+    }
+    _aiNonTextTrackNotifiedForSession = false;
     _userPausedPlayback = false;
     _pausedEngineInvalidated = false;
     _ohosRenderedFirstFrame = false;
@@ -3926,6 +4841,41 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (quality == null) {
       _lastKnownPositionMs = 0;
       _lastKnownDurationMs = 0;
+      final nextAiMediaKey = _currentAiSubtitleMediaKey;
+      if (nextAiMediaKey != _aiOverlayMediaKey) {
+        _aiOverlayMediaKey = nextAiMediaKey;
+        _aiSubtitleMediaGen++;
+        _aiOverlayMountGen++;
+        _aiOverlayCues = const <AiSubtitleCue>[];
+        _aiOverlayGlossary = const <String, String>{};
+        _aiStudioDraftCues = const <AiSubtitleCue>[];
+        _aiStudioDraftGlossary = const <String, String>{};
+        _aiStudioDraftOffset = Duration.zero;
+        _aiStudioDraftMatchesOverlay = false;
+        _aiOverlayOffset = Duration.zero;
+        _aiOverlayLabel = '';
+        _aiLiveRawLine = '';
+        _aiLiveTranslatedLine = '';
+        _aiLiveTranslateGen++;
+        _avConfirmedTextSubtitleTrackForSession = false;
+        _avConfirmedTextSubtitleTrackId = null;
+        _lastAvSelectedSubtitleTrackId = null;
+        _lastAvSubtitleTrackSignature = '';
+        _aiNonTextTrackNotifiedForSession = false;
+        _aiSubtitleStateRevision.value++;
+        _syncAvPlayerSubtitleSuppression(force: true);
+      } else {
+        // Switching engine/stream on the same film/episode preserves external
+        // AI subtitle cues while resetting only transient live cue text.
+        _aiLiveRawLine = '';
+        _aiLiveTranslatedLine = '';
+        _aiLiveTranslateGen++;
+        _avConfirmedTextSubtitleTrackForSession = false;
+        _avConfirmedTextSubtitleTrackId = null;
+        _lastAvSelectedSubtitleTrackId = null;
+        _aiSubtitleStateRevision.value++;
+        _syncAvPlayerSubtitleSuppression(force: true);
+      }
     }
     _liveSessionHasProgress = false;
     _liveStartupPhase = _LiveStartupPhase.tracksUnknown;
@@ -4088,6 +5038,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _position = _pendingResumeMs > 0
             ? Duration(milliseconds: _pendingResumeMs)
             : Duration.zero;
+        _syncAiSubtitleClockMs(_position.inMilliseconds);
         _duration = Duration.zero;
       });
     }
@@ -4138,9 +5089,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                         },
                       ));
       pendingLease = PlayerCloudMediaSession.of(resolvedEpisode);
-      if (quality == null &&
-          resolvedEpisode.variants.length > 1 &&
-          widget.storage.preferredQuality == '4k_netdisk') {
+      if (quality == null && resolvedEpisode.variants.length > 1) {
         resolvedEpisode = _selectBestQualityVariant(resolvedEpisode);
       }
       if (quality != null && _activeSite.isCatPaw) {
@@ -4340,6 +5289,10 @@ class _PlayerScreenState extends State<PlayerScreen>
               autoPlay: !_castController.isCasting,
               episodeName: _currentEpisode.name,
               lineName: _currentLine.name,
+              suppressNativeSubtitleRendering:
+                  _resolveAvNativeSubtitleSuppression(avCtrl).suppress,
+              suppressNativeSubtitleAllowNonText:
+                  _resolveAvNativeSubtitleSuppression(avCtrl).allowNonText,
             );
           } else if (!precheck.silentFallback &&
               (precheck.reason ?? '').isNotEmpty) {
@@ -4361,6 +5314,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           } else {
             _usingAvPlayer = true;
           }
+          _syncAvPlayerSubtitleSuppression(force: true);
         } else {
           if (_pendingAutoStartPipSession == session) {
             _clearPendingAutoStartPip();
@@ -4370,6 +5324,11 @@ class _PlayerScreenState extends State<PlayerScreen>
             setState(() => _usingAvPlayer = false);
           } else {
             _usingAvPlayer = false;
+          }
+          if (_isIosPlayerPlatform) {
+            final wantMdk = _shouldUseIosMdkForMedia(safePlayUrl);
+            await _ensureIosUnderlyingKernel(wantMdk: wantMdk);
+            if (!mounted || session != _playSession) return;
           }
           await _configureMpvStreamProperties(
             effectiveOpenUrl,
@@ -4434,6 +5393,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     bool immediate = false,
     bool triggerSync = true,
     bool? syncImmediate,
+    bool allowUnconfirmedWithPosition = false,
   }) async {
     if (!_allowHistory ||
         _isLiveStream ||
@@ -4441,7 +5401,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         _activeSite.isEffectivelyPrivate) {
       return;
     }
-    if (!_currentEpisodePlaybackConfirmed) {
+    if (!_currentEpisodePlaybackConfirmed &&
+        !(allowUnconfirmedWithPosition &&
+            (_position.inMilliseconds >= 1000 ||
+                _lastKnownPositionMs >= 1000))) {
       return;
     }
     final avConfirmedPosMs =
@@ -5008,6 +5971,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           posterUrl: _activeVideo.poster,
           year: _activeVideo.year,
           originRect: anchorRect,
+          isPrivate: _isPrivateBackdrop,
         ),
       );
     } else {
@@ -5017,6 +5981,12 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _handleDownloadTap(Rect? anchorRect) {
     if (_isLiveStream) return;
+    if (_activeSite.isEffectivelyPrivate ||
+        widget.site.isEffectivelyPrivate ||
+        AiService.instance.isPrivacySessionActive) {
+      _showHud('隐私分组暂不支持离线下载');
+      return;
+    }
     _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
     final parses = widget.storage.loadSavedConfig()?.parses ?? const [];
     final line = _currentLine;
@@ -5314,7 +6284,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!kIsWeb &&
         (defaultTargetPlatform == TargetPlatform.iOS ||
             defaultTargetPlatform == TargetPlatform.macOS)) {
-      return kernel == 'exo' ? 'videotoolbox' : 'auto-safe';
+      return kernel == 'ijk' ? 'videotoolbox-copy' : 'videotoolbox';
     }
     return switch (kernel) {
       'ijk' => 'auto-copy',
@@ -5496,49 +6466,30 @@ class _PlayerScreenState extends State<PlayerScreen>
     } catch (_) {}
   }
 
-  static int _rankVariantQuality(CmsEpisode v) {
-    final lower = '${v.name} ${v.url}'.toLowerCase();
-    if (lower.contains('原画') || lower.contains('raw') || lower.contains('original')) {
-      return 100;
-    }
-    if (lower.contains('4k') || lower.contains('2160') || lower.contains('uhd')) {
-      return 90;
-    }
-    if (lower.contains('2k') || lower.contains('1440')) {
-      return 80;
-    }
-    if (lower.contains('蓝光') || lower.contains('高码') || lower.contains('hdr')) {
-      return 75;
-    }
-    if (lower.contains('超清') || lower.contains('super') || lower.contains('1080')) {
-      return 60;
-    }
-    if (lower.contains('高清') || lower.contains('high') || lower.contains('720')) {
-      return 40;
-    }
-    if (lower.contains('标清') || lower.contains('low') || lower.contains('480')) {
-      return 20;
-    }
-    return 10;
-  }
-
   CmsEpisode _selectBestQualityVariant(CmsEpisode resolved) {
     if (resolved.variants.isEmpty) return resolved;
-    CmsEpisode best = resolved.variants.first;
-    int bestRank = _rankVariantQuality(best);
-    for (final v in resolved.variants.skip(1)) {
-      final r = _rankVariantQuality(v);
-      if (r > bestRank) {
-        best = v;
-        bestRank = r;
-      }
+    final orderedVariants = widget.storage.orderQualityVariants(
+      resolved.variants,
+    );
+    if (widget.storage.preferredQuality == 'default') {
+      return resolved;
     }
-    if (best.url == resolved.url) return resolved;
+    final best = orderedVariants.first;
+    if (best.url == resolved.url) {
+      return CmsEpisode(
+        name: resolved.name,
+        url: resolved.url,
+        headers: resolved.headers,
+        variants: orderedVariants,
+        externalAudioUrl: resolved.externalAudioUrl,
+        playbackSession: resolved.playbackSession,
+      );
+    }
     return CmsEpisode(
       name: resolved.name,
       url: best.url,
       headers: best.headers,
-      variants: resolved.variants,
+      variants: orderedVariants,
       externalAudioUrl: best.externalAudioUrl.isNotEmpty
           ? best.externalAudioUrl
           : resolved.externalAudioUrl,
@@ -5771,6 +6722,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (disposingPlatform is MdkPlatformPlayer) {
       disposingPlatform.cancelPendingOpen();
     }
+    _aiSubtitleClockMsNotifier.dispose();
+    _aiSubtitleStateRevision.dispose();
+    final playerAtDispose = _player;
     _mediaChanges.whenComplete(() async {
       try {
         try {
@@ -5787,14 +6741,30 @@ class _PlayerScreenState extends State<PlayerScreen>
             anime4kController.dispose();
           }
         }
-        if (widget.debugIosAvPlayerController == null) {
-          iosAvPlayerController?.dispose();
+        if (iosAvPlayerController != null) {
+          try {
+            await iosAvPlayerController.setSuppressNativeSubtitleRendering(
+              false,
+              force: true,
+            );
+          } catch (_) {}
+          if (widget.debugIosAvPlayerController == null) {
+            try {
+              await iosAvPlayerController.stop();
+            } catch (_) {}
+            iosAvPlayerController.dispose();
+          }
         }
         if (!_playerDisposed &&
             !(_isWindowsExitHookHost &&
                 WindowsTrayService.isNativeDestroyStarted)) {
           _playerDisposed = true;
           await _player.dispose();
+          if (!identical(playerAtDispose, _player)) {
+            try {
+              await playerAtDispose.dispose();
+            } catch (_) {}
+          }
         }
       } finally {
         try {
@@ -6166,6 +7136,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   void _seekPlayer(Duration target, {bool saveProgressOnSuccess = false}) {
     final clampedMs = math.max(0, target.inMilliseconds);
     final clamped = Duration(milliseconds: clampedMs);
+    _clearAiLiveSubtitleLine();
+    _syncAiSubtitleClockMs(clampedMs);
     if (_usingAvPlayer) {
       final avCtrl = _iosAvPlayerController;
       if (avCtrl != null) {
@@ -7626,10 +8598,19 @@ class _PlayerScreenState extends State<PlayerScreen>
                 child: IgnorePointer(child: activeDanmuWidget),
               ),
             // M3b: Subtitles strictly ABOVE DanmuLayer and BELOW HUD overlays.
-            if (positionedSubtitleChild != null)
+            if (positionedSubtitleChild != null && !_hasActiveAiSubtitleOverlay)
               Positioned.fill(
                 key: const Key('player-subtitle-layer'),
                 child: IgnorePointer(child: positionedSubtitleChild),
+              ),
+            if (_hasActiveAiSubtitleOverlay)
+              Positioned.fill(
+                key: const Key('player-ai-subtitle-overlay'),
+                child: IgnorePointer(
+                  child: _buildAiSubtitleOverlayWidget(
+                    bottomPadding: subtitleBottomPadding,
+                  ),
+                ),
               ),
         if (_playerBrightness < 0.995)
           IgnorePointer(
@@ -7716,7 +8697,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                                 const SizedBox(width: 9),
                                 Flexible(
                                   child: Text(
-                                    '正在加载 ${_currentScrapedEpisode().compactLabel(singleItemMovie: _currentLine.episodes.length <= 1)}…',
+                                    '正在加载 ${_currentScrapedEpisode().compactLabel(singleItemMovie: _currentLine.episodes.length <= 1, multiVersionMovie: _isMultiVersionMovie)}…',
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
@@ -7784,7 +8765,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                         const SizedBox(width: 9),
                         Flexible(
                           child: Text(
-                            '正在加载 ${_isLiveStream ? _currentEpisode.name : _currentScrapedEpisode().compactLabel(singleItemMovie: _currentLine.episodes.length <= 1)}…',
+                            '正在加载 ${_isLiveStream ? _currentEpisode.name : _currentScrapedEpisode().compactLabel(singleItemMovie: _currentLine.episodes.length <= 1, multiVersionMovie: _isMultiVersionMovie)}…',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
@@ -8636,6 +9617,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                                   episodeLabel:
                                       '${_currentEpisode.name} · ${_currentLine.name}',
                                   posterUrl: _activeVideo.poster,
+                                  isPrivate: _isPrivateBackdrop,
                                   halfScreen: true,
                                   onBack: () async {
                                     await _saveProgress(immediate: true);
@@ -9011,6 +9993,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                                   episodeLabel:
                                       '${_currentEpisode.name} · ${_currentLine.name}',
                                   posterUrl: _activeVideo.poster,
+                                  isPrivate: _isPrivateBackdrop,
                                   onBack: () async {
                                     await _saveProgress(immediate: true);
                                     if (context.mounted) _exitPlayer();
@@ -10020,8 +11003,8 @@ class _PlayerScreenState extends State<PlayerScreen>
               ),
             ),
           ),
-          if (widget.video.poster.trim().isNotEmpty ||
-              widget.video.title.trim().isNotEmpty)
+          if (_activeVideo.poster.trim().isNotEmpty ||
+              (!_isPrivateBackdrop && _activeVideo.title.trim().isNotEmpty))
             Positioned.fill(
               child: IgnorePointer(
                 child: RepaintBoundary(
@@ -10034,11 +11017,12 @@ class _PlayerScreenState extends State<PlayerScreen>
                         tileMode: TileMode.decal,
                       ),
                       child: PosterImage(
-                        url: widget.video.poster,
-                        title: widget.video.title,
-                        year: widget.video.year,
+                        url: _activeVideo.poster,
+                        title: _isPrivateBackdrop ? '' : _activeVideo.title,
+                        year: _isPrivateBackdrop ? '' : _activeVideo.year,
                         fit: BoxFit.cover,
                         forBackdrop: true,
+                        isPrivate: _isPrivateBackdrop,
                         placeholder: const SizedBox.shrink(),
                       ),
                     ),
@@ -10838,7 +11822,9 @@ class _PlayerScreenState extends State<PlayerScreen>
             );
       return IosPlayerChrome(
         title: _displayTitle,
-        episodeName: _currentEpisode.name,
+        episodeName: _isMultiVersionMovie
+            ? _currentScrapedEpisode().movieVersionLabel
+            : _currentEpisode.name,
         lineName: _currentLine.name,
         isLive: _isLiveStream,
         playing: _playing,
@@ -10877,19 +11863,43 @@ class _PlayerScreenState extends State<PlayerScreen>
         onPipTap: _isIosPlayerPlatform
             ? () => unawaited(_handleIosPipTap())
             : null,
-        engineLabel: _usingAvPlayer ? 'AVPlayer' : 'MPV',
+        engineLabel: _activeIosEngineBadgeLabel,
         isAvPlayerActive: _usingAvPlayer,
         onEngineSwitchTap: _isIosPlayerPlatform
-            ? () => unawaited(_toggleIosEngine())
+            ? () => _showIosEnginePickerSheet()
             : null,
         onEngineSwitchAnchoredTap: _isIosPlayerPlatform
-            ? (_) => unawaited(_toggleIosEngine())
+            ? (rect) => _showIosEnginePickerSheet(anchorRect: rect)
             : null,
         vocalLoudnessLabel: _vocalLoudness.shortLabelZh,
         vocalLoudnessActive: _vocalLoudness != VocalLoudnessPreset.off,
         onVocalLoudnessTap: () => _showVocalLoudnessSheet(),
         onVocalLoudnessAnchoredTap: (rect) =>
             _showVocalLoudnessSheet(anchorRect: rect),
+        toolbarItems: _iosToolbarItems,
+        isMultiVersionMovie: _isMultiVersionMovie,
+        subtitleOverlayActive: _hasActiveAiSubtitleOverlay,
+        anime4kActive: _anime4kController.iosLightweightEnabled,
+        showAiAssistantButton: _isIosPlayerPlatform &&
+            !_isLiveStream &&
+            !_activeSite.isEffectivelyPrivate &&
+            !widget.site.isEffectivelyPrivate &&
+            !AiService.instance.isPrivacySessionActive &&
+            AiService.instance.isLabUnlocked,
+        onAiAssistantTap: () => _showIosPlayerAiPopover(),
+        onAiAssistantAnchoredTap: (rect) =>
+            _showIosPlayerAiPopover(anchorRect: rect),
+        onAudioTracksTap: () => _showAudioTracksSheet(),
+        onAudioTracksAnchoredTap: (rect) =>
+            _showAudioTracksSheet(anchorRect: rect),
+        onSkipIntroOutroTap: () => _showSkipIntroOutroQuickPopover(),
+        onSkipIntroOutroAnchoredTap: (rect) =>
+            _showSkipIntroOutroQuickPopover(anchorRect: rect),
+        onAnime4kTap: _toggleIosAnime4kQuick,
+        onAnime4kAnchoredTap: (_) => _toggleIosAnime4kQuick(),
+        onSleepTimerTap: () => _showSleepTimerSheet(),
+        onSleepTimerAnchoredTap: (rect) =>
+            _showSleepTimerSheet(anchorRect: rect),
         onBack: () async {
           await _saveProgress(immediate: true);
           if (context.mounted) {
@@ -10941,7 +11951,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         onLinesTap: _showLinesSheet,
         onSpeedTap: _showSpeedSheet,
         onDanmuToggle: _handleDanmuToggle,
-        onDanmuSettingsTap: _handleDanmuSettingsTap,
+        onDanmuSettingsTap: () => _showDanmuAndSubtitleQuickPopover(),
         onAspectAndStrategyTap: _showAspectAndStrategySheet,
         onAudioSubtitleTap: _showAudioSubtitleQuickSheet,
         onMoreTap: _showIosMoreMenu,
@@ -10956,7 +11966,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         onEpisodesAnchoredTap: (rect) => _showEpisodesSheet(anchorRect: rect),
         onLinesAnchoredTap: (rect) => _showLinesSheet(anchorRect: rect),
         onDanmuSettingsAnchoredTap: (rect) =>
-            _handleDanmuSettingsTap(anchorRect: rect),
+            _showDanmuAndSubtitleQuickPopover(anchorRect: rect),
         onAspectAnchoredTap: (rect) =>
             _showAspectAndStrategySheet(anchorRect: rect),
         onAudioSubtitleAnchoredTap: (rect) =>
@@ -13070,7 +14080,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
-  void _showAudioTracksSheet() {
+  void _showAudioTracksSheet({Rect? anchorRect}) {
     _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
     if (_usingAvPlayer) {
       final avCtrl = _iosAvPlayerController;
@@ -13086,6 +14096,8 @@ class _PlayerScreenState extends State<PlayerScreen>
             context,
             title: '切换音轨',
             forceOpaque: _effectiveSheetForceOpaque,
+            anchorRect: anchorRect,
+            forceDark: true,
             options: [
               for (final t in tracks)
                 AppleNativePickerOption<IosAvPlayerTrack>(
@@ -13131,6 +14143,8 @@ class _PlayerScreenState extends State<PlayerScreen>
           context,
           title: '切换音轨',
           forceOpaque: _effectiveSheetForceOpaque,
+          anchorRect: anchorRect,
+          forceDark: true,
           options: [
             for (final t in tracks)
               AppleNativePickerOption<AudioTrack>(
@@ -13290,6 +14304,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             },
           );
           if (!mounted || session != _playSession || picked == null) return;
+          _clearAiLiveSubtitleLine();
           if (picked.isEmpty) {
             await avCtrl.setSubtitleTrack(null);
             _showHud('已关闭内嵌字幕');
@@ -13341,13 +14356,21 @@ class _PlayerScreenState extends State<PlayerScreen>
           },
         );
         if (!mounted || session != _playSession || picked == null) return;
+        _clearAiLiveSubtitleLine();
         _player.setSubtitleTrack(picked);
         _scheduleSyncNativeSubtitleState();
         if (picked == SubtitleTrack.no()) {
           _showHud('已关闭内嵌字幕');
         } else {
           final label = (picked.title ?? picked.language ?? picked.id).trim();
-          _showHud('已切换字幕：${label.isEmpty ? picked.id : label}');
+          final isBitmap = MdkPlatformPlayer.isBitmapSubtitleCodec(picked.codec);
+          if (isBitmap && _aiLiveEmbeddedTranslateEnabled) {
+            _showHud(
+              '已切换字幕：${label.isEmpty ? picked.id : label}（图形字幕无法提取文本实时翻译，可导入外挂 .srt/.ass）',
+            );
+          } else {
+            _showHud('已切换字幕：${label.isEmpty ? picked.id : label}');
+          }
         }
       }());
       return;
@@ -13377,6 +14400,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                 title: '关闭内嵌字幕',
                 onTap: () {
                   Navigator.of(ctx).pop();
+                  _clearAiLiveSubtitleLine();
                   unawaited(avCtrl.setSubtitleTrack(null));
                   _showHud('已关闭内嵌字幕');
                 },
@@ -13402,6 +14426,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                       : null,
                   onTap: () {
                     Navigator.of(ctx).pop();
+                    _clearAiLiveSubtitleLine();
                     unawaited(avCtrl.setSubtitleTrack(t.id));
                     _showHud('已切换字幕：${label.isEmpty ? t.id : label}');
                   },
@@ -13435,6 +14460,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                 title: '关闭内嵌字幕',
                 onTap: () {
                   Navigator.of(ctx).pop();
+                  _clearAiLiveSubtitleLine();
                   _player.setSubtitleTrack(SubtitleTrack.no());
                   _scheduleSyncNativeSubtitleState();
                   _showHud('已关闭内嵌字幕');
@@ -13458,6 +14484,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                       : null,
                   onTap: () {
                     Navigator.of(ctx).pop();
+                    _clearAiLiveSubtitleLine();
                     _player.setSubtitleTrack(t);
                     _scheduleSyncNativeSubtitleState();
                     _showHud('已切换字幕：${label.isEmpty ? t.id : label}');
@@ -14340,12 +15367,14 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (_isIosPlayerPlatform)
         AppleNativePickerOption<String>(
           value: 'engine_switch',
-          title: '播放内核：${_usingAvPlayer ? 'AVPlayer' : 'MPV'}',
+          title: '播放内核：$_activeIosEngineBadgeLabel',
           subtitle: _usingAvPlayer
-              ? '系统硬解低功耗 · 点击切换至 MPV'
-              : '全格式软硬解增强 · 点击切换至 AVPlayer',
+              ? '系统零拷贝硬解 · 点击切换 MDK / MPV'
+              : (_videoKernel.isMdk
+                    ? 'Metal 4K 杜比视界渲染 · 点击切换其他内核'
+                    : 'MPV 全格式解码 · 点击切换 AVPlayer / MDK'),
           symbol: _usingAvPlayer ? 'play.rectangle.fill' : 'cpu',
-          checked: _usingAvPlayer,
+          checked: true,
           section: 0,
         ),
       if (_qualityChoices.length > 1)
@@ -14443,33 +15472,59 @@ class _PlayerScreenState extends State<PlayerScreen>
         symbol: 'hand.tap.fill',
         section: 2,
       ),
+      if (_isIosPlayerPlatform)
+        AppleNativePickerOption<String>(
+          value: 'customize_toolbar',
+          title: '自定义工具栏按钮与排序',
+          subtitle: '当前已启用 ${_iosToolbarItems.length} 项按钮',
+          symbol: 'slider.horizontal.below.rectangle',
+          section: 2,
+        ),
       AppleNativePickerOption<String>(
         value: 'replay',
-        title: live ? '刷新直播流' : '从头重播本集',
+        title: live ? '刷新直播流' : (_isMultiVersionMovie ? '从头重播本片' : '从头重播本集'),
         symbol: 'arrow.clockwise',
         section: 2,
       ),
-      if (_isIosPlayerPlatform &&
-          !widget.site.isEffectivelyPrivate &&
-          AiService.instance.isLabUnlocked) ...[
+      if (_canUsePlayerAi) ...[
         if (!live && AiService.instance.config.subtitleTranslateEnabled)
-          const AppleNativePickerOption<String>(
-            value: 'ai_subtitle_studio',
-            title: 'AI 字幕精译与双语对照',
-            subtitle: '上下文精翻、锁定角色译名与时间轴校准',
-            symbol: 'captions.bubble.fill',
-            section: 3,
-            sectionTitle: 'AI 实验室',
-          ),
-        if (!live && AiService.instance.config.spoilerFreeRecapEnabled)
           AppleNativePickerOption<String>(
-            value: 'ai_episode_companion',
-            title: 'AI 防剧透前情提要与人物卡',
-            subtitle: '锁定截至第 ${_currentScrapedEpisode().effectiveEpisodeNumber} 集进度',
-            symbol: 'book.fill',
+            value: 'ai_subtitle_studio',
+            title: 'AI 双语字幕（实时/外挂）',
+            subtitle: _hasActiveAiSubtitleOverlay
+                ? '正在画面直显双语字幕'
+                : '支持内封实时双语精译与外挂字幕直显',
+            symbol: 'captions.bubble.fill',
+            checked: _hasActiveAiSubtitleOverlay,
             section: 3,
-            sectionTitle: 'AI 实验室',
+            sectionTitle: 'AI 观影助手',
           ),
+        if (!live && AiService.instance.config.spoilerFreeRecapEnabled) ...[
+          const AppleNativePickerOption<String>(
+            value: 'ai_watch_brief',
+            title: 'AI 零剧透看点与设定科普',
+            subtitle: '创作渊源、世界观设定与视听看点',
+            symbol: 'film.fill',
+            section: 3,
+            sectionTitle: 'AI 观影助手',
+          ),
+          const AppleNativePickerOption<String>(
+            value: 'ai_post_credits',
+            title: 'AI 片尾彩蛋与版本提示',
+            subtitle: '查询是否有片尾彩蛋及杜比/IMAX版本差异',
+            symbol: 'sparkles',
+            section: 3,
+            sectionTitle: 'AI 观影助手',
+          ),
+          const AppleNativePickerOption<String>(
+            value: 'ai_work_qa',
+            title: 'AI 自由观影问答（防剧透）',
+            subtitle: '围绕本片设定、背景或疑问自由提问',
+            symbol: 'bubble.left.and.bubble.right.fill',
+            section: 3,
+            sectionTitle: 'AI 观影助手',
+          ),
+        ],
         if (AiService.instance.config.smartDiagnosticsEnabled)
           const AppleNativePickerOption<String>(
             value: 'ai_diagnostics',
@@ -14477,7 +15532,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             subtitle: '脱敏分析卡顿、音画异常或加载失败',
             symbol: 'wrench.and.screwdriver.fill',
             section: 3,
-            sectionTitle: 'AI 实验室',
+            sectionTitle: 'AI 观影助手',
           ),
         if (!live)
           for (final skill in AiService.instance.config.effectiveSkills
@@ -14487,7 +15542,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               title: 'AI 技能：${skill.name}',
               symbol: 'sparkles',
               section: 3,
-              sectionTitle: 'AI 实验室',
+              sectionTitle: 'AI 观影助手',
             ),
       ],
     ];
@@ -14497,27 +15552,15 @@ class _PlayerScreenState extends State<PlayerScreen>
         case 'sleep_timer':
           _showSleepTimerSheet(anchorRect: anchorRect);
         case 'anime4k_lightweight':
-          final next = !_anime4kController.iosLightweightEnabled;
-          unawaited(() async {
-            await _anime4kController.setIosLightweightEnabled(_player, next);
-            await widget.storage.setIosAnime4kLightweightEnabled(next);
-            if (!mounted) return;
-            _showHud(
-              next
-                  ? (_usingAvPlayer
-                        ? '已开启 Anime4K 轻超分（切至 MPV 内核生效）'
-                        : '已开启 Anime4K 轻超分')
-                  : '已关闭 Anime4K 轻超分',
-            );
-          }());
+          _toggleIosAnime4kQuick();
         case 'vocal_loudness':
           _showVocalLoudnessSheet(anchorRect: anchorRect);
         case 'engine_switch':
-          unawaited(_toggleIosEngine());
+          _showIosEnginePickerSheet(anchorRect: anchorRect);
         case 'quality':
           unawaited(_showQualityChoices());
         case 'audio':
-          _showAudioTracksSheet();
+          _showAudioTracksSheet(anchorRect: anchorRect);
         case 'subtitle':
           _showSubtitleTracksSheet();
         case 'skip_intro':
@@ -14542,6 +15585,17 @@ class _PlayerScreenState extends State<PlayerScreen>
           _showHud(next ? '已开启底部常驻细进度条' : '已关闭底部常驻细进度条');
         case 'double_tap':
           _showDoubleTapSettingsSheet();
+        case 'customize_toolbar':
+          unawaited(
+            showIosPlayerToolbarCustomizeSheet(
+              context,
+              storage: widget.storage,
+              onChanged: (nextItems) {
+                if (!mounted) return;
+                setState(() => _iosToolbarItems = List<String>.of(nextItems));
+              },
+            ),
+          );
         case 'replay':
           if (live) {
             unawaited(_openCurrentEpisode());
@@ -14552,41 +15606,37 @@ class _PlayerScreenState extends State<PlayerScreen>
             _showHud('已从头开始播放');
           }
         case 'ai_subtitle_studio':
+          _openAiSubtitleStudio();
+        case 'ai_watch_brief':
           unawaited(
-            showIosAiSubtitleStudioSheet(
+            showIosAiWatchBriefSheet(
               context,
-              seriesTitle: widget.video.title,
-              episodeLabel: '第 ${_currentScrapedEpisode().effectiveEpisodeNumber} 集',
-              skipIntroSeconds: _skipIntroSec,
-              currentActiveCueLines: _player.state.subtitle,
-              onMountTranslatedSrt: (file, label) async {
-                if (_usingAvPlayer) {
-                  await _toggleIosEngine();
-                }
-                await _player.setSubtitleTrack(
-                  SubtitleTrack.uri(
-                    Uri.file(file.path).toString(),
-                    title: label,
-                  ),
-                );
-                _scheduleSyncNativeSubtitleState();
-                if (mounted) {
-                  _showHud('已挂载 $label');
-                }
-              },
+              title: _activeVideo.title,
+              year: _activeVideo.year,
+              genreOrRemarks: '${_activeVideo.tag} ${_activeVideo.remarks}'.trim(),
+              overview: _activeVideo.description,
             ),
           );
-        case 'ai_episode_companion':
+        case 'ai_post_credits':
           unawaited(
-            showIosAiEpisodeCompanionSheet(
+            showIosAiPostCreditsSheet(
               context,
-              title: widget.video.title,
-              year: widget.video.year,
-              currentEpisodeNumber:
-                  _currentScrapedEpisode().effectiveEpisodeNumber,
-              overview: widget.video.description,
+              title: _activeVideo.title,
+              year: _activeVideo.year,
+              overview: _activeVideo.description,
             ),
           );
+        case 'ai_work_qa':
+          unawaited(
+            showIosAiWorkQaSheet(
+              context,
+              title: _activeVideo.title,
+              year: _activeVideo.year,
+              overview: _activeVideo.description,
+            ),
+          );
+        case 'ai_similar_curate':
+          _openPlayerAiSimilarCurate();
         case 'ai_diagnostics':
           unawaited(
             showIosAiDiagnosticsSheet(
@@ -14594,15 +15644,19 @@ class _PlayerScreenState extends State<PlayerScreen>
               rawErrorText: _playbackError.trim().isNotEmpty
                   ? _playbackError
                   : '播放流畅度与兼容性巡检',
-              engineName: _usingAvPlayer ? 'AVPlayer' : 'MPV',
+              engineName: _activeIosEngineBadgeLabel,
               mediaFormatHint: _currentScrapedEpisode().rawName,
               hasBackupLines: _lines.length > 1,
               onExecuteAction: (act) {
                 switch (act) {
                   case AiDiagnosticActionId.switchToMpv:
-                    if (_usingAvPlayer) unawaited(_toggleIosEngine());
+                    unawaited(
+                      _switchIosEngineMode(IosPlaybackEngineMode.mpv),
+                    );
                   case AiDiagnosticActionId.switchToAvPlayer:
-                    if (!_usingAvPlayer) unawaited(_toggleIosEngine());
+                    unawaited(
+                      _switchIosEngineMode(IosPlaybackEngineMode.avPlayer),
+                    );
                   case AiDiagnosticActionId.enableVocalLoudness:
                     _showVocalLoudnessSheet();
                   case AiDiagnosticActionId.switchBackupLine:
@@ -14624,10 +15678,12 @@ class _PlayerScreenState extends State<PlayerScreen>
                 showIosAiCustomSkillOutputSheet(
                   context,
                   skill: matched,
-                  title: widget.video.title,
-                  year: widget.video.year,
-                  episode: '第 ${_currentScrapedEpisode().effectiveEpisodeNumber} 集',
-                  overview: widget.video.description,
+                  title: _activeVideo.title,
+                  year: _activeVideo.year,
+                  episode: _isMultiVersionMovie
+                      ? ''
+                      : '第 ${_currentScrapedEpisode().effectiveEpisodeNumber} 集',
+                  overview: _activeVideo.description,
                   subtitles: _player.state.subtitle.join('\n'),
                 ),
               );
@@ -14802,6 +15858,826 @@ class _PlayerScreenState extends State<PlayerScreen>
       title: '播放选项',
       builder: buildContent,
     );
+  }
+
+  void _toggleIosAnime4kQuick() {
+    final next = !_anime4kController.iosLightweightEnabled;
+    unawaited(() async {
+      await _anime4kController.setIosLightweightEnabled(_player, next);
+      await widget.storage.setIosAnime4kLightweightEnabled(next);
+      if (!mounted) return;
+      setState(() {});
+      _showHud(
+        next
+            ? (_usingAvPlayer || _videoKernel.isMdk
+                  ? '已开启 Anime4K 轻超分（切至 MPV 内核生效）'
+                  : '已开启 Anime4K 轻超分')
+            : '已关闭 Anime4K 轻超分',
+      );
+    }());
+  }
+
+  bool get _canUsePlayerAi =>
+      _isIosPlayerPlatform &&
+      !_isLiveStream &&
+      !_activeSite.isEffectivelyPrivate &&
+      !widget.site.isEffectivelyPrivate &&
+      !AiService.instance.isPrivacySessionActive &&
+      AiService.instance.isLabUnlocked;
+
+  void _openAiSubtitleStudio() {
+    if (!_canUsePlayerAi) return;
+    final capturedMediaKey = _currentAiSubtitleMediaKey;
+    final capturedMediaGen = _aiSubtitleMediaGen;
+    final activeLines = _currentActiveEmbeddedSubtitleLines;
+    final currentPosMs = _position.inMilliseconds > 0
+        ? _position.inMilliseconds
+        : (_aiSubtitleClockMsNotifier.value > 0
+              ? _aiSubtitleClockMsNotifier.value
+              : _lastKnownPositionMs);
+    unawaited(
+      showIosAiSubtitleStudioSheet(
+        context,
+        seriesTitle: _activeVideo.title,
+        episodeLabel: _isMultiVersionMovie
+            ? _currentScrapedEpisode().movieVersionLabel
+            : '第 ${_currentScrapedEpisode().effectiveEpisodeNumber} 集',
+        skipIntroSeconds: _skipIntroSec,
+        currentPlaybackPosition: Duration(milliseconds: currentPosMs),
+        currentActiveCueLines: activeLines,
+        initialSession: _currentAiSubtitleSessionSnapshot,
+        getOverlayMountGen: () => _aiOverlayMountGen,
+        onSessionChanged: (session) {
+          if (!mounted ||
+              capturedMediaKey != _currentAiSubtitleMediaKey ||
+              capturedMediaGen != _aiSubtitleMediaGen) {
+            return;
+          }
+          // Studio draft edits (importing a file or pasting text) update ONLY
+          // the studio draft state and NEVER mutate the currently mounted
+          // on-screen subtitle overlay until explicitly applied/mounted.
+          setState(() {
+            _aiOverlayMediaKey = capturedMediaKey;
+            _aiStudioDraftCues = List<AiSubtitleCue>.unmodifiable(
+              session.draftCues.isNotEmpty ? session.draftCues : session.cues,
+            );
+            _aiStudioDraftGlossary = Map<String, String>.unmodifiable(
+              session.draftGlossary.isNotEmpty
+                  ? session.draftGlossary
+                  : session.glossary,
+            );
+            _aiStudioDraftOffset = session.draftMatchesOverlay
+                ? session.offset
+                : session.draftOffset;
+            _aiStudioDraftMatchesOverlay =
+                session.overlayActive && session.draftMatchesOverlay;
+            if (session.overlayActive &&
+                session.draftMatchesOverlay &&
+                _aiOverlayCues.isNotEmpty) {
+              _aiOverlayGlossary = Map<String, String>.unmodifiable(
+                session.glossary,
+              );
+              _aiOverlayBilingual = session.bilingual;
+              _aiOverlayOffset = session.offset;
+              _aiOverlayLabel = session.label;
+            }
+          });
+          _aiSubtitleStateRevision.value++;
+          _syncAvPlayerSubtitleSuppression();
+        },
+        liveEmbeddedTranslateEnabled: _aiLiveEmbeddedTranslateEnabled,
+        hasActiveSubtitleOverlay: _aiOverlayCues.isNotEmpty,
+        onToggleLiveEmbeddedTranslate: (enabled) {
+          if (!mounted ||
+              capturedMediaKey != _currentAiSubtitleMediaKey ||
+              capturedMediaGen != _aiSubtitleMediaGen) {
+            return;
+          }
+          setState(() {
+            _aiLiveEmbeddedTranslateEnabled = enabled;
+            _aiOverlayMediaKey = capturedMediaKey;
+            if (!enabled) {
+              _clearAiLiveSubtitleLine(notify: false);
+            }
+          });
+          _aiSubtitleStateRevision.value++;
+          _syncAvPlayerSubtitleSuppression();
+          if (enabled) {
+            if (_usingAvPlayer &&
+                _iosAvPlayerController != null &&
+                !_canExtractCurrentAvSubtitleText(_iosAvPlayerController!) &&
+                (_iosAvPlayerController!.currentSubtitleHasNonTextSamples ||
+                    _iosAvPlayerController!.subtitleTracks.any(
+                      (t) =>
+                          t.selected &&
+                          (t.isBitmap ||
+                              t.isTextExtractable == false ||
+                              MdkPlatformPlayer.isBitmapSubtitleCodec(t.title)),
+                    ))) {
+              _showHud('当前内嵌字幕为图形字幕，无法提取文本实时翻译，已保留原字幕显示');
+              return;
+            }
+            if (!_usingAvPlayer &&
+                MdkPlatformPlayer.isBitmapSubtitleCodec(
+                  _player.state.track.subtitle.codec,
+                )) {
+              _showHud('当前内嵌字幕为图形字幕（PGS/VobSub），无法提取文本实时翻译，已保留原字幕显示');
+              return;
+            }
+            final currentLines = _currentActiveEmbeddedSubtitleLines;
+            if (currentLines.isNotEmpty) {
+              _handleEmbeddedSubtitleLines(currentLines);
+            }
+            _showHud('已开启内封字幕实时双语显示');
+          } else {
+            _showHud('已关闭内封字幕实时双语显示');
+          }
+        },
+        onClearSubtitleOverlay: () {
+          if (!mounted ||
+              capturedMediaKey != _currentAiSubtitleMediaKey ||
+              capturedMediaGen != _aiSubtitleMediaGen) {
+            return;
+          }
+          setState(() {
+            _aiOverlayMountGen++;
+            _aiOverlayCues = const <AiSubtitleCue>[];
+            _aiOverlayGlossary = const <String, String>{};
+            _aiStudioDraftCues = const <AiSubtitleCue>[];
+            _aiStudioDraftGlossary = const <String, String>{};
+            _aiStudioDraftOffset = Duration.zero;
+            _aiStudioDraftMatchesOverlay = false;
+            _aiOverlayOffset = Duration.zero;
+            _aiOverlayLabel = '';
+            _clearAiLiveSubtitleLine(notify: false);
+          });
+          _aiSubtitleStateRevision.value++;
+          _syncAvPlayerSubtitleSuppression(force: true);
+          _showHud('已清除 AI 字幕叠层');
+        },
+        onApplySubtitleOverlay: (
+          cues, {
+          required bilingual,
+          required offset,
+          required label,
+        }) async {
+          if (!mounted ||
+              capturedMediaKey != _currentAiSubtitleMediaKey ||
+              capturedMediaGen != _aiSubtitleMediaGen) {
+            return;
+          }
+          setState(() {
+            _aiOverlayMountGen++;
+            _aiOverlayMediaKey = capturedMediaKey;
+            _aiOverlayCues = List<AiSubtitleCue>.unmodifiable(cues);
+            _aiOverlayBilingual = bilingual;
+            _aiOverlayOffset = offset;
+            _aiOverlayLabel = label;
+            if (_aiStudioDraftMatchesOverlay || _aiStudioDraftCues.isEmpty) {
+              _aiStudioDraftCues = _aiOverlayCues;
+              _aiStudioDraftOffset = offset;
+              _aiStudioDraftMatchesOverlay = true;
+            }
+          });
+          _aiSubtitleStateRevision.value++;
+          _syncAvPlayerSubtitleSuppression(force: true);
+          _showHud('已在画面启用 $label（共 ${cues.length} 条）');
+        },
+      ),
+    );
+  }
+
+  Future<void> _switchToRecommendedPick(AiCuratedPick pick) async {
+    final targetSite = pick.matchedSite;
+    final targetVideo = pick.matchedVideo;
+    if (targetSite == null || targetVideo == null) {
+      _showHud('可在首页搜索《${pick.title}》播放');
+      return;
+    }
+    if (targetSite.isEffectivelyPrivate ||
+        AiService.instance.isPrivacySessionActive) {
+      _showHud('私密片源不支持通过 AI 推荐直接切换');
+      return;
+    }
+    final prevNavGen = _userNavigationGen;
+    _showHud('正在校验《${pick.title}》播放线路…');
+    try {
+      var resolved = targetVideo;
+      final hasPlayableLines =
+          resolved.lines.any((l) => l.episodes.isNotEmpty);
+      if (!hasPlayableLines) {
+        resolved = await _client
+            .fetchDetail(targetSite, targetVideo)
+            .timeout(const Duration(seconds: 25));
+      }
+      if (!mounted || _userNavigationGen != prevNavGen) return;
+      final normalizedResolved = WoggSource.normalizeCachedVideoLabels(
+        targetSite,
+        resolved,
+      );
+      final playableLines = normalizedResolved.lines
+          .where((l) => l.episodes.isNotEmpty)
+          .toList(growable: false);
+      if (playableLines.isEmpty) {
+        _showHud('《${pick.title}》暂未获取到可播线路，已保留当前影片');
+        return;
+      }
+      // Persist Film A's exact resume record before mutating any active state.
+      await _saveProgress(
+        immediate: true,
+        syncImmediate: false,
+        allowUnconfirmedWithPosition: true,
+      );
+      if (!mounted || _userNavigationGen != prevNavGen) return;
+      _userNavigationGen++;
+
+      // Cancel in-flight Film A cross-site hydration and clear stale rollback
+      // or error states, then release Film A's source lease and pin Film B.
+      if (_crossSiteAbort?.isCompleted == false) {
+        _crossSiteAbort!.complete();
+      }
+      _crossSiteAbort = null;
+      _pendingCrossSiteRollback = null;
+      _failedLinesForEpisode.clear();
+      _failedLiveEpisodes.clear();
+      _crossSiteDetails.clear();
+      _crossSiteErrors.clear();
+      _releaseSourceSession?.call();
+      _releaseSourceSession = _client.pinPlaybackSource(targetSite);
+
+      final recommendedLineIdx = widget.storage
+          .pickRecommendedLineIndex(playableLines)
+          .clamp(0, playableLines.length - 1);
+      final nextSkipIntro = widget.storage.getVideoSkipIntroSec(
+        targetSite.key,
+        normalizedResolved.id,
+        isPrivate: targetSite.isEffectivelyPrivate,
+      );
+      final nextSkipOutro = widget.storage.getVideoSkipOutroSec(
+        targetSite.key,
+        normalizedResolved.id,
+        isPrivate: targetSite.isEffectivelyPrivate,
+      );
+      final targetRef = _workSourceRefFor(targetSite, normalizedResolved);
+
+      // Look up Film B's own watch history and restore resume time ONLY when
+      // the historical episode genuinely matches the resolved target episode.
+      WatchHistoryEntry? targetHistory;
+      for (final entry in widget.storage.getWatchHistory()) {
+        if (entry.site == targetSite.key &&
+            entry.id == normalizedResolved.id) {
+          targetHistory = entry;
+          break;
+        }
+      }
+      final resolvedTarget = PlayerScreen.resolveRecommendedSwitchTarget(
+        playableLines: playableLines,
+        recommendedLineIndex: recommendedLineIdx,
+        historyEntry: targetHistory,
+      );
+      final targetResumeMs = resolvedTarget.resumeMs;
+      final targetLineIdx = resolvedTarget.lineIndex;
+      final targetEpIdx = resolvedTarget.episodeIndex;
+
+      setState(() {
+        _activeSite = targetSite;
+        _activeVideo = normalizedResolved;
+        _lines = List<CmsLine>.of(playableLines);
+        _lineIndex = targetLineIdx;
+        _episodeIndex = targetEpIdx;
+        _crossSiteSources = <WorkSourceRef>[targetRef];
+        _crossSiteDetails[targetRef.identityKey] = normalizedResolved;
+        _skipIntroSec = nextSkipIntro;
+        _skipOutroSec = nextSkipOutro;
+        _introSkippedForSession = false;
+        _outroSkippedForSession = false;
+        _pendingResumeMs = 0;
+        _intendedStartPositionMs = 0;
+        _episodeResumeAnchorMs = 0;
+        _position = Duration.zero;
+        _duration = Duration.zero;
+        _lastKnownPositionMs = 0;
+        _lastKnownDurationMs = 0;
+        _episodeScrapeOverride = widget.storage.getEpisodeScrapeOverride(
+          siteKey: targetSite.key,
+          videoId: normalizedResolved.id,
+          videoTitle: normalizedResolved.title,
+        );
+        _isFavorite = widget.storage.isFavorite(
+          targetSite.key,
+          normalizedResolved.id,
+          forPrivate: targetSite.isEffectivelyPrivate,
+        );
+      });
+      _showHud(
+        '已为您切换至《${normalizedResolved.title.isNotEmpty ? normalizedResolved.title : pick.title}》',
+      );
+      unawaited(_openCurrentEpisode(resumeMs: targetResumeMs));
+    } catch (_) {
+      if (!mounted || _userNavigationGen != prevNavGen) return;
+      _showHud('《${pick.title}》详情加载失败，已保留当前影片');
+    }
+  }
+
+  void _openPlayerAiSimilarCurate() {
+    if (!_canUsePlayerAi) return;
+    final historyTitles = widget.storage
+        .getWatchHistory()
+        .map((e) => e.title)
+        .take(12)
+        .toList();
+    final favs = widget.storage.getFavorites();
+    final favTitles = favs.map((e) => e.title).take(12).toList();
+    final snap = <(CmsSite, CmsVideo)>[];
+    final cfg = widget.storage.loadSavedConfig();
+    final siteByKey = <String, CmsSite>{
+      if (cfg != null)
+        for (final s in cfg.availableSites)
+          if (!s.isEffectivelyPrivate) s.key: s,
+    };
+    for (final f in favs.take(30)) {
+      final s = siteByKey[f.site];
+      if (s != null) {
+        snap.add((s, CmsVideo(id: f.id, title: f.title, poster: f.poster)));
+      }
+    }
+    unawaited(
+      showIosAiMoodSommelierSheet(
+        context,
+        sheetTitle: 'AI 看完《${_activeVideo.title}》看什么',
+        initialMoodPrompt: '与《${_activeVideo.title}》气质相近的高口碑佳作',
+        recentHistoryTitles: <String>[_activeVideo.title, ...historyTitles],
+        favoriteTitles: favTitles,
+        availableLibrarySnapshot: snap,
+        onSelectPick: (pick) {
+          unawaited(_switchToRecommendedPick(pick));
+        },
+      ),
+    );
+  }
+
+  Widget _buildAiSubtitleOverlayWidget({required double bottomPadding}) {
+    return AnimatedBuilder(
+      animation: Listenable.merge(<Listenable>[
+        _aiSubtitleClockMsNotifier,
+        _aiSubtitleStateRevision,
+      ]),
+      builder: (context, _) {
+        if (_usingAvPlayer && (_iosAvPlayerController?.isPipActive == true)) {
+          return const SizedBox.shrink();
+        }
+        String primaryZh = '';
+        String secondaryRaw = '';
+        if (_aiOverlayCues.isNotEmpty) {
+          final currentPos = Duration(
+            milliseconds: _aiSubtitleClockMsNotifier.value,
+          );
+          final adjusted = currentPos - _aiOverlayOffset;
+          for (final cue in _aiOverlayCues) {
+            if (adjusted >= cue.start && adjusted <= cue.end) {
+              final zh = cue.translatedText.trim();
+              final raw = cue.text.trim();
+              if (zh.isNotEmpty) {
+                primaryZh = zh;
+                if (_aiOverlayBilingual && raw.isNotEmpty && raw != zh) {
+                  secondaryRaw = raw;
+                }
+              } else {
+                primaryZh = raw;
+              }
+              break;
+            }
+          }
+        }
+        if (primaryZh.isEmpty &&
+            _aiLiveEmbeddedTranslateEnabled &&
+            _aiLiveRawLine.isNotEmpty) {
+          if (_aiLiveTranslatedLine.isNotEmpty) {
+            primaryZh = _aiLiveTranslatedLine;
+            if (_aiOverlayBilingual && _aiLiveRawLine != _aiLiveTranslatedLine) {
+              secondaryRaw = _aiLiveRawLine;
+            }
+          } else {
+            primaryZh = _aiLiveRawLine;
+          }
+        }
+        if (primaryZh.isEmpty) return const SizedBox.shrink();
+        return Align(
+          alignment: Alignment.bottomCenter,
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              24,
+              0,
+              24,
+              math.max(18.0, bottomPadding + 4.0),
+            ),
+            child: Container(
+              key: const ValueKey('player-ai-subtitle-box'),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+              decoration: BoxDecoration(
+                color: const Color(0xAD0B0D13),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: Colors.white.withValues(alpha: 0.14),
+                  width: 0.6,
+                ),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    primaryZh,
+                    key: const ValueKey('player-ai-subtitle-primary'),
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      height: 1.34,
+                      shadows: [
+                        Shadow(
+                          color: Color(0xE0000000),
+                          blurRadius: 6,
+                          offset: Offset(0, 1),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (secondaryRaw.isNotEmpty) ...[
+                    const SizedBox(height: 2.5),
+                    Text(
+                      secondaryRaw,
+                      key: const ValueKey('player-ai-subtitle-secondary'),
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Color(0xD8E2E8F0),
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w500,
+                        height: 1.28,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _showDanmuAndSubtitleQuickPopover({Rect? anchorRect}) {
+    if (_isLiveStream) {
+      _handleDanmuSettingsTap(anchorRect: anchorRect);
+      return;
+    }
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    final danmuOn = widget.onToggleDanmu != null
+        ? widget.danmuEnabled
+        : (!OhosRuntime.isOhos && _danmuSettings.effectiveEnabled);
+    final aiUnlocked = _canUsePlayerAi &&
+        AiService.instance.config.subtitleTranslateEnabled;
+    final options = <AppleNativePickerOption<String>>[
+      AppleNativePickerOption<String>(
+        value: 'toggle_danmu',
+        title: danmuOn ? '关闭弹幕' : '开启弹幕（默认关闭）',
+        subtitle: danmuOn ? '当前弹幕已开启' : '点击立即开启实时弹幕渲染',
+        symbol: danmuOn ? 'captions.bubble.fill' : 'captions.bubble',
+        checked: danmuOn,
+        section: 0,
+        sectionTitle: '弹幕控制',
+      ),
+      const AppleNativePickerOption<String>(
+        value: 'danmu_settings',
+        title: '弹幕样式、字号与屏蔽设置',
+        symbol: 'slider.horizontal.3',
+        section: 0,
+      ),
+      const AppleNativePickerOption<String>(
+        value: 'subtitle_tracks',
+        title: '切换片源内嵌字幕',
+        subtitle: '选择视频封装自带的中英字幕轨',
+        symbol: 'text.bubble.fill',
+        section: 1,
+        sectionTitle: '字幕与双语翻译',
+      ),
+      if (aiUnlocked)
+        AppleNativePickerOption<String>(
+          value: 'ai_subtitle',
+          title: 'AI 双语字幕（实时内封 / 外挂精译）',
+          subtitle: _hasActiveAiSubtitleOverlay
+              ? '正在画面直显双语字幕${_aiOverlayLabel.isNotEmpty ? " · $_aiOverlayLabel" : ""}'
+              : '支持外语内封字幕实时直显与 .srt/.ass 导入精翻',
+          symbol: 'sparkles',
+          checked: _hasActiveAiSubtitleOverlay,
+          section: 1,
+        ),
+    ];
+    void onSelect(String v) {
+      switch (v) {
+        case 'toggle_danmu':
+          _handleDanmuToggle();
+        case 'danmu_settings':
+          _handleDanmuSettingsTap(anchorRect: anchorRect);
+        case 'subtitle_tracks':
+          _showSubtitleTracksSheet();
+        case 'ai_subtitle':
+          _openAiSubtitleStudio();
+      }
+    }
+    if (_canUseNativeIosSheet) {
+      final session = _playSession;
+      unawaited(() async {
+        final picked = await showAppleNativeOptionSheet<String>(
+          context,
+          title: '弹幕与字幕',
+          forceOpaque: _effectiveSheetForceOpaque,
+          anchorRect: anchorRect,
+          forceDark: true,
+          options: options,
+          fallback: () async {
+            _showIosMoreFallbackSheet(options, onSelect, anchorRect: anchorRect);
+            return null;
+          },
+        );
+        if (!mounted || session != _playSession || picked == null) return;
+        onSelect(picked);
+      }());
+      return;
+    }
+    _showIosMoreFallbackSheet(options, onSelect, anchorRect: anchorRect);
+  }
+
+  void _showSkipIntroOutroQuickPopover({Rect? anchorRect}) {
+    if (_isLiveStream) return;
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    final options = <AppleNativePickerOption<String>>[
+      AppleNativePickerOption<String>(
+        value: 'skip_intro',
+        title: _skipIntroSec > 0
+            ? '跳过片头：已设 ${_skipIntroSec}s'
+            : '设置跳过片头（可取当前播放时间）',
+        symbol: 'forward.fill',
+        checked: _skipIntroSec > 0,
+      ),
+      AppleNativePickerOption<String>(
+        value: 'skip_outro',
+        title: _skipOutroSec > 0
+            ? '跳过片尾：已设 ${_skipOutroSec}s'
+            : '设置跳过片尾',
+        symbol: 'forward.end.alt.fill',
+        checked: _skipOutroSec > 0,
+      ),
+      if (_skipIntroSec > 0 || _skipOutroSec > 0)
+        const AppleNativePickerOption<String>(
+          value: 'clear_skip',
+          title: '清除本片片头与片尾设置',
+          symbol: 'xmark.circle',
+        ),
+      if (!_isMultiVersionMovie)
+        AppleNativePickerOption<String>(
+          value: 'auto_next',
+          title: '自动连播下一集：${_autoNext ? "已开启" : "已关闭"}',
+          symbol: 'repeat',
+          checked: _autoNext,
+        ),
+    ];
+    void onSelect(String v) {
+      switch (v) {
+        case 'skip_intro':
+          _showSkipIntroSheet();
+        case 'skip_outro':
+          _showSkipOutroSheet();
+        case 'clear_skip':
+          setState(() {
+            _skipIntroSec = 0;
+            _skipOutroSec = 0;
+          });
+          widget.storage.setVideoSkipIntroSec(
+            _activeSite.key,
+            _activeVideo.id,
+            0,
+            isPrivate: _activeSite.isEffectivelyPrivate,
+          );
+          widget.storage.setVideoSkipOutroSec(
+            _activeSite.key,
+            _activeVideo.id,
+            0,
+            isPrivate: _activeSite.isEffectivelyPrivate,
+          );
+          _showHud('已清除本片跳过片头与片尾');
+        case 'auto_next':
+          _toggleAutoNext();
+      }
+    }
+    if (_canUseNativeIosSheet) {
+      final session = _playSession;
+      unawaited(() async {
+        final picked = await showAppleNativeOptionSheet<String>(
+          context,
+          title: '片头片尾与连播',
+          forceOpaque: _effectiveSheetForceOpaque,
+          anchorRect: anchorRect,
+          forceDark: true,
+          options: options,
+          fallback: () async {
+            _showIosMoreFallbackSheet(options, onSelect, anchorRect: anchorRect);
+            return null;
+          },
+        );
+        if (!mounted || session != _playSession || picked == null) return;
+        onSelect(picked);
+      }());
+      return;
+    }
+    _showIosMoreFallbackSheet(options, onSelect, anchorRect: anchorRect);
+  }
+
+  void _showIosPlayerAiPopover({Rect? anchorRect}) {
+    if (!_canUsePlayerAi) {
+      return;
+    }
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    final cfg = AiService.instance.config;
+    final options = <AppleNativePickerOption<String>>[
+      if (cfg.subtitleTranslateEnabled)
+        AppleNativePickerOption<String>(
+          value: 'ai_subtitle_studio',
+          title: 'AI 双语字幕（实时内封 / 外挂精译）',
+          subtitle: _hasActiveAiSubtitleOverlay
+              ? '正在画面直显双语字幕'
+              : '全内核直接渲染双语台词，支持时间轴校准',
+          symbol: 'captions.bubble.fill',
+          checked: _hasActiveAiSubtitleOverlay,
+          section: 0,
+          sectionTitle: 'AI 观影助手',
+        ),
+      if (cfg.spoilerFreeRecapEnabled) ...[
+        const AppleNativePickerOption<String>(
+          value: 'ai_watch_brief',
+          title: '零剧透看点与设定背景科普',
+          subtitle: '创作渊源、世界观设定与视听看点',
+          symbol: 'film.fill',
+          section: 0,
+        ),
+        const AppleNativePickerOption<String>(
+          value: 'ai_post_credits',
+          title: '片尾彩蛋与版本差异提示',
+          subtitle: '查询是否有彩蛋及 IMAX / 杜比视界版本差异',
+          symbol: 'sparkles',
+          section: 0,
+        ),
+        const AppleNativePickerOption<String>(
+          value: 'ai_work_qa',
+          title: '自由观影问答（防剧透）',
+          subtitle: '围绕本片改编背景、设定或疑问自由提问',
+          symbol: 'bubble.left.and.bubble.right.fill',
+          section: 0,
+        ),
+      ],
+      if (cfg.moodCurationEnabled)
+        const AppleNativePickerOption<String>(
+          value: 'ai_similar_curate',
+          title: '看完这部看什么（自有源直达）',
+          subtitle: '匹配本地已配片源中气质相近的高分佳作',
+          symbol: 'wand.and.stars',
+          section: 1,
+          sectionTitle: '发现与排障',
+        ),
+      if (cfg.smartDiagnosticsEnabled)
+        const AppleNativePickerOption<String>(
+          value: 'ai_diagnostics',
+          title: '播放与源故障智能排障',
+          subtitle: '一键诊断偏色、卡顿、无声或加载失败',
+          symbol: 'wrench.and.screwdriver.fill',
+          section: 1,
+        ),
+      for (final skill
+          in cfg.effectiveSkills.where((s) => s.target.showsInPlayer))
+        AppleNativePickerOption<String>(
+          value: 'ai_skill:${skill.id}',
+          title: skill.name,
+          symbol: 'sparkles',
+          section: 2,
+          sectionTitle: '扩展技能卡',
+        ),
+    ];
+
+    void runPicked(String action) {
+      switch (action) {
+        case 'ai_subtitle_studio':
+          _openAiSubtitleStudio();
+        case 'ai_watch_brief':
+          unawaited(
+            showIosAiWatchBriefSheet(
+              context,
+              title: _activeVideo.title,
+              year: _activeVideo.year,
+              genreOrRemarks:
+                  '${_activeVideo.tag} ${_activeVideo.remarks}'.trim(),
+              overview: _activeVideo.description,
+            ),
+          );
+        case 'ai_post_credits':
+          unawaited(
+            showIosAiPostCreditsSheet(
+              context,
+              title: _activeVideo.title,
+              year: _activeVideo.year,
+              overview: _activeVideo.description,
+            ),
+          );
+        case 'ai_work_qa':
+          unawaited(
+            showIosAiWorkQaSheet(
+              context,
+              title: _activeVideo.title,
+              year: _activeVideo.year,
+              overview: _activeVideo.description,
+            ),
+          );
+        case 'ai_similar_curate':
+          _openPlayerAiSimilarCurate();
+        case 'ai_diagnostics':
+          unawaited(
+            showIosAiDiagnosticsSheet(
+              context,
+              rawErrorText: _playbackError.trim().isNotEmpty
+                  ? _playbackError
+                  : '播放流畅度与兼容性巡检',
+              engineName: _activeIosEngineBadgeLabel,
+              mediaFormatHint: _currentScrapedEpisode().rawName,
+              hasBackupLines: _lines.length > 1,
+              onExecuteAction: (act) {
+                switch (act) {
+                  case AiDiagnosticActionId.switchToMpv:
+                    unawaited(
+                      _switchIosEngineMode(IosPlaybackEngineMode.mpv),
+                    );
+                  case AiDiagnosticActionId.switchToAvPlayer:
+                    unawaited(
+                      _switchIosEngineMode(IosPlaybackEngineMode.avPlayer),
+                    );
+                  case AiDiagnosticActionId.enableVocalLoudness:
+                    _showVocalLoudnessSheet();
+                  case AiDiagnosticActionId.switchBackupLine:
+                    _showLinesSheet();
+                  case AiDiagnosticActionId.openEpisodeScrape:
+                    unawaited(_showEpisodeScrapeSheet());
+                }
+              },
+            ),
+          );
+        default:
+          if (action.startsWith('ai_skill:')) {
+            final skillId = action.substring('ai_skill:'.length);
+            final matched = cfg.effectiveSkills
+                .where((s) => s.id == skillId)
+                .firstOrNull;
+            if (matched != null) {
+              unawaited(
+                showIosAiCustomSkillOutputSheet(
+                  context,
+                  skill: matched,
+                  title: _activeVideo.title,
+                  year: _activeVideo.year,
+                  episode: _isMultiVersionMovie
+                      ? ''
+                      : '第 ${_currentScrapedEpisode().effectiveEpisodeNumber} 集',
+                  overview: _activeVideo.description,
+                  subtitles: _player.state.subtitle.join('\n'),
+                ),
+              );
+            }
+          }
+      }
+    }
+
+    if (_canUseNativeIosSheet) {
+      final session = _playSession;
+      unawaited(() async {
+        final picked = await showAppleNativeOptionSheet<String>(
+          context,
+          title: 'AI 观影助手',
+          forceOpaque: _effectiveSheetForceOpaque,
+          anchorRect: anchorRect,
+          forceDark: true,
+          options: options,
+          fallback: () async {
+            _showIosMoreFallbackSheet(
+              options,
+              runPicked,
+              anchorRect: anchorRect,
+            );
+            return null;
+          },
+        );
+        if (!mounted || session != _playSession || picked == null) return;
+        runPicked(picked);
+      }());
+      return;
+    }
+    _showIosMoreFallbackSheet(options, runPicked, anchorRect: anchorRect);
   }
 
   String? _episodeUnavailableReason(
@@ -16043,6 +17919,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     final startLineIndex = (initialLineIndex ?? _lineIndex)
         .clamp(0, math.max(0, _lines.length - 1))
         .toInt();
+    final isMovieVersions = _isMultiVersionMovie;
     Widget buildPicker(BuildContext ctx) => PlayerEpisodePickerSheet(
       lines: _lines,
       initialLineIndex: startLineIndex,
@@ -16052,7 +17929,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       episodeUnavailableReason: episodeChecker,
       episodeScrapeOverride: _episodeScrapeOverride,
       seriesTitle: _effectiveScrapeTitle,
-      onOpenScrape: _isLiveStream
+      isMultiVersionMovie: isMovieVersions,
+      onOpenScrape: (_isLiveStream || isMovieVersions)
           ? null
           : () {
               Navigator.of(ctx).pop();
@@ -16060,7 +17938,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             },
       lineScrapeResults: scrapeResults,
       scrapeOverride: override,
-      onCalibrateCurrent: canCalibrate
+      onCalibrateCurrent: (canCalibrate && !isMovieVersions)
           ? () {
               Navigator.of(ctx).pop();
               unawaited(_openPlayerSeriesScrapeSheet());
@@ -16117,13 +17995,16 @@ class _PlayerScreenState extends State<PlayerScreen>
         _openCurrentEpisode(resumeMs: keepPos);
       },
     );
+    final pickerTitle = isMovieVersions
+        ? '切换片源版本 (${_lines[previewLineIdx].episodes.length})'
+        : '选集与线路 (${_lines[previewLineIdx].episodes.length})';
     if (_useIos26PlayerChrome) {
       showIosGlassPopover<void>(
         context: context,
         anchorRect: anchorRect,
-        title: '选集与线路 (${_lines[previewLineIdx].episodes.length})',
+        title: pickerTitle,
         maxWidth: math.min(screenSize.width - 32, isLandscape ? 380.0 : 320.0),
-        maxHeight: math.min(screenSize.height - 80, 320.0),
+        maxHeight: math.min(screenSize.height - 80, 340.0),
         forceDark: true,
         contentPadding: const EdgeInsets.fromLTRB(6, 4, 6, 8),
         builder: buildPicker,
@@ -16132,7 +18013,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     showAppleModalSheet<void>(
       context: context,
-      title: '选集与线路 (${_lines[previewLineIdx].episodes.length})',
+      title: pickerTitle,
       maxWidth: isLandscape ? math.min(screenSize.width - 24, 760.0) : 560.0,
       builder: buildPicker,
     );
@@ -16190,6 +18071,7 @@ class PlayerEpisodePickerSheet extends StatefulWidget {
   final String? Function(CmsEpisode episode)? episodeUnavailableReason;
   final EpisodeScrapeOverride episodeScrapeOverride;
   final String seriesTitle;
+  final bool isMultiVersionMovie;
   final VoidCallback? onOpenScrape;
   final List<LineEpisodeScrapeResult>? lineScrapeResults;
   final SeriesScrapeOverride? scrapeOverride;
@@ -16206,6 +18088,7 @@ class PlayerEpisodePickerSheet extends StatefulWidget {
     this.episodeUnavailableReason,
     this.episodeScrapeOverride = const EpisodeScrapeOverride(),
     this.seriesTitle = '',
+    this.isMultiVersionMovie = false,
     this.onOpenScrape,
     this.lineScrapeResults,
     this.scrapeOverride,
@@ -16714,12 +18597,14 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
                       epIndex == widget.activeEpisodeIndex;
                   final parsed = _ParsedEpisodeLabel.parse(ep.name, epIndex);
                   final seriesEpInfo = lineScrape?.infoForOriginalIndex(epIndex);
-                  final numBadge = useEpisodeScraper
-                      ? (epInfo?.badgeLabel ??
-                          '#${(epIndex + 1).toString().padLeft(2, '0')}')
-                      : (seriesEpInfo != null
-                          ? seriesEpInfo.formattedSeasonEpisode
-                          : '#${(epIndex + 1).toString().padLeft(2, '0')}');
+                  final numBadge = widget.isMultiVersionMovie
+                      ? (epInfo?.movieVersionLabel ?? '版本 ${epIndex + 1}')
+                      : (useEpisodeScraper
+                            ? (epInfo?.badgeLabel ??
+                                '#${(epIndex + 1).toString().padLeft(2, '0')}')
+                            : (seriesEpInfo != null
+                                  ? seriesEpInfo.formattedSeasonEpisode
+                                  : '#${(epIndex + 1).toString().padLeft(2, '0')}'));
                   final tileTitle = !useEpisodeScraper &&
                           seriesEpInfo != null &&
                           seriesEpInfo.originalFileName.isNotEmpty

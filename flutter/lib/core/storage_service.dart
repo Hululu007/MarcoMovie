@@ -178,6 +178,39 @@ class StorageService {
   static const String keyPlaySpeed = 'play_speed';
   static const String keyAutoNext = 'auto_next';
   static const String keySkipIntroSec = 'skip_intro_sec';
+  static const String keyIosPlayerToolbarItems = 'ios_player_toolbar_items_v1';
+
+  /// Default iOS player primary toolbar button order:
+  /// 选集、线路、倍速、弹幕/字幕、画面、播放器、音轨、片头片尾、更多.
+  static const List<String> defaultIosPlayerToolbarItems = <String>[
+    'episodes',
+    'lines',
+    'speed',
+    'danmu_subtitle',
+    'aspect',
+    'engine',
+    'audio',
+    'skip_intro_outro',
+    'more',
+  ];
+
+  /// Complete catalog of supported iOS player toolbar action IDs.
+  static const List<String> allIosPlayerToolbarItems = <String>[
+    'episodes',
+    'lines',
+    'speed',
+    'danmu_subtitle',
+    'aspect',
+    'engine',
+    'audio',
+    'skip_intro_outro',
+    'fullscreen',
+    'loudness',
+    'anime4k',
+    'sleep_timer',
+    'pip',
+    'more',
+  ];
   static const String keySkipOutroSec = 'skip_outro_sec';
   static const String keyRepeatMode = 'repeat_mode';
   static const String keyQuarkCookie = 'netdisk_quark_cookie';
@@ -185,6 +218,16 @@ class StorageService {
   static const String keyBaiduCookie = 'netdisk_baidu_cookie';
   static const String keyAliToken = 'netdisk_ali_token';
   static const String keyDriveOrder = 'netdisk_drive_order';
+  static const String keyDriveOrderCustomized =
+      'netdisk_drive_order_customized';
+  static const String keyPrioritizeLoggedInDrives =
+      'netdisk_prioritize_logged_in';
+  static const List<String> defaultDriveOrder = <String>[
+    'quark',
+    'uc',
+    'baidu',
+    'ali',
+  ];
   static const String keyDepots = 'saved_depots';
   static const String keyActiveDepotName = 'active_depot_name';
   static const String keySubscriptions = 'saved_subscriptions';
@@ -452,8 +495,10 @@ class StorageService {
   Future<void> waitForCredentialsReady() => _credentialHydrationFuture;
 
   CmsConfig? _cachedConfig;
+  List<CmsSite>? _cachedAllKnownOfflineSites;
   Set<String>? _cachedPrivateKeys;
   int _configRevision = 0;
+  final ValueNotifier<int> configRevisionNotifier = ValueNotifier<int>(0);
   List<WatchHistoryEntry>? _historyCache;
   List<WatchHistoryEntry>? _allHistoryCache;
   List<SubscriptionEntry>? _subscriptionsCache;
@@ -472,10 +517,12 @@ class StorageService {
 
   void _invalidateConfigCache() {
     _cachedConfig = null;
+    _cachedAllKnownOfflineSites = null;
     _cachedPrivateKeys = null;
     _historyCache = null;
     _subscriptionsCache = null;
     _configRevision++;
+    configRevisionNotifier.value = _configRevision;
   }
 
   static String _resolveOrAssignTestNamespaceSync(SharedPreferences prefs) {
@@ -684,6 +731,7 @@ class StorageService {
       _credentialHydrationFuture = Future<void>.value();
     }
     await _migrateFromPrefsIfNeeded();
+    await migrateLegacyDriveOrderIfNeeded();
     _hydrateSpiderExtensions();
     getSubscriptions();
   }
@@ -1198,18 +1246,145 @@ class StorageService {
   String get aliToken =>
       _credentialCache[keyAliToken] ?? _prefs.getString(keyAliToken) ?? '';
   List<String> get driveOrder {
-    const defaults = ['quark', 'uc', 'baidu', 'ali'];
+    const defaults = defaultDriveOrder;
     final raw = _prefs.getStringList(keyDriveOrder);
     if (raw == null || raw.isEmpty) return defaults;
-    final out = <String>[
-      for (final d in raw)
-        if (defaults.contains(d)) d,
-    ];
+    final out = <String>[];
+    for (final d in raw) {
+      if (defaults.contains(d) && !out.contains(d)) {
+        out.add(d);
+      }
+    }
     for (final d in defaults) {
       if (!out.contains(d)) out.add(d);
     }
     return out;
   }
+
+  bool get hasCustomDriveOrder {
+    if (_prefs.containsKey(keyDriveOrderCustomized)) {
+      return _prefs.getBool(keyDriveOrderCustomized) ?? false;
+    }
+    // Legacy upgrade migration: earlier versions persisted a non-default
+    // `netdisk_drive_order` without writing `netdisk_drive_order_customized`.
+    // Preserve that user customization so ConfigCenterBridge never overwrites it.
+    final raw = _prefs.getStringList(keyDriveOrder);
+    if (raw == null || raw.isEmpty) return false;
+    final current = driveOrder;
+    return current.join(',') != defaultDriveOrder.join(',');
+  }
+
+  /// One-time migration for legacy upgrades that saved a non-default
+  /// `netdisk_drive_order` before `keyDriveOrderCustomized` existed.
+  Future<void> migrateLegacyDriveOrderIfNeeded() async {
+    if (_prefs.containsKey(keyDriveOrderCustomized)) return;
+    final raw = _prefs.getStringList(keyDriveOrder);
+    if (raw == null || raw.isEmpty) return;
+    final current = driveOrder;
+    if (current.join(',') != defaultDriveOrder.join(',')) {
+      await _prefs.setBool(keyDriveOrderCustomized, true);
+    }
+  }
+
+  bool get prioritizeLoggedInDrives =>
+      _prefs.getBool(keyPrioritizeLoggedInDrives) ?? true;
+
+  bool get hasAnyNetdiskLoggedIn =>
+      defaultDriveOrder.any((d) => isNetdiskLoggedIn(d));
+
+  /// Returns [driveOrder] with logged-in drives placed ahead of unauthenticated
+  /// drives when [prioritizeLoggedInDrives] is enabled, while preserving the
+  /// user's manual relative ordering within each group.
+  List<String> get effectiveDriveOrder {
+    final base = driveOrder;
+    if (!prioritizeLoggedInDrives || !hasAnyNetdiskLoggedIn) {
+      return base;
+    }
+    return <String>[
+      for (final d in base)
+        if (isNetdiskLoggedIn(d)) d,
+      for (final d in base)
+        if (!isNetdiskLoggedIn(d)) d,
+    ];
+  }
+
+  /// Detects which canonical netdisk provider (`quark` / `uc` / `baidu` / `ali`)
+  /// a [CmsLine] belongs to based on its display name and episode URLs.
+  static String? detectNetdiskDriveKey(
+    String lineName, {
+    Iterable<CmsEpisode> episodes = const <CmsEpisode>[],
+  }) {
+    final lower = lineName.trim().toLowerCase();
+    if (lower.contains('夸父') ||
+        lower.contains('夸克') ||
+        lower.contains('quark')) {
+      return 'quark';
+    }
+    if (lower.contains('优汐') ||
+        lower.contains('uc网盘') ||
+        lower.contains('uc原画') ||
+        lower.contains('uc4k') ||
+        RegExp(r'(^|[^a-z0-9])uc([^a-z0-9]|$)').hasMatch(lower)) {
+      return 'uc';
+    }
+    if (lower.contains('嘟嘟') ||
+        lower.contains('百度') ||
+        lower.contains('baidu') ||
+        RegExp(r'(^|[^a-z0-9])bd([^a-z0-9]|$)').hasMatch(lower)) {
+      return 'baidu';
+    }
+    if (lower.contains('阿狸') ||
+        lower.contains('阿里') ||
+        lower.contains('alipan') ||
+        lower.contains('aliyun') ||
+        RegExp(r'(^|[^a-z0-9])ali([^a-z0-9]|$)').hasMatch(lower)) {
+      return 'ali';
+    }
+    for (final ep in episodes.take(4)) {
+      final cp = ep.cloudProvider;
+      if (cp != null && defaultDriveOrder.contains(cp)) {
+        return cp;
+      }
+      final uri = Uri.tryParse(ep.url.trim());
+      if (uri != null) {
+        final host = uri.host.toLowerCase();
+        if (host == 'pan.quark.cn' ||
+            host == 'drive.quark.cn' ||
+            host.endsWith('.quark.cn')) {
+          return 'quark';
+        }
+        if (host == 'drive.uc.cn' || host.endsWith('.uc.cn')) {
+          return 'uc';
+        }
+        if (host == 'pan.baidu.com' || host == 'yun.baidu.com') {
+          return 'baidu';
+        }
+        if (host == 'www.alipan.com' ||
+            host == 'alipan.com' ||
+            host == 'www.aliyundrive.com' ||
+            host == 'aliyundrive.com') {
+          return 'ali';
+        }
+      }
+    }
+    return null;
+  }
+
+  static String driveShortLabelZh(String driveKey) => switch (driveKey) {
+    'quark' => '夸克',
+    'uc' => 'UC',
+    'baidu' => '百度',
+    'ali' => '阿里',
+    _ => driveKey,
+  };
+
+  static String driveAliasLabelZh(String driveKey) => switch (driveKey) {
+    'quark' => '夸父',
+    'uc' => '优汐',
+    'baidu' => '嘟嘟',
+    'ali' => '阿狸',
+    _ => driveKey,
+  };
   List<CmsDepot> getSavedDepots() {
     final raw = _prefs.getString(keyDepots) ?? '[]';
     try {
@@ -1874,6 +2049,7 @@ class StorageService {
       }
     }
     await saveSubscriptions(next);
+    _invalidateConfigCache();
     if (tombsChanged) {
       await _writeSyncTombstones(tombs);
     }
@@ -1899,6 +2075,7 @@ class StorageService {
           s,
     ];
     await saveSubscriptions(next);
+    _invalidateConfigCache();
     if (touchedPublic && webdavSyncSubs) {
       scheduleAutoWebdavSync(immediate: true, nowMs: now);
     }
@@ -2402,6 +2579,85 @@ class StorageService {
     );
     _cachedConfig = result;
     return result;
+  }
+
+  /// Returns all known sites across ALL persisted subscriptions (including
+  /// disabled subscriptions and hidden/removed sites) with active
+  /// [SiteOverride]s applied, preserving each site's original `sourceKey` and
+  /// `sourceApi` so offline download privacy checks never miss disabled or
+  /// API-overridden subscriptions.
+  List<CmsSite> loadAllKnownSitesForOfflinePrivacy() {
+    if (_cachedAllKnownOfflineSites != null) {
+      return _cachedAllKnownOfflineSites!;
+    }
+    final allSubs = getSubscriptions();
+    final aliases = _savedAliases();
+    final rawSites = <CmsSite>[];
+    if (_hasAuthoritativeSubscriptions) {
+      if (allSubs.isEmpty) {
+        _cachedAllKnownOfflineSites = const <CmsSite>[];
+        return _cachedAllKnownOfflineSites!;
+      }
+      final seenSiteKeys = <String>{};
+      for (final sub in allSubs) {
+        if (sub.rawContent.trim().isEmpty) continue;
+        try {
+          final parsed = CmsParser.parseConfig(
+            sub.rawContent,
+            origin: sub.url,
+            defaultGroup: sub.group,
+            isPrivate: sub.isEffectivelyPrivate,
+            subscriptionId: sub.id,
+            defaultName: sub.name,
+          );
+          for (final site in parsed.sites) {
+            var uniqueKey =
+                aliases[jsonEncode([sub.id, site.key, site.api])] ?? site.key;
+            if (!seenSiteKeys.add(uniqueKey)) {
+              uniqueKey = '${site.key}_${sub.id}';
+              seenSiteKeys.add(uniqueKey);
+            }
+            rawSites.add(
+              site.copyWith(
+                key: uniqueKey,
+                group: site.group.isEmpty ? sub.group : site.group,
+                isPrivate: site.isEffectivelyPrivate || sub.isEffectivelyPrivate,
+                subscriptionId: sub.id,
+              ),
+            );
+          }
+        } on Object catch (e) {
+          debugPrint(
+            'StorageService: skip malformed subscription ${sub.id} for offline privacy: $e',
+          );
+        }
+      }
+    } else {
+      final legacy = _loadImportedConfig();
+      if (legacy != null) {
+        rawSites.addAll(legacy.sites);
+      }
+    }
+    if (rawSites.isEmpty) {
+      _cachedAllKnownOfflineSites = const <CmsSite>[];
+      return _cachedAllKnownOfflineSites!;
+    }
+    final identities = _pickerIdentities(rawSites);
+    final rawOverrides = _readSiteOverrides();
+    final canonicalOverrides = <String, SiteOverride>{
+      for (final entry in rawOverrides.entries)
+        (identities[entry.key] ?? entry.key): entry.value,
+    };
+    final effective = <CmsSite>[
+      for (final s in rawSites)
+        (() {
+          final id = _siteIdentity(s);
+          final ov = canonicalOverrides[id];
+          return ov != null ? ov.applyTo(s) : s;
+        })(),
+    ];
+    _cachedAllKnownOfflineSites = List<CmsSite>.unmodifiable(effective);
+    return _cachedAllKnownOfflineSites!;
   }
 
   CmsConfig? _loadImportedConfig() {
@@ -3023,63 +3279,183 @@ class StorageService {
     await _prefs.setBool(keyTvAmbientPosterSync, enabled);
   }
   /// Selects the recommended line index from [lines] based on [preferredQuality]
-  /// and the user's configured Netdisk drive order.
+  /// and the user's manually configured Netdisk drive priority ([effectiveDriveOrder]).
   int pickRecommendedLineIndex(List<CmsLine> lines) {
-    final preferred = lines.indexWhere((line) => line.name == preferredLineName && line.episodes.isNotEmpty);
+    final preferred = lines.indexWhere(
+      (line) => line.name == preferredLineName && line.episodes.isNotEmpty,
+    );
     if (preferred >= 0) return preferred;
     if (lines.isEmpty) return 0;
-    final pref = preferredQuality;
-    if (pref == 'auto') return 0;
-    bool isNetdiskLine(String name) {
-      final n = name.toLowerCase();
-      return n.contains('4k') ||
-          n.contains('原画') ||
-          n.contains('夸父') ||
-          n.contains('夸克') ||
-          n.contains('优汐') ||
-          n.contains('uc') ||
-          n.contains('嘟嘟') ||
-          n.contains('百度') ||
-          n.contains('阿狸') ||
-          n.contains('阿里');
+
+    int firstNonEmptyOrZero() {
+      final idx = lines.indexWhere((l) => l.episodes.isNotEmpty);
+      return idx >= 0 ? idx : 0;
     }
-    if (pref == '4k_netdisk') {
-      // First check according to driveOrder
-      for (final drive in driveOrder) {
-        final alias = switch (drive) {
-          'quark' => '夸',
-          'uc' => '优',
-          'baidu' => '嘟',
-          'ali' => '阿',
-          _ => '',
-        };
-        if (alias.isNotEmpty) {
-          final idx = lines.indexWhere((l) => l.name.contains(alias));
-          if (idx >= 0) return idx;
+
+    final pref = preferredQuality;
+    if (pref == 'default') {
+      return firstNonEmptyOrZero();
+    }
+    if (pref == 'auto' && !hasCustomDriveOrder && !hasAnyNetdiskLoggedIn) {
+      return firstNonEmptyOrZero();
+    }
+
+    bool isNetdiskLine(CmsLine line) {
+      if (detectNetdiskDriveKey(line.name, episodes: line.episodes) != null) {
+        return true;
+      }
+      for (final ep in line.episodes.take(4)) {
+        final uri = Uri.tryParse(ep.url.trim());
+        if (uri == null) continue;
+        final scheme = uri.scheme.toLowerCase();
+        if (scheme == 'mmcloud' ||
+            scheme == 'mmwogg' ||
+            scheme == 'mmquark' ||
+            scheme == 'push') {
+          return true;
+        }
+        final host = uri.host.toLowerCase();
+        if (host == 'cloud.189.cn' ||
+            host == '115.com' ||
+            host.endsWith('.115.com') ||
+            host.endsWith('.115cdn.com') ||
+            host == 'www.123pan.com' ||
+            host == '123pan.com' ||
+            host == 'www.123684.com' ||
+            host == 'pan.xunlei.com' ||
+            host == 'mypikpak.com') {
+          return true;
         }
       }
-      final idx = lines.indexWhere((l) => isNetdiskLine(l.name));
-      if (idx >= 0) return idx;
-    } else if (pref == '1080p_direct') {
-      final idx = lines.indexWhere(
-        (l) =>
-            !isNetdiskLine(l.name) &&
-            (l.name.contains('蓝光') ||
-                l.name.contains('超清') ||
-                l.name.contains('1080') ||
-                l.name.contains('暴风') ||
-                l.name.contains('天堂') ||
-                l.name.contains('非凡') ||
-                l.name.contains('量子')),
-      );
-      if (idx >= 0) return idx;
-      final nonNetdisk = lines.indexWhere((l) => !isNetdiskLine(l.name));
-      if (nonNetdisk >= 0) return nonNetdisk;
-    } else if (pref == 'fast_hls') {
-      final idx = lines.indexWhere((l) => !isNetdiskLine(l.name));
-      if (idx >= 0) return idx;
+      final n = line.name.toLowerCase();
+      return n.contains('网盘') ||
+          n.contains('云盘') ||
+          n.contains('天翼') ||
+          n.contains('115') ||
+          n.contains('123盘') ||
+          n.contains('迅雷') ||
+          n.contains('pikpak');
     }
-    return 0;
+
+    int qualityTierScore(CmsLine line) {
+      final n = line.name.toLowerCase();
+      final sampleUrl =
+          line.episodes.isNotEmpty ? line.episodes.first.url.toLowerCase() : '';
+      final sampleName =
+          line.episodes.isNotEmpty ? line.episodes.first.name.toLowerCase() : '';
+      final blob = '$n $sampleName';
+      if (blob.contains('原画') ||
+          blob.contains('4k') ||
+          blob.contains('2160') ||
+          blob.contains('uhd') ||
+          blob.contains('杜比') ||
+          blob.contains('hdr') ||
+          sampleUrl.contains('2160') ||
+          sampleUrl.contains('4k')) {
+        return 4;
+      }
+      if (blob.contains('蓝光') ||
+          blob.contains('1080') ||
+          blob.contains('fhd') ||
+          blob.contains('超清') ||
+          n.contains('暴风') ||
+          n.contains('天堂') ||
+          n.contains('非凡') ||
+          n.contains('量子')) {
+        return 3;
+      }
+      if (blob.contains('720') || blob.contains('高清') || blob.contains('hd')) {
+        return 2;
+      }
+      if (blob.contains('枪版') ||
+          blob.contains('抢先') ||
+          RegExp(r'(^|[^a-z])(ts|tc)([^a-z]|$)').hasMatch(blob)) {
+        return 0;
+      }
+      return 1;
+    }
+
+    int? pickHighestQuality(Iterable<int> candidates) {
+      int? bestIdx;
+      var bestScore = -1;
+      for (final idx in candidates) {
+        final score = qualityTierScore(lines[idx]);
+        if (score > bestScore) {
+          bestScore = score;
+          bestIdx = idx;
+        }
+      }
+      return bestIdx;
+    }
+
+    bool isHlsDirectLine(CmsLine line) {
+      if (isNetdiskLine(line)) return false;
+      final n = line.name.toLowerCase();
+      if (n.contains('m3u8') || n.contains('hls')) return true;
+      for (final ep in line.episodes.take(4)) {
+        final u = ep.url.toLowerCase();
+        if (u.contains('.m3u8') || u.contains('m3u8')) return true;
+      }
+      return false;
+    }
+
+    int? matchByDriveOrder() {
+      for (final drive in effectiveDriveOrder) {
+        final matching = <int>[
+          for (var i = 0; i < lines.length; i++)
+            if (lines[i].episodes.isNotEmpty &&
+                detectNetdiskDriveKey(lines[i].name, episodes: lines[i].episodes) ==
+                    drive)
+              i,
+        ];
+        final best = pickHighestQuality(matching);
+        if (best != null) return best;
+      }
+      for (final drive in effectiveDriveOrder) {
+        final idx = lines.indexWhere(
+          (l) => detectNetdiskDriveKey(l.name, episodes: l.episodes) == drive,
+        );
+        if (idx >= 0) return idx;
+      }
+      return null;
+    }
+
+    if (pref == '4k_netdisk' || pref == 'auto') {
+      final byDrive = matchByDriveOrder();
+      if (byDrive != null) return byDrive;
+      final otherNetdisk = pickHighestQuality([
+        for (var i = 0; i < lines.length; i++)
+          if (lines[i].episodes.isNotEmpty && isNetdiskLine(lines[i])) i,
+      ]);
+      if (otherNetdisk != null) return otherNetdisk;
+      final anyNetdisk = lines.indexWhere(isNetdiskLine);
+      if (anyNetdisk >= 0) return anyNetdisk;
+      final bestDirect = pickHighestQuality([
+        for (var i = 0; i < lines.length; i++)
+          if (lines[i].episodes.isNotEmpty) i,
+      ]);
+      return bestDirect ?? firstNonEmptyOrZero();
+    } else if (pref == '1080p_direct') {
+      final bestDirect = pickHighestQuality([
+        for (var i = 0; i < lines.length; i++)
+          if (lines[i].episodes.isNotEmpty && !isNetdiskLine(lines[i])) i,
+      ]);
+      if (bestDirect != null) return bestDirect;
+      return matchByDriveOrder() ?? firstNonEmptyOrZero();
+    } else if (pref == 'fast_hls') {
+      final bestHls = pickHighestQuality([
+        for (var i = 0; i < lines.length; i++)
+          if (lines[i].episodes.isNotEmpty && isHlsDirectLine(lines[i])) i,
+      ]);
+      if (bestHls != null) return bestHls;
+      final bestDirect = pickHighestQuality([
+        for (var i = 0; i < lines.length; i++)
+          if (lines[i].episodes.isNotEmpty && !isNetdiskLine(lines[i])) i,
+      ]);
+      if (bestDirect != null) return bestDirect;
+      return matchByDriveOrder() ?? firstNonEmptyOrZero();
+    }
+    return firstNonEmptyOrZero();
   }
   String getNetdiskCred(String driveKey) {
     switch (driveKey) {
@@ -3127,8 +3503,155 @@ class StorageService {
     }
     unawaited(CatPawHost.instance.syncNetdiskConfig());
   }
-  Future<void> setDriveOrder(List<String> order) async {
-    await _prefs.setStringList(keyDriveOrder, order);
+  /// Scores a multi-quality playback variant by resolution/codec quality tier.
+  static int rankQualityVariantScore(CmsEpisode v) {
+    final lower = '${v.name} ${v.url}'.toLowerCase();
+    if (lower.contains('原画') || lower.contains('raw') || lower.contains('original')) {
+      return 100;
+    }
+    if (lower.contains('4k') || lower.contains('2160') || lower.contains('uhd')) {
+      return 90;
+    }
+    if (lower.contains('2k') || lower.contains('1440')) {
+      return 80;
+    }
+    if (lower.contains('蓝光') || lower.contains('高码') || lower.contains('hdr')) {
+      return 75;
+    }
+    if (lower.contains('超清') || lower.contains('super') || lower.contains('1080')) {
+      return 60;
+    }
+    if (lower.contains('高清') || lower.contains('high') || lower.contains('720')) {
+      return 40;
+    }
+    if (lower.contains('标清') || lower.contains('low') || lower.contains('480')) {
+      return 20;
+    }
+    return 10;
+  }
+
+  static String? detectVariantNetdiskDriveKey(CmsEpisode v) {
+    final byName = detectNetdiskDriveKey(v.name, episodes: <CmsEpisode>[v]);
+    if (byName != null) return byName;
+    final lowerUrl = v.url.trim().toLowerCase();
+    if (lowerUrl.contains('quark.cn') || lowerUrl.contains('quarks')) {
+      return 'quark';
+    }
+    if (lowerUrl.contains('uc.cn') || lowerUrl.contains('drive.uc')) {
+      return 'uc';
+    }
+    if (lowerUrl.contains('baidu.com') || lowerUrl.contains('baidupcs')) {
+      return 'baidu';
+    }
+    if (lowerUrl.contains('aliyundrive') || lowerUrl.contains('alipan.com')) {
+      return 'ali';
+    }
+    return null;
+  }
+
+  /// Orders multi-quality playback [variants] according to [preferredQuality]
+  /// (`default`, `auto`, `4k_netdisk`, `1080p_direct`, `fast_hls`) and
+  /// [effectiveDriveOrder] (logged-in & manual netdisk provider priority),
+  /// while preserving original site order on ties or when `default` is selected.
+  List<CmsEpisode> orderQualityVariants(List<CmsEpisode> variants) {
+    if (variants.length <= 1) return List<CmsEpisode>.of(variants);
+    final pref = preferredQuality;
+    if (pref == 'default') {
+      return List<CmsEpisode>.of(variants);
+    }
+    if (pref == 'auto' && !hasCustomDriveOrder && !hasAnyNetdiskLoggedIn) {
+      return List<CmsEpisode>.of(variants);
+    }
+
+    final driveOrderList = effectiveDriveOrder;
+    final indexed = <({
+      CmsEpisode ep,
+      int origIdx,
+      int qualityScore,
+      String? driveKey,
+      bool isNetdisk,
+      int driveRank,
+    })>[];
+
+    for (var i = 0; i < variants.length; i++) {
+      final v = variants[i];
+      final dk = detectVariantNetdiskDriveKey(v);
+      final lower = v.name.toLowerCase();
+      final isNetdisk = dk != null || lower.contains('网盘');
+      final rank = dk != null ? driveOrderList.indexOf(dk) : -1;
+      indexed.add((
+        ep: v,
+        origIdx: i,
+        qualityScore: rankQualityVariantScore(v),
+        driveKey: dk,
+        isNetdisk: isNetdisk,
+        driveRank: rank >= 0 ? rank : 99,
+      ));
+    }
+
+    indexed.sort((a, b) {
+      if (pref == '1080p_direct' || pref == 'fast_hls') {
+        if (a.isNetdisk != b.isNetdisk) {
+          return a.isNetdisk ? 1 : -1;
+        }
+        if (!a.isNetdisk) {
+          final qCmp = b.qualityScore.compareTo(a.qualityScore);
+          if (qCmp != 0) return qCmp;
+          return a.origIdx.compareTo(b.origIdx);
+        }
+        final dCmp = a.driveRank.compareTo(b.driveRank);
+        if (dCmp != 0) return dCmp;
+        final qCmp = b.qualityScore.compareTo(a.qualityScore);
+        if (qCmp != 0) return qCmp;
+        return a.origIdx.compareTo(b.origIdx);
+      }
+
+      // `4k_netdisk` & `auto` (with custom/logged-in drive preference):
+      // Prefer highest quality tier first; within the same quality tier,
+      // prefer configured netdisk drive order (`effectiveDriveOrder`) over
+      // lower-priority providers, then preserve upstream order.
+      final qCmp = b.qualityScore.compareTo(a.qualityScore);
+      if (qCmp != 0) return qCmp;
+      if (a.driveRank != b.driveRank) {
+        return a.driveRank.compareTo(b.driveRank);
+      }
+      if (a.isNetdisk != b.isNetdisk) {
+        return a.isNetdisk ? -1 : 1;
+      }
+      return a.origIdx.compareTo(b.origIdx);
+    });
+
+    return indexed.map((e) => e.ep).toList(growable: false);
+  }
+
+  Future<void> setDriveOrder(
+    List<String> order, {
+    bool markCustomized = true,
+  }) async {
+    final normalized = <String>[];
+    for (final d in order) {
+      if (defaultDriveOrder.contains(d) && !normalized.contains(d)) {
+        normalized.add(d);
+      }
+    }
+    for (final d in defaultDriveOrder) {
+      if (!normalized.contains(d)) normalized.add(d);
+    }
+    await _prefs.setStringList(keyDriveOrder, normalized);
+    if (markCustomized) {
+      await _prefs.setBool(keyDriveOrderCustomized, true);
+    } else if (!_prefs.containsKey(keyDriveOrderCustomized)) {
+      await _prefs.setBool(keyDriveOrderCustomized, false);
+    }
+  }
+
+  Future<void> resetDriveOrder() async {
+    await _prefs.setStringList(keyDriveOrder, defaultDriveOrder);
+    await _prefs.setBool(keyDriveOrderCustomized, false);
+  }
+
+  Future<void> setPrioritizeLoggedInDrives(bool enabled) async {
+    await _prefs.setBool(keyPrioritizeLoggedInDrives, enabled);
   }
   Set<String> _privateSiteKeySet() {
     if (_cachedPrivateKeys != null) return _cachedPrivateKeys!;
@@ -7135,5 +7658,44 @@ class StorageService {
 
   Future<void> clearMacosWindowBounds() async {
     await _prefs.remove(MacosWindowBounds.prefKey);
+  }
+
+  /// Normalizes a user-configured iOS player toolbar action list, migrating
+  /// legacy `'danmu'` -> `'danmu_subtitle'` and ensuring `'more'` is always
+  /// present so customization/settings remain reachable.
+  static List<String> normalizeIosPlayerToolbarItems(Iterable<String>? raw) {
+    if (raw == null) return defaultIosPlayerToolbarItems;
+    final allowed = allIosPlayerToolbarItems.toSet();
+    final seen = <String>{};
+    final out = <String>[];
+    for (final item in raw) {
+      var id = item.trim().toLowerCase();
+      if (id == 'danmu' || id == 'subtitle') id = 'danmu_subtitle';
+      if (id == 'tracks') id = 'audio';
+      if (id.isEmpty || !allowed.contains(id)) continue;
+      if (seen.add(id)) out.add(id);
+    }
+    if (out.isEmpty) return defaultIosPlayerToolbarItems;
+    if (!seen.contains('more')) {
+      out.add('more');
+    }
+    return List<String>.unmodifiable(out);
+  }
+
+  List<String> get iosPlayerToolbarItems {
+    final stored = _prefs.getStringList(keyIosPlayerToolbarItems);
+    if (stored == null || stored.isEmpty) {
+      return defaultIosPlayerToolbarItems;
+    }
+    return normalizeIosPlayerToolbarItems(stored);
+  }
+
+  Future<void> setIosPlayerToolbarItems(List<String> items) async {
+    final normalized = normalizeIosPlayerToolbarItems(items);
+    await _prefs.setStringList(keyIosPlayerToolbarItems, normalized);
+  }
+
+  Future<void> resetIosPlayerToolbarItems() async {
+    await _prefs.remove(keyIosPlayerToolbarItems);
   }
 }

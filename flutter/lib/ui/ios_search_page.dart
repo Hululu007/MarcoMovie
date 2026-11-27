@@ -3228,6 +3228,7 @@ class _AggregatedSearchCard extends StatelessWidget {
               url: group.poster,
               title: isPrivate ? '' : group.displayTitle,
               year: isPrivate ? '' : group.year,
+              isPrivate: isPrivate,
               placeholder: DecoratedBox(
                 decoration: BoxDecoration(
                   gradient: LinearGradient(

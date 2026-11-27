@@ -322,7 +322,13 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
   AiConfig _config = const AiConfig();
   bool _obscureApiKey = true;
   bool _testingConnection = false;
+  int _connectionTestGen = 0;
+  String _lastConnectionFingerprint = '';
   bool _fetchingModels = false;
+  int _modelCatalogGen = 0;
+  String _lastModelCatalogFingerprint = '';
+  int _lastSeenByoEndpointGen = -1;
+  int _lastSeenOAuthSessionGen = -1;
   bool _oauthSigningIn = false;
   bool _showManualOAuthBox = false;
   AiPendingOAuthLogin? _pendingOAuth;
@@ -332,6 +338,8 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
   bool _oauthNoticeIsError = false;
   String? _cacheStatusNotice;
   String? _labGateError;
+  bool _refreshingQuota = false;
+  bool _refreshingApiBalance = false;
 
   static const List<(int, String)> _budgetPresets = <(int, String)>[
     (0, '不限配额'),
@@ -372,17 +380,82 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
       if (_budgetCtrl.text != budgetText) {
         _budgetCtrl.text = budgetText;
       }
+      _lastConnectionFingerprint = _currentConnectionFingerprint(cfg);
+      _lastModelCatalogFingerprint = _currentModelCatalogFingerprint(cfg);
+      _lastSeenByoEndpointGen = _service.byoEndpointGen;
+      _lastSeenOAuthSessionGen = _service.oauthSessionGen;
     });
+    if (!_service.isPrivacySessionActive &&
+        _service.isLabUnlocked &&
+        _service.isExperimentalOAuthAllowed &&
+        _service.hasOAuthSession) {
+      unawaited(_refreshQuotaSilently());
+    }
+    if (!_service.isPrivacySessionActive &&
+        _service.isLabUnlocked &&
+        cfg.authMode == AiAuthMode.apiKey &&
+        cfg.baseUrl.trim().isNotEmpty &&
+        key.trim().isNotEmpty) {
+      unawaited(_refreshApiBalanceSilently());
+    }
+  }
+
+  Future<void> _refreshQuotaSilently() async {
+    if (_refreshingQuota) return;
+    if (mounted) setState(() => _refreshingQuota = true);
+    try {
+      await _service.refreshSubscriptionQuota();
+    } finally {
+      if (mounted) setState(() => _refreshingQuota = false);
+    }
+  }
+
+  Future<void> _refreshApiBalanceSilently({bool force = false}) async {
+    if (_refreshingApiBalance) return;
+    if (mounted) setState(() => _refreshingApiBalance = true);
+    try {
+      await _service.refreshApiBalance(
+        configOverride: _draftConfigFromControllers(),
+        apiKeyOverride: _apiKeyCtrl.text.trim(),
+        force: force,
+      );
+    } finally {
+      if (mounted) setState(() => _refreshingApiBalance = false);
+    }
   }
 
   void _onServiceChanged() {
     if (!mounted) return;
     final cfg = _service.config;
+    final endpointChanged = _lastSeenByoEndpointGen >= 0 &&
+        _service.byoEndpointGen != _lastSeenByoEndpointGen;
+    final oauthChanged = _lastSeenOAuthSessionGen >= 0 &&
+        _service.oauthSessionGen != _lastSeenOAuthSessionGen;
+    final nextConnFp = _currentConnectionFingerprint(cfg);
+    final nextCatalogFp = _currentModelCatalogFingerprint(cfg);
+    final catalogFpChanged = _lastModelCatalogFingerprint.isNotEmpty &&
+        nextCatalogFp != _lastModelCatalogFingerprint;
+    final connFpChanged = _lastConnectionFingerprint.isNotEmpty &&
+        nextConnFp != _lastConnectionFingerprint;
+    _lastSeenByoEndpointGen = _service.byoEndpointGen;
+    _lastSeenOAuthSessionGen = _service.oauthSessionGen;
+    if (endpointChanged || oauthChanged || catalogFpChanged) {
+      _modelCatalogGen++;
+      _fetchingModels = false;
+      _modelCatalogNotice = null;
+    }
+    if (endpointChanged || oauthChanged || connFpChanged) {
+      _connectionTestGen++;
+      _testingConnection = false;
+      _testResult = null;
+    }
     setState(() {
       _config = cfg;
       if (_modelCtrl.text.trim().isEmpty && cfg.model.isNotEmpty) {
         _modelCtrl.text = cfg.model;
       }
+      _lastConnectionFingerprint = nextConnFp;
+      _lastModelCatalogFingerprint = nextCatalogFp;
     });
   }
 
@@ -418,13 +491,53 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
     );
   }
 
+  String _currentConnectionFingerprint([AiConfig? cfgOverride]) {
+    final cfg = cfgOverride ?? _draftConfigFromControllers();
+    final oauthAcct = cfg.authMode == AiAuthMode.codexOAuth
+        ? AiService.oauthAccountKey(_service.oauthSession)
+        : '';
+    return '${cfg.authMode.id}|${cfg.protocol.id}|${cfg.baseUrl.trim()}|${cfg.model.trim()}|${_apiKeyCtrl.text.trim()}|$oauthAcct';
+  }
+
+  String _currentModelCatalogFingerprint([AiConfig? cfgOverride]) {
+    final cfg = cfgOverride ?? _draftConfigFromControllers();
+    final oauthAcct = cfg.authMode == AiAuthMode.codexOAuth
+        ? AiService.oauthAccountKey(_service.oauthSession)
+        : '';
+    return '${cfg.authMode.id}|${cfg.protocol.id}|${cfg.baseUrl.trim()}|${_apiKeyCtrl.text.trim()}|${cfg.activeProfileId.trim()}|$oauthAcct';
+  }
+
+  void _invalidateConnectionTestIfChanged([AiConfig? nextConfig]) {
+    final fp = _currentConnectionFingerprint(nextConfig);
+    if (fp != _lastConnectionFingerprint) {
+      _lastConnectionFingerprint = fp;
+      _connectionTestGen++;
+      _testingConnection = false;
+      _testResult = null;
+    }
+  }
+
+  void _invalidateModelCatalogIfChanged([AiConfig? nextConfig]) {
+    final fp = _currentModelCatalogFingerprint(nextConfig);
+    if (fp != _lastModelCatalogFingerprint) {
+      _lastModelCatalogFingerprint = fp;
+      _modelCatalogGen++;
+      _fetchingModels = false;
+      _modelCatalogNotice = null;
+    }
+  }
+
   Future<void> _persistDraft({AiConfig? overrideConfig}) async {
     final next = overrideConfig ?? _draftConfigFromControllers();
+    _invalidateConnectionTestIfChanged(next);
+    _invalidateModelCatalogIfChanged(next);
     _config = next;
     await _service.saveConfig(next);
     if (next.authMode == AiAuthMode.apiKey) {
       await _service.setApiKey(_apiKeyCtrl.text);
     }
+    _lastSeenByoEndpointGen = _service.byoEndpointGen;
+    _lastSeenOAuthSessionGen = _service.oauthSessionGen;
     if (mounted) setState(() {});
     widget.onChanged?.call();
   }
@@ -451,7 +564,13 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
       authMode: mode,
       model: nextModel,
     );
+    _connectionTestGen++;
+    _modelCatalogGen++;
+    _lastConnectionFingerprint = _currentConnectionFingerprint(next);
+    _lastModelCatalogFingerprint = _currentModelCatalogFingerprint(next);
     setState(() {
+      _testingConnection = false;
+      _fetchingModels = false;
       _testResult = null;
       _modelCatalogNotice = null;
       _oauthNotice = null;
@@ -586,9 +705,22 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
 
   Future<void> _handleSignOutOAuth() async {
     HapticFeedback.mediumImpact();
+    _modelCatalogGen++;
+    _connectionTestGen++;
+    setState(() {
+      _fetchingModels = false;
+      _modelCatalogNotice = null;
+      _testingConnection = false;
+      _testResult = null;
+    });
     await _service.signOutOAuth();
     if (!mounted) return;
+    _lastSeenOAuthSessionGen = _service.oauthSessionGen;
+    _lastModelCatalogFingerprint = _currentModelCatalogFingerprint();
+    _lastConnectionFingerprint = _currentConnectionFingerprint();
     setState(() {
+      _fetchingModels = false;
+      _modelCatalogNotice = null;
       _oauthNotice = '已退出订阅账号并清除钥匙串令牌';
       _oauthNoticeIsError = false;
       _testResult = null;
@@ -600,6 +732,24 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
     if (_fetchingModels) return;
     FocusScope.of(context).unfocus();
     await _persistDraft();
+    if (!mounted) return;
+
+    final initiatingCfg = _draftConfigFromControllers();
+    final initiatingKey = _apiKeyCtrl.text.trim();
+    final initiatingFp = _currentModelCatalogFingerprint(initiatingCfg);
+    final initiatingEndpointGen = _service.byoEndpointGen;
+    final initiatingOAuthGen = _service.oauthSessionGen;
+    final fetchGen = ++_modelCatalogGen;
+    _lastModelCatalogFingerprint = initiatingFp;
+    _lastSeenByoEndpointGen = initiatingEndpointGen;
+    _lastSeenOAuthSessionGen = initiatingOAuthGen;
+
+    bool isCatalogStillValid() =>
+        mounted &&
+        fetchGen == _modelCatalogGen &&
+        _currentModelCatalogFingerprint() == initiatingFp &&
+        _service.byoEndpointGen == initiatingEndpointGen &&
+        _service.oauthSessionGen == initiatingOAuthGen;
 
     setState(() {
       _fetchingModels = true;
@@ -607,20 +757,26 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
     });
 
     List<AiModelOption> models = const <AiModelOption>[];
+    var usedOfflineFallback = false;
+    String? fallbackNotice;
     try {
       models = await _service.fetchAvailableModelOptions(
-        configOverride: _config,
-        apiKeyOverride: _apiKeyCtrl.text.trim(),
+        configOverride: initiatingCfg,
+        apiKeyOverride: initiatingKey,
       );
     } on AiServiceException catch (e) {
-      if (!mounted) return;
-      if (_config.authMode == AiAuthMode.codexOAuth &&
-          _service.hasOAuthSession) {
-        models = AiService.fallbackCodexModels;
-        setState(() {
-          _fetchingModels = false;
-          _modelCatalogNotice = '在线列表暂不可达，已加载内置订阅模型目录';
-        });
+      if (!isCatalogStillValid()) return;
+      if (initiatingCfg.authMode == AiAuthMode.codexOAuth &&
+          _service.hasOAuthSession &&
+          _service.isExperimentalOAuthAllowed &&
+          !_service.isPrivacySessionActive &&
+          (e.code == AiErrorCode.networkError || e.code == AiErrorCode.timeout)) {
+        models = List<AiModelOption>.unmodifiable([
+          for (final fb in AiService.fallbackCodexModels)
+            fb.copyWithPriority(fb.priority, isLocalFallback: true),
+        ]);
+        usedOfflineFallback = true;
+        fallbackNotice = '当前离线或接口不可达，以下为内置目录（待验证）';
       } else {
         setState(() {
           _fetchingModels = false;
@@ -629,18 +785,39 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
         return;
       }
     } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _fetchingModels = false;
-        _modelCatalogNotice = '拉取模型列表失败，请检查网络或配置';
-      });
-      return;
+      if (!isCatalogStillValid()) return;
+      if (initiatingCfg.authMode == AiAuthMode.codexOAuth &&
+          _service.hasOAuthSession &&
+          _service.isExperimentalOAuthAllowed &&
+          !_service.isPrivacySessionActive) {
+        models = List<AiModelOption>.unmodifiable([
+          for (final fb in AiService.fallbackCodexModels)
+            fb.copyWithPriority(fb.priority, isLocalFallback: true),
+        ]);
+        usedOfflineFallback = true;
+        fallbackNotice = '当前离线或接口不可达，以下为内置目录（待验证）';
+      } else {
+        setState(() {
+          _fetchingModels = false;
+          _modelCatalogNotice = '拉取模型列表失败，请检查网络或配置';
+        });
+        return;
+      }
     }
 
-    if (!mounted) return;
+    if (!isCatalogStillValid()) return;
+    final liveCount = models.where((m) => !m.isLocalFallback).length;
     setState(() {
       _fetchingModels = false;
-      _modelCatalogNotice = '已获取 ${models.length} 个可用模型';
+      if (usedOfflineFallback || liveCount == 0) {
+        _modelCatalogNotice =
+            fallbackNotice ?? '在线列表暂不可达，以下为内置目录（待验证）';
+      } else {
+        final fallbackCount = models.length - liveCount;
+        _modelCatalogNotice = fallbackCount > 0
+            ? '已获取 $liveCount 个在线模型（另含 $fallbackCount 个内置待验证）'
+            : '已获取 $liveCount 个可用模型';
+      }
     });
 
     if (models.isEmpty) return;
@@ -652,7 +829,7 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
       title: forFastModel ? '选择轻量清洗模型' : '选择主模型',
       allowClear: forFastModel,
     );
-    if (!mounted || picked == null) return;
+    if (!isCatalogStillValid() || picked == null) return;
     if (forFastModel) {
       _fastModelCtrl.text = picked;
     } else {
@@ -806,17 +983,57 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
                                               crossAxisAlignment:
                                                   CrossAxisAlignment.start,
                                               children: [
-                                                Text(
-                                                  item.hasDistinctDisplayName
-                                                      ? '${item.displayName} (${item.id})'
-                                                      : item.id,
-                                                  style: TextStyle(
-                                                    color: p.labelPrimary,
-                                                    fontSize: 15,
-                                                    fontWeight: selected
-                                                        ? FontWeight.w700
-                                                        : FontWeight.w500,
-                                                  ),
+                                                Row(
+                                                  children: [
+                                                    Flexible(
+                                                      child: Text(
+                                                        item.hasDistinctDisplayName
+                                                            ? '${item.displayName} (${item.id})'
+                                                            : item.id,
+                                                        style: TextStyle(
+                                                          color: p.labelPrimary,
+                                                          fontSize: 15,
+                                                          fontWeight: selected
+                                                              ? FontWeight.w700
+                                                              : FontWeight.w500,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                    if (item.isLocalFallback) ...[
+                                                      const SizedBox(width: 6),
+                                                      Container(
+                                                        key: ValueKey(
+                                                          'model-fallback-badge-${item.id}',
+                                                        ),
+                                                        padding:
+                                                            const EdgeInsets.symmetric(
+                                                          horizontal: 6,
+                                                          vertical: 2,
+                                                        ),
+                                                        decoration:
+                                                            BoxDecoration(
+                                                          color: p.labelTertiary
+                                                              .withValues(
+                                                            alpha: 0.16,
+                                                          ),
+                                                          borderRadius:
+                                                              BorderRadius.circular(
+                                                            6,
+                                                          ),
+                                                        ),
+                                                        child: Text(
+                                                          '待验证',
+                                                          style: TextStyle(
+                                                            color:
+                                                                p.labelSecondary,
+                                                            fontSize: 10.5,
+                                                            fontWeight:
+                                                                FontWeight.w600,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ],
                                                 ),
                                                 if (item.description.isNotEmpty)
                                                   Padding(
@@ -865,21 +1082,39 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
   Future<void> _handleTestConnection() async {
     if (_testingConnection) return;
     FocusScope.of(context).unfocus();
+    final targetConfig = _draftConfigFromControllers();
+    final targetKey = _apiKeyCtrl.text.trim();
+    final startFp = _currentConnectionFingerprint(targetConfig);
+    _lastConnectionFingerprint = startFp;
+    final testGen = ++_connectionTestGen;
     setState(() {
       _testingConnection = true;
       _testResult = null;
       _cacheStatusNotice = null;
     });
-    await _persistDraft();
+    await _persistDraft(overrideConfig: targetConfig);
+    if (!mounted ||
+        testGen != _connectionTestGen ||
+        startFp != _currentConnectionFingerprint()) {
+      return;
+    }
     final result = await _service.testConnection(
-      configOverride: _config,
-      apiKeyOverride: _apiKeyCtrl.text.trim(),
+      configOverride: targetConfig,
+      apiKeyOverride: targetKey,
     );
-    if (!mounted) return;
+    if (!mounted ||
+        testGen != _connectionTestGen ||
+        startFp != _currentConnectionFingerprint() ||
+        result.stale) {
+      return;
+    }
     setState(() {
       _testingConnection = false;
       _testResult = result;
     });
+    if (result.ok && targetConfig.authMode == AiAuthMode.apiKey) {
+      unawaited(_refreshApiBalanceSilently(force: true));
+    }
   }
 
   Future<void> _handleClearCache() async {
@@ -1469,6 +1704,10 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
                 ),
               ),
               onChanged: (v) {
+                setState(() {
+                  _invalidateConnectionTestIfChanged();
+                  _invalidateModelCatalogIfChanged();
+                });
                 unawaited(_service.setApiKey(v));
               },
             ),
@@ -1630,9 +1869,9 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
                         ],
                         const SizedBox(height: 20),
                         IosSettingsGroup(
-                          header: '五大核心实验场景与基础增强',
+                          header: '核心观影实验场景与基础增强',
                           footer:
-                              '所有 AI 能力仅做字幕精翻、防剧透导览、元数据整理与诊断，绝不生成或抓取任何第三方视频流链接；开启隐私空间期间全局硬性阻断。',
+                              '所有 AI 能力聚焦双语字幕、零剧透看点科普、片尾彩蛋提示、自有源选片与故障排障，不编造未核实台词且绝不上传播放链接；开启隐私空间期间全局硬性阻断。',
                           children: [
                             _buildSwitchCell(
                               rowKey: const ValueKey('ios-ai-nlsearch-switch'),
@@ -1665,8 +1904,8 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
                                   const ValueKey('ios-ai-subtranslate-switch'),
                               icon: CupertinoIcons.captions_bubble_fill,
                               iconColor: AppleColors.systemBlue,
-                              title: '播放器 AI 字幕精译与双语对照',
-                              subtitle: '外挂字幕上下文精翻、角色译名锁定与时间轴校准',
+                              title: '播放器 AI 实时双语字幕与外挂精译',
+                              subtitle: '支持内封字幕实时双语直显、外挂字幕术语锁定与时间轴微调',
                               value: _config.subtitleTranslateEnabled,
                               onChanged: (val) {
                                 final next = _draftConfigFromControllers()
@@ -1675,11 +1914,12 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
                               },
                             ),
                             _buildSwitchCell(
-                              rowKey: const ValueKey('ios-ai-recap-switch'),
-                              icon: CupertinoIcons.book_fill,
+                              rowKey:
+                                  const ValueKey('ios-ai-watchbrief-switch'),
+                              icon: CupertinoIcons.film_fill,
                               iconColor: AppleColors.systemIndigo,
-                              title: '防剧透前情提要与人物速览',
-                              subtitle: '严格锁定当前观看集数边界，追更不泄底',
+                              title: '零剧透看点、设定背景与片尾彩蛋',
+                              subtitle: '客观梳理创作背景、片尾彩蛋提示与自由观影问答，不泄底',
                               value: _config.spoilerFreeRecapEnabled,
                               onChanged: (val) {
                                 final next = _draftConfigFromControllers()
@@ -1692,7 +1932,7 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
                               icon: CupertinoIcons.sparkles,
                               iconColor: AppleColors.systemPink,
                               title: '观影口味画像与「今晚看什么」',
-                              subtitle: '在片库页根据本地收藏与当前心情策展自有片单',
+                              subtitle: '根据本地收藏与当前心情策展自有片单（播放页支持同好接力）',
                               value: _config.moodCurationEnabled,
                               onChanged: (val) {
                                 final next = _draftConfigFromControllers()
@@ -1719,20 +1959,40 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
                         _buildCustomSkillsGroup(context),
                         const SizedBox(height: 20),
                         IosSettingsGroup(
-                          header: '月度配额与缓存（${usage.monthKey}）',
+                          header: '用量统计、额度余额与缓存（${usage.monthKey}）',
                           footer:
-                              '相同查询与文件名命中本地 SHA-256 缓存时消耗 0 Token；达到月度 Token 上限后自动停止发起外部请求。',
+                              '点击「本月用量统计与调用明细」可查看每次请求详情、API 账户余额及 GPT 订阅 5 小时 / 周额度；相同查询命中本地 SHA-256 缓存时消耗 0 Token。',
                           dividerIndent: 16,
                           children: [
                             IosSettingsRow(
+                              key: const ValueKey('ios-ai-usage-detail-row'),
                               icon: CupertinoIcons.chart_bar_alt_fill,
                               iconColor: AppleColors.systemGreen,
-                              title: '本月用量统计',
+                              title: '本月用量统计与调用明细',
                               subtitle:
-                                  '输入 ${usage.promptTokens} · 输出 ${usage.completionTokens} · 本地缓存 $cacheCount 条',
+                                  '输入 ${usage.promptTokens} · 输出 ${usage.completionTokens} · 缓存 $cacheCount 条',
                               trailingText:
-                                  '本月调用 ${usage.requestCount} 次 · 约 ${usage.totalTokens} tokens',
+                                  '${usage.requestCount} 次 · ${usage.totalTokens} tok',
+                              showChevron: true,
+                              onTap: () {
+                                HapticFeedback.selectionClick();
+                                Navigator.of(context).push<void>(
+                                  buildApplePageRoute<void>(
+                                    builder: (_) => IosAiUsageDetailPage(
+                                      service: _service,
+                                      backLabel: 'AI 观影实验室',
+                                    ),
+                                  ),
+                                );
+                              },
                             ),
+                            if (_config.authMode == AiAuthMode.codexOAuth &&
+                                _service.hasOAuthSession)
+                              _buildInlineSubscriptionQuotaSummary(context),
+                            if (_config.authMode == AiAuthMode.apiKey &&
+                                _baseUrlCtrl.text.trim().isNotEmpty &&
+                                _apiKeyCtrl.text.trim().isNotEmpty)
+                              _buildInlineApiBalanceSummary(context),
                             Padding(
                               padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
                               child: Column(
@@ -2312,5 +2572,664 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
     );
     nameCtrl.dispose();
     tplCtrl.dispose();
+  }
+
+  Widget _buildInlineSubscriptionQuotaSummary(BuildContext context) {
+    final p = ApplePalette.of(context);
+    final snap = _service.subscriptionQuota;
+    final now = DateTime.now();
+    final local5h = _service.rollingWindowUsage(const Duration(hours: 5));
+    final local7d = _service.rollingWindowUsage(const Duration(days: 7));
+    return Padding(
+      key: const ValueKey('ios-ai-sub-quota-card'),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 13),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Icon(
+                CupertinoIcons.speedometer,
+                size: 15,
+                color: p.systemBlue,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'GPT 订阅额度（5 小时 / 周额度）',
+                  style: TextStyle(
+                    color: p.labelPrimary,
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              GestureDetector(
+                key: const ValueKey('ios-ai-refresh-quota-btn'),
+                behavior: HitTestBehavior.opaque,
+                onTap: _refreshingQuota ? null : _refreshQuotaSilently,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (_refreshingQuota)
+                      const Padding(
+                        padding: EdgeInsets.only(right: 4),
+                        child: CupertinoActivityIndicator(radius: 6),
+                      )
+                    else
+                      Icon(
+                        CupertinoIcons.refresh,
+                        size: 13,
+                        color: p.systemBlue,
+                      ),
+                    const SizedBox(width: 3),
+                    Text(
+                      '刷新额度',
+                      style: TextStyle(
+                        color: p.systemBlue,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          _IosSubscriptionQuotaWindowBar(
+            label: '5 小时窗口额度',
+            window: snap?.fiveHourWindow,
+            now: now,
+            localSummary:
+                '本机近 5h：${local5h.requests} 次 · ${local5h.totalTokens} tok',
+          ),
+          const SizedBox(height: 9),
+          _IosSubscriptionQuotaWindowBar(
+            label: '7 天周额度',
+            window: snap?.weeklyWindow,
+            now: now,
+            localSummary:
+                '本机近 7d：${local7d.requests} 次 · ${local7d.totalTokens} tok',
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInlineApiBalanceSummary(BuildContext context) {
+    final p = ApplePalette.of(context);
+    final bal = _service.apiBalance;
+    return Padding(
+      key: const ValueKey('ios-ai-api-balance-card'),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 13),
+      child: _IosApiBalanceCardContent(
+        balance: bal,
+        refreshing: _refreshingApiBalance,
+        refreshButtonKey: const ValueKey('ios-ai-refresh-balance-btn'),
+        onRefresh: () => unawaited(_refreshApiBalanceSilently(force: true)),
+        palette: p,
+      ),
+    );
+  }
+}
+
+class _IosApiBalanceCardContent extends StatelessWidget {
+  final AiApiBalanceSnapshot? balance;
+  final bool refreshing;
+  final Key? refreshButtonKey;
+  final VoidCallback onRefresh;
+  final ApplePalette palette;
+
+  const _IosApiBalanceCardContent({
+    required this.balance,
+    required this.refreshing,
+    required this.refreshButtonKey,
+    required this.onRefresh,
+    required this.palette,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final p = palette;
+    final bal = balance;
+    final ratio = bal?.usedRatio;
+    final barColor = ratio != null && ratio >= 0.90
+        ? AppleColors.systemRed
+        : (ratio != null && ratio >= 0.72
+              ? AppleColors.systemOrange
+              : AppleColors.systemGreen);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Icon(
+              CupertinoIcons.creditcard_fill,
+              size: 15,
+              color: bal != null && bal.supported
+                  ? AppleColors.systemGreen
+                  : p.labelSecondary,
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                'API 账户余额',
+                style: TextStyle(
+                  color: p.labelPrimary,
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            GestureDetector(
+              key: refreshButtonKey,
+              behavior: HitTestBehavior.opaque,
+              onTap: refreshing ? null : onRefresh,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (refreshing)
+                    const Padding(
+                      padding: EdgeInsets.only(right: 4),
+                      child: CupertinoActivityIndicator(radius: 6),
+                    )
+                  else
+                    Icon(
+                      CupertinoIcons.refresh,
+                      size: 13,
+                      color: p.systemBlue,
+                    ),
+                  const SizedBox(width: 3),
+                  Text(
+                    refreshing ? '查询中' : '刷新余额',
+                    style: TextStyle(
+                      color: p.systemBlue,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Text(
+          bal == null
+              ? (refreshing ? '正在尝试从当前 API 接口获取余额…' : '点击右上角尝试查询当前 API 余额')
+              : bal.headlineTextZh,
+          key: const ValueKey('ios-ai-api-balance-headline'),
+          style: TextStyle(
+            color: bal != null && bal.supported
+                ? p.labelPrimary
+                : p.labelSecondary,
+            fontSize: bal != null && bal.supported ? 16 : 13,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        if (ratio != null) ...[
+          const SizedBox(height: 7),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: SizedBox(
+              height: 6,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  ColoredBox(
+                    color: p.isDark
+                        ? const Color(0xFF2C2C36)
+                        : const Color(0xFFE4E7F0),
+                  ),
+                  FractionallySizedBox(
+                    alignment: Alignment.centerLeft,
+                    widthFactor: ratio,
+                    child: ColoredBox(color: barColor),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+        const SizedBox(height: 5),
+        Text(
+          bal == null
+              ? '自动兼容 OneAPI / NewAPI / OpenRouter / DeepSeek / 硅基流动等标准余额接口'
+              : bal.detailSubtitleZh,
+          style: TextStyle(
+            color: p.labelTertiary,
+            fontSize: 11.5,
+            height: 1.38,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _IosSubscriptionQuotaWindowBar extends StatelessWidget {
+  final String label;
+  final AiSubscriptionQuotaWindow? window;
+  final DateTime now;
+  final String localSummary;
+
+  const _IosSubscriptionQuotaWindowBar({
+    required this.label,
+    required this.window,
+    required this.now,
+    required this.localSummary,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final p = ApplePalette.of(context);
+    final pct = window?.usedPercent;
+    final hasRemote = pct != null;
+    final ratio = hasRemote ? (pct / 100.0).clamp(0.0, 1.0) : 0.0;
+    final barColor = ratio >= 0.90
+        ? AppleColors.systemRed
+        : (ratio >= 0.72 ? AppleColors.systemOrange : p.systemBlue);
+    final countdown = window?.resetCountdownZh(now) ?? '';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                label,
+                style: TextStyle(
+                  color: p.labelSecondary,
+                  fontSize: 12.2,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            Text(
+              hasRemote
+                  ? '已用 ${pct.toStringAsFixed(0)}% · 剩余 ${(100.0 - pct).clamp(0.0, 100.0).toStringAsFixed(0)}%'
+                      '${countdown.isNotEmpty ? "（$countdown）" : ""}'
+                  : localSummary,
+              style: TextStyle(
+                color: p.labelPrimary,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 5),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(999),
+          child: SizedBox(
+            height: 6,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                ColoredBox(
+                  color: p.isDark
+                      ? const Color(0xFF2C2C36)
+                      : const Color(0xFFE4E7F0),
+                ),
+                if (hasRemote)
+                  FractionallySizedBox(
+                    alignment: Alignment.centerLeft,
+                    widthFactor: ratio,
+                    child: ColoredBox(color: barColor),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        if (hasRemote) ...[
+          const SizedBox(height: 3),
+          Text(
+            localSummary,
+            style: TextStyle(color: p.labelTertiary, fontSize: 11.2),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+/// Dedicated drill-down page showing subscription 5h/weekly quota windows,
+/// per-feature token breakdown, and chronological AI call history.
+class IosAiUsageDetailPage extends StatefulWidget {
+  final AiService? service;
+  final String backLabel;
+
+  const IosAiUsageDetailPage({
+    super.key,
+    this.service,
+    this.backLabel = 'AI 观影实验室',
+  });
+
+  @override
+  State<IosAiUsageDetailPage> createState() => _IosAiUsageDetailPageState();
+}
+
+class _IosAiUsageDetailPageState extends State<IosAiUsageDetailPage> {
+  late final AiService _service;
+  bool _refreshing = false;
+  bool _refreshingBalance = false;
+
+  static String featureLabelZh(String raw) {
+    switch (raw.trim()) {
+      case 'live_subtitle_translate':
+      case 'ai_sub_live_v1':
+        return '实时内封双语字幕';
+      case 'subtitle_translate':
+      case 'subtitle_glossary':
+      case 'subtitle_offset':
+      case 'ai_sub_v1':
+      case 'ai_sub_offset_v1':
+        return '外挂字幕精译与对轴';
+      case 'watch_brief':
+      case 'ai_watch_brief_v1':
+        return '零剧透看点与设定科普';
+      case 'post_credits_guide':
+      case 'ai_post_credits_v1':
+        return '片尾彩蛋与版本提示';
+      case 'work_qa':
+      case 'ai_work_qa_v1':
+        return '自由观影问答';
+      case 'mood_sommelier':
+      case 'ai_sommelier_v1':
+        return '口味画像与片单策展';
+      case 'nl_search':
+      case 'nl_search_v1':
+        return '自然语言找片';
+      case 'title_cleanup':
+      case 'title_clean_v1':
+        return '文件名与标题清洗';
+      case 'episode_curate':
+      case 'ai_ep_curate_v1':
+        return '杂乱剧集智能编排';
+      case 'diagnostics':
+      case 'ai_diag_v1':
+        return '播放与源故障排障';
+      case 'connection_test':
+      case 'ping':
+        return '接口连接测试';
+      default:
+        if (raw.startsWith('custom_skill:') || raw.startsWith('skill:')) {
+          return '扩展技能卡';
+        }
+        return raw.trim().isEmpty ? 'AI 请求' : raw.trim();
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _service = widget.service ?? AiService.instance;
+    _service.addListener(_onChanged);
+    if (!_service.isPrivacySessionActive &&
+        _service.isLabUnlocked &&
+        _service.isExperimentalOAuthAllowed &&
+        _service.hasOAuthSession) {
+      unawaited(_refreshQuota());
+    }
+    if (!_service.isPrivacySessionActive &&
+        _service.isLabUnlocked &&
+        _service.activeAuthMode == AiAuthMode.apiKey &&
+        _service.hasApiKey &&
+        _service.config.baseUrl.trim().isNotEmpty) {
+      unawaited(_refreshApiBalance());
+    }
+  }
+
+  @override
+  void dispose() {
+    _service.removeListener(_onChanged);
+    super.dispose();
+  }
+
+  void _onChanged() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _refreshQuota() async {
+    if (_refreshing) return;
+    setState(() => _refreshing = true);
+    try {
+      await _service.refreshSubscriptionQuota();
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
+    }
+  }
+
+  Future<void> _refreshApiBalance({bool force = false}) async {
+    if (_refreshingBalance) return;
+    setState(() => _refreshingBalance = true);
+    try {
+      await _service.refreshApiBalance(force: force);
+    } finally {
+      if (mounted) setState(() => _refreshingBalance = false);
+    }
+  }
+
+  String _formatTime(int epochMs) {
+    final dt = DateTime.fromMillisecondsSinceEpoch(epochMs);
+    final mm = dt.month.toString().padLeft(2, '0');
+    final dd = dt.day.toString().padLeft(2, '0');
+    final hh = dt.hour.toString().padLeft(2, '0');
+    final min = dt.minute.toString().padLeft(2, '0');
+    return '$mm-$dd $hh:$min';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = ApplePalette.of(context);
+    final safeBottom = MediaQuery.paddingOf(context).bottom;
+    final usage = _service.monthlyUsage;
+    final history = _service.usageHistory;
+    final snap = _service.subscriptionQuota;
+    final session = _service.oauthSession;
+    final local5h = _service.rollingWindowUsage(const Duration(hours: 5));
+    final local7d = _service.rollingWindowUsage(const Duration(days: 7));
+
+    final byFeature = <String, ({int count, int tokens})>{};
+    for (final item in history) {
+      final label = featureLabelZh(item.feature);
+      final prev = byFeature[label] ?? (count: 0, tokens: 0);
+      byFeature[label] = (
+        count: prev.count + 1,
+        tokens: prev.tokens + item.totalTokens,
+      );
+    }
+    final featureEntries = byFeature.entries.toList()
+      ..sort((a, b) => b.value.tokens.compareTo(a.value.tokens));
+
+    return IosSettingsScaffold(
+      title: '用量统计与额度详情',
+      backLabel: widget.backLabel,
+      body: ListView(
+        key: const ValueKey('ios-ai-usage-detail-page'),
+        padding: EdgeInsets.fromLTRB(18, 16, 18, safeBottom + 40),
+        children: [
+          Align(
+            alignment: Alignment.topCenter,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 740),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (_service.hasOAuthSession) ...[
+                    IosSettingsGroup(
+                      header:
+                          'GPT 订阅账号实时额度${session != null ? " · ${session.planBadgeLabel}" : ""}',
+                      footer:
+                          '5 小时窗口与 7 天周额度直接同步自您的 ChatGPT 订阅配额响应头与用量接口。',
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              _IosSubscriptionQuotaWindowBar(
+                                label: '5 小时滚动额度 (5h)',
+                                window: snap?.fiveHourWindow,
+                                now: DateTime.now(),
+                                localSummary:
+                                    '本机近 5h：${local5h.requests} 次 · ${local5h.totalTokens} tokens',
+                              ),
+                              const SizedBox(height: 12),
+                              _IosSubscriptionQuotaWindowBar(
+                                label: '7 天周额度 (Weekly)',
+                                window: snap?.weeklyWindow,
+                                now: DateTime.now(),
+                                localSummary:
+                                    '本机近 7d：${local7d.requests} 次 · ${local7d.totalTokens} tokens',
+                              ),
+                            ],
+                          ),
+                        ),
+                        IosSettingsRow(
+                          key: const ValueKey('ios-ai-usage-detail-refresh-btn'),
+                          icon: CupertinoIcons.refresh_circled_solid,
+                          iconColor: AppleColors.systemBlue,
+                          title: _refreshing ? '正在同步订阅额度…' : '刷新实时订阅额度',
+                          titleColor: p.systemBlue,
+                          onTap: _refreshing ? null : _refreshQuota,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 18),
+                  ],
+                  if (_service.activeAuthMode == AiAuthMode.apiKey &&
+                      _service.hasApiKey &&
+                      _service.config.baseUrl.trim().isNotEmpty) ...[
+                    IosSettingsGroup(
+                      header: 'API 账户余额与额度',
+                      footer:
+                          '仅向您自行填写的 API 接口同源查询标准余额路径，绝不转发密钥至第三方；若服务商未开放余额接口则静默隐藏数值。',
+                      children: [
+                        Padding(
+                          key: const ValueKey('ios-ai-usage-detail-balance-card'),
+                          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+                          child: _IosApiBalanceCardContent(
+                            balance: _service.apiBalance,
+                            refreshing: _refreshingBalance,
+                            refreshButtonKey: const ValueKey(
+                              'ios-ai-usage-detail-refresh-balance-btn',
+                            ),
+                            onRefresh: () =>
+                                unawaited(_refreshApiBalance(force: true)),
+                            palette: p,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 18),
+                  ],
+                  IosSettingsGroup(
+                    header: '本机用量汇总（${usage.monthKey}）',
+                    dividerIndent: 16,
+                    children: [
+                      IosSettingsRow(
+                        icon: CupertinoIcons.number_circle_fill,
+                        iconColor: AppleColors.systemBlue,
+                        title: '本月累计调用',
+                        trailingText: '${usage.requestCount} 次',
+                      ),
+                      IosSettingsRow(
+                        icon: CupertinoIcons.arrow_up_right_circle_fill,
+                        iconColor: AppleColors.systemTeal,
+                        title: '本月输入 / 输出 Tokens',
+                        subtitle:
+                            '输入 ${usage.promptTokens} · 输出 ${usage.completionTokens}',
+                        trailingText: '共 ${usage.totalTokens}',
+                      ),
+                      IosSettingsRow(
+                        icon: CupertinoIcons.clock_fill,
+                        iconColor: AppleColors.systemIndigo,
+                        title: '近 5 小时 / 近 7 天本机调用',
+                        subtitle:
+                            '5h：${local5h.requests} 次 (${local5h.totalTokens} tok)',
+                        trailingText:
+                            '7d：${local7d.requests} 次 (${local7d.totalTokens} tok)',
+                      ),
+                      IosSettingsRow(
+                        icon: CupertinoIcons.archivebox_fill,
+                        iconColor: AppleColors.systemGreen,
+                        title: '本地零消耗响应缓存',
+                        trailingText: '${_service.cachedEntryCount} 条',
+                      ),
+                    ],
+                  ),
+                  if (featureEntries.isNotEmpty) ...[
+                    const SizedBox(height: 18),
+                    IosSettingsGroup(
+                      header: '按功能模块分布',
+                      dividerIndent: 16,
+                      children: [
+                        for (final e in featureEntries)
+                          IosSettingsRow(
+                            icon: CupertinoIcons.sparkles,
+                            iconColor: AppleColors.systemPurple,
+                            title: e.key,
+                            subtitle: '调用 ${e.value.count} 次',
+                            trailingText: '${e.value.tokens} tokens',
+                          ),
+                      ],
+                    ),
+                  ],
+                  const SizedBox(height: 18),
+                  IosSettingsGroup(
+                    header: '最近调用明细（最多保留 ${AiService.maxUsageHistoryEntries} 条）',
+                    dividerIndent: 16,
+                    children: [
+                      if (history.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.all(18),
+                          child: Text(
+                            '暂无调用记录。触发双语字幕、看点科普或连接测试后将在此显示每次请求的模型、耗时与 Token 明细。',
+                            style: TextStyle(
+                              color: p.labelSecondary,
+                              fontSize: 13,
+                              height: 1.45,
+                            ),
+                          ),
+                        )
+                      else
+                        for (final log in history.take(60))
+                          IosSettingsRow(
+                            icon: log.authModeId == AiAuthMode.codexOAuth.id
+                                ? CupertinoIcons.person_crop_circle_fill
+                                : CupertinoIcons.bolt_circle_fill,
+                            iconColor: log.authModeId == AiAuthMode.codexOAuth.id
+                                ? AppleColors.systemGreen
+                                : AppleColors.systemBlue,
+                            title: featureLabelZh(log.feature),
+                            subtitle:
+                                '${_formatTime(log.timestampMs)} · ${log.model.isEmpty ? "默认模型" : log.model} · ${log.latencyMs}ms',
+                            trailingText:
+                                '入 ${log.promptTokens} / 出 ${log.completionTokens}',
+                          ),
+                      if (history.isNotEmpty)
+                        IosSettingsRow(
+                          key: const ValueKey('ios-ai-clear-usage-history-btn'),
+                          icon: CupertinoIcons.trash_fill,
+                          iconColor: AppleColors.systemRed,
+                          title: '清空调用明细记录',
+                          titleColor: AppleColors.systemRed,
+                          onTap: () async {
+                            HapticFeedback.mediumImpact();
+                            await _service.clearUsageHistory();
+                          },
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }

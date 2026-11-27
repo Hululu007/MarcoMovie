@@ -145,29 +145,18 @@ class AiCustomSkill {
     this.useFastModel = false,
   });
 
+  static const Set<String> retiredBuiltInSkillIds = <String>{
+    'builtin_quotes',
+    'builtin_lang_notes',
+  };
+
   static const List<AiCustomSkill> defaultBuiltInSkills = <AiCustomSkill>[
-    AiCustomSkill(
-      id: 'builtin_quotes',
-      name: '台词金句与隐喻赏析',
-      promptTemplate:
-          '请围绕《{{title}}》（{{year}}）{{episode}}，提炼 3 条最具代表性的经典台词或核心镜头隐喻，并用简明温暖的中文做无剧透解读。背景参考：{{overview}}',
-      target: AiSkillTarget.both,
-      useFastModel: false,
-    ),
     AiCustomSkill(
       id: 'builtin_family_guide',
       name: '合家欢陪看分级提示',
       promptTemplate:
           '请根据《{{title}}》（{{year}}）的公开作品属性（简介：{{overview}}），客观评估是否适合与父母或青少年共同观看（暴力/恐怖/尴尬桥段预警），不剧透关键结局，控制在 120 字以内。',
       target: AiSkillTarget.detailOnly,
-      useFastModel: true,
-    ),
-    AiCustomSkill(
-      id: 'builtin_lang_notes',
-      name: '外语地道表达学习卡',
-      promptTemplate:
-          '请结合《{{title}}》{{episode}}当前片段台词：\n{{subtitles}}\n挑选 3～5 个值得积累的地道表达或文化梗，给出简明释义与例句。',
-      target: AiSkillTarget.playerOnly,
       useFastModel: true,
     ),
   ];

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
@@ -176,6 +177,42 @@ class IosLaunchCurtainHost extends StatefulWidget {
   @visibleForTesting
   static bool debugEnableInTest = false;
 
+  /// Emits `true` once the cold-start launch curtain has finished dissolving
+  /// (or was skipped under Reduce Motion / test mode) so startup dialogs can
+  /// coordinate deterministically without fixed `Future.delayed(420ms)` races.
+  static final ValueNotifier<bool> curtainCompleted = ValueNotifier<bool>(true);
+  static int _activeCurtainCount = 0;
+
+  @visibleForTesting
+  static void resetCurtainStateForTest({bool completed = true}) {
+    _activeCurtainCount = completed ? 0 : 1;
+    curtainCompleted.value = completed;
+  }
+
+  /// Resolves immediately when no launch curtain is animating, or awaits the
+  /// live curtain completion event (bounded by [timeout] as a safety guard).
+  static Future<void> waitUntilCurtainCompleted({
+    Duration timeout = const Duration(milliseconds: 1400),
+  }) async {
+    if (_activeCurtainCount <= 0 && curtainCompleted.value) return;
+    if (curtainCompleted.value) return;
+    final done = Completer<void>();
+    void onChange() {
+      if (curtainCompleted.value && !done.isCompleted) {
+        done.complete();
+      }
+    }
+    curtainCompleted.addListener(onChange);
+    try {
+      if (curtainCompleted.value && !done.isCompleted) {
+        done.complete();
+      }
+      await done.future.timeout(timeout, onTimeout: () {});
+    } finally {
+      curtainCompleted.removeListener(onChange);
+    }
+  }
+
   final Widget child;
 
   const IosLaunchCurtainHost({
@@ -192,6 +229,19 @@ class _IosLaunchCurtainHostState extends State<IosLaunchCurtainHost>
   AnimationController? _controller;
   bool _completed = false;
   bool _started = false;
+  bool _ownsActiveCurtain = false;
+
+  void _releaseActiveCurtain() {
+    if (!_ownsActiveCurtain) return;
+    _ownsActiveCurtain = false;
+    if (IosLaunchCurtainHost._activeCurtainCount > 0) {
+      IosLaunchCurtainHost._activeCurtainCount--;
+    }
+    if (IosLaunchCurtainHost._activeCurtainCount <= 0) {
+      IosLaunchCurtainHost._activeCurtainCount = 0;
+      IosLaunchCurtainHost.curtainCompleted.value = true;
+    }
+  }
 
   bool _shouldSkipAnimation(BuildContext context) {
     final inFlutterTest =
@@ -214,19 +264,30 @@ class _IosLaunchCurtainHostState extends State<IosLaunchCurtainHost>
     if (_completed || _started) return;
     if (_shouldSkipAnimation(context)) {
       _completed = true;
+      if (IosLaunchCurtainHost._activeCurtainCount <= 0) {
+        IosLaunchCurtainHost.curtainCompleted.value = true;
+      }
       return;
     }
     _started = true;
+    _ownsActiveCurtain = true;
+    IosLaunchCurtainHost._activeCurtainCount++;
+    IosLaunchCurtainHost.curtainCompleted.value = false;
     final ctrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 680),
     );
     _controller = ctrl;
     ctrl.addStatusListener((status) {
-      if (status == AnimationStatus.completed && mounted) {
-        setState(() {
+      if (status == AnimationStatus.completed) {
+        _releaseActiveCurtain();
+        if (mounted) {
+          setState(() {
+            _completed = true;
+          });
+        } else {
           _completed = true;
-        });
+        }
         _controller?.dispose();
         _controller = null;
       }
@@ -234,12 +295,15 @@ class _IosLaunchCurtainHostState extends State<IosLaunchCurtainHost>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && !_completed) {
         ctrl.forward();
+      } else {
+        _releaseActiveCurtain();
       }
     });
   }
 
   @override
   void dispose() {
+    _releaseActiveCurtain();
     _controller?.dispose();
     _controller = null;
     super.dispose();

@@ -1,4 +1,5 @@
 import 'dart:async';
+import '../core/curated_discovery.dart';
 import '../core/emby_library.dart';
 import '../core/media_library_connectors.dart';
 import '../core/catpaw_host.dart';
@@ -12,6 +13,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
+import 'package:path_provider/path_provider.dart';
 
 /// Real per-episode metadata resolved from open domestic encyclopedias & media APIs
 /// (360 Baike `tvplot`, Bilibili PGC `media_bangumi`/`media_ft`, and Bangumi `/v0/episodes`).
@@ -123,14 +125,22 @@ class PosterLoader {
       'buvid3=58D32EBE-894C-69EE-AE53-607BE1EC3CC597728infoc; b_nut=1793900397';
   static const int _maxImageBytes = 15 * 1024 * 1024;
   static const int _maxMemoryBytes = 112 * 1024 * 1024;
+  static const int _maxPrivateMemoryBytes = 32 * 1024 * 1024;
+  static const int _defaultMaxDiskBytes = 100 * 1024 * 1024;
   static const int _maxConcurrent = 32;
 
-  static final HttpClient _client = HttpClient()
+  static final HttpClient _defaultClient = HttpClient()
     ..connectionTimeout = const Duration(milliseconds: 3200)
     ..idleTimeout = const Duration(seconds: 25)
     ..maxConnectionsPerHost = 18
     ..userAgent = null
     ..autoUncompress = true;
+
+  @visibleForTesting
+  static HttpClient Function()? debugHttpClientFactory;
+
+  static HttpClient get _client =>
+      debugHttpClientFactory?.call() ?? _defaultClient;
 
   /// Increments whenever any poster image bytes are written into [_memory].
   /// Active [PosterImage] widgets listen to this notifier so scrolling lists
@@ -144,6 +154,10 @@ class PosterLoader {
   static final LinkedHashMap<String, Uint8List> _memory =
       LinkedHashMap<String, Uint8List>();
   static int _memoryBytes = 0;
+  static final LinkedHashMap<String, Uint8List> _privateMemory =
+      LinkedHashMap<String, Uint8List>();
+  static int _privateMemoryBytes = 0;
+  static final Map<String, Future<Uint8List>> _inflightPrivate = {};
   static final Map<String, Set<VoidCallback>> _keyListeners = {};
   static final Map<String, String> _cleanTitleMemo = {};
   static final Map<String, Future<Uint8List>> _inflight = {};
@@ -175,10 +189,85 @@ class PosterLoader {
   static final Map<int, bool> _clearDimensionCache = LruMap(500);
   static int _active = 0;
   static final Queue<Completer<void>> _waiters = Queue<Completer<void>>();
+  static const int _maxScrapeConcurrent = 6;
+  static int _activeScrape = 0;
+  static final Queue<Completer<void>> _scrapeWaiters =
+      Queue<Completer<void>>();
   static Directory? _diskDir;
+  static Future<Directory?>? _diskInitFuture;
   static bool _diskReady = false;
+  static bool _startupDiskPruned = false;
   static bool _legacyDiskCleaned = false;
+  static int _diskWritesSincePrune = 0;
+  static int _privateCacheEpoch = 0;
+  static Future<void>? _pruneInFlight;
   static final math.Random _rng = math.Random();
+
+  @visibleForTesting
+  static Directory? debugDiskDirOverride;
+
+  @visibleForTesting
+  static int debugDiskMaxBytesOverride = 0;
+
+  @visibleForTesting
+  static Future<Uint8List> Function(String url)? debugPrivateFetcherOverride;
+
+  @visibleForTesting
+  static int get privateMemoryCount => _privateMemory.length;
+
+  @visibleForTesting
+  static int get publicMemoryCount => _memory.length;
+
+  static int get _effectiveMaxDiskBytes =>
+      debugDiskMaxBytesOverride > 0
+          ? debugDiskMaxBytesOverride
+          : _defaultMaxDiskBytes;
+
+  @visibleForTesting
+  static void resetDiskCacheConfigForTest() {
+    debugDiskDirOverride = null;
+    debugDiskMaxBytesOverride = 0;
+    debugPrivateFetcherOverride = null;
+    _diskDir = null;
+    _diskInitFuture = null;
+    _diskReady = false;
+    _startupDiskPruned = false;
+    _diskWritesSincePrune = 0;
+    _pruneInFlight = null;
+  }
+
+  /// Clears ONLY the memory-only private poster bucket and advances
+  /// `_privateCacheEpoch` so any late in-flight private fetch can never
+  /// repopulate `_privateMemory` after Privacy Space is locked.
+  static void clearPrivateCache() {
+    _privateCacheEpoch++;
+    _privateMemory.clear();
+    _privateMemoryBytes = 0;
+    _inflightPrivate.clear();
+    _keyListeners.removeWhere((k, _) => k.startsWith('private:'));
+    cacheRevision.value++;
+  }
+
+  static void _rememberPrivate(String key, Uint8List bytes) {
+    if (key.isEmpty) return;
+    final old = _privateMemory.remove(key);
+    if (old != null) _privateMemoryBytes -= old.length;
+    _privateMemory[key] = bytes;
+    _privateMemoryBytes += bytes.length;
+    while (_privateMemoryBytes > _maxPrivateMemoryBytes &&
+        _privateMemory.isNotEmpty) {
+      final oldestKey = _privateMemory.keys.first;
+      final removed = _privateMemory.remove(oldestKey);
+      if (removed != null) _privateMemoryBytes -= removed.length;
+    }
+    final keyCallbacks = _keyListeners[key];
+    if (keyCallbacks != null && keyCallbacks.isNotEmpty) {
+      for (final cb in List<VoidCallback>.of(keyCallbacks)) {
+        cb();
+      }
+    }
+    cacheRevision.value++;
+  }
 
   static void addKeyListener(String key, VoidCallback listener) {
     if (key.isEmpty) return;
@@ -248,10 +337,12 @@ class PosterLoader {
     return bucket.clamp(360, 1080);
   }
 
-  /// Clears both in-memory LRU cache and on-disk temporary poster files.
+  /// Clears both in-memory LRU cache, private poster memory bucket, and
+  /// on-disk rebuildable poster cache files.
   static Future<void> clearCache() async {
     _memory.clear();
     _memoryBytes = 0;
+    clearPrivateCache();
     _cleanTitleMemo.clear();
     _titleCoverUrlsCache.clear();
     _landscapeCoverUrlsCache.clear();
@@ -271,25 +362,90 @@ class PosterLoader {
     _clearDimensionCache.clear();
     cacheRevision.value++;
     metadataRevision.value++;
-    for (final folder in const [
-      'marco_poster_cache_v6',
-      'marco_poster_cache_v5',
-      'marco_poster_cache_v4',
-    ]) {
-      try {
-        final dir = Directory(
-          '${Directory.systemTemp.path}${Platform.pathSeparator}$folder',
+    final isTestEnv = !kIsWeb && Platform.environment.containsKey('FLUTTER_TEST');
+    if (isTestEnv) {
+      // Under Flutter tests, ONLY clear the active test cache root (explicit
+      // `debugDiskDirOverride`, active `_diskDir`, or this process's PID-scoped
+      // test folder) so unrelated legacy `marco_poster_cache_v*` directories in
+      // TEMP/TMP are never touched.
+      final testDirs = <Directory>[
+        if (debugDiskDirOverride != null) debugDiskDirOverride!,
+        if (_diskDir != null) _diskDir!,
+      ];
+      if (testDirs.isEmpty) {
+        testDirs.add(
+          Directory(
+            '${Directory.systemTemp.path}${Platform.pathSeparator}marco_poster_cache_v7_test_$pid',
+          ),
         );
-        if (await dir.exists()) {
-          await for (final entity in dir.list()) {
-            if (entity is File) {
-              try {
-                await entity.delete();
-              } catch (_) {}
+      }
+      final seenPaths = <String>{};
+      for (final dir in testDirs) {
+        if (!seenPaths.add(dir.path)) continue;
+        try {
+          if (await dir.exists()) {
+            await for (final entity in dir.list()) {
+              if (entity is File) {
+                try {
+                  await entity.delete();
+                } catch (_) {}
+              }
             }
           }
-        }
+        } catch (_) {}
+      }
+      return;
+    }
+    final candidateRoots = <String>{Directory.systemTemp.path};
+    if (_diskDir != null) {
+      candidateRoots.add(_diskDir!.parent.path);
+    }
+    if (debugDiskDirOverride != null) {
+      candidateRoots.add(debugDiskDirOverride!.parent.path);
+    }
+    if (!kIsWeb) {
+      try {
+        final caches = await getApplicationCacheDirectory();
+        candidateRoots.add(caches.path);
       } catch (_) {}
+      try {
+        final support = await getApplicationSupportDirectory();
+        candidateRoots.add(support.path);
+      } catch (_) {}
+    }
+    for (final root in candidateRoots) {
+      for (final folder in const [
+        'marco_poster_cache_v7',
+        'marco_poster_cache_v6',
+        'marco_poster_cache_v5',
+        'marco_poster_cache_v4',
+      ]) {
+        try {
+          final dir = Directory('$root${Platform.pathSeparator}$folder');
+          if (await dir.exists()) {
+            await for (final entity in dir.list()) {
+              if (entity is File) {
+                try {
+                  await entity.delete();
+                } catch (_) {}
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    }
+  }
+
+  /// Warms direct poster image URLs into memory and persistent disk cache
+  /// without triggering multi-site title scraping.
+  static void prefetchUrls(Iterable<String> urls, {int limit = 16}) {
+    var count = 0;
+    for (final raw in urls) {
+      if (count >= limit) break;
+      final u = raw.trim();
+      if (u.isEmpty || _isKnownDeadPosterHost(u)) continue;
+      count++;
+      unawaited(load(u).then<void>((_) {}, onError: (_) {}));
     }
   }
 
@@ -1362,7 +1518,16 @@ class PosterLoader {
     String title = '',
     String year = '',
     bool preferHd = false,
+    bool isPrivate = false,
   }) {
+    if (isPrivate) {
+      final privKey = 'private:${rawUrl.trim()}';
+      final hit = _privateMemory.remove(privKey);
+      if (hit != null) {
+        _privateMemory[privKey] = hit;
+      }
+      return hit;
+    }
     if (EmbyLibrary.isImage(rawUrl) ||
         ExternalMediaLibrary.isPrivateImage(rawUrl)) {
       return _memory[rawUrl];
@@ -1453,7 +1618,42 @@ class PosterLoader {
     String raw, {
     String title = '',
     String year = '',
+    bool isPrivate = false,
   }) {
+    if (isPrivate) {
+      final trimmed = raw.trim();
+      if (trimmed.isEmpty) {
+        return Future<Uint8List>.error(const FormatException('空私密海报地址'));
+      }
+      final privKey = 'private:$trimmed';
+      final cached = _privateMemory[privKey];
+      if (cached != null) return SynchronousFuture<Uint8List>(cached);
+      final pendingPriv = _inflightPrivate[privKey];
+      if (pendingPriv != null) return pendingPriv;
+      final capturedEpoch = _privateCacheEpoch;
+      late final Future<Uint8List> fut;
+      fut = () async {
+        final fetcher = debugPrivateFetcherOverride;
+        final bytes = fetcher != null
+            ? await fetcher(trimmed)
+            : await _tryPrimaryUrlAttempts(
+                trimmed,
+                maxAttempts: 2,
+                perAttemptTimeout: const Duration(milliseconds: 4500),
+              );
+        if (capturedEpoch != _privateCacheEpoch) {
+          throw StateError('私密空间已锁定，已丢弃迟到的私密海报响应');
+        }
+        _rememberPrivate(privKey, bytes);
+        return bytes;
+      }().whenComplete(() {
+        if (identical(_inflightPrivate[privKey], fut)) {
+          _inflightPrivate.remove(privKey);
+        }
+      });
+      _inflightPrivate[privKey] = fut;
+      return fut;
+    }
     if (EmbyLibrary.isImage(raw) || ExternalMediaLibrary.isPrivateImage(raw)) {
       final cached = _memory[raw];
       if (cached != null) return SynchronousFuture(cached);
@@ -4121,6 +4321,36 @@ class PosterLoader {
       }
     }
 
+    await _acquireScrape();
+    try {
+      return await _resolveCoverUrlsByTitleGuarded(
+        rawTitle,
+        cleanTitle: cleanTitle,
+        targetYear: targetYear,
+        wantMc: wantMc,
+        scopedKey: scopedKey,
+        year: year,
+        forceRefreshHd: forceRefreshHd,
+        verifiedOnly: verifiedOnly,
+        includeDoubanPosterGallery: includeDoubanPosterGallery,
+      );
+    } finally {
+      _releaseScrape();
+    }
+  }
+
+  static Future<List<String>> _resolveCoverUrlsByTitleGuarded(
+    String rawTitle, {
+    required String cleanTitle,
+    required int? targetYear,
+    required bool wantMc,
+    required String scopedKey,
+    required String year,
+    bool forceRefreshHd = false,
+    required bool verifiedOnly,
+    required bool includeDoubanPosterGallery,
+  }) async {
+
     final primaryHdResults = <String>[];
     final murlHdResults = <String>[];
     final bingOipFallbackResults = <String>[];
@@ -4765,7 +4995,27 @@ class PosterLoader {
   static void _release() {
     _active--;
     if (_waiters.isNotEmpty) {
-      _waiters.removeLast().complete();
+      // Strictly FIFO (`removeFirst`) so top-of-screen visible Hero & first-shelf
+      // posters finish first instead of starving behind offscreen bottom cards.
+      _waiters.removeFirst().complete();
+    }
+  }
+
+  static Future<void> _acquireScrape() async {
+    if (_activeScrape < _maxScrapeConcurrent) {
+      _activeScrape++;
+      return;
+    }
+    final waiter = Completer<void>();
+    _scrapeWaiters.add(waiter);
+    await waiter.future;
+    _activeScrape++;
+  }
+
+  static void _releaseScrape() {
+    _activeScrape--;
+    if (_scrapeWaiters.isNotEmpty) {
+      _scrapeWaiters.removeFirst().complete();
     }
   }
 
@@ -5088,22 +5338,78 @@ class PosterLoader {
     return false;
   }
 
-  static Future<File?> _diskFileFor(String key) async {
-    if (!_diskReady) {
-      _diskReady = true;
-      try {
-        final dir = Directory(
-          '${Directory.systemTemp.path}${Platform.pathSeparator}marco_poster_cache_v6',
-        );
-        if (!await dir.exists()) await dir.create(recursive: true);
-        _diskDir = dir;
-      } catch (_) {
-        _diskDir = null;
+  static Future<Directory?> _ensureDiskDir() {
+    if (debugDiskDirOverride != null) {
+      final dir = debugDiskDirOverride!;
+      if (_diskReady && _diskDir?.path == dir.path && _startupDiskPruned) {
+        return SynchronousFuture<Directory?>(dir);
       }
-      if (!_legacyDiskCleaned) {
+      return _diskInitFuture ??= () async {
+        if (!await dir.exists()) {
+          await dir.create(recursive: true);
+        }
+        _diskDir = dir;
+        _diskReady = true;
+        if (!_startupDiskPruned) {
+          _startupDiskPruned = true;
+          await _pruneDiskCacheIfNeeded(dir);
+        }
+        return dir;
+      }();
+    }
+    if (_diskReady) return SynchronousFuture<Directory?>(_diskDir);
+    return _diskInitFuture ??= () async {
+      Directory? resolved;
+      final isFlutterTest =
+          !kIsWeb && Platform.environment.containsKey('FLUTTER_TEST');
+      if (!kIsWeb && !isFlutterTest) {
+        // Store rebuildable public posters in `Library/Caches` (never
+        // iCloud-backed `Application Support`) so OS purge and our byte cap
+        // keep storage strictly bounded.
+        try {
+          final caches = await getApplicationCacheDirectory().timeout(
+            const Duration(milliseconds: 1200),
+          );
+          final cacheDir = Directory(
+            '${caches.path}${Platform.pathSeparator}marco_poster_cache_v7',
+          );
+          if (!await cacheDir.exists()) {
+            await cacheDir.create(recursive: true);
+          }
+          resolved = cacheDir;
+        } catch (_) {}
+      }
+      if (resolved == null) {
+        try {
+          final tempDir = (!kIsWeb && !isFlutterTest)
+              ? await getTemporaryDirectory()
+                  .timeout(const Duration(milliseconds: 800))
+              : Directory.systemTemp;
+          final folderName = isFlutterTest
+              ? 'marco_poster_cache_v7_test_${pid}'
+              : 'marco_poster_cache_v7';
+          final fallbackDir = Directory(
+            '${tempDir.path}${Platform.pathSeparator}$folderName',
+          );
+          if (!await fallbackDir.exists()) {
+            await fallbackDir.create(recursive: true);
+          }
+          resolved = fallbackDir;
+        } catch (_) {}
+      }
+      _diskDir = resolved;
+      _diskReady = true;
+      // Enforce the 100 MiB cache cap on cold start so repeated short runs
+      // with < 24 writes per launch still reclaim oversized disk cache!
+      if (resolved != null && !_startupDiskPruned) {
+        _startupDiskPruned = true;
+        unawaited(_pruneDiskCacheIfNeeded(resolved));
+      }
+      if (!kIsWeb && !isFlutterTest && !_legacyDiskCleaned) {
         _legacyDiskCleaned = true;
         unawaited(() async {
           for (final legacy in const [
+            'marco_poster_cache_v6',
             'marco_poster_cache_v5',
             'marco_poster_cache_v4',
           ]) {
@@ -5116,10 +5422,27 @@ class PosterLoader {
               }
             } catch (_) {}
           }
+          try {
+            final support = await getApplicationSupportDirectory().timeout(
+              const Duration(milliseconds: 1200),
+            );
+            final legacySupportDir = Directory(
+              '${support.path}${Platform.pathSeparator}marco_poster_cache_v6',
+            );
+            if (await legacySupportDir.exists()) {
+              await legacySupportDir.delete(recursive: true);
+            }
+          } catch (_) {}
         }());
       }
-    }
-    final dir = _diskDir;
+      return resolved;
+    }();
+  }
+
+  static Future<File?> _diskFileFor(String key) async {
+    final dir = (debugDiskDirOverride == null && _diskReady)
+        ? _diskDir
+        : await _ensureDiskDir();
     if (dir == null) return null;
     return File('${dir.path}${Platform.pathSeparator}${_fnv1a64(key)}.img');
   }
@@ -5129,7 +5452,89 @@ class PosterLoader {
       final tmp = File('${file.path}.tmp');
       await tmp.writeAsBytes(bytes, flush: true);
       await tmp.rename(file.path);
+      _diskWritesSincePrune++;
+      if (debugDiskMaxBytesOverride > 0 || _diskWritesSincePrune >= 24) {
+        _diskWritesSincePrune = 0;
+        await _pruneDiskCacheIfNeeded(file.parent);
+      }
     } catch (_) {}
+  }
+
+  /// Evicts oldest-modified `.img` files from the public poster disk cache
+  /// whenever total size exceeds the configured byte cap (`100 MiB` default).
+  @visibleForTesting
+  static Future<int> enforceDiskCacheCapNow() async {
+    final dir = await _ensureDiskDir();
+    if (dir == null) return 0;
+    await _pruneDiskCacheIfNeeded(dir);
+    var remaining = 0;
+    try {
+      await for (final entity in dir.list()) {
+        if (entity is File && entity.path.endsWith('.img')) {
+          remaining += (await entity.stat()).size;
+        }
+      }
+    } catch (_) {}
+    return remaining;
+  }
+
+  @visibleForTesting
+  static Future<void> writePublicDiskEntryForTest(
+    String key,
+    Uint8List bytes, {
+    DateTime? modifiedAt,
+  }) async {
+    final file = await _diskFileFor(key);
+    if (file == null) return;
+    await file.writeAsBytes(bytes, flush: true);
+    if (modifiedAt != null) {
+      await file.setLastModified(modifiedAt);
+    }
+    await _pruneDiskCacheIfNeeded(file.parent);
+  }
+
+  static Future<void> _pruneDiskCacheIfNeeded(Directory dir) async {
+    if (_pruneInFlight != null) {
+      await _pruneInFlight;
+      return;
+    }
+    final op = () async {
+      try {
+        if (!await dir.exists()) return;
+        final cap = _effectiveMaxDiskBytes;
+        final entries = <({File file, int size, DateTime modified})>[];
+        var totalBytes = 0;
+        await for (final entity in dir.list()) {
+          if (entity is! File || !entity.path.endsWith('.img')) continue;
+          try {
+            final stat = await entity.stat();
+            totalBytes += stat.size;
+            entries.add((
+              file: entity,
+              size: stat.size,
+              modified: stat.modified,
+            ));
+          } catch (_) {}
+        }
+        if (totalBytes <= cap) return;
+        entries.sort((a, b) => a.modified.compareTo(b.modified));
+        for (final entry in entries) {
+          if (totalBytes <= cap) break;
+          try {
+            await entry.file.delete();
+            totalBytes -= entry.size;
+          } catch (_) {}
+        }
+      } catch (_) {}
+    }();
+    _pruneInFlight = op;
+    try {
+      await op;
+    } finally {
+      if (identical(_pruneInFlight, op)) {
+        _pruneInFlight = null;
+      }
+    }
   }
 
   static String _fnv1a64(String input) {
@@ -5216,6 +5621,8 @@ class PosterImage extends StatefulWidget {
   final bool highRes;
   final bool strictHighRes;
   final bool forBackdrop;
+  final bool isPrivate;
+  final bool deferTitleScrape;
   final ValueChanged<Uint8List>? onBytesLoaded;
 
   const PosterImage({
@@ -5230,6 +5637,8 @@ class PosterImage extends StatefulWidget {
     this.highRes = false,
     this.strictHighRes = false,
     this.forBackdrop = false,
+    this.isPrivate = false,
+    this.deferTitleScrape = false,
     this.onBytesLoaded,
   });
 
@@ -5245,14 +5654,49 @@ class _PosterImageState extends State<PosterImage>
   int _retryCount = 0;
   Timer? _retryTimer;
   List<String> _subscribedKeys = const [];
+  bool _listeningWarmupDefer = false;
 
-  bool get _wantsHd => widget.highRes || widget.strictHighRes;
+  bool get _wantsHd => !widget.isPrivate && (widget.highRes || widget.strictHighRes);
+
+  /// Only curated discovery seed cards (`deferTitleScrape: true`) defer
+  /// posterless title-scraping while curated disk warmup/refresh is in flight.
+  /// Ordinary CMS cards (`deferTitleScrape: false`) NEVER stall.
+  bool get _shouldDeferPosterlessScrape =>
+      !widget.isPrivate &&
+      widget.url.trim().isEmpty &&
+      widget.title.trim().isNotEmpty &&
+      widget.deferTitleScrape &&
+      CuratedDiscoveryService.shouldDeferPosterlessSeedScrape;
+
+  void _syncWarmupDeferListener() {
+    final need = _shouldDeferPosterlessScrape && _bytes == null;
+    if (need && !_listeningWarmupDefer) {
+      _listeningWarmupDefer = true;
+      CuratedDiscoveryService.warmupRevision.addListener(_onWarmupDeferTick);
+    } else if (!need && _listeningWarmupDefer) {
+      _listeningWarmupDefer = false;
+      CuratedDiscoveryService.warmupRevision.removeListener(_onWarmupDeferTick);
+    }
+  }
+
+  void _onWarmupDeferTick() {
+    if (!mounted) return;
+    if (!_shouldDeferPosterlessScrape) {
+      _syncWarmupDeferListener();
+      if (_bytes == null) {
+        _fetchBytes();
+      }
+    }
+  }
 
   @override
   bool get wantKeepAlive => _bytes != null;
 
   List<String> _computeSubscribedKeys() {
     final raw = widget.url.trim();
+    if (widget.isPrivate) {
+      return raw.isEmpty ? const [] : <String>['private:$raw'];
+    }
     if (EmbyLibrary.isImage(raw) || ExternalMediaLibrary.isPrivateImage(raw)) {
       return [raw];
     }
@@ -5299,7 +5743,8 @@ class _PosterImageState extends State<PosterImage>
     super.didUpdateWidget(oldWidget);
     final sameIdentity = oldWidget.url.trim() == widget.url.trim() &&
         oldWidget.title.trim() == widget.title.trim() &&
-        oldWidget.year.trim() == widget.year.trim();
+        oldWidget.year.trim() == widget.year.trim() &&
+        oldWidget.isPrivate == widget.isPrivate;
     if (!sameIdentity) {
       _retryTimer?.cancel();
       _retryCount = 0;
@@ -5307,6 +5752,12 @@ class _PosterImageState extends State<PosterImage>
       _resubscribeKeys();
       _initLoad();
       return;
+    }
+    if (oldWidget.deferTitleScrape != widget.deferTitleScrape && _bytes == null) {
+      _syncWarmupDeferListener();
+      if (!_shouldDeferPosterlessScrape) {
+        _fetchBytes();
+      }
     }
     if (oldWidget.highRes != widget.highRes ||
         oldWidget.strictHighRes != widget.strictHighRes) {
@@ -5324,6 +5775,10 @@ class _PosterImageState extends State<PosterImage>
 
   @override
   void dispose() {
+    if (_listeningWarmupDefer) {
+      _listeningWarmupDefer = false;
+      CuratedDiscoveryService.warmupRevision.removeListener(_onWarmupDeferTick);
+    }
     for (final k in _subscribedKeys) {
       PosterLoader.removeKeyListener(k, _onKeyCacheUpdated);
     }
@@ -5340,6 +5795,7 @@ class _PosterImageState extends State<PosterImage>
         title: widget.title,
         year: widget.year,
         preferHd: _wantsHd,
+        isPrivate: widget.isPrivate,
       );
       if (hit != null) {
         setState(() {
@@ -5350,7 +5806,7 @@ class _PosterImageState extends State<PosterImage>
       }
       return;
     }
-    if (_wantsHd && widget.title.trim().isNotEmpty) {
+    if (!widget.isPrivate && _wantsHd && widget.title.trim().isNotEmpty) {
       final hdHit = PosterLoader.peekHdMemory(
         widget.title,
         rawUrl: widget.url,
@@ -5382,30 +5838,35 @@ class _PosterImageState extends State<PosterImage>
   }
 
   void _initLoad() {
-    final immediateHd = _wantsHd && widget.title.trim().isNotEmpty
+    final effectiveTitle = widget.isPrivate ? '' : widget.title.trim();
+    final effectiveYear = widget.isPrivate ? '' : widget.year.trim();
+    final immediateHd = !widget.isPrivate && _wantsHd && effectiveTitle.isNotEmpty
         ? PosterLoader.peekHdMemory(
-            widget.title,
+            effectiveTitle,
             rawUrl: widget.url,
-            year: widget.year,
+            year: effectiveYear,
           )
         : null;
     final immediate = immediateHd ??
         PosterLoader.peekMemory(
           widget.url,
-          title: widget.title,
-          year: widget.year,
-          preferHd: _wantsHd,
+          title: effectiveTitle,
+          year: effectiveYear,
+          preferHd: !widget.isPrivate && _wantsHd,
+          isPrivate: widget.isPrivate,
         );
     if (immediate != null) {
       _bytes = immediate;
       _loadedSync = true;
       _hasVerifiedHd = immediateHd != null;
+      _syncWarmupDeferListener();
       updateKeepAlive();
       _notifyBytes(immediate);
-      if (_wantsHd &&
+      if (!widget.isPrivate &&
+          _wantsHd &&
           !widget.forBackdrop &&
-          widget.title.trim().isNotEmpty) {
-        unawaited(_verifyAndUpgradeIfLowRes(immediate, widget.title.trim()));
+          effectiveTitle.isNotEmpty) {
+        unawaited(_verifyAndUpgradeIfLowRes(immediate, effectiveTitle));
       }
       return;
     }
@@ -5413,13 +5874,18 @@ class _PosterImageState extends State<PosterImage>
     _loadedSync = false;
     _hasVerifiedHd = false;
     updateKeepAlive();
-    _fetchBytes();
-    if (widget.strictHighRes &&
-        !widget.forBackdrop &&
-        widget.title.trim().isNotEmpty &&
-        !EmbyLibrary.isImage(widget.url) &&
-        !ExternalMediaLibrary.isPrivateImage(widget.url)) {
-      unawaited(_tryUpgradeToHd(widget.title.trim(), null));
+    _syncWarmupDeferListener();
+    if (!_shouldDeferPosterlessScrape) {
+      _fetchBytes();
+      if (!widget.isPrivate &&
+          _wantsHd &&
+          widget.strictHighRes &&
+          !widget.forBackdrop &&
+          effectiveTitle.isNotEmpty &&
+          !EmbyLibrary.isImage(widget.url) &&
+          !ExternalMediaLibrary.isPrivateImage(widget.url)) {
+        unawaited(_tryUpgradeToHd(effectiveTitle, null));
+      }
     }
   }
 
@@ -5448,7 +5914,8 @@ class _PosterImageState extends State<PosterImage>
     String requestedTitle,
     Uint8List? currentBytes,
   ) async {
-    if (EmbyLibrary.isImage(widget.url) ||
+    if (widget.isPrivate ||
+        EmbyLibrary.isImage(widget.url) ||
         ExternalMediaLibrary.isPrivateImage(widget.url)) {
       return;
     }
@@ -5485,20 +5952,29 @@ class _PosterImageState extends State<PosterImage>
   }
 
   Future<void> _fetchBytes() async {
-    if (widget.url.trim().isEmpty && widget.title.trim().isEmpty) return;
     final requestedUrl = widget.url.trim();
-    final requestedTitle = widget.title.trim();
-    final requestedYear = widget.year.trim();
+    final requestedTitle = widget.isPrivate ? '' : widget.title.trim();
+    final requestedYear = widget.isPrivate ? '' : widget.year.trim();
+    final requestedPrivate = widget.isPrivate;
+    if (requestedPrivate && requestedUrl.isEmpty) return;
+    if (requestedUrl.isEmpty && requestedTitle.isEmpty) return;
+    if (_shouldDeferPosterlessScrape) {
+      _syncWarmupDeferListener();
+      return;
+    }
     try {
       final data = await PosterLoader.load(
         requestedUrl,
         title: requestedTitle,
         year: requestedYear,
+        isPrivate: requestedPrivate,
       );
       if (!mounted) return;
       if (widget.url.trim() != requestedUrl ||
-          widget.title.trim() != requestedTitle ||
-          widget.year.trim() != requestedYear) {
+          widget.isPrivate != requestedPrivate ||
+          (!requestedPrivate &&
+              (widget.title.trim() != requestedTitle ||
+                  widget.year.trim() != requestedYear))) {
         return;
       }
       // Never let a lower-resolution CMS fetch overwrite an already-verified HD poster.
@@ -5548,7 +6024,58 @@ class _PosterImageState extends State<PosterImage>
     super.build(context);
     final bytes = _bytes;
     if (bytes == null) {
-      return widget.placeholder;
+      if (widget.forBackdrop || widget.strictHighRes) {
+        return widget.placeholder;
+      }
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final enoughSpace = constraints.maxWidth.isFinite &&
+              constraints.maxHeight.isFinite &&
+              constraints.maxWidth >= 68 &&
+              constraints.maxHeight >= 88;
+          if (!enoughSpace) return widget.placeholder;
+          return Stack(
+            fit: StackFit.passthrough,
+            children: [
+              widget.placeholder,
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    key: const Key('poster-loading-sheen'),
+                    decoration: const BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          Color(0xFF1F222C),
+                          Color(0xFF151821),
+                          Color(0xFF0E1017),
+                        ],
+                        stops: [0.0, 0.52, 1.0],
+                      ),
+                    ),
+                    child: Center(
+                      child: Container(
+                        width: 34,
+                        height: 34,
+                        decoration: const BoxDecoration(
+                          color: Color(0x16FFFFFF),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          IconData(0xf662, fontFamily: 'CupertinoIcons', fontPackage: 'cupertino_icons'),
+                          size: 16,
+                          color: Color(0x52FFFFFF),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      );
     }
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -5665,6 +6192,9 @@ class EpisodeStillImage extends StatefulWidget {
   final bool? wantMotionComic;
   final String fallbackPosterUrl;
   final Widget placeholder;
+  /// When `true`, disables public episode still/metadata scraping and keeps the
+  /// fallback poster strictly inside the private memory-only bucket.
+  final bool isPrivate;
 
   const EpisodeStillImage({
     super.key,
@@ -5675,6 +6205,7 @@ class EpisodeStillImage extends StatefulWidget {
     this.year = '',
     this.realEpisodeNumber,
     this.wantMotionComic,
+    this.isPrivate = false,
   });
 
   @override
@@ -5702,7 +6233,8 @@ class _EpisodeStillImageState extends State<EpisodeStillImage>
         oldWidget.year != widget.year ||
         oldWidget.episodeIndex != widget.episodeIndex ||
         oldWidget.realEpisodeNumber != widget.realEpisodeNumber ||
-        oldWidget.wantMotionComic != widget.wantMotionComic) {
+        oldWidget.wantMotionComic != widget.wantMotionComic ||
+        oldWidget.isPrivate != widget.isPrivate) {
       _stillUrl = null;
       _resolveStill();
     }
@@ -5726,6 +6258,7 @@ class _EpisodeStillImageState extends State<EpisodeStillImage>
   }
 
   void _pickFromCaches() {
+    if (widget.isPrivate) return;
     final title = widget.seriesTitle.trim();
     if (title.isEmpty) return;
     final wantMc =
@@ -5760,6 +6293,7 @@ class _EpisodeStillImageState extends State<EpisodeStillImage>
   }
 
   Future<void> _resolveStill() async {
+    if (widget.isPrivate) return;
     _pickFromCaches();
     if (_stillUrl != null && _stillUrl!.isNotEmpty) return;
     final title = widget.seriesTitle.trim();
@@ -5790,14 +6324,15 @@ class _EpisodeStillImageState extends State<EpisodeStillImage>
         -0.72 + ((widget.episodeIndex * 3) % 7) * 0.22; // -0.72 .. +0.60
     final fallbackPosterWidget = PosterImage(
       url: widget.fallbackPosterUrl,
-      title: widget.seriesTitle,
-      year: widget.year,
+      title: widget.isPrivate ? '' : widget.seriesTitle,
+      year: widget.isPrivate ? '' : widget.year,
       fit: BoxFit.cover,
       alignment: Alignment(0.0, alignY),
       highRes: false,
+      isPrivate: widget.isPrivate,
       placeholder: widget.placeholder,
     );
-    if (still != null && still.isNotEmpty) {
+    if (!widget.isPrivate && still != null && still.isNotEmpty) {
       return PosterImage(
         key: ValueKey(
           'still_${widget.seriesTitle}_${widget.episodeIndex}_$still',
@@ -5806,6 +6341,7 @@ class _EpisodeStillImageState extends State<EpisodeStillImage>
         title: '',
         fit: BoxFit.cover,
         highRes: false,
+        isPrivate: widget.isPrivate,
         placeholder: fallbackPosterWidget,
       );
     }
@@ -5846,6 +6382,9 @@ class LandscapePosterImage extends StatefulWidget {
   final bool preferredDoubanIsTv;
   /// Explicit work-form disambiguation (`true` = 动态漫画, `false` = regular).
   final bool? wantMotionComic;
+  /// When `true`, keeps all loaded images strictly in private memory cache and
+  /// disables external lookup and public disk writes.
+  final bool isPrivate;
 
   const LandscapePosterImage({
     super.key,
@@ -5856,6 +6395,7 @@ class LandscapePosterImage extends StatefulWidget {
     this.fit = BoxFit.cover,
     this.alignment = const Alignment(0.0, -0.2),
     this.allowExternalLookup = true,
+    this.isPrivate = false,
     this.onBytesLoaded,
     this.onLandscapeStatusChanged,
     this.blurPortraitFallback = false,
@@ -5882,7 +6422,7 @@ class _LandscapePosterImageState extends State<LandscapePosterImage>
   bool get wantKeepAlive => _landscapeBytes != null;
 
   String _computeKey() {
-    if (!widget.allowExternalLookup) return '';
+    if (widget.isPrivate || !widget.allowExternalLookup) return '';
     final prefBackdrop =
         PosterLoader.upgradeUrlToHd(widget.preferredBackdropUrl);
     if (prefBackdrop.isNotEmpty) {
@@ -5928,6 +6468,7 @@ class _LandscapePosterImageState extends State<LandscapePosterImage>
         oldWidget.title.trim() != widget.title.trim() ||
         oldWidget.year.trim() != widget.year.trim() ||
         oldWidget.allowExternalLookup != widget.allowExternalLookup ||
+        oldWidget.isPrivate != widget.isPrivate ||
         oldWidget.preferredBackdropUrl.trim() !=
             widget.preferredBackdropUrl.trim() ||
         oldWidget.preferredDoubanId.trim() != widget.preferredDoubanId.trim() ||
@@ -6015,7 +6556,8 @@ class _LandscapePosterImageState extends State<LandscapePosterImage>
     _fallbackBytes = null;
     final hasPreferred = widget.preferredBackdropUrl.trim().isNotEmpty ||
         widget.preferredDoubanId.trim().isNotEmpty;
-    if (!widget.allowExternalLookup ||
+    if (widget.isPrivate ||
+        !widget.allowExternalLookup ||
         (widget.title.trim().isEmpty && !hasPreferred)) {
       _landscapeBytes = null;
       _loadedSync = false;
@@ -6140,11 +6682,12 @@ class _LandscapePosterImageState extends State<LandscapePosterImage>
   Widget _buildFallback() {
     final basePoster = PosterImage(
       url: widget.url,
-      title: widget.allowExternalLookup ? widget.title : '',
-      year: widget.year,
+      title: (!widget.isPrivate && widget.allowExternalLookup) ? widget.title : '',
+      year: widget.isPrivate ? '' : widget.year,
+      isPrivate: widget.isPrivate,
       fit: widget.fit,
       alignment: widget.alignment,
-      highRes: true,
+      highRes: !widget.isPrivate,
       forBackdrop: widget.blurPortraitFallback,
       placeholder: widget.placeholder,
       onBytesLoaded: _onFallbackBytesLoaded,

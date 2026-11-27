@@ -551,7 +551,11 @@ void main() {
         final secure = InMemorySecureCredentialStore();
         http.Request? pingReq;
         final mockHttp = MockClient((req) async {
-          pingReq = req;
+          if (req.method == 'POST') {
+            pingReq = req;
+          } else {
+            return http.Response('{}', 404);
+          }
           return http.Response.bytes(
             utf8.encode(
               jsonEncode({

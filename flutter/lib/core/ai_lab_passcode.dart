@@ -545,6 +545,10 @@ class AiLabPasscodeStore extends ChangeNotifier {
 
   String get storedToken => isUnlocked ? _storedToken : '';
 
+  /// `true` whenever any raw passcode token has been stored (even if it has
+  /// since expired), so callers can enforce re-lock on expiry.
+  bool get hasStoredToken => _storedToken.trim().isNotEmpty;
+
   @visibleForTesting
   void configureForTest({
     DateTime Function()? clock,

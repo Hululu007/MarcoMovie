@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'core/app_log.dart';
 import 'core/cms_client.dart';
+import 'core/curated_discovery.dart';
 import 'core/download_service.dart';
 import 'core/launch_diagnostics.dart';
 import 'core/macos_window_bounds.dart';
@@ -45,9 +46,15 @@ Future<MarcoAppBootstrapResult> _defaultBootstrapApp() async {
     }
   }
   MarcoLaunchDiagnostics.record('storage_init_start');
+  final curatedWarmFuture = CuratedDiscoveryService.warmFromDisk();
   final storage = await StorageService.init(
     deferSecureCredentialHydration: !kIsWeb && Platform.isIOS,
   );
+  // Let the tiny curated snapshot JSON finish hydrating before Frame 1 builds
+  // (bounded tightly so cold launch is never blocked on slow storage).
+  try {
+    await curatedWarmFuture.timeout(const Duration(milliseconds: 120));
+  } catch (_) {}
   MarcoLaunchDiagnostics.record(
     'storage_init_done',
     'subs=${storage.getSubscriptions().length}',

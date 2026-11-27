@@ -133,7 +133,14 @@ class ScrapedEpisodeInfo {
   }
 
   /// Concise episode label for picker grids (`第 5 集`, `S02E05`, `预告 · ...`).
-  String compactLabel({bool isVariety = false, bool singleItemMovie = false}) {
+  String compactLabel({
+    bool isVariety = false,
+    bool singleItemMovie = false,
+    bool multiVersionMovie = false,
+  }) {
+    if (multiVersionMovie) {
+      return movieVersionLabel;
+    }
     if (singleItemMovie) {
       if (cleanSubtitle.isNotEmpty) return cleanSubtitle;
       if (qualityBadge != null) return '正片 ($qualityBadge)';
@@ -152,6 +159,69 @@ class ScrapedEpisodeInfo {
       return 'S${seasonNumber!.toString().padLeft(2, '0')}E$epStr';
     }
     return '第 $effectiveEpisodeNumber $unit';
+  }
+
+  /// Human-readable resource edition label for movies with multiple files or
+  /// encodes (e.g. `4K 杜比视界`, `1080P · 国语版`, `花絮 · 制作特辑`), never
+  /// synthesizing fake `第 1 集 / 第 2 集` episode numbers.
+  String get movieVersionLabel {
+    if (isSpecial) {
+      final tag = specialTag ?? '特辑';
+      if (cleanSubtitle.isNotEmpty && cleanSubtitle != tag) {
+        return '$tag · $cleanSubtitle';
+      }
+      return tag;
+    }
+    final raw = rawName.trim();
+    final badges = <String>[];
+    final upper = raw.toUpperCase();
+    if (upper.contains('REMUX') || raw.contains('原盘')) {
+      badges.add('原盘 Remux');
+    } else if (upper.contains('2160P') || upper.contains('4K')) {
+      badges.add('4K');
+    } else if (upper.contains('1080P') || raw.contains('超清') || raw.contains('蓝光')) {
+      badges.add('1080P');
+    } else if (upper.contains('720P')) {
+      badges.add('720P');
+    }
+    if (raw.contains('杜比') ||
+        RegExp(r'\b(?:DV|DoVi|Dolby)\b', caseSensitive: false).hasMatch(raw)) {
+      badges.add('杜比视界');
+    } else if (upper.contains('HDR')) {
+      badges.add('HDR');
+    }
+    if (raw.contains('国语') || raw.contains('国配')) {
+      badges.add('国语');
+    } else if (raw.contains('粤语')) {
+      badges.add('粤语');
+    } else if (raw.contains('原声') || raw.contains('英语')) {
+      badges.add('原声');
+    }
+    if (raw.contains('导演剪辑') || upper.contains('DIRECTOR')) {
+      badges.add('导演剪辑版');
+    } else if (raw.contains('加长') || upper.contains('EXTENDED')) {
+      badges.add('加长版');
+    } else if (upper.contains('IMAX')) {
+      badges.add('IMAX版');
+    }
+    if (badges.isNotEmpty) {
+      return badges.take(3).join(' · ');
+    }
+    if (cleanSubtitle.isNotEmpty) {
+      return cleanSubtitle;
+    }
+    final base = raw
+        .split(RegExp(r'[/\\]+'))
+        .last
+        .replaceFirst(
+          RegExp(r'\.(?:mp4|mkv|ts|flv|avi|mov|m4v|m3u8|iso)$', caseSensitive: false),
+          '',
+        )
+        .trim();
+    if (base.isNotEmpty && base.length <= 24) {
+      return base;
+    }
+    return '正片源 ${rawIndex + 1}';
   }
 
   /// Episode title hint sent to Danmaku providers alongside [effectiveEpisodeNumber].
@@ -454,48 +524,53 @@ class EpisodeScraper {
     );
   }
 
+  static bool _isPlausibleYearNumber(int? n) =>
+      n != null && n >= 1900 && n <= 2099;
+
   static int? _parseEpisodeNumberFromCleaned(String noExt, String cleaned) {
-    bool isPlausible(int? n) => n != null && n > 0 && n <= 2000;
+    bool isPlausibleExplicit(int? n) => n != null && n > 0 && n <= 2000;
+    bool isPlausibleLoose(int? n) =>
+        n != null && n > 0 && n <= 2000 && !_isPlausibleYearNumber(n);
 
     // 1. Explicit S01E05 (checked against original noExt first in case cleaning touched anything)
     final se = _seasonEpisodeRe.firstMatch(noExt);
     if (se != null) {
       final n = int.tryParse(se.group(2) ?? '');
-      if (isPlausible(n)) return n;
+      if (isPlausibleExplicit(n)) return n;
     }
 
     // 2. Explicit Chinese episode marker (`第05集`, `第五集`, `第十二期`)
     final cn = _cnEpisodeRe.firstMatch(noExt);
     if (cn != null) {
       final n = parseChineseOrArabicNumber(cn.group(1) ?? '');
-      if (isPlausible(n)) return n;
+      if (isPlausibleExplicit(n)) return n;
     }
 
     // 3. Explicit `E05` / `EP05`
     final ep = _epPrefixRe.firstMatch(cleaned);
     if (ep != null) {
       final n = int.tryParse(ep.group(1) ?? '');
-      if (isPlausible(n)) return n;
+      if (isPlausibleExplicit(n)) return n;
     }
 
     // 4. `05集` / `05话`
     final cnSuffix = _cnSuffixNumRe.firstMatch(cleaned);
     if (cnSuffix != null) {
       final n = int.tryParse(cnSuffix.group(1) ?? '');
-      if (isPlausible(n)) return n;
+      if (isPlausibleExplicit(n)) return n;
     }
 
     // 5. Fansub bracketed pure number `[05]` / `【12】`
     for (final m in _bracketNumRe.allMatches(cleaned)) {
       final n = int.tryParse(m.group(1) ?? '');
-      if (isPlausible(n)) return n;
+      if (isPlausibleLoose(n)) return n;
     }
 
     // 6. `#05`
     final hash = _hashNumRe.firstMatch(cleaned);
     if (hash != null) {
       final n = int.tryParse(hash.group(1) ?? '');
-      if (isPlausible(n)) return n;
+      if (isPlausibleLoose(n)) return n;
     }
 
     // Strip non-numeric bracketed tags (`[官方中字]`, `(2026)`) before looser numeric matching.
@@ -508,21 +583,21 @@ class EpisodeScraper {
     final dashMatches = _dashNumRe.allMatches(withoutTags).toList();
     if (dashMatches.isNotEmpty) {
       final n = int.tryParse(dashMatches.last.group(1) ?? '');
-      if (isPlausible(n)) return n;
+      if (isPlausibleLoose(n)) return n;
     }
 
     // 8. Leading pure number (`05.mp4`, `05 标题`)
     final lead = _leadingNumRe.firstMatch(withoutTags);
     if (lead != null) {
       final n = int.tryParse(lead.group(1) ?? '');
-      if (isPlausible(n)) return n;
+      if (isPlausibleLoose(n)) return n;
     }
 
     // 9. Trailing standalone number (`Title 05`, `Title_05`)
     final trail = _trailingNumRe.firstMatch(withoutTags);
     if (trail != null) {
       final n = int.tryParse(trail.group(1) ?? '');
-      if (isPlausible(n)) return n;
+      if (isPlausibleLoose(n)) return n;
     }
 
     return null;
@@ -627,5 +702,257 @@ class EpisodeScraper {
       specialCount: specialCount,
       hasOrderOrNumberMismatch: hasMismatch,
     );
+  }
+
+  static final RegExp _seriesCategoryOrRemarkRe = RegExp(
+    r'(?:电视剧|连续剧|剧集|国产剧|美剧|韩剧|日剧|泰剧|港剧|台剧|英剧|海外剧|短剧|微短剧|番剧|新番|连载|电视动画|TV动画|综艺|真人秀|脱口秀|晚会|更新至|更至|全\s*\d+\s*[集期话話]|第\s*[一二三四五六七八九十\d]+\s*[季集期话])',
+    caseSensitive: false,
+  );
+
+  static final RegExp _movieCategoryOrRemarkRe = RegExp(
+    r'(?:电影|影片|院线|动作片|喜剧片|爱情片|科幻片|恐怖片|剧情片|战争片|犯罪片|悬疑片|惊悚片|奇幻片|冒险片|动画电影|剧场版|网络大电影|\bMovie\b)',
+    caseSensitive: false,
+  );
+
+  static final RegExp _pureNumericEpisodeNameRe = RegExp(
+    r'^\s*0*([1-9]\d{0,3})(?:[vV]\d)?\s*$',
+  );
+
+  static final RegExp _movieVersionMarkerRe = RegExp(
+    r'(?:'
+    r'杜比视界|杜比全景声|杜比|Dolby(?:\s*(?:Vision|Atmos))?|\bDV\b|DoVi|IMAX|'
+    r'4K|8K|2160[pPiI]?|1440[pPiI]?|1080[pPiI]?|720[pPiI]?|HDR10\+?|HDR|HLG|SDR|'
+    r'原盘|Remux|蓝光|Blu-?Ray|BDRip|BRRip|WEB-?DL|WEBRip|HDRip|DVDRip|HDTV|'
+    r'高码率?|高帧率?|60\s*fps|120\s*fps|HFR|超清|高清|标清|抢先版?|枪版|\bUHD\b|\bFHD\b|\bHD\b|\bBD\b|\bTC\b|\bTS\b|'
+    r'国语|粤语|英语|日语|韩语|法语|德语|俄语|泰语|原声|双语|多音轨|国配|台配|港配|配音|'
+    r'中字|中英|双字|简繁|简体|繁体|内封|外挂|特效字幕|无水印|'
+    r'全景声|Atmos|TrueHD|DTS(?:-?HD)?(?:\s*MA)?|DDP?\s*\d*(?:\.\d+)?|EAC-?3|AC-?3|AAC\d*(?:\.\d+)?|5\.1|7\.1|'
+    r'正片|完整版|未删减|删减版|导演剪辑版?|导剪版?|加长版|公映版|剧场版|院线版|修复版|重制版|典藏版|纪念版|特供版|'
+    r"Director'?s?\s*Cut|Extended|Unrated|Uncut|Theatrical|Remastered|Criterion"
+    r')',
+    caseSensitive: false,
+  );
+
+  static final RegExp _multiPartMarkerRe = RegExp(
+    r'(?:(?<![a-zA-Z])(?:Part|Pt|Disc|CD|Vol)\.?\s*([1-9]\d?|[IVX]+)(?![a-zA-Z0-9])|'
+    r'(?:^|[\s._\-\[\(【（])([上中下])\s*(?:部|集|篇|卷)?(?=$|[\s._\-\]\)】）]))',
+    caseSensitive: false,
+  );
+
+  static final RegExp _trailingSequelNumRe = RegExp(
+    r'(?:(?<=[\u4e00-\u9fff])|[\s._\-])([1-9]|1[0-5]|II|III|IV|V|VI)(?=$)',
+  );
+
+  static String _stripBasenameNoExt(String rawName) {
+    final slashParts = rawName.trim().split(RegExp(r'[/\\]+'));
+    final basename = slashParts.last.trim().isNotEmpty
+        ? slashParts.last.trim()
+        : rawName.trim();
+    return basename.replaceFirst(_extRe, '').trim();
+  }
+
+  /// Returns `true` when [rawName] carries an unambiguous TV/anime episode
+  /// marker (`S01E02`, `第02集`, `EP02`, `02集`, `[02]`, or bare `01`/`02`).
+  /// Bare 4-digit years such as `2024.mkv` are explicitly rejected.
+  static bool hasExplicitEpisodicMarker(String rawName) {
+    final noExt = _stripBasenameNoExt(rawName);
+    if (noExt.isEmpty) return false;
+    if (_seasonEpisodeRe.hasMatch(noExt)) return true;
+    if (_cnEpisodeRe.hasMatch(noExt)) return true;
+    if (_epPrefixRe.hasMatch(noExt)) return true;
+    if (_cnSuffixNumRe.hasMatch(noExt)) return true;
+    final pureNum = _pureNumericEpisodeNameRe.firstMatch(noExt);
+    if (pureNum != null) {
+      final n = int.tryParse(pureNum.group(1) ?? '');
+      if (n != null && n > 0 && n <= 2000 && !_isPlausibleYearNumber(n)) {
+        return true;
+      }
+      return false;
+    }
+    final cleaned = noExt
+        .replaceAll(_fileSizeRe, ' ')
+        .replaceAll(_date8Re, ' ')
+        .replaceAll(_techTokenRe, ' ')
+        .replaceAll(_yearRe, ' ');
+    for (final m in _bracketNumRe.allMatches(cleaned)) {
+      final n = int.tryParse(m.group(1) ?? '');
+      if (n != null && n > 0 && n <= 500 && !_isPlausibleYearNumber(n)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Determines whether a multi-item line actually represents **different encodes
+  /// / quality versions / language tracks / extras of a single Movie** (such as a
+  /// Quark share with `4K DV.mkv` + `1080P.mp4` + `花絮.mp4`, or a CMS movie line
+  /// with `HD中字` + `国语版`) rather than episodic TV, documentaries, mini-series,
+  /// or multi-film sequel collections.
+  static bool isLikelyMultiVersionMovie(
+    List<CmsEpisode> episodes, {
+    String seriesTitle = '',
+    String categoryOrTags = '',
+    String remarks = '',
+    String videoTitle = '',
+    String videoTag = '',
+    String videoRemarks = '',
+    EpisodeScrapeOverride override = const EpisodeScrapeOverride(),
+  }) {
+    if (episodes.length <= 1) return false;
+    if (!override.isDefault) return false;
+    final effectiveTitle =
+        seriesTitle.trim().isNotEmpty ? seriesTitle : videoTitle;
+    final effectiveTags =
+        categoryOrTags.trim().isNotEmpty ? categoryOrTags : videoTag;
+    final effectiveRemarks =
+        remarks.trim().isNotEmpty ? remarks : videoRemarks;
+    final metaBlob = '$effectiveTitle $effectiveTags $effectiveRemarks';
+    if (_seriesCategoryOrRemarkRe.hasMatch(metaBlob)) {
+      return false;
+    }
+    for (final ep in episodes) {
+      if (hasExplicitEpisodicMarker(ep.name)) {
+        return false;
+      }
+    }
+    final isExplicitMovie = _movieCategoryOrRemarkRe.hasMatch(metaBlob);
+    if (!isExplicitMovie && episodes.length > 12) return false;
+
+    final normSeries = normalizeSeriesTitle(effectiveTitle).toLowerCase();
+    final normSeriesCompact =
+        normSeries.replaceAll(RegExp(r'[\s._\-:：·]+'), '');
+
+    var versionMarkedCount = 0;
+    var extraCount = 0;
+    var nonExtraCount = 0;
+    final distinctYears = <String>{};
+    final distinctPartMarkers = <String>{};
+    final distinctSequelTokens = <String>{};
+    final allNonEmptyCompactStems = <String>{};
+    final distinctNonEmptyStems = <String>{};
+    final distinctVersionSignatures = <String>{};
+    var hasEmptyNonExtraStem = false;
+
+    for (final ep in episodes) {
+      final noExt = _stripBasenameNoExt(ep.name);
+      if (noExt.isEmpty) continue;
+      final isExtra = _specialPatterns.any((pair) => pair.$1.hasMatch(noExt));
+      if (isExtra) {
+        extraCount++;
+        continue;
+      }
+      nonExtraCount++;
+
+      final versionTokens = <String>[
+        for (final m in _movieVersionMarkerRe.allMatches(noExt))
+          m.group(0)!.trim().toLowerCase(),
+      ];
+      if (versionTokens.isNotEmpty) {
+        versionMarkedCount++;
+        distinctVersionSignatures.add(versionTokens.join('|'));
+      }
+
+      for (final ym in _yearRe.allMatches(noExt)) {
+        distinctYears.add(ym.group(0)!);
+      }
+
+      for (final pm in _multiPartMarkerRe.allMatches(noExt)) {
+        final token = (pm.group(1) ?? pm.group(2) ?? '').trim().toLowerCase();
+        if (token.isNotEmpty) distinctPartMarkers.add(token);
+      }
+
+      var stem = noExt
+          .replaceAll(_fileSizeRe, ' ')
+          .replaceAll(_date8Re, ' ')
+          .replaceAll(_techTokenRe, ' ')
+          .replaceAll(_movieVersionMarkerRe, ' ')
+          .replaceAll(_yearRe, ' ')
+          .replaceAll(RegExp(r'[\[【\(（][^\]】\)）]*[\]】\)）]'), ' ')
+          .replaceAll(RegExp(r'[\s._\-:：·/\\|]+'), ' ')
+          .trim()
+          .toLowerCase();
+
+      if (stem.isNotEmpty) {
+        final sequelMatch = _trailingSequelNumRe.firstMatch(stem);
+        if (sequelMatch != null) {
+          final baseBeforeSeq =
+              stem.substring(0, sequelMatch.start).trim();
+          final seqTok = sequelMatch.group(1)!.toLowerCase();
+          if (baseBeforeSeq.isNotEmpty) {
+            distinctSequelTokens.add('$baseBeforeSeq::$seqTok');
+          }
+        }
+        final compactStem = stem.replaceAll(RegExp(r'\s+'), '');
+        allNonEmptyCompactStems.add(compactStem);
+        final matchesSeries = normSeriesCompact.isNotEmpty &&
+            (compactStem == normSeriesCompact ||
+                compactStem.startsWith(normSeriesCompact) &&
+                    compactStem.length - normSeriesCompact.length <= 0);
+        if (!matchesSeries) {
+          distinctNonEmptyStems.add(compactStem);
+        }
+      } else {
+        hasEmptyNonExtraStem = true;
+      }
+    }
+
+    // Multiple release years (e.g. 2021 + 2024), multi-part splits (Part 1/2,
+    // 上/下), or sequel collections (教父1/2/3, 沙丘/沙丘2) are separate works or
+    // sequential parts — keep auto-next enabled instead of folding as versions.
+    if (distinctYears.length >= 2) return false;
+    if (distinctPartMarkers.length >= 2) return false;
+    if (distinctSequelTokens.length >= 2) return false;
+
+    final sequelCheckStems = <String>{
+      ...allNonEmptyCompactStems,
+      if (hasEmptyNonExtraStem && normSeriesCompact.isNotEmpty)
+        normSeriesCompact,
+    };
+    final hasSequelSubset = sequelCheckStems.any(
+      (a) => sequelCheckStems.any(
+        (b) =>
+            a != b &&
+            b.startsWith(a) &&
+            RegExp(
+              r'^(?:第?(?:[1-9]|1[0-5]|[二三四五六七八九十])部?|ii|iii|iv|v)$',
+            ).hasMatch(b.substring(a.length)),
+      ),
+    );
+    if (hasSequelSubset) return false;
+
+    if (nonExtraCount == 0) {
+      return isExplicitMovie && extraCount >= 2;
+    }
+    if (nonExtraCount == 1 && extraCount >= 1) {
+      return true;
+    }
+
+    // Distinct thematic stems (e.g. documentary episodes `森林` / `海洋` or
+    // mini-series titles `圣朱尼佩罗 1080P` / `急转直下 1080P`) must NOT be folded
+    // into one movie unless explicitly tagged as Movie AND each file carries a
+    // distinct version/quality/audio signature (e.g. EN title 4K vs CN title 1080P).
+    if (allNonEmptyCompactStems.length >= 2) {
+      if (isExplicitMovie &&
+          versionMarkedCount == nonExtraCount &&
+          distinctVersionSignatures.length >= 2) {
+        return true;
+      }
+      return false;
+    }
+
+    // All non-extra items share the same stem (or bare version labels).
+    // Require positive version/edition/quality/language/extra evidence!
+    if (versionMarkedCount >= 2 ||
+        (versionMarkedCount >= 1 && extraCount >= 1)) {
+      return true;
+    }
+    if (versionMarkedCount >= 1 && distinctNonEmptyStems.isEmpty) {
+      // E.g. `[2024.mkv, 4K杜比.mkv]` or `[沙丘2.mkv, 沙丘2 4K.mkv]`
+      final scraped = scrapeLine(episodes, seriesTitle: effectiveTitle);
+      if (scraped.recognizedCount == 0) {
+        return true;
+      }
+    }
+    return false;
   }
 }

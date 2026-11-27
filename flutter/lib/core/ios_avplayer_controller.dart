@@ -15,6 +15,11 @@ enum IosPlaybackEngineMode {
     labelZh: 'Apple 原生 (AVPlayer 低功耗)',
     shortLabel: 'AVPlayer',
   ),
+  mdk(
+    id: 'mdk',
+    labelZh: 'MDK (Metal 4K 杜比视界)',
+    shortLabel: 'MDK',
+  ),
   mpv(
     id: 'mpv',
     labelZh: 'MPV 全能解码',
@@ -160,6 +165,33 @@ class IosAvPlayerTelemetry {
   }
 }
 
+/// Three-state classification of an `AVMediaSelectionGroup` subtitle track.
+enum IosAvSubtitleFormat {
+  text,
+  bitmap,
+  unknown;
+
+  static IosAvSubtitleFormat fromWire(
+    Object? raw, {
+    required bool isBitmap,
+    required bool? isTextExtractable,
+  }) {
+    final normalized = (raw?.toString() ?? '').trim().toLowerCase();
+    if (normalized == 'text') return IosAvSubtitleFormat.text;
+    if (normalized == 'bitmap' || normalized == 'graphical') {
+      return IosAvSubtitleFormat.bitmap;
+    }
+    if (normalized == 'unknown') return IosAvSubtitleFormat.unknown;
+    if (isBitmap || isTextExtractable == false) {
+      return IosAvSubtitleFormat.bitmap;
+    }
+    if (isTextExtractable == true) {
+      return IosAvSubtitleFormat.text;
+    }
+    return IosAvSubtitleFormat.unknown;
+  }
+}
+
 /// Audio or subtitle track reported by `AVMediaSelectionGroup`.
 @immutable
 class IosAvPlayerTrack {
@@ -167,20 +199,48 @@ class IosAvPlayerTrack {
   final String title;
   final String language;
   final bool selected;
+  final bool isBitmap;
+  final bool? isTextExtractable;
+  final IosAvSubtitleFormat subtitleFormat;
 
   const IosAvPlayerTrack({
     required this.id,
     required this.title,
     this.language = '',
     this.selected = false,
-  });
+    this.isBitmap = false,
+    this.isTextExtractable,
+    IosAvSubtitleFormat? subtitleFormat,
+  }) : subtitleFormat = subtitleFormat ??
+            (isBitmap || isTextExtractable == false
+                ? IosAvSubtitleFormat.bitmap
+                : (isTextExtractable == true
+                    ? IosAvSubtitleFormat.text
+                    : IosAvSubtitleFormat.unknown));
 
   factory IosAvPlayerTrack.fromMap(Map<Object?, Object?> map) {
+    final isBitmap = map['isBitmap'] == true;
+    final rawExtractable = map['isTextExtractable'] is bool
+        ? map['isTextExtractable'] as bool
+        : null;
+    final format = IosAvSubtitleFormat.fromWire(
+      map['subtitleFormat'],
+      isBitmap: isBitmap,
+      isTextExtractable: rawExtractable,
+    );
     return IosAvPlayerTrack(
       id: (map['id'] ?? '').toString(),
       title: (map['title'] ?? '').toString(),
       language: (map['language'] ?? '').toString(),
       selected: map['selected'] == true,
+      isBitmap: isBitmap || format == IosAvSubtitleFormat.bitmap,
+      isTextExtractable: rawExtractable ??
+          switch (format) {
+            IosAvSubtitleFormat.text => true,
+            IosAvSubtitleFormat.bitmap => false,
+            IosAvSubtitleFormat.unknown => null,
+          },
+      subtitleFormat: format,
     );
   }
 }
@@ -270,6 +330,9 @@ class IosAvPlayerController extends ChangeNotifier {
       StreamController<bool>.broadcast();
   final StreamController<double> _systemVolumeCtrl =
       StreamController<double>.broadcast();
+  final StreamController<({List<String> lines, bool hasNativeSamples})>
+      _subtitleCueCtrl =
+      StreamController<({List<String> lines, bool hasNativeSamples})>.broadcast();
 
   StreamSubscription<dynamic>? _eventSub;
   bool _initialized = false;
@@ -325,6 +388,11 @@ class IosAvPlayerController extends ChangeNotifier {
   int _physicalMemoryBytes = 0;
   List<IosAvPlayerTrack> _audioTracks = const <IosAvPlayerTrack>[];
   List<IosAvPlayerTrack> _subtitleTracks = const <IosAvPlayerTrack>[];
+  List<String> _activeSubtitleLines = const <String>[];
+  bool _currentSubtitleHasNonTextSamples = false;
+  bool _suppressNativeSubtitleRendering = false;
+  bool _suppressNativeSubtitleAllowNonText = false;
+  bool _suppressNativeSubtitleSynced = false;
   String? _lastError;
 
   IosAvPlayerController({
@@ -412,6 +480,9 @@ class IosAvPlayerController extends ChangeNotifier {
   int get physicalMemoryBytes => _physicalMemoryBytes;
   List<IosAvPlayerTrack> get audioTracks => _audioTracks;
   List<IosAvPlayerTrack> get subtitleTracks => _subtitleTracks;
+  List<String> get activeSubtitleLines => _activeSubtitleLines;
+  bool get currentSubtitleHasNonTextSamples => _currentSubtitleHasNonTextSamples;
+  bool get suppressNativeSubtitleRendering => _suppressNativeSubtitleRendering;
   String? get lastError => _lastError;
 
   Stream<FallbackToMpvRequested> get onFallbackToMpvRequested =>
@@ -422,6 +493,8 @@ class IosAvPlayerController extends ChangeNotifier {
   Stream<void> get onPipRestoreForeground => _pipRestoreCtrl.stream;
   Stream<bool> get onAirPlayStateChanged => _airPlayCtrl.stream;
   Stream<double> get onSystemVolumeChanged => _systemVolumeCtrl.stream;
+  Stream<({List<String> lines, bool hasNativeSamples})>
+      get onSubtitleCueChanged => _subtitleCueCtrl.stream;
 
   /// Static pre-check before launching `AVPlayer`.
   ///
@@ -718,6 +791,31 @@ class IosAvPlayerController extends ChangeNotifier {
         }
         _notify();
         break;
+      case 'subtitleCue':
+        final rawLines = event['lines'];
+        final lines = rawLines is List
+            ? rawLines
+                .map((e) => e.toString().trim())
+                .where((e) => e.isNotEmpty)
+                .toList(growable: false)
+            : const <String>[];
+        final hasNativeSamples = event['hasNativeSamples'] == true;
+        _activeSubtitleLines = lines;
+        _currentSubtitleHasNonTextSamples = hasNativeSamples && lines.isEmpty;
+        if (!_subtitleCueCtrl.isClosed) {
+          _subtitleCueCtrl.add((
+            lines: lines,
+            hasNativeSamples: hasNativeSamples,
+          ));
+        }
+        _notify();
+        break;
+      case 'subtitleTracksChanged':
+        if (event['subtitleTracks'] is List) {
+          _subtitleTracks = _parseTrackList(event['subtitleTracks'] as List);
+          _notify();
+        }
+        break;
       case 'videoSize':
         _updateMetricsFromMap(event);
         _notify();
@@ -901,6 +999,8 @@ class IosAvPlayerController extends ChangeNotifier {
     String? episodeName,
     String? lineName,
     List<String> externalSubtitles = const <String>[],
+    bool suppressNativeSubtitleRendering = false,
+    bool suppressNativeSubtitleAllowNonText = false,
   }) async {
     if (_disposed) return false;
     final mediaId = ++_nextMediaId;
@@ -958,6 +1058,12 @@ class IosAvPlayerController extends ChangeNotifier {
     _completed = false;
     _hasError = false;
     _lastError = null;
+    _activeSubtitleLines = const <String>[];
+    _currentSubtitleHasNonTextSamples = false;
+    _suppressNativeSubtitleRendering = suppressNativeSubtitleRendering;
+    _suppressNativeSubtitleAllowNonText =
+        suppressNativeSubtitleRendering && suppressNativeSubtitleAllowNonText;
+    _suppressNativeSubtitleSynced = true;
     _position = startPosition;
     _notify();
 
@@ -971,6 +1077,9 @@ class IosAvPlayerController extends ChangeNotifier {
           'startPositionMs': startPosition.inMilliseconds,
           'autoPlay': autoPlay,
           'preferredForwardBufferDuration': preferredForwardBufferDuration,
+          'suppressNativeSubtitleRendering': suppressNativeSubtitleRendering,
+          'suppressNativeSubtitleAllowNonText':
+              suppressNativeSubtitleRendering && suppressNativeSubtitleAllowNonText,
         },
       );
       return _mediaId == mediaId && ok == true;
@@ -1032,6 +1141,7 @@ class IosAvPlayerController extends ChangeNotifier {
     );
     final optimisticPos = Duration(milliseconds: clampedMs);
     _position = optimisticPos;
+    _clearActiveSubtitleCue();
     _notify();
 
     void finishSeekAndReconcile() {
@@ -1502,10 +1612,68 @@ class IosAvPlayerController extends ChangeNotifier {
     } catch (_) {}
   }
 
+  void _clearActiveSubtitleCue() {
+    if (_activeSubtitleLines.isNotEmpty || _currentSubtitleHasNonTextSamples) {
+      _activeSubtitleLines = const <String>[];
+      _currentSubtitleHasNonTextSamples = false;
+      if (!_subtitleCueCtrl.isClosed) {
+        _subtitleCueCtrl.add((
+          lines: const <String>[],
+          hasNativeSamples: false,
+        ));
+      }
+    }
+  }
+
   Future<void> setSubtitleTrack(String? trackId) async {
+    _clearActiveSubtitleCue();
+    _notify();
     if (!isSupportedPlatform || _disposed) return;
     try {
       await _channel.invokeMethod<void>('setSubtitleTrack', trackId);
+    } on MissingPluginException {
+      // Ignore in tests.
+    } catch (_) {}
+  }
+
+  /// Coordinates native `AVPlayerItemLegibleOutput.suppressesPlayerRendering`
+  /// with Flutter's AI subtitle overlay so original subtitles are never
+  /// rendered twice inline while automatically restoring native rendering
+  /// inside system Picture-in-Picture and across media handoffs.
+  ///
+  /// Set [allowNonText] to `true` ONLY when replacing native subtitles with an
+  /// explicit external subtitle track (e.g. mounted SRT overlay) so graphical
+  /// PGS/VobSub tracks do not double-render underneath the external SRT; leave
+  /// `false` for live embedded translation so non-text tracks stay visible.
+  Future<void> setSuppressNativeSubtitleRendering(
+    bool suppress, {
+    bool allowNonText = false,
+    bool force = false,
+  }) async {
+    final effectiveAllowNonText = suppress && allowNonText;
+    if (!force &&
+        _suppressNativeSubtitleSynced &&
+        _suppressNativeSubtitleRendering == suppress &&
+        _suppressNativeSubtitleAllowNonText == effectiveAllowNonText) {
+      return;
+    }
+    _suppressNativeSubtitleRendering = suppress;
+    _suppressNativeSubtitleAllowNonText = effectiveAllowNonText;
+    _suppressNativeSubtitleSynced = true;
+    _notify();
+    if (!isSupportedPlatform || _disposed) return;
+    try {
+      final Object payload = effectiveAllowNonText
+          ? <String, dynamic>{
+              'suppress': true,
+              'allowNonText': true,
+              'mode': 'externalOverlay',
+            }
+          : suppress;
+      await _channel.invokeMethod<void>(
+        'setSuppressNativeSubtitleRendering',
+        payload,
+      );
     } on MissingPluginException {
       // Ignore in tests.
     } catch (_) {}
@@ -1551,6 +1719,17 @@ class IosAvPlayerController extends ChangeNotifier {
     _completionSuppressEventSeq = null;
     _inFlightSeekGens.clear();
     _burstSeekTargets.clear();
+    _activeSubtitleLines = const <String>[];
+    _currentSubtitleHasNonTextSamples = false;
+    _suppressNativeSubtitleRendering = false;
+    _suppressNativeSubtitleAllowNonText = false;
+    _suppressNativeSubtitleSynced = false;
+    if (!_subtitleCueCtrl.isClosed) {
+      _subtitleCueCtrl.add((
+        lines: const <String>[],
+        hasNativeSamples: false,
+      ));
+    }
     _notify();
     if (!isSupportedPlatform || _disposed) return;
     try {
@@ -1591,6 +1770,7 @@ class IosAvPlayerController extends ChangeNotifier {
     _pipRestoreCtrl.close();
     _airPlayCtrl.close();
     _systemVolumeCtrl.close();
+    _subtitleCueCtrl.close();
     super.dispose();
   }
 }

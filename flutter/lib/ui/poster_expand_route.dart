@@ -109,6 +109,7 @@ class PosterExpandRoute<T> extends PageRoute<T> {
   final String posterUrl;
   final String title;
   final String year;
+  final bool isPrivate;
   final bool isFullBleedHero;
   final bool strictHighResPoster;
   final bool forBackdrop;
@@ -161,6 +162,7 @@ class PosterExpandRoute<T> extends PageRoute<T> {
     this.posterUrl = '',
     this.title = '',
     this.year = '',
+    this.isPrivate = false,
     this.isFullBleedHero = false,
     this.strictHighResPoster = false,
     this.forBackdrop = false,
@@ -501,7 +503,7 @@ class PosterExpandRoute<T> extends PageRoute<T> {
   }
 
   bool get _hasSharedPoster =>
-      posterUrl.trim().isNotEmpty || title.trim().isNotEmpty;
+      posterUrl.trim().isNotEmpty || (!isPrivate && title.trim().isNotEmpty);
 
   @override
   Widget buildTransitions(
@@ -637,10 +639,11 @@ class PosterExpandRoute<T> extends PageRoute<T> {
       key: _sharedPosterKey,
       child: PosterImage(
         url: posterUrl,
-        title: title,
-        year: year,
-        highRes: true,
-        strictHighRes: strictHighResPoster,
+        title: isPrivate ? '' : title,
+        year: isPrivate ? '' : year,
+        isPrivate: isPrivate,
+        highRes: !isPrivate,
+        strictHighRes: !isPrivate && strictHighResPoster,
         forBackdrop: forBackdrop,
         fadeIn: false,
         fit: BoxFit.cover,

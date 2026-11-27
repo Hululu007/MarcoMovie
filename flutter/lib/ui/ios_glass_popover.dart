@@ -136,6 +136,216 @@ class _Ios27MorphingPopoverRoute<T> extends PopupRoute<T> {
   }
 }
 
+/// Resolved non-overlapping geometry for [showIosGlassPopover].
+@immutable
+class IosGlassPopoverLayout {
+  final bool useSheetFallback;
+  final double width;
+  final double maxHeight;
+  final double left;
+  final double? top;
+  final double? bottom;
+  final Alignment morphAlignment;
+
+  const IosGlassPopoverLayout({
+    required this.useSheetFallback,
+    required this.width,
+    required this.maxHeight,
+    required this.left,
+    required this.top,
+    required this.bottom,
+    required this.morphAlignment,
+  });
+
+  /// Returns the conservative bounding rectangle occupied by this popover
+  /// given [screenHeight] (used in unit/widget geometry tests to assert zero
+  /// anchor occlusion).
+  Rect boundingRect(double screenHeight) {
+    final resolvedTop =
+        top ?? (screenHeight - (bottom ?? 0.0) - maxHeight);
+    return Rect.fromLTWH(left, resolvedTop, width, maxHeight);
+  }
+}
+
+/// Pure safe-area net-clearance layout solver for [showIosGlassPopover].
+///
+/// Computes actual net clearance on all 4 sides of [anchorRect] inside the
+/// screen's safe area (`safe`), chooses a non-overlapping placement and clamped
+/// size so the popover NEVER covers [anchorRect], and falls back to a compact
+/// scrollable bottom sheet (`useSheetFallback: true`) whenever no
+/// non-overlapping side has enough clearance for comfortable 4-item interaction.
+@visibleForTesting
+IosGlassPopoverLayout computeIosGlassPopoverLayout({
+  required Size screen,
+  required EdgeInsets safe,
+  required Rect? anchorRect,
+  required double maxWidth,
+  required double maxHeight,
+}) {
+  final isCompactHeight = screen.height < 480;
+  final edgeGap = isCompactHeight ? 6.0 : (screen.width <= 360 ? 8.0 : 12.0);
+  const anchorGap = 6.0;
+  const minComfortableW = 208.0;
+  final minComfortableH = isCompactHeight ? 212.0 : 232.0;
+
+  final safeLeft = safe.left + edgeGap;
+  final safeRight = math.max(safeLeft + 160.0, screen.width - safe.right - edgeGap);
+  final safeTop = safe.top + edgeGap;
+  final safeBottom =
+      math.max(safeTop + 160.0, screen.height - safe.bottom - edgeGap);
+
+  final availableW = (safeRight - safeLeft).clamp(160.0, screen.width);
+  final fullSafeSpan = (safeBottom - safeTop).clamp(160.0, screen.height * 0.94);
+
+  if (anchorRect == null) {
+    final sheetW = math.min(maxWidth, availableW);
+    final sheetH = math.min(maxHeight, fullSafeSpan);
+    final left = safeLeft + (availableW - sheetW) * 0.5;
+    final top = safeTop + (fullSafeSpan - sheetH) * 0.5;
+    return IosGlassPopoverLayout(
+      useSheetFallback: false,
+      width: sheetW,
+      maxHeight: sheetH,
+      left: left,
+      top: top,
+      bottom: null,
+      morphAlignment: Alignment.center,
+    );
+  }
+
+  final anchor = anchorRect;
+  final spaceAbove = (anchor.top - anchorGap) - safeTop;
+  final spaceBelow = safeBottom - (anchor.bottom + anchorGap);
+  final spaceLeft = (anchor.left - anchorGap) - safeLeft;
+  final spaceRight = safeRight - (anchor.right + anchorGap);
+
+  final isSideEdgeAnchor =
+      (anchor.center.dx > screen.width * 0.72 ||
+          anchor.center.dx < screen.width * 0.28) &&
+      anchor.center.dy >= screen.height * 0.22 &&
+      anchor.center.dy <= screen.height * 0.78;
+
+  IosGlassPopoverLayout? tryPlaceLeft() {
+    if (spaceLeft < minComfortableW || fullSafeSpan < 160.0) return null;
+    final bubbleW = math.min(maxWidth, spaceLeft);
+    final bubbleH = math.min(maxHeight, fullSafeSpan);
+    final left = (anchor.left - anchorGap - bubbleW)
+        .clamp(
+          safeLeft,
+          math.max(safeLeft, anchor.left - anchorGap - bubbleW),
+        )
+        .toDouble();
+    final top = (anchor.center.dy - bubbleH * 0.5)
+        .clamp(safeTop, math.max(safeTop, safeBottom - bubbleH))
+        .toDouble();
+    return IosGlassPopoverLayout(
+      useSheetFallback: false,
+      width: bubbleW,
+      maxHeight: bubbleH,
+      left: left,
+      top: top,
+      bottom: null,
+      morphAlignment: const Alignment(1.0, 0.0),
+    );
+  }
+
+  IosGlassPopoverLayout? tryPlaceRight() {
+    if (spaceRight < minComfortableW || fullSafeSpan < 160.0) return null;
+    final bubbleW = math.min(maxWidth, spaceRight);
+    final bubbleH = math.min(maxHeight, fullSafeSpan);
+    final left = anchor.right + anchorGap;
+    final top = (anchor.center.dy - bubbleH * 0.5)
+        .clamp(safeTop, math.max(safeTop, safeBottom - bubbleH))
+        .toDouble();
+    return IosGlassPopoverLayout(
+      useSheetFallback: false,
+      width: bubbleW,
+      maxHeight: bubbleH,
+      left: left,
+      top: top,
+      bottom: null,
+      morphAlignment: const Alignment(-1.0, 0.0),
+    );
+  }
+
+  IosGlassPopoverLayout? tryPlaceVertical({required bool below}) {
+    final clearance = below ? spaceBelow : spaceAbove;
+    if (clearance < minComfortableH) return null;
+    final bubbleW = math.min(maxWidth, availableW);
+    final bubbleH = math.min(maxHeight, clearance);
+    final left = (anchor.center.dx - bubbleW * 0.5)
+        .clamp(safeLeft, math.max(safeLeft, safeRight - bubbleW))
+        .toDouble();
+    final normX = (((anchor.center.dx - left) / math.max(bubbleW, 1.0)) * 2.0 - 1.0)
+        .clamp(-1.0, 1.0);
+    if (below) {
+      return IosGlassPopoverLayout(
+        useSheetFallback: false,
+        width: bubbleW,
+        maxHeight: bubbleH,
+        left: left,
+        top: anchor.bottom + anchorGap,
+        bottom: null,
+        morphAlignment: Alignment(normX, -1.0),
+      );
+    }
+    return IosGlassPopoverLayout(
+      useSheetFallback: false,
+      width: bubbleW,
+      maxHeight: bubbleH,
+      left: left,
+      top: null,
+      bottom: screen.height - (anchor.top - anchorGap),
+      morphAlignment: Alignment(normX, 1.0),
+    );
+  }
+
+  // 1. Side-edge buttons (e.g., symmetrical right-edge AI button) strongly
+  //    prefer opening horizontally away from the anchor so they never cover it.
+  if (isSideEdgeAnchor) {
+    final sidePrimary = anchor.center.dx > screen.width * 0.5
+        ? tryPlaceLeft()
+        : tryPlaceRight();
+    if (sidePrimary != null) return sidePrimary;
+    final sideSecondary = anchor.center.dx > screen.width * 0.5
+        ? tryPlaceRight()
+        : tryPlaceLeft();
+    if (sideSecondary != null) return sideSecondary;
+  }
+
+  // 2. Top/bottom anchors pick whichever vertical side has larger clearance,
+  //    strictly honoring net clearance without overlapping the anchor.
+  final preferBelow = spaceBelow >= spaceAbove;
+  final primaryVert = tryPlaceVertical(below: preferBelow);
+  if (primaryVert != null) return primaryVert;
+  final secondaryVert = tryPlaceVertical(below: !preferBelow);
+  if (secondaryVert != null) return secondaryVert;
+
+  // 3. Compact-height landscape screens (e.g. 375pt tall iPhone) where vertical
+  //    clearance above/below the toolbar is tight: try placing horizontally
+  //    beside the anchor using the full safe height!
+  final preferLeft = spaceLeft >= spaceRight;
+  final sideAlt1 = preferLeft ? tryPlaceLeft() : tryPlaceRight();
+  if (sideAlt1 != null) return sideAlt1;
+  final sideAlt2 = preferLeft ? tryPlaceRight() : tryPlaceLeft();
+  if (sideAlt2 != null) return sideAlt2;
+
+  // 4. No non-overlapping popover direction has enough clearance -> downgrade
+  //    cleanly to a compact scrollable bottom sheet!
+  final sheetW = math.min(math.max(maxWidth, 320.0), availableW);
+  final sheetH = math.min(maxHeight, fullSafeSpan);
+  final sheetLeft = safeLeft + (availableW - sheetW) * 0.5;
+  return IosGlassPopoverLayout(
+    useSheetFallback: true,
+    width: sheetW,
+    maxHeight: sheetH,
+    left: sheetLeft,
+    top: null,
+    bottom: safe.bottom + edgeGap,
+    morphAlignment: Alignment.bottomCenter,
+  );
+}
+
 class _IosGlassPopoverOverlay extends StatefulWidget {
   final Animation<double> routeAnimation;
   final Rect? anchorRect;
@@ -240,46 +450,19 @@ class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay>
     final screen = media.size;
     final safe = media.padding;
     final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
-    const edgeGap = 12.0;
-    const anchorGap = 8.0;
     const menuRadius = 24.0;
 
-    final safeLeft = safe.left + edgeGap;
-    final safeRight =
-        math.max(safeLeft + 180.0, screen.width - safe.right - edgeGap);
-    final safeTop = safe.top + edgeGap;
-    final safeBottom =
-        math.max(safeTop + 140.0, screen.height - safe.bottom - edgeGap);
-
-    final availableW = (safeRight - safeLeft).clamp(180.0, screen.width);
-    final bubbleW = math.min(maxWidth, availableW);
-    final anchor = anchorRect ??
-        Rect.fromCenter(
-          center: Offset(screen.width / 2, screen.height * 0.42),
-          width: 40,
-          height: 40,
-        );
-
-    final spaceBelow = safeBottom - (anchor.bottom + anchorGap);
-    final spaceAbove = (anchor.top - anchorGap) - safeTop;
-    final showBelow =
-        spaceBelow >= math.min(maxHeight, 210) || spaceBelow >= spaceAbove;
-
-    final maxAvailableH = showBelow ? spaceBelow : spaceAbove;
-    final bubbleMaxH = math.min(
-      maxHeight,
-      maxAvailableH.clamp(120.0, screen.height * 0.86),
+    final layout = computeIosGlassPopoverLayout(
+      screen: screen,
+      safe: safe,
+      anchorRect: anchorRect,
+      maxWidth: maxWidth,
+      maxHeight: maxHeight,
     );
-
-    final rawLeft = anchor.center.dx - bubbleW / 2;
-    final left = rawLeft.clamp(safeLeft, safeRight - bubbleW);
-    final anchorNormalizedX =
-        (((anchor.center.dx - left) / math.max(bubbleW, 1.0)) * 2.0 - 1.0)
-            .clamp(-1.0, 1.0);
-    final morphAlignment = Alignment(
-      anchorNormalizedX,
-      showBelow ? -1.0 : 1.0,
-    );
+    final bubbleW = layout.width;
+    final bubbleMaxH = layout.maxHeight;
+    final left = layout.left;
+    final morphAlignment = layout.morphAlignment;
 
     final isDark = forceDark || ApplePalette.isDarkOf(context);
     final reduce = IosLiquidGlassBridge.reduceTransparency ||
@@ -302,14 +485,22 @@ class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay>
       child: Material(
         type: MaterialType.transparency,
         child: ConstrainedBox(
+          key: ValueKey<String>(
+            layout.useSheetFallback
+                ? 'ios-glass-popover-sheet-fallback'
+                : 'ios-glass-popover-surface',
+          ),
           constraints: BoxConstraints(
-            minWidth: math.min(220, bubbleW),
+            minWidth: math.min(200, bubbleW),
             maxWidth: bubbleW,
             maxHeight: bubbleMaxH,
           ),
           child: AnimatedBuilder(
             animation: _morphCtrl,
             builder: (context, menuChild) {
+              const anchorGap = 6.0;
+              final anchorHeight = anchorRect?.height ?? 40.0;
+              final opensDownward = layout.top != null;
               final rawT = _morphCtrl.value;
               final clampedT = rawT.clamp(0.0, 1.0);
               final opacity = reduceMotion
@@ -321,13 +512,13 @@ class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay>
               final currentRadius = reduceMotion
                   ? menuRadius
                   : lerpDouble(
-                      math.min(anchor.height * 0.5, menuRadius),
+                      math.min(anchorHeight * 0.5, menuRadius),
                       menuRadius,
                       clampedT,
                     )!;
               final translateDy = reduceMotion
                   ? 0.0
-                  : (showBelow ? -anchorGap : anchorGap) * (1.0 - clampedT);
+                  : (opensDownward ? -anchorGap : anchorGap) * (1.0 - clampedT);
 
               return Opacity(
                 opacity: opacity,
@@ -430,16 +621,15 @@ class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay>
       ),
     );
 
-    final positioned = showBelow
+    final Widget positioned = layout.top != null
         ? Positioned(
             left: left,
-            top: (anchor.bottom + anchorGap).clamp(safeTop, safeBottom - 120),
+            top: layout.top,
             child: bubble,
           )
         : Positioned(
             left: left,
-            bottom: (screen.height - (anchor.top - anchorGap))
-                .clamp(safe.bottom + edgeGap, screen.height - safeTop - 120),
+            bottom: layout.bottom ?? (safe.bottom + 8.0),
             child: bubble,
           );
 

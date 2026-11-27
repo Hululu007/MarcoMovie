@@ -1,6 +1,4 @@
 // Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
-import 'dart:io';
-
 import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -44,29 +42,87 @@ class OnboardingPrefs {
 
   bool get playHintDismissed => _prefs.getBool(playHintDismissedKey) ?? false;
 
-  /// Returns `true` when [currentVersion] is a valid semantic version and the
-  /// user has not yet seen the post-update safety & sponsorship notice for it.
-  bool shouldShowPostUpdateNotice(String currentVersion) {
+  /// Normalizes `version` and optional `buildNumber` into a canonical version
+  /// token (`x.y.z` or `x.y.z+build`).
+  static String normalizeVersionToken(
+    String version, {
+    String buildNumber = '',
+  }) {
+    final v = version.trim();
+    if (!RegExp(r'^\d+\.\d+\.\d+(?:\+\d+)?$').hasMatch(v)) return '';
+    if (v.contains('+')) return v;
+    final b = buildNumber.trim();
+    if (b.isNotEmpty && RegExp(r'^\d+$').hasMatch(b)) {
+      return '$v+$b';
+    }
+    return v;
+  }
+
+  static String _baseSemver(String token) {
+    final idx = token.indexOf('+');
+    return idx >= 0 ? token.substring(0, idx) : token;
+  }
+
+  /// One-time migration for legacy bare semver tokens (e.g. `'0.7.10'` saved
+  /// before `+build` tokens were introduced): upgrades the persisted token to
+  /// the full `x.y.z+build` [currentVersion] when the base semver matches so a
+  /// subsequent build-only upgrade (`0.7.10+104` -> `0.7.10+105`) reliably
+  /// triggers the post-update notice.
+  Future<bool> migrateLegacyBareVersionTokenIfNeeded(
+    String currentVersion,
+  ) async {
+    final clean = currentVersion.trim();
+    if (!clean.contains('+') ||
+        !RegExp(r'^\d+\.\d+\.\d+\+\d+$').hasMatch(clean)) {
+      return false;
+    }
+    final seen = lastSeenAppVersion;
+    if (seen.isEmpty || seen.contains('+')) return false;
+    if (_baseSemver(seen) != _baseSemver(clean)) return false;
+    return markPostUpdateNoticeSeen(clean);
+  }
+
+  /// Returns `true` when [currentVersion] is a valid semantic version (with or
+  /// without `+build`) and the user has not yet seen the post-update safety &
+  /// sponsorship notice for it.
+  ///
+  /// Passing [hasExistingUserData] = `true` ensures existing users upgrading
+  /// from an older version where `officialChannelNoticeVersion` was never
+  /// stamped (`0`) and `lastSeenAppVersion` was empty still receive the
+  /// post-update popup on first launch after updating.
+  bool shouldShowPostUpdateNotice(
+    String currentVersion, {
+    bool hasExistingUserData = false,
+  }) {
     if (OhosRuntime.isOhos) return false;
     final clean = currentVersion.trim();
-    if (!RegExp(r'^\d+\.\d+\.\d+$').hasMatch(clean)) return false;
+    if (!RegExp(r'^\d+\.\d+\.\d+(?:\+\d+)?$').hasMatch(clean)) return false;
     final seen = lastSeenAppVersion;
-    if (seen == clean) return false;
-    if (seen.isNotEmpty) return true;
+    if (seen.isNotEmpty) {
+      if (seen == clean) return false;
+      final seenBase = _baseSemver(seen);
+      final cleanBase = _baseSemver(clean);
+      // Compatibility when one side carries `+build` and the other is bare
+      // semver (e.g. legacy stored `0.7.10` or unit tests querying `'0.7.10'`).
+      // Call `migrateLegacyBareVersionTokenIfNeeded(clean)` on startup so a
+      // subsequent build-only bump (`0.7.10+104` -> `0.7.10+105`) triggers.
+      if (!seen.contains('+') || !clean.contains('+')) {
+        if (seenBase == cleanBase) return false;
+      }
+      return true;
+    }
     // When `seen` is empty:
-    // - Fresh installs have `officialChannelNoticeVersion == 0`, so the
-    //   initial official-channel notice handles first open and stamps `clean`.
-    // - Existing users upgrading from an earlier release have
-    //   `officialChannelNoticeVersion >= 1` and see this notice once.
-    if (officialChannelNoticeVersion < currentOfficialChannelNoticeVersion) {
-      return false;
-    }
-    final inFlutterTest =
-        !kIsWeb && Platform.environment.containsKey('FLUTTER_TEST');
-    if (inFlutterTest && !debugEnablePostUpdateAutoPopInTest) {
-      return false;
-    }
-    return true;
+    // - True fresh installs (`!hasExistingUserData` and
+    //   `officialChannelNoticeVersion == 0` and `doneVersion == 0`) show the
+    //   initial `OfficialChannelNoticeDialog` and stamp `lastSeenAppVersion`.
+    // - Existing users upgrading from any earlier release (`hasExistingUserData`
+    //   or `officialChannelNoticeVersion >= 1` or `doneVersion >= 1`) MUST see
+    //   the post-update notice on first open after updating.
+    final isUpgradedInstall =
+        hasExistingUserData ||
+        officialChannelNoticeVersion >= currentOfficialChannelNoticeVersion ||
+        doneVersion >= OnboardingPrefs.currentVersion;
+    return isUpgradedInstall;
   }
 
   /// Persists acknowledgment of the post-update notice for [version].

@@ -23,12 +23,31 @@ def strip_dsym_bundles(app_dir: Path) -> None:
             shutil.rmtree(dsym)
 
 
-def validate_app(app_dir: Path, max_min_ios: str | None = None) -> None:
+def validate_app(
+    app_dir: Path,
+    max_min_ios: str | None = None,
+    expected_version: str | None = None,
+    expected_build: str | None = None,
+) -> None:
     """Reject dependencies compiled for a newer iOS. Rewriting minos hides dyld errors."""
     target_str = (max_min_ios or os.environ.get("MARCOMOVIE_IOS_MIN_TARGET") or "14.0").strip()
     max_tuple, max_packed = _parse_min_ios(target_str)
-    if not (app_dir / 'Info.plist').is_file():
+    app_plist = app_dir / 'Info.plist'
+    if not app_plist.is_file():
         raise ValueError('Missing application Info.plist')
+    app_metadata = plistlib.loads(app_plist.read_bytes())
+    if expected_version:
+        actual_ver = str(app_metadata.get('CFBundleShortVersionString') or '').strip()
+        if actual_ver != expected_version.strip():
+            raise ValueError(
+                f'{app_plist}: CFBundleShortVersionString={actual_ver!r} != expected {expected_version!r}'
+            )
+    if expected_build:
+        actual_build = str(app_metadata.get('CFBundleVersion') or '').strip()
+        if actual_build != str(expected_build).strip():
+            raise ValueError(
+                f'{app_plist}: CFBundleVersion={actual_build!r} != expected {expected_build!r}'
+            )
     binaries = 0
     for path in app_dir.rglob('*'):
         if path.is_symlink() or not path.is_file():
@@ -120,18 +139,31 @@ def codesign_bundle(app_dir: Path) -> None:
 def main() -> None:
     args = sys.argv[1:]
     max_min_ios = None
+    expected_version = None
+    expected_build = None
     filtered = []
     idx = 0
     while idx < len(args):
         if args[idx] == "--min-ios" and idx + 1 < len(args):
             max_min_ios = args[idx + 1]
             idx += 2
+        elif args[idx] == "--expected-version" and idx + 1 < len(args):
+            expected_version = args[idx + 1]
+            idx += 2
+        elif args[idx] == "--expected-build" and idx + 1 < len(args):
+            expected_build = args[idx + 1]
+            idx += 2
         else:
             filtered.append(args[idx])
             idx += 1
     app_dir = Path(filtered[0]).resolve()
     strip_dsym_bundles(app_dir)
-    validate_app(app_dir, max_min_ios=max_min_ios)
+    validate_app(
+        app_dir,
+        max_min_ios=max_min_ios,
+        expected_version=expected_version,
+        expected_build=expected_build,
+    )
     codesign_bundle(app_dir)
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app_dir)], check=True)
 

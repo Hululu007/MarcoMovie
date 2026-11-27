@@ -109,7 +109,17 @@ abstract class MdkNativeBackend {
   Future<void> disposeAsync();
 }
 
-class _RealMdkNativeBackend implements MdkNativeBackend {
+/// Optional capability interface implemented by real MDK backends (and
+/// targeted tests) to expose native subtitle cue text callbacks and immediate
+/// cancellation of pre-first-frame texture waits without breaking legacy
+/// `MdkNativeBackend` test fakes.
+abstract class MdkExtendedNativeBackend {
+  Stream<({double startSec, double endSec, List<String> lines})>
+      get onSubtitleText;
+  void cancelPendingTextureWait();
+}
+
+class _RealMdkNativeBackend implements MdkNativeBackend, MdkExtendedNativeBackend {
   final mdk.Player _inner = mdk.Player();
   final StreamController<({int oldStatus, int newStatus})> _statusCtl =
       StreamController<({int oldStatus, int newStatus})>.broadcast();
@@ -118,9 +128,13 @@ class _RealMdkNativeBackend implements MdkNativeBackend {
   final StreamController<({int error, String category, String detail})>
       _eventCtl = StreamController<
           ({int error, String category, String detail})>.broadcast();
+  final StreamController<({double startSec, double endSec, List<String> lines})>
+      _subtitleCtl = StreamController<
+          ({double startSec, double endSec, List<String> lines})>.broadcast();
   late final StreamSubscription<dynamic> _statusSub;
   late final StreamSubscription<dynamic> _stateSub;
   late final StreamSubscription<dynamic> _eventSub;
+  Completer<void>? _pendingTextureSizeCancel;
   bool _disposed = false;
 
   _RealMdkNativeBackend() {
@@ -146,7 +160,25 @@ class _RealMdkNativeBackend implements MdkNativeBackend {
         ));
       }
     });
+    try {
+      _inner.onSubtitleText((start, end, text) {
+        if (_disposed || _subtitleCtl.isClosed) return;
+        final lines = text
+            .map((e) => e.trim())
+            .where((e) => e.isNotEmpty)
+            .toList(growable: false);
+        _subtitleCtl.add((
+          startSec: start,
+          endSec: end,
+          lines: lines,
+        ));
+      });
+    } catch (_) {}
   }
+
+  @override
+  Stream<({double startSec, double endSec, List<String> lines})>
+      get onSubtitleText => _subtitleCtl.stream;
 
   @override
   ValueListenable<int?> get textureIdListenable => _inner.textureId;
@@ -358,7 +390,27 @@ class _RealMdkNativeBackend implements MdkNativeBackend {
     if (cancelled()) {
       return -1;
     }
-    final size = await _inner.textureSize;
+    final sizeCancel = Completer<void>();
+    final prevCancel = _pendingTextureSizeCancel;
+    if (prevCancel != null && !prevCancel.isCompleted) {
+      prevCancel.complete();
+    }
+    _pendingTextureSizeCancel = sizeCancel;
+    final dynamic sizeFuture = _inner.textureSize;
+    unawaited(
+      (sizeFuture as Future<dynamic>).then<void>((_) {}, onError: (_) {}),
+    );
+    dynamic size;
+    try {
+      size = await Future.any<dynamic>(<Future<dynamic>>[
+        sizeFuture,
+        sizeCancel.future.then<dynamic>((_) => null),
+      ]);
+    } finally {
+      if (identical(_pendingTextureSizeCancel, sizeCancel)) {
+        _pendingTextureSizeCancel = null;
+      }
+    }
     if (size == null || cancelled()) {
       return -1;
     }
@@ -369,7 +421,13 @@ class _RealMdkNativeBackend implements MdkNativeBackend {
   /// `_videoSize.future` without freeing the native `mdkPlayerAPI*` handle. If
   /// `CreateRT` IPC is already in flight, setting `media = ''` does not delete
   /// the handle so the in-flight texture completes safely before disposal.
+  @override
   void cancelPendingTextureWait() {
+    final pendingCancel = _pendingTextureSizeCancel;
+    _pendingTextureSizeCancel = null;
+    if (pendingCancel != null && !pendingCancel.isCompleted) {
+      pendingCancel.complete();
+    }
     if (_disposed) return;
     try {
       _inner.state = mdk.PlaybackState.stopped;
@@ -383,12 +441,21 @@ class _RealMdkNativeBackend implements MdkNativeBackend {
   Future<void> disposeAsync() async {
     if (_disposed) return;
     _disposed = true;
+    final pendingCancel = _pendingTextureSizeCancel;
+    _pendingTextureSizeCancel = null;
+    if (pendingCancel != null && !pendingCancel.isCompleted) {
+      pendingCancel.complete();
+    }
+    try {
+      _inner.onSubtitleText(null);
+    } catch (_) {}
     await _statusSub.cancel();
     await _stateSub.cancel();
     await _eventSub.cancel();
     await _statusCtl.close();
     await _stateCtl.close();
     await _eventCtl.close();
+    await _subtitleCtl.close();
     // If native window destruction has already started (e.g. bounded exit timed
     // out while a slow texture callback was still in flight), do NOT issue new
     // Flutter MethodChannel IPC (`ReleaseRT`) against a tearing-down messenger
@@ -434,11 +501,39 @@ class MdkPlatformPlayer extends PlatformPlayer {
     'dav1d',
   ];
 
+  /// Default Apple iOS / iPadOS hardware decoder chain (`VideoToolbox` zero-copy
+  /// Metal `IOSurface` + built-in Metal Dolby Vision Profile 5/7/8 `ICtCp`
+  /// reshape & HDR10 tone-mapping).
+  static const List<String> defaultIosDecoders = <String>[
+    'VT',
+    'FFmpeg',
+    'dav1d',
+  ];
+
+  /// Compatibility iOS `VideoToolbox` copy-back chain.
+  static const List<String> compatIosDecoders = <String>[
+    'VT:copy=1',
+    'VT',
+    'FFmpeg',
+    'dav1d',
+  ];
+
   static bool _globalInitialized = false;
 
+  /// Whether Apple iOS / iPadOS Metal `mdk.framework` (`fvp`) is enabled.
+  static bool get isIosSupported => true;
+
   /// Resolves the decoder priority list for the user's playback strategy.
-  static List<String> decodersForKernelStrategy(String kernelStrategy) {
-    if (kernelStrategy.trim().toLowerCase() == 'ijk') {
+  static List<String> decodersForKernelStrategy(
+    String kernelStrategy, {
+    TargetPlatform? platform,
+  }) {
+    final effectivePlatform = platform ?? defaultTargetPlatform;
+    final isCompat = kernelStrategy.trim().toLowerCase() == 'ijk';
+    if (!kIsWeb && effectivePlatform == TargetPlatform.iOS) {
+      return isCompat ? compatIosDecoders : defaultIosDecoders;
+    }
+    if (isCompat) {
       return legacyIgpuCompatDecoders;
     }
     return defaultIgpuDecoders;
@@ -460,19 +555,49 @@ class MdkPlatformPlayer extends PlatformPlayer {
     return '';
   }
 
-  /// Idempotently initializes `fvp` / `libmdk` global options on Windows
-  /// (activating bundled MDK key, `d3d11.sync.cpu=1` for smooth iGPU texture
-  /// sync, and Windows CJK subtitle font fallback).
+  static String _resolveIosSubtitleFont() {
+    if (kIsWeb || !Platform.isIOS) return '';
+    const candidates = <String>[
+      '/System/Library/Fonts/PingFang.ttc',
+      '/System/Library/Fonts/CoreUI/PingFang.ttc',
+      '/System/Library/Fonts/LanguageSupport/PingFang.ttc',
+    ];
+    for (final path in candidates) {
+      try {
+        if (File(path).existsSync()) return path;
+      } catch (_) {}
+    }
+    return '';
+  }
+
+  /// Idempotently initializes `fvp` / `libmdk` global options on Windows & iOS
+  /// (activating bundled MDK key for commercial Metal Dolby Vision / HDR + D3D11
+  /// hardware pipelines and CJK subtitle font fallback).
   static void ensureInitialized() {
     if (_globalInitialized ||
         kIsWeb ||
         OhosRuntime.isOhos ||
-        !Platform.isWindows ||
+        (!Platform.isWindows && !Platform.isIOS) ||
         Platform.environment.containsKey('FLUTTER_TEST')) {
       return;
     }
     _globalInitialized = true;
     try {
+      if (Platform.isIOS) {
+        final iosFont = _resolveIosSubtitleFont();
+        fvp.registerWith(
+          options: <String, dynamic>{
+            'platforms': <String>['ios'],
+            'fastSeek': true,
+            'video.decoders': defaultIosDecoders,
+            'global': <String, Object>{
+              'log': 'warning',
+              'subtitle.fonts.file': iosFont,
+            },
+          },
+        );
+        return;
+      }
       final fontPath = _resolveWindowsSubtitleFont();
       fvp.registerWith(
         options: <String, dynamic>{
@@ -497,12 +622,35 @@ class MdkPlatformPlayer extends PlatformPlayer {
   StreamSubscription<({int oldStatus, int newStatus})>? _statusSub;
   StreamSubscription<mdk.PlaybackState>? _stateSub;
   StreamSubscription<({int error, String category, String detail})>? _eventSub;
+  StreamSubscription<({double startSec, double endSec, List<String> lines})>?
+      _subtitleSub;
   Timer? _positionTimer;
   int _openGeneration = 0;
   int _texturePreparedGeneration = -1;
   Future<void>? _textureUpdateFuture;
   Completer<void>? _pendingPrepareCancel;
+  Completer<void>? _pendingTextureWaitCancel;
+  double? _activeSubtitleEndSec;
   bool _disposed = false;
+
+  /// Returns true when [codec] denotes a graphical/bitmap subtitle stream
+  /// (e.g. Blu-ray PGS, DVD VobSub, DVB-SUB) from which plain text cannot be
+  /// extracted without OCR.
+  static bool isBitmapSubtitleCodec(String? codec) {
+    final c = (codec ?? '').trim().toLowerCase();
+    if (c.isEmpty) return false;
+    return c.contains('pgs') ||
+        c.contains('dvd_subtitle') ||
+        c.contains('vobsub') ||
+        c.contains('dvb_subtitle') ||
+        c.contains('xsub') ||
+        c.contains('bitmap') ||
+        c == 'sup' ||
+        c == 's_hdmv/pgs';
+  }
+
+  bool get isCurrentSubtitleTrackBitmap =>
+      isBitmapSubtitleCodec(state.track.subtitle.codec);
   bool _acceptingBackendEvents = true;
   bool _userRequestedStop = false;
   bool _demuxerReachedEnd = false;
@@ -533,8 +681,11 @@ class MdkPlatformPlayer extends PlatformPlayer {
 
   void _configureBaselineProperties(String kernelStrategy) {
     _backend.videoDecoders = decodersForKernelStrategy(kernelStrategy);
-    // Crucial for Intel/AMD iGPU drivers: avoid D3D11 SRV format mismatch.
-    _backend.setProperty('video.decoder', 'shader_resource=0');
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
+      // Crucial for Windows Intel/AMD iGPU drivers: avoid D3D11 SRV format mismatch.
+      // On iOS, leave unset so `VT` binds 10-bit `P010` `IOSurface` zero-copy into Metal!
+      _backend.setProperty('video.decoder', 'shader_resource=0');
+    }
     _backend.setProperty('keep_open', '1');
     _backend.setProperty('avformat.strict', 'experimental');
     _backend.setProperty('avformat.safe', '0');
@@ -688,6 +839,29 @@ class MdkPlatformPlayer extends PlatformPlayer {
         _emitPositionAndBuffer();
       }
     });
+
+    if (_backend is MdkExtendedNativeBackend) {
+      final ext = _backend as MdkExtendedNativeBackend;
+      _subtitleSub = ext.onSubtitleText.listen((cue) {
+        if (_disposed || !_acceptingBackendEvents) return;
+        final lines = cue.lines
+            .map((e) => e.trim())
+            .where((e) => e.isNotEmpty)
+            .toList(growable: false);
+        _activeSubtitleEndSec =
+            (lines.isNotEmpty && cue.endSec > 0) ? cue.endSec : null;
+        state = state.copyWith(subtitle: lines);
+        subtitleController.add(lines);
+      });
+    }
+  }
+
+  void _clearActiveSubtitleLines() {
+    _activeSubtitleEndSec = null;
+    if (state.subtitle.isNotEmpty) {
+      state = state.copyWith(subtitle: const <String>[]);
+      subtitleController.add(const <String>[]);
+    }
   }
 
   Future<void> _refreshTextureSafely({int? generation}) async {
@@ -697,52 +871,71 @@ class MdkPlatformPlayer extends PlatformPlayer {
         WindowsTrayService.isNativeDestroyStarted) {
       return;
     }
-    final previous = _textureUpdateFuture;
-    if (_texturePreparedGeneration == targetGen) {
-      if (previous != null) {
-        try {
-          await previous;
-        } catch (_) {}
-      }
-      return;
+    final cancel = Completer<void>();
+    final prevCancel = _pendingTextureWaitCancel;
+    if (prevCancel != null && !prevCancel.isCompleted) {
+      prevCancel.complete();
     }
-    if (previous != null) {
-      try {
-        await previous;
-      } catch (_) {}
-      if (_disposed ||
-          targetGen != _openGeneration ||
-          _texturePreparedGeneration == targetGen ||
-          WindowsTrayService.isNativeDestroyStarted) {
+    _pendingTextureWaitCancel = cancel;
+
+    Future<void> raceWait(Future<void> op) {
+      return Future.any<void>(<Future<void>>[
+        op,
+        cancel.future,
+      ]);
+    }
+
+    try {
+      final previous = _textureUpdateFuture;
+      if (_texturePreparedGeneration == targetGen) {
+        if (previous != null) {
+          try {
+            await raceWait(previous);
+          } catch (_) {}
+        }
         return;
       }
-    }
-    _texturePreparedGeneration = targetGen;
-    final op = () async {
-      try {
-        if (_backend is _RealMdkNativeBackend) {
-          await (_backend as _RealMdkNativeBackend).updateTextureCancellable(
-            shouldCancel: () =>
-                _disposed ||
-                targetGen != _openGeneration ||
-                WindowsTrayService.isNativeDestroyStarted,
-          );
-        } else {
-          await _backend.updateTexture();
+      if (previous != null) {
+        try {
+          await raceWait(previous);
+        } catch (_) {}
+        if (_disposed ||
+            targetGen != _openGeneration ||
+            _texturePreparedGeneration == targetGen ||
+            WindowsTrayService.isNativeDestroyStarted) {
+          return;
         }
-      } catch (e) {
-        if (_texturePreparedGeneration == targetGen) {
-          _texturePreparedGeneration = -1;
-        }
-        debugPrint('MdkPlatformPlayer updateTexture warning: $e');
       }
-    }();
-    _textureUpdateFuture = op;
-    try {
-      await op;
+      _texturePreparedGeneration = targetGen;
+      final op = () async {
+        try {
+          if (_backend is _RealMdkNativeBackend) {
+            await (_backend as _RealMdkNativeBackend).updateTextureCancellable(
+              shouldCancel: () =>
+                  _disposed ||
+                  targetGen != _openGeneration ||
+                  WindowsTrayService.isNativeDestroyStarted,
+            );
+          } else {
+            await _backend.updateTexture();
+          }
+        } catch (e) {
+          if (_texturePreparedGeneration == targetGen) {
+            _texturePreparedGeneration = -1;
+          }
+          debugPrint('MdkPlatformPlayer updateTexture warning: $e');
+        }
+      }();
+      _textureUpdateFuture = op;
+      unawaited(op.whenComplete(() {
+        if (identical(_textureUpdateFuture, op)) {
+          _textureUpdateFuture = null;
+        }
+      }));
+      await raceWait(op);
     } finally {
-      if (identical(_textureUpdateFuture, op)) {
-        _textureUpdateFuture = null;
+      if (identical(_pendingTextureWaitCancel, cancel)) {
+        _pendingTextureWaitCancel = null;
       }
     }
   }
@@ -838,6 +1031,10 @@ class MdkPlatformPlayer extends PlatformPlayer {
     state = state.copyWith(position: pos, buffer: buf);
     positionController.add(pos);
     bufferController.add(buf);
+    if (_activeSubtitleEndSec != null &&
+        (posMs / 1000.0) > _activeSubtitleEndSec! + 0.15) {
+      _clearActiveSubtitleLines();
+    }
     if (state.duration <= Duration.zero && !_backend.isLive) {
       final snap = _backend.readMediaSnapshot();
       if (snap.durationMs > 0) {
@@ -873,8 +1070,16 @@ class MdkPlatformPlayer extends PlatformPlayer {
         break;
       case 'hwdec':
         final compat = value.contains('copy');
-        _backend.videoDecoders =
-            compat ? legacyIgpuCompatDecoders : defaultIgpuDecoders;
+        _backend.videoDecoders = decodersForKernelStrategy(
+          compat ? 'ijk' : 'exo',
+        );
+        break;
+      case 'af':
+        var cleanAf = value.trim();
+        if (cleanAf.startsWith('lavfi=[') && cleanAf.endsWith(']')) {
+          cleanAf = cleanAf.substring('lavfi=['.length, cleanAf.length - 1);
+        }
+        _backend.setProperty('audio.filter', cleanAf);
         break;
       case 'user-agent':
         _backend.setProperty('avio.user_agent', value.trim());
@@ -906,6 +1111,14 @@ class MdkPlatformPlayer extends PlatformPlayer {
     _pendingPrepareCancel = null;
     if (pending != null && !pending.isCompleted) {
       pending.complete();
+    }
+    final pendingTex = _pendingTextureWaitCancel;
+    _pendingTextureWaitCancel = null;
+    if (pendingTex != null && !pendingTex.isCompleted) {
+      pendingTex.complete();
+    }
+    if (_backend is MdkExtendedNativeBackend) {
+      (_backend as MdkExtendedNativeBackend).cancelPendingTextureWait();
     }
   }
 
@@ -1037,6 +1250,7 @@ class MdkPlatformPlayer extends PlatformPlayer {
     cancelPendingOpen();
     _demuxerReachedEnd = false;
     _stopPositionTimer();
+    _clearActiveSubtitleLines();
     _backend.state = mdk.PlaybackState.stopped;
     state = state.copyWith(
       playing: false,
@@ -1080,6 +1294,7 @@ class MdkPlatformPlayer extends PlatformPlayer {
   Future<void> seek(Duration duration) async {
     if (_disposed) return;
     _demuxerReachedEnd = false;
+    _clearActiveSubtitleLines();
     final targetMs = math.max(0, duration.inMilliseconds);
     final clamped = Duration(milliseconds: targetMs);
     state = state.copyWith(position: clamped, completed: false);
@@ -1141,6 +1356,7 @@ class MdkPlatformPlayer extends PlatformPlayer {
       _backend.setMediaForType(track.id, mdk.MediaType.subtitle);
     } else if (track == SubtitleTrack.no()) {
       _backend.activeSubtitleTracks = const <int>[];
+      _clearActiveSubtitleLines();
     } else if (track == SubtitleTrack.auto()) {
       _backend.activeSubtitleTracks = const <int>[0];
     } else {
@@ -1190,16 +1406,18 @@ class MdkPlatformPlayer extends PlatformPlayer {
     await _statusSub?.cancel();
     await _stateSub?.cancel();
     await _eventSub?.cancel();
+    await _subtitleSub?.cancel();
     _statusSub = null;
     _stateSub = null;
     _eventSub = null;
+    _subtitleSub = null;
     try {
       _backend.state = mdk.PlaybackState.stopped;
     } catch (_) {}
     final inFlightTexture = _textureUpdateFuture;
     if (inFlightTexture != null) {
-      if (_backend is _RealMdkNativeBackend) {
-        (_backend as _RealMdkNativeBackend).cancelPendingTextureWait();
+      if (_backend is MdkExtendedNativeBackend) {
+        (_backend as MdkExtendedNativeBackend).cancelPendingTextureWait();
       }
       // Never delete the native `mdkPlayerAPI*` handle while an outstanding
       // `updateTexture()` still owns it; wait unconditionally for the texture

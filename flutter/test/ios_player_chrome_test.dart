@@ -1293,10 +1293,10 @@ void main() {
         await tester.pump(const Duration(milliseconds: 100));
         expect(player.rates.last, 1.0);
 
-        // Wake controls -> speed badge MUST now display 1.0× (synced with _normalSpeed)!
+        // Wake controls -> speed pill returns to default '倍速' label (1.5× cleared)!
         await tester.tapAt(const Offset(420, 220));
         await tester.pump(const Duration(milliseconds: 300));
-        expect(find.text('1.0×'), findsOneWidget);
+        expect(find.text('倍速'), findsOneWidget);
         expect(find.text('1.5×'), findsNothing);
 
         await tester.pumpWidget(const SizedBox.shrink());

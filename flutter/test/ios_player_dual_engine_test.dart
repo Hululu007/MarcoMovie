@@ -258,8 +258,11 @@ void main() {
         findsOneWidget,
       );
 
-      // Tapping engine switch inside 更多 toggles persisted preference between MPV and AVPlayer.
+      // Tapping engine switch inside 更多 opens the 3-engine picker (AVPlayer / MDK / MPV) and persists selection.
       await tester.tap(find.textContaining('播放内核：MPV'));
+      await tester.pumpAndSettle();
+      expect(find.text('MDK (Metal 4K 杜比视界)'), findsOneWidget);
+      await tester.tap(find.text('Apple 原生 AVPlayer'));
       await tester.pumpAndSettle();
       expect(storage.iosPlaybackEngineMode, 'avplayer');
 

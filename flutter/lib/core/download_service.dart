@@ -92,6 +92,7 @@ class DownloadTask {
         'headers': headers,
         if (sourceSite != null) 'sourceSite': {
           'key': sourceSite!.key, 'originalKey': sourceSite!.originalKey,
+          'originalApi': sourceSite!.originalApi,
           'name': sourceSite!.name, 'type': sourceSite!.type, 'api': sourceSite!.api,
           'playUrl': sourceSite!.playUrl, 'ext': sourceSite!.ext,
           'rawExtension': sourceSite!.rawExtension, 'jar': sourceSite!.jar,
@@ -129,6 +130,7 @@ class DownloadTask {
     final source = j['sourceSite'];
     final sourceSite = source is Map ? CmsSite(
       key: '${source['key'] ?? ''}', originalKey: source['originalKey'] as String?,
+      originalApi: source['originalApi'] as String?,
       name: '${source['name'] ?? ''}', type: asInt(source['type']),
       api: '${source['api'] ?? ''}', playUrl: '${source['playUrl'] ?? ''}',
       ext: '${source['ext'] ?? ''}', rawExtension: source['rawExtension'] as String?,
@@ -1074,6 +1076,9 @@ class DownloadService extends ChangeNotifier {
     required List<int> episodeIndexes,
     List<CmsParse> parses = const [],
   }) {
+    if (site.isEffectivelyPrivate) {
+      return 0;
+    }
     var added = 0;
     for (final idx in episodeIndexes) {
       if (idx < 0 || idx >= line.episodes.length) continue;
@@ -1184,6 +1189,7 @@ class DownloadService extends ChangeNotifier {
     for (final id in ids.toSet()) {
       final t = _byId(id);
       if (t == null || !t.isActive) continue;
+      _sessionTouchedIds.add(id);
       if (_running.contains(id)) {
         _stopRequested.add(id);
       } else {
@@ -1203,6 +1209,7 @@ class DownloadService extends ChangeNotifier {
       final t = _byId(id);
       if (t == null) continue;
       if (t.status == DownloadStatus.paused || t.status == DownloadStatus.failed) {
+        _sessionTouchedIds.add(id);
         t.status = DownloadStatus.queued;
         t.error = '';
         changed = true;

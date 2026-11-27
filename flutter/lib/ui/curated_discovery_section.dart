@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -94,6 +95,10 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
     super.initState();
     _syncFromCache();
     _sharedRevision.addListener(_onSharedUpdated);
+    CuratedDiscoveryService.warmupRevision.addListener(_onSharedUpdated);
+    if (!CuratedDiscoveryService.isInitialized) {
+      unawaited(CuratedDiscoveryService.warmFromDisk());
+    }
     if (widget.loadLive) {
       _ensureSharedRefresh();
     }
@@ -102,6 +107,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
   @override
   void dispose() {
     _sharedRevision.removeListener(_onSharedUpdated);
+    CuratedDiscoveryService.warmupRevision.removeListener(_onSharedUpdated);
     super.dispose();
   }
 
@@ -120,10 +126,11 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
     if (_sharedLiveFetch != null) return;
     _sharedLiveFetch = () async {
       try {
-        for (final spec in CuratedDiscoveryService.modules) {
-          await CuratedDiscoveryService.fetchModule(spec);
-          _sharedRevision.value++;
-        }
+        await CuratedDiscoveryService.refreshAllModules(
+          onModuleUpdated: () {
+            _sharedRevision.value++;
+          },
+        );
       } finally {
         _sharedLiveFetch = null;
       }
@@ -865,6 +872,7 @@ class _CuratedLandscapeCard extends StatelessWidget {
                             fit: BoxFit.cover,
                             forBackdrop: true,
                             highRes: true,
+                            deferTitleScrape: true,
                             placeholder: _buildFallbackThumb(video.title, palette),
                           ),
                           Positioned.fill(
@@ -1021,6 +1029,7 @@ class _EditorialCollectionCard extends StatelessWidget {
                         fit: BoxFit.cover,
                         forBackdrop: true,
                         highRes: true,
+                        deferTitleScrape: true,
                         placeholder: Container(color: tintBase),
                       ),
                     DecoratedBox(
@@ -1234,6 +1243,7 @@ class _EditorialMiniWideTile extends StatelessWidget {
                           year: video.year,
                           fit: BoxFit.cover,
                           forBackdrop: true,
+                          deferTitleScrape: true,
                           placeholder: Container(
                             color: Colors.black.withValues(alpha: 0.28),
                           ),
@@ -1520,6 +1530,7 @@ class _StudioFanCard extends StatelessWidget {
                               title: v.title,
                               year: v.year,
                               fit: BoxFit.cover,
+                              deferTitleScrape: true,
                               placeholder: Container(
                                 color: Colors.white.withValues(alpha: 0.08),
                               ),
@@ -1760,6 +1771,7 @@ class _StackedCategoryPill extends StatelessWidget {
                             title: stack[i].title,
                             year: stack[i].year,
                             fit: BoxFit.cover,
+                            deferTitleScrape: true,
                             placeholder: Container(
                               color: palette.groupedTertiary,
                             ),
@@ -1866,6 +1878,7 @@ class _PosterWallMosaicCard extends StatelessWidget {
                                           title: pool[(row * 4 + col) % pool.length].title,
                                           year: pool[(row * 4 + col) % pool.length].year,
                                           fit: BoxFit.cover,
+                                          deferTitleScrape: true,
                                           placeholder: Container(
                                             color: const Color(0xFF242731),
                                           ),
@@ -2062,6 +2075,7 @@ class _CuratedPosterCard extends StatelessWidget {
                               fit: BoxFit.cover,
                               fadeIn: true,
                               highRes: true,
+                              deferTitleScrape: true,
                               placeholder: placeholder,
                             ),
                             if (rankNumber != null)
@@ -2875,6 +2889,7 @@ class _CuratedGravityWallPageState extends State<_CuratedGravityWallPage>
                 year: video.year,
                 fit: BoxFit.cover,
                 highRes: true,
+                deferTitleScrape: true,
                 placeholder: _buildFallbackThumb(video.title, palette),
               ),
             ),

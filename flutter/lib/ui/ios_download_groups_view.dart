@@ -6,12 +6,18 @@ import '../core/download_service.dart';
 import 'apple_theme.dart';
 import 'poster_image.dart';
 
-/// All download tasks of one series (same source + video), episodes ordered.
+/// All download tasks of one series (same confirmed source + privacy domain +
+/// video), episodes ordered.
 class DownloadSeriesGroup {
   final String key;
   final List<DownloadTask> tasks;
+  final bool isPrivate;
 
-  const DownloadSeriesGroup(this.key, this.tasks);
+  const DownloadSeriesGroup(
+    this.key,
+    this.tasks, {
+    this.isPrivate = false,
+  });
 
   DownloadTask get lead => tasks.first;
   String get title => lead.title;
@@ -62,32 +68,92 @@ class DownloadSeriesGroup {
       .fold<int>(0, (s, t) => s + (t.totalBytes > 0 ? t.totalBytes : 0));
 }
 
-String _groupKeyOf(DownloadTask t) {
-  final videoId = t.videoId.trim();
-  if (videoId.isNotEmpty) return 'v\u0001${t.siteKey}\u0001$videoId';
-  return 't\u0001${t.title.trim()}';
+String _normalizeDownloadGroupApi(String raw) {
+  final trimmed = raw.trim();
+  if (trimmed.isEmpty) return '';
+  final parsed = Uri.tryParse(trimmed);
+  if (parsed != null && parsed.hasScheme && parsed.hasAuthority) {
+    final scheme = parsed.scheme.toLowerCase();
+    final host = parsed.host.toLowerCase();
+    final isDefaultPort = !parsed.hasPort ||
+        (scheme == 'http' && parsed.port == 80) ||
+        (scheme == 'https' && parsed.port == 443);
+    final authority = parsed.userInfo.isNotEmpty
+        ? '${parsed.userInfo}@$host${isDefaultPort ? '' : ':${parsed.port}'}'
+        : '$host${isDefaultPort ? '' : ':${parsed.port}'}';
+    // Normalize bare root `/` to empty path while preserving trailing slashes
+    // on non-root paths so `/media` and `/media/` remain distinct endpoints.
+    final path = parsed.path == '/' ? '' : parsed.path;
+    final query = parsed.hasQuery ? '?${parsed.query}' : '';
+    final fragment = parsed.hasFragment ? '#${parsed.fragment}' : '';
+    return '$scheme://$authority$path$query$fragment';
+  }
+  return trimmed == '/' ? '' : trimmed;
 }
 
-/// Groups tasks by series (`siteKey` + `videoId`, falling back to the title).
+String _groupKeyOf(DownloadTask t, {bool? isPrivateOverride}) {
+  final stored = t.sourceSite;
+  final isPriv = isPrivateOverride ?? (stored?.isEffectivelyPrivate ?? false);
+  final subId = (stored?.subscriptionId ?? '').trim();
+  final sourceKey =
+      (stored != null && stored.sourceKey.isNotEmpty) ? stored.sourceKey : t.siteKey;
+  final normApi = _normalizeDownloadGroupApi(
+    (stored != null && stored.sourceApi.trim().isNotEmpty)
+        ? stored.sourceApi
+        : ((stored != null && stored.api.trim().isNotEmpty)
+            ? stored.api
+            : t.siteApi),
+  );
+  final siteType = stored?.type ?? t.siteType;
+  final privacyDomain = isPriv ? 'priv' : 'pub';
+  final originSig =
+      '$privacyDomain\u0001$subId\u0001$siteType\u0001$normApi\u0001$sourceKey';
+  final videoId = t.videoId.trim();
+  if (videoId.isNotEmpty) return 'v\u0001$originSig\u0001$videoId';
+  final title = t.title.trim();
+  if (title.isNotEmpty) return 't\u0001$originSig\u0001$title';
+  return 'u\u0001${t.id}';
+}
+
+/// Groups tasks by confirmed source identity (`privacyDomain` + `subscriptionId`
+/// + `siteType` + case-preserving normalized `siteApi` + `siteKey`) and series
+/// (`videoId`, falling back to `title`).
 ///
 /// Group order follows the first appearance in [tasks] (the service lists the
 /// newest first); episodes are ordered by line (first-added line first) and
 /// then by episode index.
-List<DownloadSeriesGroup> groupDownloadTasks(List<DownloadTask> tasks) {
+List<DownloadSeriesGroup> groupDownloadTasks(
+  List<DownloadTask> tasks, {
+  String Function(DownloadTask task)? groupKeyBuilder,
+  bool Function(DownloadTask task)? isTaskPrivate,
+}) {
   final order = <String>[];
   final buckets = <String, List<DownloadTask>>{};
+  final bucketPrivate = <String, bool>{};
   for (final t in tasks) {
-    final key = _groupKeyOf(t);
+    final priv = isTaskPrivate != null
+        ? isTaskPrivate(t)
+        : (t.sourceSite?.isEffectivelyPrivate ?? false);
+    final key = groupKeyBuilder != null
+        ? groupKeyBuilder(t)
+        : _groupKeyOf(t, isPrivateOverride: priv);
     final bucket = buckets[key];
     if (bucket == null) {
       order.add(key);
       buckets[key] = [t];
+      bucketPrivate[key] = priv;
     } else {
       bucket.add(t);
+      if (priv) bucketPrivate[key] = true;
     }
   }
   return [
-    for (final key in order) DownloadSeriesGroup(key, _sortEpisodes(buckets[key]!)),
+    for (final key in order)
+      DownloadSeriesGroup(
+        key,
+        _sortEpisodes(buckets[key]!),
+        isPrivate: bucketPrivate[key] ?? false,
+      ),
   ];
 }
 
@@ -149,6 +215,8 @@ class IosDownloadGroupsView extends StatefulWidget {
   final ValueChanged<DownloadSeriesGroup> onResumeGroup;
   final ValueChanged<DownloadSeriesGroup> onDeleteGroup;
   final Widget Function()? placeholderBuilder;
+  final String Function(DownloadTask task)? groupKeyBuilder;
+  final bool Function(DownloadTask task)? isTaskPrivate;
 
   const IosDownloadGroupsView({
     super.key,
@@ -162,6 +230,8 @@ class IosDownloadGroupsView extends StatefulWidget {
     required this.onResumeGroup,
     required this.onDeleteGroup,
     this.placeholderBuilder,
+    this.groupKeyBuilder,
+    this.isTaskPrivate,
   });
 
   /// Expanded series survive tab switches and the 4 Hz progress rebuilds.
@@ -184,7 +254,11 @@ class _IosDownloadGroupsViewState extends State<IosDownloadGroupsView> {
 
   @override
   Widget build(BuildContext context) {
-    final groups = groupDownloadTasks(widget.tasks);
+    final groups = groupDownloadTasks(
+      widget.tasks,
+      groupKeyBuilder: widget.groupKeyBuilder,
+      isTaskPrivate: widget.isTaskPrivate,
+    );
     return AppleGroupedSection(
       children: [
         for (final g in groups)
@@ -268,7 +342,8 @@ class _SeriesBlock extends StatelessWidget {
                         borderRadius: BorderRadius.circular(7),
                         child: PosterImage(
                           url: g.poster,
-                          title: g.title,
+                          title: g.isPrivate ? '' : g.title,
+                          isPrivate: g.isPrivate,
                           placeholder: _placeholder(context),
                         ),
                       ),

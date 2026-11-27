@@ -1254,13 +1254,27 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     let items: [OptionItem]
   }
 
+  private struct PopoverLayoutPlan {
+    let useSheetFallback: Bool
+    let sourceRect: CGRect
+    let permittedArrowDirections: UIPopoverArrowDirection
+    let preferredContentSize: CGSize
+    let effectiveSafeFrame: CGRect
+  }
+
   private let sheetTitle: String
   private let sheetSubtitle: String?
   private let cancelTitle: String
   private let forceOpaque: Bool
   private let isPopoverPresentation: Bool
   private let forceDarkSurface: Bool
+  private let originalArgs: [String: Any]
   private let sections: [OptionSection]
+  private let rawAnchorRect: CGRect?
+  private let initialAnchorHostBounds: CGRect
+  private let allowPopoverRestore: Bool
+  private weak var hostPresenter: UIViewController?
+  private var lastHostBounds: CGRect
   private let tableView: UITableView
   private var compactHeaderView: UIView?
   private var compactHeaderLabel: UILabel?
@@ -1269,6 +1283,9 @@ private final class MarcoNativeOptionSheetController: UIViewController,
   private var completion: FlutterResult?
   private var resolved = false
   private var dismissing = false
+  private var pendingSheetFallbackAfterTransition = false
+  private var pendingPopoverRestoreAfterTransition = false
+  private var transitioningToSheetFallback = false
   private var navIdentity: ObjectIdentifier?
 
   private var isOpaqueMode: Bool {
@@ -1279,134 +1296,7 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     return forceDarkSurface || MarcoLiquidGlassSupport.isEffectiveDark(for: isViewLoaded ? view : nil)
   }
 
-  override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-    super.traitCollectionDidChange(previousTraitCollection)
-    if traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) {
-      let dark = useDarkColors
-      tableView.separatorColor = dark
-        ? UIColor.white.withAlphaComponent(0.10)
-        : UIColor.black.withAlphaComponent(0.08)
-      compactHeaderLabel?.textColor = dark
-        ? UIColor.white.withAlphaComponent(0.92)
-        : UIColor.label
-      compactHeaderDivider?.backgroundColor = dark
-        ? UIColor.white.withAlphaComponent(0.12)
-        : UIColor.black.withAlphaComponent(0.08)
-      tableView.reloadData()
-    }
-  }
-
-  override func viewWillTransition(
-    to size: CGSize,
-    with coordinator: UIViewControllerTransitionCoordinator
-  ) {
-    super.viewWillTransition(to: size, with: coordinator)
-    coordinator.animate(alongsideTransition: { [weak self] _ in
-      guard let self = self else { return }
-      if self.isPopoverPresentation, let nav = self.navigationController {
-        let maxW = min(Double(size.width) - 24.0, 306.0)
-        let maxH = min(Double(size.height) * 0.86, 496.0)
-        nav.preferredContentSize = CGSize(
-          width: max(236.0, min(Double(nav.preferredContentSize.width), maxW)),
-          height: min(Double(nav.preferredContentSize.height), max(maxH, 160.0))
-        )
-      }
-      self.view.setNeedsLayout()
-      self.view.layoutIfNeeded()
-    }, completion: nil)
-  }
-
-  func adaptivePresentationStyle(
-    for controller: UIPresentationController,
-    traitCollection: UITraitCollection
-  ) -> UIModalPresentationStyle {
-    return isPopoverPresentation ? .none : .automatic
-  }
-
-  static func present(args: [String: Any], completion: @escaping FlutterResult) {
-    guard let host = MarcoLiquidGlassSupport.topPresenter() else {
-      completion(nil)
-      return
-    }
-    let anchorDict = args["anchorRect"] as? [String: Any]
-    let vc = MarcoNativeOptionSheetController(
-      args: args,
-      isPopover: anchorDict != nil,
-      completion: completion
-    )
-    let nav = UINavigationController(rootViewController: vc)
-    let navId = ObjectIdentifier(nav)
-    vc.navIdentity = navId
-    let style: UIUserInterfaceStyle = vc.forceDarkSurface ? .dark : MarcoLiquidGlassSupport.interfaceStyle
-    nav.overrideUserInterfaceStyle = style
-
-    if let anchor = anchorDict,
-       let ax = (anchor["x"] as? NSNumber)?.doubleValue,
-       let ay = (anchor["y"] as? NSNumber)?.doubleValue,
-       let aw = (anchor["width"] as? NSNumber)?.doubleValue,
-       let ah = (anchor["height"] as? NSNumber)?.doubleValue {
-      nav.modalPresentationStyle = .popover
-      nav.setNavigationBarHidden(true, animated: false)
-      let itemCount = vc.sections.reduce(0) { $0 + $1.items.count }
-      let sectionHeaderCount = vc.sections.filter { !$0.title.isEmpty }.count
-      let subtitleRows = vc.sections.flatMap { $0.items }.filter { $0.subtitle != nil }.count
-      let headerH = vc.sheetTitle.isEmpty ? 6.0 : 34.0
-      let rawHeight = headerH + Double(itemCount) * 36.0 + Double(subtitleRows) * 11.0 + Double(sectionHeaderCount) * 22.0 + 10.0
-      let maxH = min(Double(host.view.bounds.height) * 0.86, 496.0)
-      let maxW = min(Double(host.view.bounds.width) - 24.0, 306.0)
-      nav.preferredContentSize = CGSize(
-        width: max(240.0, maxW),
-        height: min(max(rawHeight, 118.0), max(maxH, 160.0))
-      )
-      if let popover = nav.popoverPresentationController {
-        popover.delegate = vc
-        popover.sourceView = host.view
-        popover.sourceRect = CGRect(
-          x: max(4.0, min(CGFloat(ax), host.view.bounds.width - 8.0)),
-          y: max(4.0, min(CGFloat(ay), host.view.bounds.height - 8.0)),
-          width: max(CGFloat(aw), 1.0),
-          height: max(CGFloat(ah), 1.0)
-        )
-        popover.permittedArrowDirections = [.up, .down, .left, .right]
-        popover.canOverlapSourceViewRect = false
-      }
-    } else {
-      nav.modalPresentationStyle = .pageSheet
-      nav.presentationController?.delegate = vc
-      if #available(iOS 15.0, *), let sheet = nav.sheetPresentationController {
-        sheet.detents = [.medium(), .large()]
-        sheet.prefersGrabberVisible = true
-        sheet.preferredCornerRadius = 32.0
-        sheet.prefersScrollingExpandsWhenScrolledToEdge = true
-        sheet.prefersEdgeAttachedInCompactHeight = true
-        sheet.widthFollowsPreferredContentSizeWhenEdgeAttached = true
-      }
-    }
-    guard MarcoNativeSheetCoordinator.tryBeginPresentation(
-      host: host,
-      controller: nav,
-      onCancel: { [weak vc] in vc?.finish(selectedId: nil) }
-    ) else {
-      vc.finish(selectedId: nil)
-      return
-    }
-    MarcoNativeSheetCoordinator.presentRespectingDismissTransition(
-      host: host,
-      controller: nav,
-      identity: navId,
-      onRejected: { [weak vc] in vc?.finish(selectedId: nil) }
-    )
-  }
-
-  init(args: [String: Any], isPopover: Bool = false, completion: @escaping FlutterResult) {
-    self.sheetTitle = (args["title"] as? String) ?? ""
-    let rawSubtitle = (args["subtitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-    self.sheetSubtitle = (rawSubtitle?.isEmpty ?? true) ? nil : rawSubtitle
-    self.cancelTitle = (args["cancelTitle"] as? String) ?? "关闭"
-    self.forceOpaque = (args["forceOpaque"] as? Bool) ?? false
-    self.isPopoverPresentation = isPopover
-    self.forceDarkSurface = (args["forceDark"] as? Bool) ?? isPopover
-    self.tableView = UITableView(frame: .zero, style: isPopover ? .plain : .insetGrouped)
+  private static func parseSections(from args: [String: Any]) -> [OptionSection] {
     let rawItems = (args["items"] as? [[String: Any]]) ?? []
     var builtSections: [OptionSection] = []
     var currentKey: Int?
@@ -1446,7 +1336,562 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     if !bucket.isEmpty {
       builtSections.append(OptionSection(title: currentTitle, items: bucket))
     }
-    self.sections = builtSections
+    return builtSections
+  }
+
+  private static func parseAnchorRect(from args: [String: Any]) -> CGRect? {
+    guard let anchor = args["anchorRect"] as? [String: Any],
+          let ax = (anchor["x"] as? NSNumber)?.doubleValue,
+          let ay = (anchor["y"] as? NSNumber)?.doubleValue,
+          let aw = (anchor["width"] as? NSNumber)?.doubleValue,
+          let ah = (anchor["height"] as? NSNumber)?.doubleValue else {
+      return nil
+    }
+    return CGRect(x: ax, y: ay, width: max(aw, 1.0), height: max(ah, 1.0))
+  }
+
+  private static func computePopoverLayout(
+    anchorRect: CGRect?,
+    hostBounds: CGRect,
+    hostSafeFrame: CGRect,
+    sections: [OptionSection],
+    sheetTitle: String
+  ) -> PopoverLayoutPlan {
+    let effSafe = (hostSafeFrame.width > 120.0 && hostSafeFrame.height > 120.0)
+      ? hostSafeFrame
+      : hostBounds.insetBy(dx: 8.0, dy: 8.0)
+    guard let anchor = anchorRect else {
+      return PopoverLayoutPlan(
+        useSheetFallback: true,
+        sourceRect: .zero,
+        permittedArrowDirections: [],
+        preferredContentSize: .zero,
+        effectiveSafeFrame: effSafe
+      )
+    }
+
+    let itemCount = sections.reduce(0) { $0 + $1.items.count }
+    let sectionHeaderCount = sections.filter { !$0.title.isEmpty }.count
+    let subtitleRows = sections.flatMap { $0.items }.filter { $0.subtitle != nil }.count
+    let headerH = sheetTitle.isEmpty ? 8.0 : 38.0
+    let rawHeight = headerH + Double(itemCount) * 44.0 + Double(subtitleRows) * 14.0 + Double(sectionHeaderCount) * 26.0 + 16.0
+
+    let clampedW = max(min(anchor.width, max(effSafe.width - 8.0, 1.0)), 1.0)
+    let clampedH = max(min(anchor.height, max(effSafe.height - 8.0, 1.0)), 1.0)
+    let clampedX = max(effSafe.minX + 2.0, min(anchor.minX, max(effSafe.minX + 2.0, effSafe.maxX - clampedW - 2.0)))
+    let clampedY = max(effSafe.minY + 2.0, min(anchor.minY, max(effSafe.minY + 2.0, effSafe.maxY - clampedH - 2.0)))
+    let sourceRect = CGRect(x: clampedX, y: clampedY, width: clampedW, height: clampedH)
+
+    let arrowMargin = 14.0
+    let spaceAbove = Double(sourceRect.minY - effSafe.minY) - arrowMargin
+    let spaceBelow = Double(effSafe.maxY - sourceRect.maxY) - arrowMargin
+    let spaceLeft = Double(sourceRect.minX - effSafe.minX) - arrowMargin
+    let spaceRight = Double(effSafe.maxX - sourceRect.maxX) - arrowMargin
+    let fullSafeH = Double(effSafe.height) - 16.0
+    let fullSafeW = Double(effSafe.width) - 16.0
+    let minComfortableH = itemCount >= 4 ? 228.0 : 124.0
+    let minComfortableW = 216.0
+
+    var chosenArrow: UIPopoverArrowDirection = []
+    var resolvedW = min(fullSafeW, 316.0)
+    var resolvedH = min(rawHeight, min(fullSafeH, 520.0))
+
+    let isSideEdge = (Double(sourceRect.midX - effSafe.minX) > Double(effSafe.width) * 0.72
+        || Double(sourceRect.midX - effSafe.minX) < Double(effSafe.width) * 0.28)
+      && Double(sourceRect.midY - effSafe.minY) >= Double(effSafe.height) * 0.22
+      && Double(sourceRect.midY - effSafe.minY) <= Double(effSafe.height) * 0.78
+
+    if isSideEdge {
+      if Double(sourceRect.midX) > Double(effSafe.midX), spaceLeft >= minComfortableW, fullSafeH >= minComfortableH {
+        chosenArrow = [.right]
+        resolvedW = min(316.0, spaceLeft)
+        resolvedH = min(max(rawHeight, minComfortableH), min(fullSafeH, 520.0))
+      } else if spaceRight >= minComfortableW, fullSafeH >= minComfortableH {
+        chosenArrow = [.left]
+        resolvedW = min(316.0, spaceRight)
+        resolvedH = min(max(rawHeight, minComfortableH), min(fullSafeH, 520.0))
+      }
+    }
+
+    if chosenArrow.isEmpty {
+      let bestVerticalSpace = max(spaceAbove, spaceBelow)
+      if bestVerticalSpace >= minComfortableH && fullSafeW >= minComfortableW {
+        if spaceAbove >= spaceBelow {
+          chosenArrow = [.down]
+          resolvedH = min(max(rawHeight, minComfortableH), min(spaceAbove, 520.0))
+        } else {
+          chosenArrow = [.up]
+          resolvedH = min(max(rawHeight, minComfortableH), min(spaceBelow, 520.0))
+        }
+        resolvedW = min(316.0, fullSafeW)
+      } else if spaceLeft >= minComfortableW && fullSafeH >= minComfortableH {
+        chosenArrow = [.right]
+        resolvedW = min(316.0, spaceLeft)
+        resolvedH = min(max(rawHeight, minComfortableH), min(fullSafeH, 520.0))
+      } else if spaceRight >= minComfortableW && fullSafeH >= minComfortableH {
+        chosenArrow = [.left]
+        resolvedW = min(316.0, spaceRight)
+        resolvedH = min(max(rawHeight, minComfortableH), min(fullSafeH, 520.0))
+      }
+    }
+
+    let preferredSize = CGSize(
+      width: max(min(minComfortableW, max(fullSafeW, 180.0)), min(resolvedW, max(fullSafeW, 180.0))),
+      height: max(min(minComfortableH, max(fullSafeH, 160.0)), min(resolvedH, max(fullSafeH, 160.0)))
+    )
+    return PopoverLayoutPlan(
+      useSheetFallback: chosenArrow.isEmpty,
+      sourceRect: sourceRect,
+      permittedArrowDirections: chosenArrow,
+      preferredContentSize: preferredSize,
+      effectiveSafeFrame: effSafe
+    )
+  }
+
+  private static func configureSheetPresentation(
+    _ nav: UINavigationController,
+    delegate: MarcoNativeOptionSheetController,
+    safeHeight: CGFloat
+  ) {
+    nav.modalPresentationStyle = .pageSheet
+    nav.setNavigationBarHidden(false, animated: false)
+    nav.presentationController?.delegate = delegate
+    if #available(iOS 15.0, *), let sheet = nav.sheetPresentationController {
+      let compactHeight = safeHeight > 0 && safeHeight < 460.0
+      sheet.detents = [.medium(), .large()]
+      sheet.selectedDetentIdentifier = compactHeight ? .large : .medium
+      sheet.prefersGrabberVisible = true
+      sheet.preferredCornerRadius = 32.0
+      sheet.prefersScrollingExpandsWhenScrolledToEdge = true
+      sheet.prefersEdgeAttachedInCompactHeight = true
+      sheet.widthFollowsPreferredContentSizeWhenEdgeAttached = true
+    }
+  }
+
+  override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+    super.traitCollectionDidChange(previousTraitCollection)
+    if traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) {
+      let dark = useDarkColors
+      tableView.separatorColor = dark
+        ? UIColor.white.withAlphaComponent(0.10)
+        : UIColor.black.withAlphaComponent(0.08)
+      compactHeaderLabel?.textColor = dark
+        ? UIColor.white.withAlphaComponent(0.92)
+        : UIColor.label
+      compactHeaderDivider?.backgroundColor = dark
+        ? UIColor.white.withAlphaComponent(0.12)
+        : UIColor.black.withAlphaComponent(0.08)
+      tableView.reloadData()
+    }
+  }
+
+  private func resolvedHostMetrics(
+    hostView: UIView?,
+    fallbackSize: CGSize? = nil
+  ) -> (bounds: CGRect, safeFrame: CGRect) {
+    let bounds: CGRect
+    if let hv = hostView, hv.bounds.width > 0, hv.bounds.height > 0 {
+      bounds = hv.bounds
+    } else if let size = fallbackSize, size.width > 0, size.height > 0 {
+      bounds = CGRect(origin: .zero, size: size)
+    } else {
+      bounds = lastHostBounds
+    }
+    let safeFrame: CGRect
+    if let hv = hostView,
+       hv.safeAreaLayoutGuide.layoutFrame.width > 120.0,
+       hv.safeAreaLayoutGuide.layoutFrame.height > 120.0 {
+      safeFrame = hv.safeAreaLayoutGuide.layoutFrame
+    } else {
+      safeFrame = bounds.insetBy(dx: 8.0, dy: 8.0)
+    }
+    return (bounds, safeFrame)
+  }
+
+  /// Remaps the immutable initial anchor rect from `initialAnchorHostBounds`
+  /// into `targetHostBounds` so both the transition animation and completion
+  /// callbacks—and repeated iPad Split View wide -> narrow -> wide resizes—
+  /// share one exact, drift-free coordinate baseline.
+  private func remappedAnchorRect(for targetHostBounds: CGRect) -> CGRect? {
+    guard let orig = rawAnchorRect else { return nil }
+    guard initialAnchorHostBounds.width > 1.0,
+          initialAnchorHostBounds.height > 1.0,
+          targetHostBounds.width > 1.0,
+          targetHostBounds.height > 1.0 else {
+      return orig
+    }
+    let rx = orig.midX / initialAnchorHostBounds.width
+    let ry = orig.midY / initialAnchorHostBounds.height
+    let newMidX = rx * targetHostBounds.width
+    let newMidY = ry * targetHostBounds.height
+    return CGRect(
+      x: newMidX - orig.width * 0.5,
+      y: newMidY - orig.height * 0.5,
+      width: orig.width,
+      height: orig.height
+    )
+  }
+
+  override func viewWillTransition(
+    to size: CGSize,
+    with coordinator: UIViewControllerTransitionCoordinator
+  ) {
+    super.viewWillTransition(to: size, with: coordinator)
+    coordinator.animate(alongsideTransition: { [weak self] _ in
+      guard let self = self, let nav = self.navigationController else { return }
+      let hostView = self.presentingViewController?.view ?? self.hostPresenter?.view
+      let metrics = self.resolvedHostMetrics(hostView: hostView, fallbackSize: size)
+      let nextHostBounds = metrics.bounds
+      let nextSafeFrame = metrics.safeFrame
+      let remappedAnchor = self.remappedAnchorRect(for: nextHostBounds)
+      self.lastHostBounds = nextHostBounds
+
+      if self.isPopoverPresentation {
+        let plan = Self.computePopoverLayout(
+          anchorRect: remappedAnchor,
+          hostBounds: nextHostBounds,
+          hostSafeFrame: nextSafeFrame,
+          sections: self.sections,
+          sheetTitle: self.sheetTitle
+        )
+        if plan.useSheetFallback {
+          self.pendingSheetFallbackAfterTransition = true
+          self.pendingPopoverRestoreAfterTransition = false
+        } else {
+          self.pendingSheetFallbackAfterTransition = false
+          let boundedW = max(180.0, min(plan.preferredContentSize.width, max(180.0, plan.effectiveSafeFrame.width - 16.0)))
+          let boundedH = max(160.0, min(plan.preferredContentSize.height, max(160.0, plan.effectiveSafeFrame.height - 16.0)))
+          nav.preferredContentSize = CGSize(width: boundedW, height: boundedH)
+          if let popover = nav.popoverPresentationController {
+            if let hv = hostView {
+              popover.sourceView = hv
+            }
+            popover.sourceRect = plan.sourceRect
+            popover.permittedArrowDirections = plan.permittedArrowDirections
+            popover.canOverlapSourceViewRect = false
+          }
+        }
+      } else {
+        if self.allowPopoverRestore, let anchor = remappedAnchor {
+          let plan = Self.computePopoverLayout(
+            anchorRect: anchor,
+            hostBounds: nextHostBounds,
+            hostSafeFrame: nextSafeFrame,
+            sections: self.sections,
+            sheetTitle: self.sheetTitle
+          )
+          if !plan.useSheetFallback {
+            self.pendingPopoverRestoreAfterTransition = true
+            self.pendingSheetFallbackAfterTransition = false
+          } else {
+            self.pendingPopoverRestoreAfterTransition = false
+          }
+        } else {
+          self.pendingPopoverRestoreAfterTransition = false
+        }
+        if !self.pendingPopoverRestoreAfterTransition,
+           #available(iOS 15.0, *),
+           let sheet = nav.sheetPresentationController {
+          let compactHeight = nextSafeFrame.height > 0 && nextSafeFrame.height < 460.0
+          sheet.animateChanges {
+            sheet.detents = [.medium(), .large()]
+            sheet.selectedDetentIdentifier = compactHeight ? .large : .medium
+          }
+        }
+      }
+      self.view.setNeedsLayout()
+      self.view.layoutIfNeeded()
+    }, completion: { [weak self] _ in
+      guard let self = self else { return }
+      if self.pendingSheetFallbackAfterTransition {
+        self.pendingSheetFallbackAfterTransition = false
+        self.transitionPopoverToSheetFallbackIfNeeded()
+      } else if self.pendingPopoverRestoreAfterTransition {
+        self.pendingPopoverRestoreAfterTransition = false
+        self.transitionSheetBackToPopoverIfNeeded()
+      }
+    })
+  }
+
+  private func transitionPopoverToSheetFallbackIfNeeded() {
+    guard isPopoverPresentation,
+          !resolved,
+          !dismissing,
+          !transitioningToSheetFallback,
+          let nav = navigationController,
+          let host = presentingViewController ?? hostPresenter else {
+      return
+    }
+    let metrics = resolvedHostMetrics(hostView: host.view)
+    let remappedAnchor = remappedAnchorRect(for: metrics.bounds)
+    let finalPlan = Self.computePopoverLayout(
+      anchorRect: remappedAnchor,
+      hostBounds: metrics.bounds,
+      hostSafeFrame: metrics.safeFrame,
+      sections: sections,
+      sheetTitle: sheetTitle
+    )
+    guard finalPlan.useSheetFallback else {
+      let boundedW = max(180.0, min(finalPlan.preferredContentSize.width, max(180.0, finalPlan.effectiveSafeFrame.width - 16.0)))
+      let boundedH = max(160.0, min(finalPlan.preferredContentSize.height, max(160.0, finalPlan.effectiveSafeFrame.height - 16.0)))
+      nav.preferredContentSize = CGSize(width: boundedW, height: boundedH)
+      if let popover = nav.popoverPresentationController {
+        popover.sourceView = host.view
+        popover.sourceRect = finalPlan.sourceRect
+        popover.permittedArrowDirections = finalPlan.permittedArrowDirections
+        popover.canOverlapSourceViewRect = false
+      }
+      return
+    }
+
+    transitioningToSheetFallback = true
+    dismissing = true
+    resolved = true
+    let pendingCompletion = completion
+    completion = nil
+    let oldNavId = navIdentity
+    navIdentity = nil
+    let argsCopy = originalArgs
+    let sectionsCopy = sections
+    let anchorCopy = rawAnchorRect
+    let initialBoundsCopy = initialAnchorHostBounds
+    let restoreCopy = allowPopoverRestore
+
+    nav.dismiss(animated: false) {
+      if let oldId = oldNavId {
+        MarcoNativeSheetCoordinator.didFinish(identity: oldId)
+      }
+      guard let cb = pendingCompletion else { return }
+      let presentHost = (host.view.window != nil ? host : MarcoLiquidGlassSupport.topPresenter()) ?? host
+      let nextVc = MarcoNativeOptionSheetController(
+        args: argsCopy,
+        parsedSections: sectionsCopy,
+        isPopover: false,
+        rawAnchorRect: anchorCopy,
+        hostPresenter: presentHost,
+        initialHostBounds: initialBoundsCopy,
+        allowPopoverRestore: restoreCopy,
+        completion: cb
+      )
+      let nextNav = UINavigationController(rootViewController: nextVc)
+      let nextId = ObjectIdentifier(nextNav)
+      nextVc.navIdentity = nextId
+      let style: UIUserInterfaceStyle = nextVc.forceDarkSurface ? .dark : MarcoLiquidGlassSupport.interfaceStyle
+      nextNav.overrideUserInterfaceStyle = style
+      Self.configureSheetPresentation(
+        nextNav,
+        delegate: nextVc,
+        safeHeight: presentHost.view.safeAreaLayoutGuide.layoutFrame.height
+      )
+      guard MarcoNativeSheetCoordinator.tryBeginPresentation(
+        host: presentHost,
+        controller: nextNav,
+        onCancel: { [weak nextVc] in nextVc?.finish(selectedId: nil) }
+      ) else {
+        nextVc.finish(selectedId: nil)
+        return
+      }
+      MarcoNativeSheetCoordinator.presentRespectingDismissTransition(
+        host: presentHost,
+        controller: nextNav,
+        identity: nextId,
+        onRejected: { [weak nextVc] in nextVc?.finish(selectedId: nil) }
+      )
+    }
+  }
+
+  private func transitionSheetBackToPopoverIfNeeded() {
+    guard !isPopoverPresentation,
+          allowPopoverRestore,
+          !resolved,
+          !dismissing,
+          !transitioningToSheetFallback,
+          let nav = navigationController,
+          let host = presentingViewController ?? hostPresenter else {
+      return
+    }
+    let metrics = resolvedHostMetrics(hostView: host.view)
+    let remappedAnchor = remappedAnchorRect(for: metrics.bounds)
+    let finalPlan = Self.computePopoverLayout(
+      anchorRect: remappedAnchor,
+      hostBounds: metrics.bounds,
+      hostSafeFrame: metrics.safeFrame,
+      sections: sections,
+      sheetTitle: sheetTitle
+    )
+    guard !finalPlan.useSheetFallback else {
+      return
+    }
+
+    transitioningToSheetFallback = true
+    dismissing = true
+    resolved = true
+    let pendingCompletion = completion
+    completion = nil
+    let oldNavId = navIdentity
+    navIdentity = nil
+    let argsCopy = originalArgs
+    let sectionsCopy = sections
+    let anchorCopy = rawAnchorRect
+    let initialBoundsCopy = initialAnchorHostBounds
+
+    nav.dismiss(animated: false) {
+      if let oldId = oldNavId {
+        MarcoNativeSheetCoordinator.didFinish(identity: oldId)
+      }
+      guard let cb = pendingCompletion else { return }
+      let presentHost = (host.view.window != nil ? host : MarcoLiquidGlassSupport.topPresenter()) ?? host
+      let nextVc = MarcoNativeOptionSheetController(
+        args: argsCopy,
+        parsedSections: sectionsCopy,
+        isPopover: true,
+        rawAnchorRect: anchorCopy,
+        hostPresenter: presentHost,
+        initialHostBounds: initialBoundsCopy,
+        allowPopoverRestore: true,
+        completion: cb
+      )
+      let nextNav = UINavigationController(rootViewController: nextVc)
+      let nextId = ObjectIdentifier(nextNav)
+      nextVc.navIdentity = nextId
+      let style: UIUserInterfaceStyle = nextVc.forceDarkSurface ? .dark : MarcoLiquidGlassSupport.interfaceStyle
+      nextNav.overrideUserInterfaceStyle = style
+      let settledMetrics = nextVc.resolvedHostMetrics(hostView: presentHost.view)
+      let settledAnchor = nextVc.remappedAnchorRect(for: settledMetrics.bounds)
+      let settledPlan = Self.computePopoverLayout(
+        anchorRect: settledAnchor,
+        hostBounds: settledMetrics.bounds,
+        hostSafeFrame: settledMetrics.safeFrame,
+        sections: sectionsCopy,
+        sheetTitle: nextVc.sheetTitle
+      )
+      nextNav.modalPresentationStyle = .popover
+      nextNav.setNavigationBarHidden(true, animated: false)
+      let boundedW = max(180.0, min(settledPlan.preferredContentSize.width, max(180.0, settledPlan.effectiveSafeFrame.width - 16.0)))
+      let boundedH = max(160.0, min(settledPlan.preferredContentSize.height, max(160.0, settledPlan.effectiveSafeFrame.height - 16.0)))
+      nextNav.preferredContentSize = CGSize(width: boundedW, height: boundedH)
+      if let popover = nextNav.popoverPresentationController {
+        popover.delegate = nextVc
+        popover.sourceView = presentHost.view
+        popover.sourceRect = settledPlan.sourceRect
+        popover.permittedArrowDirections = settledPlan.permittedArrowDirections
+        popover.canOverlapSourceViewRect = false
+      }
+      guard MarcoNativeSheetCoordinator.tryBeginPresentation(
+        host: presentHost,
+        controller: nextNav,
+        onCancel: { [weak nextVc] in nextVc?.finish(selectedId: nil) }
+      ) else {
+        nextVc.finish(selectedId: nil)
+        return
+      }
+      MarcoNativeSheetCoordinator.presentRespectingDismissTransition(
+        host: presentHost,
+        controller: nextNav,
+        identity: nextId,
+        onRejected: { [weak nextVc] in nextVc?.finish(selectedId: nil) }
+      )
+    }
+  }
+
+  func adaptivePresentationStyle(
+    for controller: UIPresentationController,
+    traitCollection: UITraitCollection
+  ) -> UIModalPresentationStyle {
+    return isPopoverPresentation ? .none : .automatic
+  }
+
+  static func present(args: [String: Any], completion: @escaping FlutterResult) {
+    guard let host = MarcoLiquidGlassSupport.topPresenter() else {
+      completion(nil)
+      return
+    }
+    let sheetTitle = (args["title"] as? String) ?? ""
+    let sections = parseSections(from: args)
+    let rawAnchorRect = parseAnchorRect(from: args)
+    let layoutPlan = computePopoverLayout(
+      anchorRect: rawAnchorRect,
+      hostBounds: host.view.bounds,
+      hostSafeFrame: host.view.safeAreaLayoutGuide.layoutFrame,
+      sections: sections,
+      sheetTitle: sheetTitle
+    )
+    let useSheetFallback = layoutPlan.useSheetFallback
+    let vc = MarcoNativeOptionSheetController(
+      args: args,
+      parsedSections: sections,
+      isPopover: !useSheetFallback,
+      rawAnchorRect: rawAnchorRect,
+      hostPresenter: host,
+      initialHostBounds: host.view.bounds,
+      allowPopoverRestore: rawAnchorRect != nil,
+      completion: completion
+    )
+    let nav = UINavigationController(rootViewController: vc)
+    let navId = ObjectIdentifier(nav)
+    vc.navIdentity = navId
+    let style: UIUserInterfaceStyle = vc.forceDarkSurface ? .dark : MarcoLiquidGlassSupport.interfaceStyle
+    nav.overrideUserInterfaceStyle = style
+
+    if !useSheetFallback {
+      nav.modalPresentationStyle = .popover
+      nav.setNavigationBarHidden(true, animated: false)
+      nav.preferredContentSize = layoutPlan.preferredContentSize
+      if let popover = nav.popoverPresentationController {
+        popover.delegate = vc
+        popover.sourceView = host.view
+        popover.sourceRect = layoutPlan.sourceRect
+        popover.permittedArrowDirections = layoutPlan.permittedArrowDirections
+        popover.canOverlapSourceViewRect = false
+      }
+    } else {
+      configureSheetPresentation(
+        nav,
+        delegate: vc,
+        safeHeight: layoutPlan.effectiveSafeFrame.height
+      )
+    }
+    guard MarcoNativeSheetCoordinator.tryBeginPresentation(
+      host: host,
+      controller: nav,
+      onCancel: { [weak vc] in vc?.finish(selectedId: nil) }
+    ) else {
+      vc.finish(selectedId: nil)
+      return
+    }
+    MarcoNativeSheetCoordinator.presentRespectingDismissTransition(
+      host: host,
+      controller: nav,
+      identity: navId,
+      onRejected: { [weak vc] in vc?.finish(selectedId: nil) }
+    )
+  }
+
+  private init(
+    args: [String: Any],
+    parsedSections: [OptionSection]? = nil,
+    isPopover: Bool = false,
+    rawAnchorRect: CGRect? = nil,
+    hostPresenter: UIViewController? = nil,
+    initialHostBounds: CGRect = .zero,
+    allowPopoverRestore: Bool = false,
+    completion: @escaping FlutterResult
+  ) {
+    self.originalArgs = args
+    self.sheetTitle = (args["title"] as? String) ?? ""
+    let rawSubtitle = (args["subtitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    self.sheetSubtitle = (rawSubtitle?.isEmpty ?? true) ? nil : rawSubtitle
+    self.cancelTitle = (args["cancelTitle"] as? String) ?? "关闭"
+    self.forceOpaque = (args["forceOpaque"] as? Bool) ?? false
+    self.isPopoverPresentation = isPopover
+    self.forceDarkSurface = (args["forceDark"] as? Bool) ?? isPopover
+    self.rawAnchorRect = rawAnchorRect
+    self.initialAnchorHostBounds = initialHostBounds
+    self.allowPopoverRestore = allowPopoverRestore
+    self.hostPresenter = hostPresenter
+    self.lastHostBounds = initialHostBounds
+    self.tableView = UITableView(frame: .zero, style: isPopover ? .plain : .insetGrouped)
+    self.sections = parsedSections ?? Self.parseSections(from: args)
     self.completion = completion
     super.init(nibName: nil, bundle: nil)
   }

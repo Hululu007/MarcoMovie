@@ -162,7 +162,7 @@ private final class MarcoAvPlayerViewFactory: NSObject, FlutterPlatformViewFacto
   }
 }
 
-private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AVPictureInPictureControllerDelegate {
+private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AVPictureInPictureControllerDelegate, AVPlayerItemLegibleOutputPushDelegate {
   private var methodChannel: FlutterMethodChannel?
   private var eventSink: FlutterEventSink?
 
@@ -170,6 +170,21 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
   private weak var visiblePlayerLayer: AVPlayerLayer?
   private var pipSourceLayer: AVPlayerLayer?
   private var pipController: AVPictureInPictureController?
+  private var legibleOutput: AVPlayerItemLegibleOutput?
+  private weak var legibleOutputItem: AVPlayerItem?
+  private var lastLegibleLines: [String] = []
+  private var lastLegibleHasNativeSamples: Bool = false
+  private enum LegibleTrackFormatKind: String {
+    case text = "text"
+    case bitmap = "bitmap"
+    case unknown = "unknown"
+  }
+
+  private var selectedLegibleStaticFormat: LegibleTrackFormatKind = .unknown
+  private var legibleTrackConfirmedText: Bool = false
+  private var legibleTrackConfirmedNonText: Bool = false
+  private var suppressNativeSubtitleRenderingRequested: Bool = false
+  private var suppressNativeSubtitleAllowNonText: Bool = false
   private var hiddenAirPlayPicker: AVRoutePickerView?
   private var hiddenVolumeView: MPVolumeView?
 
@@ -495,6 +510,8 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
       let startPositionMs = (args["startPositionMs"] as? NSNumber)?.intValue ?? 0
       let autoPlay = (args["autoPlay"] as? Bool) ?? true
       let preferredBufferSec = (args["preferredForwardBufferDuration"] as? NSNumber)?.doubleValue ?? 24.0
+      let suppressNativeSubs = (args["suppressNativeSubtitleRendering"] as? Bool) ?? false
+      let suppressAllowNonText = (args["suppressNativeSubtitleAllowNonText"] as? Bool) ?? false
       DispatchQueue.main.async { [weak self] in
         self?.openMedia(
           urlString: urlStr,
@@ -503,6 +520,8 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
           startPositionMs: startPositionMs,
           autoPlay: autoPlay,
           preferredBufferSec: preferredBufferSec,
+          suppressNativeSubtitleRendering: suppressNativeSubs,
+          suppressNativeSubtitleAllowNonText: suppressAllowNonText,
           result: result
         )
       }
@@ -536,6 +555,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
         }
         let seekMediaId = self.activeMediaId
         let clampedMs = max(0, posMs)
+        self.clearLegibleSubtitleState(forceEmit: true)
         let target = CMTime(value: CMTimeValue(clampedMs), timescale: 1000)
         player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
           DispatchQueue.main.async {
@@ -725,6 +745,25 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
         result(nil)
       }
 
+    case "setSuppressNativeSubtitleRendering":
+      let suppress: Bool
+      let allowNonText: Bool
+      if let dict = call.arguments as? [String: Any] {
+        suppress = (dict["suppress"] as? Bool) ?? false
+        let mode = (dict["mode"] as? String) ?? ""
+        allowNonText = (dict["allowNonText"] as? Bool) ?? (mode == "externalOverlay")
+      } else {
+        suppress = (call.arguments as? Bool) ?? false
+        allowNonText = false
+      }
+      DispatchQueue.main.async { [weak self] in
+        guard let self = self else { result(nil); return }
+        self.suppressNativeSubtitleRenderingRequested = suppress
+        self.suppressNativeSubtitleAllowNonText = suppress && allowNonText
+        self.applyEffectiveLegibleSuppression()
+        result(nil)
+      }
+
     case "getTelemetry":
       DispatchQueue.main.async { [weak self] in
         result(self?.buildTelemetryMap() ?? [:])
@@ -777,6 +816,8 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     startPositionMs: Int,
     autoPlay: Bool,
     preferredBufferSec: Double,
+    suppressNativeSubtitleRendering: Bool = false,
+    suppressNativeSubtitleAllowNonText: Bool = false,
     result: @escaping FlutterResult
   ) {
     guard let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
@@ -816,6 +857,26 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     item.preferredForwardBufferDuration = max(4.0, preferredBufferSec)
     item.canUseNetworkResourcesForLiveStreamingWhilePaused = true
 
+    // Explicitly reset native subtitle suppression and track capability on
+    // every media handoff so a previous film's AI bilingual overlay never
+    // leaves native subtitles suppressed on the next film.
+    suppressNativeSubtitleRenderingRequested = suppressNativeSubtitleRendering
+    suppressNativeSubtitleAllowNonText =
+      suppressNativeSubtitleRendering && suppressNativeSubtitleAllowNonText
+    selectedLegibleStaticFormat = .unknown
+    legibleTrackConfirmedText = false
+    legibleTrackConfirmedNonText = false
+    lastLegibleLines = []
+    lastLegibleHasNativeSamples = false
+
+    let output = AVPlayerItemLegibleOutput()
+    output.setDelegate(self, queue: .main)
+    item.add(output)
+    legibleOutput = output
+    legibleOutputItem = item
+    refreshSelectedLegibleTrackCapability(for: item)
+    applyEffectiveLegibleSuppression()
+
     let player = ensurePlayer()
     if let layer = visiblePlayerLayer {
       if layer.player !== player {
@@ -852,6 +913,8 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
             self.queuePlayer?.seek(to: seekTarget, toleranceBefore: .zero, toleranceAfter: .zero)
           }
           self.inspectPlayabilityAndHdr(for: observedItem, sessionId: sessionId)
+          self.refreshSelectedLegibleTrackCapability(for: observedItem)
+          self.applyEffectiveLegibleSuppression()
           self.emitMediaEvent([
             "type": "ready",
             "durationMs": self.currentDurationMs(),
@@ -999,6 +1062,14 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     lastProgressPositionMs = -1
     lastProgressBufferedMs = -1
     lastProgressPlaying = false
+    // Explicitly restore native subtitle rendering state on stop/exit so the
+    // singleton coordinator never leaks suppression into a subsequent session.
+    suppressNativeSubtitleRenderingRequested = false
+    suppressNativeSubtitleAllowNonText = false
+    selectedLegibleStaticFormat = .unknown
+    legibleTrackConfirmedText = false
+    legibleTrackConfirmedNonText = false
+    legibleOutput?.suppressesPlayerRendering = false
     cleanupItemObservers()
     if let pip = pipController, wasActivePip {
       pip.stopPictureInPicture()
@@ -1022,6 +1093,13 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
   }
 
   private func cleanupItemObservers() {
+    if let output = legibleOutput {
+      output.setDelegate(nil, queue: nil)
+      legibleOutputItem?.remove(output)
+    }
+    legibleOutput = nil
+    legibleOutputItem = nil
+    lastLegibleLines = []
     statusObservation?.invalidate()
     statusObservation = nil
     likelyToKeepUpObservation?.invalidate()
@@ -1053,6 +1131,125 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
 
   // MARK: - Media Selection Tracks
 
+  private func classifyLegibleOption(
+    _ option: AVMediaSelectionOption,
+    in item: AVPlayerItem
+  ) -> LegibleTrackFormatKind {
+    // Closed captions and explicit text media types are always text-extractable.
+    if option.mediaType == .closedCaption || option.mediaType == .text {
+      return .text
+    }
+
+    let textSubTypes: Set<FourCharCode> = [
+      0x74783367, // 'tx3g'
+      0x77767474, // 'wvtt'
+      0x74657874, // 'text'
+      0x73747070, // 'stpp'
+      0x63363038, // 'c608'
+      0x63373038, // 'c708'
+      0x61743638, // 'at68'
+      0x73727420, // 'srt '
+      0x73736120, // 'ssa '
+      0x61737320, // 'ass '
+    ]
+    let bitmapSubTypes: Set<FourCharCode> = [
+      0x64766220, // 'dvb '
+      0x70677373, // 'pgss'
+      0x73756270, // 'subp'
+      0x6D703473, // 'mp4s'
+      0x766F6220, // 'vob '
+      0x68646D76, // 'hdmv'
+      0x64766473, // 'dvds'
+    ]
+
+    // Inspect the selected option's own mediaSubTypes first so a same-language
+    // graphical/bitmap track never poisons a sibling text subtitle track.
+    let optionSubTypes: [FourCharCode] = option.mediaSubTypes.map { $0.uint32Value }
+    if !optionSubTypes.isEmpty {
+      if optionSubTypes.contains(where: { textSubTypes.contains($0) }) {
+        return .text
+      }
+      if optionSubTypes.contains(where: { bitmapSubTypes.contains($0) }) {
+        return .bitmap
+      }
+    }
+
+    let nameLower = option.displayName.lowercased()
+    if nameLower.contains("pgs") ||
+        nameLower.contains("vobsub") ||
+        nameLower.contains("dvb") ||
+        nameLower.contains("bitmap") ||
+        nameLower.contains("dvdsub") ||
+        nameLower.contains("hdmv") {
+      return .bitmap
+    }
+    if nameLower.contains("webvtt") ||
+        nameLower.contains("vtt") ||
+        nameLower.contains("srt") ||
+        nameLower.contains("tx3g") ||
+        nameLower.contains("closed caption") ||
+        nameLower.contains("cea-608") ||
+        nameLower.contains("cea-708") ||
+        nameLower.contains("ttml") {
+      return .text
+    }
+
+    // Fallback when mediaSubTypes is empty: inspect asset subtitle tracks for
+    // the option's language, keeping `.unknown` whenever text and bitmap tracks
+    // coexist or format metadata is incomplete/unrecognized.
+    let optionLang = (option.locale?.identifier ?? option.extendedLanguageTag ?? "").lowercased()
+    var sawText = false
+    var sawBitmap = false
+    var sawUnknown = false
+    for track in item.asset.tracks(withMediaType: .subtitle) {
+      let trackLang = (track.extendedLanguageTag ?? track.languageCode ?? "").lowercased()
+      if !optionLang.isEmpty && !trackLang.isEmpty && !optionLang.hasPrefix(trackLang) && !trackLang.hasPrefix(optionLang) {
+        continue
+      }
+      var trackHasFormat = false
+      for rawDesc in track.formatDescriptions {
+        trackHasFormat = true
+        let desc = rawDesc as! CMFormatDescription
+        let subType = CMFormatDescriptionGetMediaSubType(desc)
+        if bitmapSubTypes.contains(subType) {
+          sawBitmap = true
+        } else if textSubTypes.contains(subType) {
+          sawText = true
+        } else {
+          sawUnknown = true
+        }
+      }
+      if !trackHasFormat {
+        sawUnknown = true
+      }
+    }
+    if sawBitmap && !sawText && !sawUnknown {
+      return .bitmap
+    }
+    if sawText && !sawBitmap && !sawUnknown {
+      return .text
+    }
+    return .unknown
+  }
+
+  private func refreshSelectedLegibleTrackCapability(for item: AVPlayerItem) {
+    guard let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .legible),
+          let selected = item.currentMediaSelection.selectedMediaOption(in: group) else {
+      selectedLegibleStaticFormat = .unknown
+      return
+    }
+    selectedLegibleStaticFormat = classifyLegibleOption(selected, in: item)
+    switch selectedLegibleStaticFormat {
+    case .bitmap:
+      legibleTrackConfirmedNonText = true
+      legibleTrackConfirmedText = false
+    case .text, .unknown:
+      if !lastLegibleHasNativeSamples {
+        legibleTrackConfirmedNonText = false
+      }
+    }
+  }
+
   private func readMediaSelectionTracks(characteristic: AVMediaCharacteristic) -> [[String: Any]] {
     guard let item = queuePlayer?.currentItem,
           let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: characteristic) else {
@@ -1062,12 +1259,33 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     var out: [[String: Any]] = []
     for (idx, option) in group.options.enumerated() {
       let lang = option.locale?.identifier ?? option.extendedLanguageTag ?? ""
-      out.append([
+      var entry: [String: Any] = [
         "id": "\(idx)",
         "title": option.displayName,
         "language": lang,
         "selected": option == selected,
-      ])
+      ]
+      if characteristic == .legible {
+        var kind = classifyLegibleOption(option, in: item)
+        if option == selected {
+          if legibleTrackConfirmedText {
+            kind = .text
+          } else if legibleTrackConfirmedNonText {
+            kind = .bitmap
+          }
+        }
+        entry["subtitleFormat"] = kind.rawValue
+        entry["isBitmap"] = (kind == .bitmap)
+        switch kind {
+        case .text:
+          entry["isTextExtractable"] = true
+        case .bitmap:
+          entry["isTextExtractable"] = false
+        case .unknown:
+          entry["isTextExtractable"] = NSNull()
+        }
+      }
+      out.append(entry)
     }
     return out
   }
@@ -1081,11 +1299,117 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
       if group.allowsEmptySelection {
         item.select(nil, in: group)
       }
+      if characteristic == .legible {
+        selectedLegibleStaticFormat = .unknown
+        legibleTrackConfirmedText = false
+        legibleTrackConfirmedNonText = false
+        clearLegibleSubtitleState(forceEmit: true)
+        applyEffectiveLegibleSuppression()
+        emitMediaEvent([
+          "type": "subtitleTracksChanged",
+          "subtitleTracks": readMediaSelectionTracks(characteristic: .legible),
+        ])
+      }
       return
     }
     if let rawId = trackId, let idx = Int(rawId), idx >= 0 && idx < group.options.count {
       item.select(group.options[idx], in: group)
+      if characteristic == .legible {
+        selectedLegibleStaticFormat = .unknown
+        legibleTrackConfirmedText = false
+        legibleTrackConfirmedNonText = false
+        clearLegibleSubtitleState(forceEmit: true)
+        refreshSelectedLegibleTrackCapability(for: item)
+        applyEffectiveLegibleSuppression()
+        emitMediaEvent([
+          "type": "subtitleTracksChanged",
+          "subtitleTracks": readMediaSelectionTracks(characteristic: .legible),
+        ])
+      }
     }
+  }
+
+  private func applyEffectiveLegibleSuppression() {
+    // System Picture-in-Picture cannot display Flutter overlays, so native
+    // AVPlayer subtitle rendering must remain active inside PiP.
+    // Inline:
+    // - Explicit external subtitle replacement (`suppressNativeSubtitleAllowNonText == true`)
+    //   suppresses native rendering even on graphical/bitmap/unknown tracks so
+    //   external SRT never double-renders over embedded subtitles.
+    // - Live embedded translation (`suppressNativeSubtitleAllowNonText == false`)
+    //   suppresses native rendering ONLY when the selected track is confirmed
+    //   extractable text (statically `.text` or after emitting real text lines);
+    //   graphical `.bitmap` and `.unknown` tracks keep native subtitles visible.
+    let liveTextTrackReadyToSuppress =
+      !legibleTrackConfirmedNonText &&
+      (legibleTrackConfirmedText || selectedLegibleStaticFormat == .text)
+    let shouldSuppress = suppressNativeSubtitleRenderingRequested
+      && !isPipActiveOrStarting
+      && (suppressNativeSubtitleAllowNonText || liveTextTrackReadyToSuppress)
+    legibleOutput?.suppressesPlayerRendering = shouldSuppress
+  }
+
+  private func clearLegibleSubtitleState(forceEmit: Bool = false) {
+    if forceEmit || !lastLegibleLines.isEmpty || lastLegibleHasNativeSamples {
+      lastLegibleLines = []
+      lastLegibleHasNativeSamples = false
+      emitMediaEvent([
+        "type": "subtitleCue",
+        "lines": [],
+        "hasNativeSamples": false,
+      ])
+    }
+  }
+
+  // MARK: - AVPlayerItemLegibleOutputPushDelegate
+
+  func legibleOutput(
+    _ output: AVPlayerItemLegibleOutput,
+    didOutputAttributedStrings strings: [NSAttributedString],
+    nativeSampleBuffers nativeSamples: [Any],
+    forItemTime itemTime: CMTime
+  ) {
+    guard output === legibleOutput else { return }
+    let lines = strings
+      .map { $0.string.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+    let hasNativeSamples = !nativeSamples.isEmpty
+    let prevConfirmedText = legibleTrackConfirmedText
+    let prevConfirmedNonText = legibleTrackConfirmedNonText
+    if !lines.isEmpty {
+      legibleTrackConfirmedText = true
+      legibleTrackConfirmedNonText = false
+      applyEffectiveLegibleSuppression()
+    } else if hasNativeSamples {
+      legibleTrackConfirmedNonText = true
+      legibleTrackConfirmedText = false
+      applyEffectiveLegibleSuppression()
+    }
+    if legibleTrackConfirmedText != prevConfirmedText ||
+        legibleTrackConfirmedNonText != prevConfirmedNonText {
+      emitMediaEvent([
+        "type": "subtitleTracksChanged",
+        "subtitleTracks": readMediaSelectionTracks(characteristic: .legible),
+      ])
+    }
+    if lines == lastLegibleLines && hasNativeSamples == lastLegibleHasNativeSamples {
+      return
+    }
+    lastLegibleLines = lines
+    lastLegibleHasNativeSamples = hasNativeSamples
+    emitMediaEvent([
+      "type": "subtitleCue",
+      "lines": lines,
+      "hasNativeSamples": hasNativeSamples,
+    ])
+  }
+
+  func outputSequenceWasFlushed(_ output: AVPlayerItemOutput) {
+    guard let legible = output as? AVPlayerItemLegibleOutput,
+          legible === legibleOutput else {
+      return
+    }
+    clearLegibleSubtitleState(forceEmit: true)
   }
 
   // MARK: - Device System Volume (MPVolumeView + AVAudioSession)
@@ -1240,6 +1564,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
 
   func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
     pipStarting = true
+    applyEffectiveLegibleSuppression()
     emitEvent([
       "type": "pipStateChanged",
       "active": false,
@@ -1254,6 +1579,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     if cancelPendingPipStart {
       cancelPendingPipStart = false
       pictureInPictureController.stopPictureInPicture()
+      applyEffectiveLegibleSuppression()
       emitEvent([
         "type": "pipStateChanged",
         "active": false,
@@ -1263,6 +1589,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
       ])
       return
     }
+    applyEffectiveLegibleSuppression()
     emitPipState(phase: "didStart")
   }
 
@@ -1272,6 +1599,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
   ) {
     pipStarting = false
     cancelPendingPipStart = false
+    applyEffectiveLegibleSuppression()
     let prevPossible = pictureInPictureController.isPictureInPicturePossible
     if pipSourceLayer !== visiblePlayerLayer {
       teardownPictureInPicture(detachSourceLayer: true)
@@ -1291,6 +1619,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
 
   func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
     pipStarting = false
+    applyEffectiveLegibleSuppression()
     emitEvent([
       "type": "pipStateChanged",
       "active": false,
@@ -1302,6 +1631,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
 
   func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
     pipStarting = false
+    applyEffectiveLegibleSuppression()
     if pipSourceLayer !== visiblePlayerLayer {
       teardownPictureInPicture(detachSourceLayer: true)
       if let currentVisible = visiblePlayerLayer {
