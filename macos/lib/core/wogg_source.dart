@@ -32,6 +32,31 @@ class WoggSource {
     this.shareTimeout = const Duration(seconds: 18),
   });
 
+  static String? _extractExplicitOriginRaw(String rawExt) {
+    final trimmed = rawExt.trim();
+    if (trimmed.isEmpty) return null;
+    try {
+      final ext = jsonDecode(trimmed);
+      if (ext is Map) {
+        for (final key in const ['siteUrl', 'site', 'url', 'domain', 'host']) {
+          final val = (ext[key] ?? '').toString().trim();
+          if (val.isNotEmpty) return val;
+        }
+        return null;
+      }
+      if (ext is String) {
+        final s = ext.trim();
+        if (s.startsWith('http://') || s.startsWith('https://')) return s;
+      }
+      return null;
+    } catch (_) {
+      if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+        return trimmed;
+      }
+      return null;
+    }
+  }
+
   static bool supports(CmsSite site) {
     if (site.type != 3 ||
         !RegExp(r'^csp_wogg(?:guard)?$', caseSensitive: false)
@@ -39,12 +64,7 @@ class WoggSource {
       return false;
     }
     if (site.pluginReference.trim().isNotEmpty) return true;
-    try {
-      final ext = jsonDecode(site.ext);
-      return ext is Map && (ext['siteUrl'] ?? '').toString().trim().isNotEmpty;
-    } catch (_) {
-      return false;
-    }
+    return _extractExplicitOriginRaw(site.ext) != null;
   }
 
   /// Correct only provably mismatched labels in an older WoGG detail snapshot.
@@ -203,13 +223,10 @@ class WoggSource {
   }
 
   Future<WoggPluginConfiguration> _configuration(CmsSite site) async {
-    Object? ext;
-    try {
-      ext = jsonDecode(site.ext);
-    } catch (_) {/* Optional JSON ext. */}
-    if (ext is Map && (ext['siteUrl'] ?? '').toString().trim().isNotEmpty) {
+    final explicitOrigin = _extractExplicitOriginRaw(site.ext);
+    if (explicitOrigin != null) {
       return WoggPluginConfiguration(
-        origins: [_origin(ext['siteUrl'].toString()).toString()],
+        origins: [_origin(explicitOrigin).toString()],
         userAgent: 'Mozilla/5.0',
       );
     }

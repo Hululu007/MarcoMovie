@@ -777,7 +777,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     if (matched != null) {
       if (!matched.supported) {
-        _showAppleNotice(matched.name, matched.unsupportedReason);
+        _showUnsupportedSiteNotice(matched);
         return;
       }
       _openVideoDetail(
@@ -1982,6 +1982,33 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       });
     }
   }
+  void _showUnsupportedSiteNotice(CmsSite site, {BuildContext? dialogContext}) {
+    final targetCtx = dialogContext ?? context;
+    unawaited(
+      showAppleNativeAlert(
+        targetCtx,
+        title: site.name,
+        message: site.actionableUnsupportedHint,
+        actions: const [
+          AppleNativeAlertAction(
+            id: 'extensions',
+            title: '配置蜘蛛扩展与网关',
+            isDefault: true,
+          ),
+          AppleNativeAlertAction(
+            id: 'ok',
+            title: '我知道了',
+            isCancel: true,
+          ),
+        ],
+      ).then((actionId) {
+        if (actionId == 'extensions' && mounted) {
+          unawaited(_openSpiderExtensionsPage(iosBackLabel: '返回'));
+        }
+      }),
+    );
+  }
+
   void _openVideoDetail(
     CmsSite site,
     CmsVideo video, {
@@ -1993,7 +2020,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     Color? ambientColor,
   }) {
     if (!CuratedDiscoveryService.isCuratedSite(site) && !site.supported) {
-      _showAppleNotice(site.name, site.unsupportedReason);
+      _showUnsupportedSiteNotice(site);
       return;
     }
     if (video.id.startsWith('netdisk_qr:')) {
@@ -4816,15 +4843,21 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
   }
   Widget _buildPluginOnlyConfigNotice(BuildContext context) {
-    final pluginCount = _config?.pluginOnlySites.length ?? 0;
+    final pluginCount = _config?.unadaptedPluginSites.length ?? 0;
+    final netdiskPluginCount = _config?.unadaptedPluginSites
+            .where((s) => CspBridge.isNetdiskSite(s))
+            .length ??
+        0;
     final depotCount = _config?.depots.length ?? 0;
     final liveCount = _config?.supportedLives.length ?? 0;
     final String titleText;
     final String bodyText;
     if (pluginCount > 0) {
-      titleText = '已成功加载配置（共 $pluginCount 个安卓专用插件站点）';
+      titleText = netdiskPluginCount == pluginCount
+          ? '已加载配置（共 $pluginCount 个未适配网盘插件站点）'
+          : '已成功加载配置（共 $pluginCount 个未适配插件站点）';
       bodyText =
-          '当前仓库中的片源全部为安卓 JAR 爬虫插件（csp_*）。由于苹果 iOS / macOS 系统安全机制限制，无法直接运行安卓 DEX 字节码插件；Apple 端支持所有标准 HTTP/HTTPS CMS 站点（type 0 / 1 / 4）、已移植 Guard/DRPY/JS/Py 规则源与 M3U/TXT 电视直播源。';
+          '当前仓库中的片源均依赖安卓 JAR/DEX 插件或尚未适配的网盘爬虫（csp_*）。macOS 端支持所有标准 HTTP/HTTPS CMS 站点（type 0 / 1 / 4）、已适配的 4K 网盘源、Guard/DRPY/JS/Py 规则源与 M3U/TXT 直播源；您也可在「设置 → 蜘蛛扩展与网关」导入适配包或连接局域网 Android 蜘蛛网关。';
     } else if (liveCount > 0) {
       titleText = '已成功加载直播配置（共 $liveCount 个直播源）';
       bodyText = '当前订阅仅包含电视直播频道，可直接前往直播页观看，或导入点播订阅源。';
@@ -4880,11 +4913,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   compact: true,
                   onPressed: _showDepotPickerDialog,
                 ),
+              if (pluginCount > 0)
+                AppleCapsuleButton(
+                  label: '配置蜘蛛扩展与网关',
+                  icon: CupertinoIcons.cube_box_fill,
+                  primary: depotCount <= 1 && liveCount == 0,
+                  compact: true,
+                  onPressed: () =>
+                      unawaited(_openSpiderExtensionsPage(iosBackLabel: '首页')),
+                ),
               if (liveCount > 0)
                 AppleCapsuleButton(
                   label: '观看电视直播 ($liveCount)',
                   icon: CupertinoIcons.dot_radiowaves_left_right,
-                  primary: depotCount <= 1,
+                  primary: depotCount <= 1 && pluginCount == 0,
                   compact: true,
                   onPressed: () => setState(() => _tabIndex = 1),
                 ),
@@ -7499,20 +7541,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             ),
                       onTap: () {
                         if (!s.supported) {
-                          unawaited(
-                            showAppleNativeAlert(
-                              ctx,
-                              title: s.name,
-                              message: s.unsupportedReason,
-                              actions: const [
-                                AppleNativeAlertAction(
-                                  id: 'ok',
-                                  title: '我知道了',
-                                  isDefault: true,
-                                ),
-                              ],
-                            ),
-                          );
+                          _showUnsupportedSiteNotice(s, dialogContext: ctx);
                           return;
                         }
                         Navigator.of(ctx).pop();

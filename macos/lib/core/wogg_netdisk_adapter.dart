@@ -39,13 +39,18 @@ class WoggNetdiskAdapter {
 
   WoggNetdiskAdapter(this.site, this.fetchText, {this.postJson});
 
+  static final RegExp _supportedApiPattern = RegExp(
+    r'^csp_(?:wobg|wanou|zhizhen|mihdr|muou|shandian|xiaomi|erxiao|ouge|tudou|labi|duoduo|huban|huajuan|xiaopan|kuaiying|qingying|woniu|zhinan|yidong|yidong4k|qiwei|leijing|haimian|panta|panhub|yiso|fengye|fengye4k|fengqi4k|kaka|jike)(?:guard)?$',
+    caseSensitive: false,
+  );
+
+  static bool matchesApiName(String api) =>
+      _supportedApiPattern.hasMatch(api.trim());
+
   static bool supports(CmsSite site) {
     if (site.type != 3 || site.ext.trim().isEmpty) return false;
     final api = site.api.trim();
-    if (!RegExp(
-      r'^csp_(?:wobg|zhizhen|mihdr|muou|shandian|xiaomi|erxiao|ouge|tudou|labi|duoduo|huban|huajuan|xiaopan|kuaiying|qingying|woniu|zhinan|yidong|qiwei|leijing|haimian|panta|yiso)(?:guard)?$',
-      caseSensitive: false,
-    ).hasMatch(api)) {
+    if (!matchesApiName(api)) {
       return false;
     }
     return parseDomains(site.ext, siteKey: api).isNotEmpty ||

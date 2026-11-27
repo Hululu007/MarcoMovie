@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart' show SubtitleViewState;
 import '../core/anime4k_controller.dart';
+import '../core/app_log.dart';
 import '../core/bluray_iso_proxy.dart';
 import '../core/cast_service.dart';
 import '../core/catpaw_host.dart';
@@ -198,6 +199,49 @@ class PlayerScreen extends StatefulWidget {
       return '直播源连接超时，请重试或切换其他频道/线路';
     }
     return '直播源暂不可用，请重试或切换其他频道/线路';
+  }
+
+  /// Formats a concise, redacted, actionable Chinese message for VOD playback
+  /// and plugin/adapter resolution failures instead of collapsing unknown
+  /// plugin or runtime errors into a generic string.
+  static String formatActionablePlaybackError(
+    CmsSite site,
+    CmsEpisode episode,
+    Object? error,
+  ) {
+    final cloudError = CmsClient.cloudPlaybackError(episode, error);
+    if (cloudError.isNotEmpty) return cloudError;
+    if (error is TimeoutException) {
+      return '媒体加载超时，请重试或选择其他画质';
+    }
+    if (error != null &&
+        (error is GuardBootstrapException ||
+            error is DrpySourceException ||
+            error is FormatException ||
+            error is StateError)) {
+      final raw = AppLog.redact(CmsClient.cleanErrorMessage(error));
+      if (raw.isNotEmpty &&
+          raw.length <= 220 &&
+          !raw.contains('片源加载已取消') &&
+          !RegExp(r'^Bad state:', caseSensitive: false).hasMatch(raw)) {
+        if (raw.contains('缺少') ||
+            raw.contains('适配') ||
+            raw.contains('运行环境') ||
+            raw.contains('蜘蛛网关') ||
+            raw.contains('网页解析') ||
+            raw.contains('刷新详情') ||
+            raw.contains('网盘') ||
+            raw.contains('CatPaw') ||
+            raw.contains('插件') ||
+            raw.contains('解析')) {
+          return raw;
+        }
+      }
+    }
+    if (!site.supported) {
+      return site.actionableUnsupportedHint;
+    }
+    return '播放失败，请重试或切换线路';
   }
 
   @override
@@ -2668,6 +2712,12 @@ class _PlayerScreenState extends State<PlayerScreen>
             error: error,
           ).then((recovered) {
             if (!recovered && mounted && recoverySession == _playSession) {
+              AppLog.instance.logError(
+                'VOD playback failed after recovery: ${CmsClient.cleanErrorMessage(error ?? 'unknown')}',
+                source: 'PlayerScreen',
+                context:
+                    'site=${widget.site.key} api=${widget.site.api} ep=${_currentEpisode.name}',
+              );
               setState(() {
                 _allowEvents = false;
                 _allowHistory = false;
@@ -2675,9 +2725,11 @@ class _PlayerScreenState extends State<PlayerScreen>
                 _buffering = false;
                 _playing = false;
                 _controlsVisible = true;
-                _playbackError = error is TimeoutException
-                    ? '媒体加载超时，请重试或选择其他画质'
-                    : '播放失败，请重试或切换线路';
+                _playbackError = PlayerScreen.formatActionablePlaybackError(
+                  widget.site,
+                  _currentEpisode,
+                  error,
+                );
                 _playbackErrorCause = error;
               });
               _enginePause();
@@ -2694,6 +2746,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     } else if (error is String && error.contains('请求头')) {
       specificHeaderError = error.trim();
     }
+    AppLog.instance.logError(
+      'Playback failed: ${CmsClient.cleanErrorMessage(error ?? 'unknown')}',
+      source: 'PlayerScreen',
+      context:
+          'live=$_isLiveStream site=${widget.site.key} api=${widget.site.api} ep=${_currentEpisode.name}',
+    );
     setState(() {
       _allowEvents = false;
       _allowHistory = false;
@@ -2712,9 +2770,11 @@ class _PlayerScreenState extends State<PlayerScreen>
               error,
               upstreamStatusCode: _lastLiveUpstreamStatus,
             )
-          : error is TimeoutException
-          ? '媒体加载超时，请重试或选择其他画质'
-          : '播放失败，请重试或切换线路';
+          : PlayerScreen.formatActionablePlaybackError(
+              widget.site,
+              _currentEpisode,
+              error,
+            );
       _playbackErrorCause = error;
       if (CmsClient.needsSourceVerification(widget.site, error)) {
         _playbackError = '此片源需要完成验证码后继续播放';

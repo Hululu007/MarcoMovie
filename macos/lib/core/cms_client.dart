@@ -9,6 +9,7 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:path_provider/path_provider.dart';
+import 'app_log.dart';
 import 'cms_parser.dart';
 import 'csp_bridge.dart';
 import 'csp_rule_engines.dart';
@@ -1382,8 +1383,17 @@ class CmsClient {
 
   String _wrapJsEpisodeIds(String raw, {String scheme = 'mmjs'}) {
     final doc = jsonDecode(raw);
-    if (doc is! Map || doc['list'] is! List) return raw;
-    for (final item in (doc['list'] as List).whereType<Map>()) {
+    if (doc is! Map) return raw;
+    List? items;
+    if (doc['list'] is List) {
+      items = doc['list'] as List;
+    } else if (doc['data'] is Map && (doc['data'] as Map)['list'] is List) {
+      items = (doc['data'] as Map)['list'] as List;
+    } else if (doc['data'] is List) {
+      items = doc['data'] as List;
+    }
+    if (items == null) return raw;
+    for (final item in items.whereType<Map>()) {
       final urls = item['vod_play_url'];
       if (urls is! String || urls.isEmpty) continue;
       final flags = (item['vod_play_from'] ?? '').toString().split(r'$$$');
@@ -2838,6 +2848,66 @@ class CmsClient {
     );
   }
 
+  Future<CmsEpisode?> _tryResolveCloudShareFromPayload(
+    CmsSite site,
+    CmsEpisode episode,
+    Object? payloadUrl, {
+    List<CmsParse> parses = const [],
+    List<CmsSniffRule> rules = const [],
+    List<String> ads = const [],
+  }) async {
+    if (payloadUrl is String) {
+      return _tryResolveCloudShareTarget(
+        site,
+        episode,
+        payloadUrl,
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
+    }
+    if (payloadUrl is Map) {
+      return _tryResolveCloudShareFromPayload(
+        site,
+        episode,
+        payloadUrl['url'] ?? payloadUrl['urls'] ?? payloadUrl['playUrl'],
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
+    }
+    if (payloadUrl is List) {
+      for (final item in payloadUrl) {
+        if (item is String &&
+            (item.trim().startsWith('mmshare://') ||
+                item.trim().toLowerCase().startsWith('push://') ||
+                ResilientHttpClient.cloudProviderForShare(item.trim()) !=
+                    null)) {
+          final resolved = await _tryResolveCloudShareTarget(
+            site,
+            episode,
+            item,
+            parses: parses,
+            rules: rules,
+            ads: ads,
+          );
+          if (resolved != null) return resolved;
+        } else if (item is Map) {
+          final resolved = await _tryResolveCloudShareFromPayload(
+            site,
+            episode,
+            item,
+            parses: parses,
+            rules: rules,
+            ads: ads,
+          );
+          if (resolved != null) return resolved;
+        }
+      }
+    }
+    return null;
+  }
+
   Future<CmsEpisode> _wrapAliMediaLease(CmsEpisode played) async {
     if (_http != null && _http is! ResilientHttpClient) return played;
     Uri? firstLeaseTarget;
@@ -2911,6 +2981,35 @@ class CmsClient {
     List<CmsSniffRule> rules = const [],
     List<String> ads = const [],
   }) async {
+    try {
+      return await _resolveEpisodeForPlaybackInner(
+        site,
+        episode,
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
+    } catch (error, st) {
+      if (!_sourceCancelled()) {
+        AppLog.instance.logError(
+          'resolveEpisodeForPlayback failed: ${cleanErrorMessage(error)}',
+          source: 'CmsClient',
+          context:
+              'site=${site.key} api=${site.api} type=${site.type} ep=${episode.name}',
+          stackTrace: st.toString(),
+        );
+      }
+      rethrow;
+    }
+  }
+
+  Future<CmsEpisode> _resolveEpisodeForPlaybackInner(
+    CmsSite site,
+    CmsEpisode episode, {
+    List<CmsParse> parses = const [],
+    List<CmsSniffRule> rules = const [],
+    List<String> ads = const [],
+  }) async {
     site = _resolveAdapterSite(site);
     if (episode.url.startsWith('mmshare://') ||
         episode.url.toLowerCase().startsWith('push://') ||
@@ -2962,18 +3061,15 @@ class CmsClient {
         }),
       );
       if (raw is! Map) throw const FormatException('蜘蛛网关没有返回有效的播放地址');
-      final payloadUrl = raw['url'];
-      if (payloadUrl is String) {
-        final shareResolved = await _tryResolveCloudShareTarget(
-          site,
-          episode,
-          payloadUrl,
-          parses: parses,
-          rules: rules,
-          ads: ads,
-        );
-        if (shareResolved != null) return shareResolved;
-      }
+      final shareResolved = await _tryResolveCloudShareFromPayload(
+        site,
+        episode,
+        raw['url'] ?? raw['urls'],
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
+      if (shareResolved != null) return shareResolved;
       final payload = await _maybeUnwrapSpiderPayload(
         site,
         raw,
@@ -3003,18 +3099,15 @@ class CmsClient {
       final raw = jsonDecode(await _callT4(site,
         {'play': parameters['id'] ?? '', 'flag': parameters['flag'] ?? ''}));
       if (raw is! Map) throw const FormatException('T4 没有返回播放结果');
-      final payloadUrl = raw['url'];
-      if (payloadUrl is String) {
-        final shareResolved = await _tryResolveCloudShareTarget(
-          site,
-          episode,
-          payloadUrl,
-          parses: parses,
-          rules: rules,
-          ads: ads,
-        );
-        if (shareResolved != null) return shareResolved;
-      }
+      final shareResolved = await _tryResolveCloudShareFromPayload(
+        site,
+        episode,
+        raw['url'] ?? raw['urls'],
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
+      if (shareResolved != null) return shareResolved;
       final payload = await _maybeUnwrapSpiderPayload(
         site,
         raw,
@@ -3030,18 +3123,15 @@ class CmsClient {
       final raw = jsonDecode(await _getText(_appendQuery(site.api,
         {'play':parameters['id'] ?? '', 'flag':parameters['flag'] ?? ''}).toString()));
       if (raw is! Map) throw const FormatException('CatPaw 没有返回播放结果');
-      final payloadUrl = raw['url'];
-      if (payloadUrl is String) {
-        final shareResolved = await _tryResolveCloudShareTarget(
-          site,
-          episode,
-          payloadUrl,
-          parses: parses,
-          rules: rules,
-          ads: ads,
-        );
-        if (shareResolved != null) return shareResolved;
-      }
+      final shareResolved = await _tryResolveCloudShareFromPayload(
+        site,
+        episode,
+        raw['url'] ?? raw['urls'],
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
+      if (shareResolved != null) return shareResolved;
       final payload = await _maybeUnwrapSpiderPayload(
         site,
         raw,
@@ -3058,18 +3148,15 @@ class CmsClient {
       final params = Uri.parse(episode.url).queryParameters;
       final raw = jsonDecode(await _callJs(site, 'play', [params['flag'], params['id'], []]));
       if (raw is! Map) throw const FormatException('脚本没有返回播放地址');
-      final payloadUrl = raw['url'];
-      if (payloadUrl is String) {
-        final shareResolved = await _tryResolveCloudShareTarget(
-          site,
-          episode,
-          payloadUrl,
-          parses: parses,
-          rules: rules,
-          ads: ads,
-        );
-        if (shareResolved != null) return shareResolved;
-      }
+      final shareResolved = await _tryResolveCloudShareFromPayload(
+        site,
+        episode,
+        raw['url'] ?? raw['urls'],
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
+      if (shareResolved != null) return shareResolved;
       final payload = await _maybeUnwrapSpiderPayload(
         site,
         raw,
