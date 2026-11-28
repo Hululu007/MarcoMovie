@@ -270,8 +270,7 @@ final class PlaybackController {
                 || combined.contains("baidu");
     }
 
-    private static Cms.Episode findMatchingEpisode(
-            Cms.Line targetLine, Cms.Line fromLine, Cms.Episode ep) {
+    static Cms.Episode findMatchingEpisode(Cms.Line targetLine, Cms.Line fromLine, Cms.Episode ep) {
         if (targetLine == null || targetLine.episodes.isEmpty()) return null;
         if (ep != null && ep.name != null) {
             for (Cms.Episode candidate : targetLine.episodes) {
@@ -860,6 +859,7 @@ final class PlaybackController {
             if (e.url.startsWith("//")) {
                 e.url = "https:" + e.url;
             }
+            e.url = MediaOptions.stripInlineHeaders(e.url, e.headers);
             if (e.url.regionMatches(true, 0, "webview://", 0, 10)) {
                 e.url = e.url.substring(10).trim();
                 resolveWebPage(a, s, v, e, "");
@@ -1277,6 +1277,7 @@ final class PlaybackController {
         a.root.addView(a.playbackLayer, new FrameLayout.LayoutParams(-1, -1));
         a.playbackLayer.addView(surface, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
         a.playerChrome = new PlayerChrome(a, v, ep, "live".equals(s.key));
+        final int[] lastCutoutTopPx = new int[1];
         if (!a.isTvDevice()) {
             final PlayerChrome chrome = a.playerChrome;
             a.root.setOnApplyWindowInsetsListener(
@@ -1285,6 +1286,7 @@ final class PlaybackController {
                         int top = insets.getSystemWindowInsetTop();
                         int right = insets.getSystemWindowInsetRight();
                         int bottom = insets.getSystemWindowInsetBottom();
+                        int cutoutTop = 0;
                         if (android.os.Build.VERSION.SDK_INT >= 30) {
                             android.graphics.Insets safe =
                                     insets.getInsets(
@@ -1295,6 +1297,9 @@ final class PlaybackController {
                             left = safe.left;
                             top = safe.top;
                             right = safe.right;
+                            cutoutTop =
+                                    insets.getInsets(android.view.WindowInsets.Type.displayCutout())
+                                            .top;
                             android.graphics.Insets navigation =
                                     insets.getInsetsIgnoringVisibility(
                                             android.view.WindowInsets.Type.navigationBars());
@@ -1306,12 +1311,19 @@ final class PlaybackController {
                             android.view.DisplayCutout cutout = insets.getDisplayCutout();
                             left = Math.max(left, cutout.getSafeInsetLeft());
                             top = Math.max(top, cutout.getSafeInsetTop());
+                            cutoutTop = cutout.getSafeInsetTop();
                             right = Math.max(right, cutout.getSafeInsetRight());
                             bottom = Math.max(bottom, cutout.getSafeInsetBottom());
                         }
+                        lastCutoutTopPx[0] = cutoutTop;
                         chrome.safeInsets(left, top, right, bottom);
                         if (a.playbackControls != null && a.playbackControls.danmaku != null) {
-                            a.playbackControls.danmaku.setPadding(0, top, 0, 0);
+                            a.playbackControls.danmaku.setPadding(
+                                    0,
+                                    computeDanmakuTopInsetPx(
+                                            view.getWidth(), view.getHeight(), cutoutTop),
+                                    0,
+                                    0);
                         }
                         return insets;
                     });
@@ -1332,6 +1344,12 @@ final class PlaybackController {
                 (view, l, t, r, b, ol, ot, or, ob) -> {
                     int w = r - l, h = b - t;
                     if (w > 0 && h > 0) {
+                        if (!a.isTvDevice()
+                                && a.playbackControls != null
+                                && a.playbackControls.danmaku != null) {
+                            a.playbackControls.danmaku.setPadding(
+                                    0, computeDanmakuTopInsetPx(w, h, lastCutoutTopPx[0]), 0, 0);
+                        }
                         if (w != a.usableWidth || h != a.usableHeight) {
                             a.usableWidth = w;
                             a.usableHeight = h;
@@ -1789,6 +1807,18 @@ final class PlaybackController {
                                                                 a.markerHost.abort();
                                                             int currentPos =
                                                                     mp.getCurrentPosition();
+                                                            AppLog.w(
+                                                                    "PlaybackController",
+                                                                    "playerPage error what="
+                                                                            + what
+                                                                            + " extra="
+                                                                            + extra
+                                                                            + " engine="
+                                                                            + mp.getClass()
+                                                                                    .getSimpleName()
+                                                                            + " url="
+                                                                            + playUrl,
+                                                                    null);
                                                             if (!"live".equals(s.key)
                                                                     && what >= 2000
                                                                     && what < 3000
@@ -1852,6 +1882,53 @@ final class PlaybackController {
                                                             }
                                                             boolean autoSwitchKernel =
                                                                     shouldAutoSwitchKernel(a);
+                                                            if (autoSwitchKernel
+                                                                    && !"live".equals(s.key)
+                                                                    && wasLoopbackCacheOrHlsUrl(
+                                                                            playUrl)
+                                                                    && ep.media != null
+                                                                    && !ep.media.optBoolean(
+                                                                            MEDIA_KEY_DIRECT_URL_FALLBACK)
+                                                                    && a.activeLine != null
+                                                                    && a.activeEpisode != null) {
+                                                                try {
+                                                                    ep.media.put(
+                                                                            MEDIA_KEY_DIRECT_URL_FALLBACK,
+                                                                            true);
+                                                                    clearTransientFallbackFlags(
+                                                                            ep.media);
+                                                                } catch (Exception ignored) {
+                                                                }
+                                                                a.resumeAt =
+                                                                        resolveFallbackResumePosition(
+                                                                                currentPos,
+                                                                                a.playingBookmark
+                                                                                                != null
+                                                                                        ? a.playingBookmark
+                                                                                                .position
+                                                                                        : 0,
+                                                                                a.resumeAt);
+                                                                a.toast("本地代理异常，已切换直连播放");
+                                                                a.playStatus.setText(
+                                                                        "本地代理异常，正在切换直连播放…");
+                                                                final Cms.Line retryLine =
+                                                                        a.activeLine;
+                                                                final Cms.Episode retryEp =
+                                                                        a.activeEpisode;
+                                                                a.ui.post(
+                                                                        () -> {
+                                                                            if (isFullscreenRetrySessionActive(
+                                                                                    a, ticket,
+                                                                                    sessionId,
+                                                                                    retryLine,
+                                                                                    retryEp)) {
+                                                                                playerPage(
+                                                                                        a, s, v,
+                                                                                        ep);
+                                                                            }
+                                                                        });
+                                                                return true;
+                                                            }
                                                             int bookmarkPos =
                                                                     a.playingBookmark != null
                                                                             ? a.playingBookmark
@@ -1876,7 +1953,9 @@ final class PlaybackController {
                                                                             currentPos,
                                                                             bookmarkPos,
                                                                             a.resumeAt,
-                                                                            autoSwitchKernel);
+                                                                            autoSwitchKernel,
+                                                                            MpvPlayer
+                                                                                    .isAvailable());
                                                             if (kernelAction.action
                                                                     != FullscreenFallbackAction
                                                                             .ACTION_NONE) {
@@ -2592,6 +2671,8 @@ final class PlaybackController {
     static final int ENGINE_MPV = 3;
     static final String MEDIA_KEY_MPV_INCOMPATIBLE_LOCAL_HLS = "_mpvIncompatibleLocalHls";
     static final String MEDIA_KEY_SINGLE_PLAY_FALLBACK_FROM_MPV = "_singlePlayFallbackFromMpv";
+    static final String MEDIA_KEY_DIRECT_URL_FALLBACK = "_directUrlFallback";
+    static final String MEDIA_KEY_TRY_MPV_FALLBACK = "_tryMpvFallback";
     private static final int LOCAL_HLS_INSPECT_MAX_CHILDREN = 32;
 
     /** Deterministic engine selection plan shared by both fullscreen and mobile inline players. */
@@ -2863,6 +2944,14 @@ final class PlaybackController {
         boolean swFallback = m.optBoolean("_softwareFallback");
         boolean mpvFallback = m.optBoolean("_mpvFallback");
 
+        if (m.optBoolean(MEDIA_KEY_TRY_MPV_FALLBACK)
+                && !mpvFallback
+                && mpvAvailable
+                && drmScheme.isEmpty()
+                && !m.optBoolean(MEDIA_KEY_MPV_INCOMPATIBLE_LOCAL_HLS)) {
+            return new EnginePlan(
+                    ENGINE_MPV, false, 0, false, "MPV", "Media3 / 系统播放器异常，已切换 MPV 兼容内核");
+        }
         if (sysFallback) {
             return new EnginePlan(
                     ENGINE_SYSTEM, false, 0, false, "Android 系统播放器", "已回退至 Android 系统播放器");
@@ -3075,6 +3164,7 @@ final class PlaybackController {
         static final int ACTION_HW_RETRY = 2;
         static final int ACTION_SOFTWARE_FALLBACK = 3;
         static final int ACTION_SYSTEM_FALLBACK = 4;
+        static final int ACTION_MEDIA3_TO_MPV = 5;
 
         final int action;
         final int resumeAtMs;
@@ -3092,6 +3182,33 @@ final class PlaybackController {
                 new FullscreenFallbackAction(ACTION_NONE, 0, 0L, "");
     }
 
+    static FullscreenFallbackAction decideFullscreenKernelFallback(
+            boolean isMpv,
+            int errorWhat,
+            int decoderMode,
+            int enginePref,
+            JSONObject media,
+            boolean unsupportedDv5,
+            int softFallbackMode,
+            int currentPosMs,
+            int bookmarkPosMs,
+            int existingResumeAtMs,
+            boolean autoSwitchKernel) {
+        return decideFullscreenKernelFallback(
+                isMpv,
+                errorWhat,
+                decoderMode,
+                enginePref,
+                media,
+                unsupportedDv5,
+                softFallbackMode,
+                currentPosMs,
+                bookmarkPosMs,
+                existingResumeAtMs,
+                autoSwitchKernel,
+                false);
+    }
+
     /**
      * Unified fullscreen kernel-fallback decision enforcing {@link Prefs#AUTO_SWITCH_KERNEL} and
      * preserving the playback position across kernel switches.
@@ -3107,7 +3224,8 @@ final class PlaybackController {
             int currentPosMs,
             int bookmarkPosMs,
             int existingResumeAtMs,
-            boolean autoSwitchKernel) {
+            boolean autoSwitchKernel,
+            boolean mpvAvailable) {
         if (media == null) return FullscreenFallbackAction.NONE;
         int resumePos =
                 resolveFallbackResumePosition(currentPosMs, bookmarkPosMs, existingResumeAtMs);
@@ -3168,18 +3286,54 @@ final class PlaybackController {
                         "正在切换至系统硬件播放器…");
             }
         }
+        JSONObject drmObj = media.optJSONObject("drm");
+        String drmScheme =
+                drmObj == null
+                        ? media.optString("drmScheme", "")
+                        : drmObj.optString("scheme", drmObj.optString("type", ""));
+        if (autoSwitchKernel
+                && mpvAvailable
+                && !isMpv
+                && enginePref != ENGINE_MPV
+                && drmScheme.isEmpty()
+                && !media.optBoolean("_mpvFallback")
+                && !media.optBoolean(MEDIA_KEY_TRY_MPV_FALLBACK)
+                && !media.optBoolean(MEDIA_KEY_MPV_INCOMPATIBLE_LOCAL_HLS)) {
+            try {
+                media.put(MEDIA_KEY_TRY_MPV_FALLBACK, true);
+            } catch (Exception ignored) {
+            }
+            return new FullscreenFallbackAction(
+                    FullscreenFallbackAction.ACTION_MEDIA3_TO_MPV, resumePos, 0L, "正在尝试 MPV 兼容内核…");
+        }
         return FullscreenFallbackAction.NONE;
     }
 
-    /**
-     * Advances the shared engine fallback ladder ({@code MPV -> Media3 -> Media3 SW -> System})
-     * when {@code autoSwitchKernel} is enabled. Returns the fallback description, or {@code null}
-     * when no fallback step remains.
-     */
     static String advanceFallbackPlan(
             JSONObject media, int activeEngine, boolean softwareActive, boolean autoSwitchKernel) {
+        return advanceFallbackPlan(
+                media, activeEngine, softwareActive, autoSwitchKernel, false, false);
+    }
+
+    /**
+     * Advances the shared engine fallback ladder ({@code Proxy->Direct -> MPV -> Media3 -> Media3 SW
+     * -> System -> MPV}) when {@code autoSwitchKernel} is enabled. Returns the fallback
+     * description, or {@code null} when no fallback step remains.
+     */
+    static String advanceFallbackPlan(
+            JSONObject media,
+            int activeEngine,
+            boolean softwareActive,
+            boolean autoSwitchKernel,
+            boolean mpvAvailable,
+            boolean wasProxiedLoopback) {
         if (!autoSwitchKernel || media == null) return null;
         try {
+            if (wasProxiedLoopback && !media.optBoolean(MEDIA_KEY_DIRECT_URL_FALLBACK)) {
+                media.put(MEDIA_KEY_DIRECT_URL_FALLBACK, true);
+                clearTransientFallbackFlags(media);
+                return "本地代理异常，已自动切换直连播放";
+            }
             if (activeEngine == ENGINE_MPV && !media.optBoolean("_mpvFallback")) {
                 media.put("_mpvFallback", true);
                 return "MPV 播放异常，已自动回退 Media3";
@@ -3191,20 +3345,113 @@ final class PlaybackController {
                 media.put("_fallbackMode", 2);
                 return "硬解异常，已自动切换软件解码";
             }
-            if (activeEngine != ENGINE_SYSTEM && !media.optBoolean("_systemFallback")) {
+            if (activeEngine != ENGINE_SYSTEM
+                    && activeEngine != ENGINE_MPV
+                    && !media.optBoolean("_systemFallback")) {
                 media.put("_systemFallback", true);
                 return "已自动切换 Android 系统播放器";
+            }
+            JSONObject drmObj = media.optJSONObject("drm");
+            String drmScheme =
+                    drmObj == null
+                            ? media.optString("drmScheme", "")
+                            : drmObj.optString("scheme", drmObj.optString("type", ""));
+            if (mpvAvailable
+                    && activeEngine != ENGINE_MPV
+                    && drmScheme.isEmpty()
+                    && !media.optBoolean("_mpvFallback")
+                    && !media.optBoolean(MEDIA_KEY_TRY_MPV_FALLBACK)
+                    && !media.optBoolean(MEDIA_KEY_MPV_INCOMPATIBLE_LOCAL_HLS)) {
+                media.put(MEDIA_KEY_TRY_MPV_FALLBACK, true);
+                return "已自动切换 MPV 兼容内核";
             }
         } catch (Exception ignored) {
         }
         return null;
     }
 
+    static int computeDanmakuTopInsetPx(int rootWidth, int rootHeight, int displayCutoutTopPx) {
+        if (rootWidth <= 0 || rootHeight <= 0 || rootWidth >= rootHeight) {
+            return 0;
+        }
+        return Math.max(0, displayCutoutTopPx);
+    }
+
+    static boolean wasLoopbackCacheOrHlsUrl(String url) {
+        if (url == null || url.isEmpty()) return false;
+        try {
+            java.net.URI uri = java.net.URI.create(url.trim());
+            if (!ProxyAddress.isLoopbackHost(uri.getHost())) return false;
+            String path = uri.getPath();
+            return path != null && (path.startsWith("/kcache/") || path.startsWith("/hls"));
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    static void clearTransientFallbackFlags(JSONObject media) {
+        if (media == null) return;
+        media.remove("_hwRetry");
+        media.remove("_softwareFallback");
+        media.remove("_fallbackMode");
+        media.remove("_systemFallback");
+        media.remove("_tryMpvFallback");
+        media.remove("_mpvFallback");
+    }
+
+    static void launchExternalPlayer(MainActivity a, Cms.Video v, Cms.Episode ep) {
+        if (a == null) return;
+        if (ep == null || ep.url == null || ep.url.trim().isEmpty()) {
+            a.toast("当前播放地址尚未就绪");
+            return;
+        }
+        String raw = ep.url.trim();
+        if (raw.startsWith("//")) raw = "https:" + raw;
+        Map<String, String> headers = new LinkedHashMap<>(ep.headers);
+        raw = MediaOptions.stripInlineHeaders(raw, headers);
+        try {
+            String launchUrl =
+                    Cms.isHttp(raw)
+                            ? ProxyAddress.normalizeMediaHttpUrl(Cms.normalizeHttp(raw))
+                            : raw;
+            android.content.Intent intent =
+                    new android.content.Intent(android.content.Intent.ACTION_VIEW);
+            intent.setDataAndType(Uri.parse(launchUrl), "video/*");
+            String title =
+                    (v != null && v.title != null && !v.title.isEmpty() ? v.title + " - " : "")
+                            + (ep.name != null ? ep.name : "");
+            if (!title.isEmpty()) {
+                intent.putExtra("title", title);
+            }
+            if (!headers.isEmpty()) {
+                java.util.ArrayList<String> pairs = new java.util.ArrayList<>();
+                for (Map.Entry<String, String> entry : headers.entrySet()) {
+                    if (entry.getKey() != null && entry.getValue() != null) {
+                        pairs.add(entry.getKey());
+                        pairs.add(entry.getValue());
+                    }
+                }
+                if (!pairs.isEmpty()) {
+                    intent.putExtra("headers", pairs.toArray(new String[0]));
+                }
+            }
+            a.startActivity(android.content.Intent.createChooser(intent, "选择外部播放器打开"));
+        } catch (Exception e) {
+            a.toast("未找到可用的外部播放器");
+        }
+    }
+
     static String preparePlayUrl(
             MainActivity a, Cms.Site s, Cms.Episode ep, Map<String, String> mediaHeaders)
             throws Exception {
-        String rawPlayUrl = Cms.isHttp(ep.url) ? Cms.normalizeHttp(ep.url) : ep.url;
+        String rawPlayUrl =
+                Cms.isHttp(ep.url)
+                        ? ProxyAddress.normalizeMediaHttpUrl(Cms.normalizeHttp(ep.url))
+                        : ep.url;
         if (!Cms.isHttp(rawPlayUrl)) {
+            return rawPlayUrl;
+        }
+        if (ep.media != null && ep.media.optBoolean(MEDIA_KEY_DIRECT_URL_FALLBACK)) {
             return rawPlayUrl;
         }
         String playUrl = rawPlayUrl;

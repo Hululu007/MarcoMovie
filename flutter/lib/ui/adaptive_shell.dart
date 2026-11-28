@@ -7663,7 +7663,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             child: AppleGlassSurface(
               padding: const EdgeInsets.all(28),
               borderRadius: BorderRadius.circular(26),
-              color: const Color(0xCC16171D),
+              color: ApplePalette.isDarkOf(context)
+                  ? const Color(0xCC16171D)
+                  : const Color(0xF2FFFFFF),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [

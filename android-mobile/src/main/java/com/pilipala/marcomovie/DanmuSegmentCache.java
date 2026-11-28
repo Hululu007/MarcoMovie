@@ -1072,6 +1072,7 @@ public final class DanmuSegmentCache implements AutoCloseable {
 
             // 3. Update draw coordinates for active slots
             float lineHeightPx = fontSizePx * LINE_HEIGHT_FACTOR;
+            float firstRowBaselinePx = topInsetPx + fontSizePx * 0.96f;
             float baselineOffsetPx = fontSizePx * 0.22f;
             float safeBottom = Math.max(0f, bottomSafeInsetPx);
             for (int i = 0; i < MAX_ACTIVE_SLOTS; i++) {
@@ -1080,13 +1081,13 @@ public final class DanmuSegmentCache implements AutoCloseable {
                 long age = effectiveMs - slot.startMs;
                 if (slot.mode == 5) {
                     slot.x = (viewW - slot.widthPx) * 0.5f;
-                    slot.y = topInsetPx + (slot.lane + 1) * lineHeightPx - baselineOffsetPx;
+                    slot.y = firstRowBaselinePx + slot.lane * lineHeightPx;
                 } else if (slot.mode == 4) {
                     slot.x = (viewW - slot.widthPx) * 0.5f;
                     slot.y = viewH - safeBottom - slot.lane * lineHeightPx - baselineOffsetPx;
                 } else {
                     slot.x = (float) (viewW - slot.velocityPxPerMs * age);
-                    slot.y = topInsetPx + (slot.lane + 1) * lineHeightPx - baselineOffsetPx;
+                    slot.y = firstRowBaselinePx + slot.lane * lineHeightPx;
                 }
             }
             return activeCount;

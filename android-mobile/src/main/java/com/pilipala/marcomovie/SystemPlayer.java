@@ -172,7 +172,10 @@ public final class SystemPlayer extends MoviePlayer {
                 () -> {
                     check();
                     mediaUri = uri;
-                    headers = Collections.unmodifiableMap(new LinkedHashMap<>(requestHeaders));
+                    Map<String, String> sanitized =
+                            ProxyAddress.sanitizeLoopbackHeaders(
+                                    uri != null ? uri.getHost() : null, requestHeaders);
+                    headers = Collections.unmodifiableMap(new LinkedHashMap<>(sanitized));
                     nativePlayer.setDataSource(context, uri, headers);
                     return null;
                 });

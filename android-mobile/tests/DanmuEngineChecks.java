@@ -90,6 +90,7 @@ public final class DanmuEngineChecks {
         testSeekStormDebounceAndCancellation();
         testRateLimitingAnd429RetryAfter();
         testTvPerFrameZeroRepeatFilterAndZeroAllocPast64Min();
+        testTopRowBaselineNearZeroGap();
         System.out.println("ALL DANMU ENGINE CHECKS PASSED (" + passed + " assertions)");
     }
 
@@ -1754,6 +1755,38 @@ public final class DanmuEngineChecks {
         check(
                 admittedPreviouslyBlocked,
                 "M-01 LayoutEngine.onBlockFilterChanged clears droppedIds when rules relax");
+    }
+
+    private static void testTopRowBaselineNearZeroGap() {
+        LayoutEngine engine = new LayoutEngine();
+        TextWidthMeasurer measurer =
+                new TextWidthMeasurer() {
+                    @Override
+                    public float measureWidth(String text) {
+                        return 120f;
+                    }
+                };
+        List<DanmuItem> items =
+                Arrays.asList(
+                        new DanmuItem("top0", 1000L, 5, 0xFFFFFF, "TopRow0"),
+                        new DanmuItem("scr0", 1000L, 1, 0xFFFFFF, "ScrollRow0"));
+        engine.step(
+                1100L, items, 1920, 1080, 20f, 0f, 44f, 0.25f, 6, 48, 7600L, true, true, true,
+                measurer);
+        float topY = -1f;
+        float scrollY = -1f;
+        for (ActiveSlot s : engine.getSlots()) {
+            if (!s.active) continue;
+            if ("top0".equals(s.id)) topY = s.y;
+            if ("scr0".equals(s.id)) scrollY = s.y;
+        }
+        check(
+                Math.abs(topY - 19.2f) < 0.2f && Math.abs(scrollY - 19.2f) < 0.2f,
+                "Row-0 baseline sits snug at top edge (topY="
+                        + topY
+                        + ", scrollY="
+                        + scrollY
+                        + ")");
     }
 
     private static String repeatChar(char c, int count) {

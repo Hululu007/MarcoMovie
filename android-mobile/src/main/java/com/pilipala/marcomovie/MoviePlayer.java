@@ -113,6 +113,7 @@ public class MoviePlayer {
     private static volatile OkHttpClient sharedMediaHttp;
 
     static OkHttpClient mediaHttpClient() {
+        Cms.ensureApi23RootTrust();
         OkHttpClient existing = sharedMediaHttp;
         if (existing != null) return existing;
         synchronized (MoviePlayer.class) {
@@ -125,6 +126,74 @@ public class MoviePlayer {
                                 .followSslRedirects(true)
                                 .retryOnConnectionFailure(true)
                                 .connectionPool(new ConnectionPool(8, 5, TimeUnit.MINUTES))
+                                .dns(
+                                        hostname -> {
+                                            if (ProxyAddress.isLoopbackHost(hostname)) {
+                                                return okhttp3.Dns.SYSTEM.lookup(hostname);
+                                            }
+                                            java.net.UnknownHostException sysErr = null;
+                                            try {
+                                                java.util.List<java.net.InetAddress> raw =
+                                                        okhttp3.Dns.SYSTEM.lookup(hostname);
+                                                java.util.List<java.net.InetAddress> clean =
+                                                        new java.util.ArrayList<>(raw.size());
+                                                for (java.net.InetAddress addr : raw) {
+                                                    if (addr == null
+                                                            || addr.isAnyLocalAddress()
+                                                            || addr.isLoopbackAddress()
+                                                            || addr.isMulticastAddress()) {
+                                                        continue;
+                                                    }
+                                                    byte[] bytes = addr.getAddress();
+                                                    if (bytes.length == 4
+                                                            && (bytes[0] & 0xff) == 255
+                                                            && (bytes[1] & 0xff) == 255
+                                                            && (bytes[2] & 0xff) == 255
+                                                            && (bytes[3] & 0xff) == 255) {
+                                                        continue;
+                                                    }
+                                                    clean.add(addr);
+                                                }
+                                                if (!clean.isEmpty()) {
+                                                    return clean;
+                                                }
+                                            } catch (java.net.UnknownHostException e) {
+                                                sysErr = e;
+                                            }
+                                            java.util.List<java.net.InetAddress> doh =
+                                                    Cms.resolveViaDoh(hostname);
+                                            if (!doh.isEmpty()) {
+                                                return doh;
+                                            }
+                                            if (sysErr != null) throw sysErr;
+                                            throw new java.net.UnknownHostException(hostname);
+                                        })
+                                .addInterceptor(
+                                        chain -> {
+                                            okhttp3.Request req = chain.request();
+                                            okhttp3.Response resp = chain.proceed(req);
+                                            if (resp.code() == 403
+                                                    && !(ProxyAddress.isLoopbackHost(
+                                                                    req.url().host())
+                                                            && req.url().port()
+                                                                    == ProxyAddress.port)) {
+                                                String ua = req.header("User-Agent");
+                                                if (ua == null
+                                                        || ua.isEmpty()
+                                                        || ua.startsWith("okhttp/")
+                                                        || ua.startsWith("MarcoMovie/")) {
+                                                    resp.close();
+                                                    okhttp3.Request retry =
+                                                            req.newBuilder()
+                                                                    .header(
+                                                                            "User-Agent",
+                                                                            Cms.MOBILE_USER_AGENT)
+                                                                    .build();
+                                                    return chain.proceed(retry);
+                                                }
+                                            }
+                                            return resp;
+                                        })
                                 .build();
             }
             return sharedMediaHttp;
@@ -937,32 +1006,8 @@ public class MoviePlayer {
 
     private static Map<String, String> sanitizeHeadersForAddress(
             Uri address, Map<String, String> sourceHeaders) {
-        Map<String, String> out = new LinkedHashMap<>(sourceHeaders);
-        if (address != null && ProxyAddress.isLoopbackHost(address.getHost())) {
-            for (java.util.Iterator<Map.Entry<String, String>> it = out.entrySet().iterator();
-                    it.hasNext(); ) {
-                Map.Entry<String, String> e = it.next();
-                String k = e.getKey();
-                if ("Origin".equalsIgnoreCase(k)) {
-                    String v = e.getValue();
-                    it.remove();
-                    if (v != null && !v.isEmpty()) out.put("X-Movie-Origin", v);
-                    break;
-                }
-            }
-            for (java.util.Iterator<Map.Entry<String, String>> it = out.entrySet().iterator();
-                    it.hasNext(); ) {
-                Map.Entry<String, String> e = it.next();
-                String k = e.getKey();
-                if ("Host".equalsIgnoreCase(k)) {
-                    String v = e.getValue();
-                    it.remove();
-                    if (v != null && !v.isEmpty()) out.put("X-Movie-Host", v);
-                    break;
-                }
-            }
-        }
-        return out;
+        return ProxyAddress.sanitizeLoopbackHeaders(
+                address != null ? address.getHost() : null, sourceHeaders);
     }
 
     public void prepareAsync() {

@@ -254,6 +254,79 @@ public final class Batch3MobileChecks {
                         == null,
                 "P1: autoSwitchKernel=false disables automatic kernel fallback");
 
+        JSONObject sixStepMedia = new JSONObject();
+        String proxyStep =
+                PlaybackController.advanceFallbackPlan(
+                        sixStepMedia, PlaybackController.ENGINE_MEDIA3, false, true, true, true);
+        PlaybackController.EnginePlan afterProxy =
+                PlaybackController.planEngine(0, sixStepMedia, true);
+        String swStep =
+                PlaybackController.advanceFallbackPlan(
+                        sixStepMedia,
+                        afterProxy.engine,
+                        afterProxy.softwareFallback,
+                        true,
+                        true,
+                        false);
+        PlaybackController.EnginePlan afterSw =
+                PlaybackController.planEngine(0, sixStepMedia, true);
+        String sysStep =
+                PlaybackController.advanceFallbackPlan(
+                        sixStepMedia, afterSw.engine, afterSw.softwareFallback, true, true, false);
+        PlaybackController.EnginePlan afterSys =
+                PlaybackController.planEngine(0, sixStepMedia, true);
+        String mpvStep =
+                PlaybackController.advanceFallbackPlan(
+                        sixStepMedia,
+                        afterSys.engine,
+                        afterSys.softwareFallback,
+                        true,
+                        true,
+                        false);
+        PlaybackController.EnginePlan afterMpv =
+                PlaybackController.planEngine(0, sixStepMedia, true);
+        check(
+                proxyStep != null
+                        && sixStepMedia.optBoolean(PlaybackController.MEDIA_KEY_DIRECT_URL_FALLBACK)
+                        && swStep != null
+                        && sysStep != null
+                        && afterSys.engine == PlaybackController.ENGINE_SYSTEM
+                        && mpvStep != null
+                        && afterMpv.engine == PlaybackController.ENGINE_MPV,
+                "P1: 6-arg advanceFallbackPlan recovers via Direct URL -> SW -> System -> MPV");
+        check(
+                PlaybackController.wasLoopbackCacheOrHlsUrl("http://127.0.0.1:41234/kcache/abc")
+                        && PlaybackController.wasLoopbackCacheOrHlsUrl(
+                                "http://127.0.0.1:41234/hls?sid=1")
+                        && !PlaybackController.wasLoopbackCacheOrHlsUrl(
+                                "https://cdn.example/video.mp4"),
+                "P1: wasLoopbackCacheOrHlsUrl detects loopback proxy routes only");
+        PlaybackController.FullscreenFallbackAction toMpvAction =
+                PlaybackController.decideFullscreenKernelFallback(
+                        false,
+                        1000,
+                        0,
+                        0,
+                        new JSONObject()
+                                .put("_softwareFallback", true)
+                                .put("_systemFallback", true),
+                        false,
+                        2,
+                        0,
+                        0,
+                        0,
+                        true,
+                        true);
+        check(
+                toMpvAction.action
+                        == PlaybackController.FullscreenFallbackAction.ACTION_MEDIA3_TO_MPV,
+                "P1: 12-arg decideFullscreenKernelFallback escalates to MPV after System fallback");
+        check(
+                PlaybackController.computeDanmakuTopInsetPx(1920, 1080, 72) == 0
+                        && PlaybackController.computeDanmakuTopInsetPx(1080, 1920, 72) == 72
+                        && PlaybackController.computeDanmakuTopInsetPx(1080, 1920, -5) == 0,
+                "Danmaku top inset clears gesture gap in landscape and retains cutout only in portrait");
+
         // Background/lock-screen/PiP audio policy
         check(
                 MobileInlinePlayer.shouldContinuePlaybackInBackground(true, false, false),

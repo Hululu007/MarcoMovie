@@ -96,6 +96,20 @@ public final class EmbyChecks {
             throw new AssertionError("invalid id");
         } catch (java.io.IOException expected) {
         }
+        String assembled =
+                MobileEmbyLibrary.assembleServerUrl(false, "emby.example", "/media", "8096");
+        if (!"http://emby.example:8096/media".equals(assembled)) {
+            throw new AssertionError("assembleServerUrl failed: " + assembled);
+        }
+        JSONObject split =
+                MobileEmbyLibrary.splitServerUrl(
+                        "https://nas.example:8920/emby/web/index.html#!/home");
+        if (!split.optBoolean("useHttps")
+                || !"nas.example".equals(split.optString("host"))
+                || !"8920".equals(split.optString("port"))
+                || !"/emby".equals(split.optString("subpath"))) {
+            throw new AssertionError("splitServerUrl failed: " + split);
+        }
         System.out.println(
                 "PASS Emby library, stable episode identity, playback negotiation, scoped transcode, 204 check-ins and terminal reporter");
     }

@@ -2,12 +2,14 @@ package com.pilipala.marcomovie;
 
 import java.io.IOException;
 import java.net.HttpURLConnection;
+import java.net.IDN;
 import java.net.Proxy;
 import java.net.ProxySelector;
 import java.net.SocketAddress;
 import java.net.URI;
 import java.net.URL;
 import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -151,6 +153,138 @@ final class ProxyAddress {
                         .replace("`", "%60")
                         .replace(" ", "%20");
         return prefix + tail;
+    }
+
+    static String normalizeMediaHttpUrl(String rawUrl) {
+        if (rawUrl == null) return "";
+        String trimmed = rawUrl.trim();
+        if (trimmed.isEmpty()) return "";
+        if (trimmed.startsWith("//")) {
+            trimmed = "https:" + trimmed;
+        }
+        int schemeEnd = trimmed.indexOf("://");
+        if (schemeEnd <= 0) return trimmed;
+        String scheme = trimmed.substring(0, schemeEnd).toLowerCase(Locale.ROOT);
+        if (!"http".equals(scheme) && !"https".equals(scheme)) return trimmed;
+
+        int afterScheme = schemeEnd + 3;
+        int authorityEnd = trimmed.length();
+        for (int i = afterScheme; i < trimmed.length(); i++) {
+            char c = trimmed.charAt(i);
+            if (c == '/' || c == '?' || c == '#') {
+                authorityEnd = i;
+                break;
+            }
+        }
+        String authority = trimmed.substring(afterScheme, authorityEnd);
+        String tail = trimmed.substring(authorityEnd);
+
+        int at = authority.lastIndexOf('@');
+        String userInfoPart = at >= 0 ? authority.substring(0, at + 1) : "";
+        String hostPort = at >= 0 ? authority.substring(at + 1) : authority;
+        String host;
+        String portPart = "";
+        if (hostPort.startsWith("[")) {
+            int close = hostPort.indexOf(']');
+            if (close >= 0) {
+                host = hostPort.substring(0, close + 1);
+                portPart = hostPort.substring(close + 1);
+            } else {
+                host = hostPort;
+            }
+        } else {
+            int colon = hostPort.indexOf(':');
+            if (colon >= 0) {
+                host = hostPort.substring(0, colon);
+                portPart = hostPort.substring(colon);
+            } else {
+                host = hostPort;
+            }
+        }
+        if (!host.isEmpty() && !host.startsWith("[")) {
+            try {
+                host = IDN.toASCII(host);
+            } catch (IllegalArgumentException ignored) {
+            }
+        }
+
+        StringBuilder out = new StringBuilder(trimmed.length() + 16);
+        out.append(scheme).append("://").append(userInfoPart).append(host).append(portPart);
+        for (int i = 0; i < tail.length(); ) {
+            char c = tail.charAt(i);
+            if (c == '%'
+                    && i + 2 < tail.length()
+                    && Character.digit(tail.charAt(i + 1), 16) >= 0
+                    && Character.digit(tail.charAt(i + 2), 16) >= 0) {
+                out.append(tail, i, i + 3);
+                i += 3;
+                continue;
+            }
+            int cp = tail.codePointAt(i);
+            int count = Character.charCount(cp);
+            if (cp > 0x7F || isUnsafeMediaUrlChar(cp)) {
+                byte[] utf8 = tail.substring(i, i + count).getBytes(StandardCharsets.UTF_8);
+                for (byte b : utf8) {
+                    int v = b & 0xFF;
+                    out.append('%');
+                    out.append(Character.toUpperCase(Character.forDigit((v >>> 4) & 0xF, 16)));
+                    out.append(Character.toUpperCase(Character.forDigit(v & 0xF, 16)));
+                }
+            } else {
+                out.append(c);
+            }
+            i += count;
+        }
+        return out.toString();
+    }
+
+    private static boolean isUnsafeMediaUrlChar(int cp) {
+        return cp <= 0x20
+                || cp == 0x7F
+                || cp == '['
+                || cp == ']'
+                || cp == '{'
+                || cp == '}'
+                || cp == '|'
+                || cp == '"'
+                || cp == '<'
+                || cp == '>'
+                || cp == '\\'
+                || cp == '^'
+                || cp == '`';
+    }
+
+    static Map<String, String> sanitizeLoopbackHeaders(
+            String host, Map<String, String> sourceHeaders) {
+        Map<String, String> out =
+                sourceHeaders == null
+                        ? new LinkedHashMap<String, String>()
+                        : new LinkedHashMap<String, String>(sourceHeaders);
+        if (isLoopbackHost(host)) {
+            for (java.util.Iterator<Map.Entry<String, String>> it = out.entrySet().iterator();
+                    it.hasNext(); ) {
+                Map.Entry<String, String> e = it.next();
+                String k = e.getKey();
+                if ("Origin".equalsIgnoreCase(k)) {
+                    String v = e.getValue();
+                    it.remove();
+                    if (v != null && !v.isEmpty()) out.put("X-Movie-Origin", v);
+                    break;
+                }
+            }
+            for (java.util.Iterator<Map.Entry<String, String>> it = out.entrySet().iterator();
+                    it.hasNext(); ) {
+                Map.Entry<String, String> e = it.next();
+                String k = e.getKey();
+                if ("Host".equalsIgnoreCase(k)) {
+                    String v = e.getValue();
+                    it.remove();
+                    if (v != null && !v.isEmpty()) out.put("X-Movie-Host", v);
+                    break;
+                }
+            }
+        }
+        return out;
     }
 
     static boolean isLoopbackHost(String host) {

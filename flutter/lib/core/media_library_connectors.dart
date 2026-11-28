@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'emby_library.dart';
 import 'models.dart';
 import 'smb2_client.dart';
 
@@ -221,6 +222,65 @@ class ExternalMediaLibrary {
     final cleanPath = u.path.replaceFirst(RegExp(r'/+$'), '');
     return u.replace(path: cleanPath, query: null, fragment: null);
   }
+
+  static Future<Map<String, dynamic>?> readAccountConfig(String subId) async {
+    if (subId.startsWith('emby_')) {
+      return EmbyLibrary.readAccountConfig(subId);
+    }
+    if (subId.startsWith('jellyfin_')) {
+      final key = subId.substring('jellyfin_'.length);
+      final raw = (await SharedPreferences.getInstance())
+          .getString('jellyfin.account.$key');
+      if (raw == null || raw.isEmpty) return null;
+      try {
+        final decoded = jsonDecode(raw);
+        return decoded is Map ? Map<String, dynamic>.from(decoded) : null;
+      } catch (_) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  static Future<HttpClientResponse> sendSameOriginRedirects({
+    required HttpClient client,
+    required Uri originUri,
+    required Uri initialUri,
+    required String method,
+    void Function(HttpClientRequest req)? configureRequest,
+    List<int>? bodyBytes,
+    int maxHops = 5,
+    required String serviceLabel,
+  }) async {
+    var target = initialUri;
+    for (var hop = 0; hop <= maxHops; hop++) {
+      final req = await client.openUrl(method, target);
+      req.followRedirects = false;
+      req.headers.set('User-Agent', 'MarcoMovie/1.0');
+      configureRequest?.call(req);
+      if (bodyBytes != null && bodyBytes.isNotEmpty) {
+        req.add(bodyBytes);
+      }
+      final resp = await req.close();
+      if (const {301, 302, 303, 307, 308}.contains(resp.statusCode)) {
+        await resp.drain<void>();
+        final loc = resp.headers.value(HttpHeaders.locationHeader);
+        if (loc == null || loc.trim().isEmpty) {
+          throw HttpException('$serviceLabel 重定向地址缺失（HTTP ${resp.statusCode}）');
+        }
+        final next = target.resolve(loc.trim());
+        if (!['http', 'https'].contains(next.scheme.toLowerCase()) ||
+            next.origin != originUri.origin ||
+            next.userInfo.isNotEmpty) {
+          throw FormatException('$serviceLabel 拒绝跨源重定向以保护账号凭据');
+        }
+        target = next;
+        continue;
+      }
+      return resp;
+    }
+    throw FormatException('$serviceLabel 重定向次数过多');
+  }
 }
 
 /// Real Jellyfin Media Server connector (`jellyfin://account/<key>`).
@@ -245,16 +305,19 @@ class JellyfinLibrary {
     String password, {
     required String group,
     required bool isPrivate,
+    String label = '',
+    bool allowCloudSync = true,
   }) async {
     final base = ExternalMediaLibrary._validateHttpBase(address, 'Jellyfin');
     final prefs = await SharedPreferences.getInstance();
     final device =
         prefs.getString('jellyfin.device') ?? ExternalMediaLibrary._nonce();
     await prefs.setString('jellyfin.device', device);
+    final cleanUser = username.trim();
     final authClient = JellyfinLibrary._(base, '', '', device, '');
     final json = await authClient._api(
       '/Users/AuthenticateByName',
-      body: {'Username': username.trim(), 'Pw': password},
+      body: {'Username': cleanUser, 'Pw': password},
     );
     final user = json['User']?['Id']?.toString() ?? '';
     final token = json['AccessToken']?.toString() ?? '';
@@ -268,7 +331,11 @@ class JellyfinLibrary {
     if (views['Items'] is! List) {
       throw StateError('Jellyfin 未返回有效媒体库目录，请检查该账号的库访问权限');
     }
-    final name = 'Jellyfin · ${username.trim()}';
+    final cleanLabel = label.trim();
+    final display = cleanLabel.isNotEmpty ? cleanLabel : cleanUser;
+    final name =
+        display.startsWith('Jellyfin') ? display : 'Jellyfin · $display';
+    final split = EmbyLibrary.splitServerUrl(base.toString());
     await prefs.setString(
       'jellyfin.account.$key',
       jsonEncode({
@@ -276,6 +343,13 @@ class JellyfinLibrary {
         'user': user,
         'token': token,
         'device': device,
+        'label': cleanLabel,
+        'username': cleanUser,
+        'allowCloudSync': allowCloudSync,
+        'rawHttps': split.useHttps,
+        'rawHost': split.host,
+        'rawPort': split.port,
+        'rawSubpath': split.subpath,
       }),
     );
     final api = '${ExternalMediaLibrary.jellyfinPrefix}$key';
@@ -290,6 +364,53 @@ class JellyfinLibrary {
       rawContent: jsonEncode({
         'sites': [
           {'key': 'jellyfin_$key', 'name': name, 'type': 1, 'api': api},
+        ],
+      }),
+    );
+  }
+
+  static Future<SubscriptionEntry> updateAccountMeta({
+    required SubscriptionEntry existing,
+    required String label,
+    required String group,
+    required bool isPrivate,
+    required bool allowCloudSync,
+    required bool useHttps,
+    required String rawHost,
+    required String rawPort,
+    required String rawSubpath,
+  }) async {
+    final key = existing.id.substring('jellyfin_'.length);
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('jellyfin.account.$key');
+    if (raw == null) throw StateError('请重新验证媒体库凭据');
+    final saved = Map<String, dynamic>.from(jsonDecode(raw) as Map);
+    final cleanLabel = label.trim();
+    final fallbackUser = saved['username']?.toString().trim() ?? '';
+    final display = cleanLabel.isNotEmpty
+        ? cleanLabel
+        : (fallbackUser.isNotEmpty ? fallbackUser : 'Jellyfin');
+    final name =
+        display.startsWith('Jellyfin') ? display : 'Jellyfin · $display';
+    final api = '${ExternalMediaLibrary.jellyfinPrefix}$key';
+    saved['label'] = cleanLabel;
+    saved['allowCloudSync'] = allowCloudSync;
+    saved['rawHttps'] = useHttps;
+    saved['rawHost'] = rawHost.trim();
+    saved['rawPort'] = rawPort.trim();
+    saved['rawSubpath'] = rawSubpath.trim();
+    await prefs.setString('jellyfin.account.$key', jsonEncode(saved));
+    return SubscriptionEntry(
+      id: existing.id,
+      name: name,
+      group: group,
+      isPrivate: isPrivate,
+      format: 'Jellyfin',
+      siteCount: 1,
+      updatedAt: DateTime.now().millisecondsSinceEpoch,
+      rawContent: jsonEncode({
+        'sites': [
+          {'key': existing.id, 'name': name, 'type': 1, 'api': api},
         ],
       }),
     );
@@ -324,23 +445,28 @@ class JellyfinLibrary {
     final deadline =
         Timer(const Duration(seconds: 15), () => client.close(force: true));
     try {
-      final req = await client.openUrl(
-        body == null ? 'GET' : 'POST',
-        _url(path, params),
-      );
-      req.followRedirects = false;
       final authHeader =
           'MediaBrowser Client="Marco Movie", Device="${Platform.operatingSystem}", DeviceId="$device", Version="1"${token.isNotEmpty ? ', Token="$token"' : ''}';
-      req.headers.set('Authorization', authHeader);
-      req.headers.set('X-Emby-Authorization', authHeader);
-      if (token.isNotEmpty) {
-        req.headers.set('X-Emby-Token', token);
-      }
-      if (body != null) {
-        req.headers.contentType = ContentType.json;
-        req.write(jsonEncode(body));
-      }
-      final resp = await req.close();
+      final bodyBytes = body != null ? utf8.encode(jsonEncode(body)) : null;
+      final resp = await ExternalMediaLibrary.sendSameOriginRedirects(
+        client: client,
+        originUri: base,
+        initialUri: _url(path, params),
+        method: body == null ? 'GET' : 'POST',
+        bodyBytes: bodyBytes,
+        serviceLabel: 'Jellyfin',
+        configureRequest: (req) {
+          req.headers.set('Authorization', authHeader);
+          req.headers.set('X-Emby-Authorization', authHeader);
+          req.headers.set('Accept', 'application/json');
+          if (token.isNotEmpty) {
+            req.headers.set('X-Emby-Token', token);
+          }
+          if (body != null) {
+            req.headers.contentType = ContentType.json;
+          }
+        },
+      );
       if (resp.statusCode == 401 || resp.statusCode == 403) {
         throw StateError('Jellyfin 拒绝访问，请检查账号密码或媒体库权限');
       }
@@ -360,6 +486,14 @@ class JellyfinLibrary {
         throw const FormatException('Jellyfin 未返回有效 JSON 数据');
       }
       return Map<String, dynamic>.from(decoded);
+    } on HandshakeException catch (e) {
+      throw HandshakeException(
+        'SSL 握手失败（若服务器使用 8096 等 HTTP 端口，请关闭 HTTPS 开关或改用 http:// 地址）：${e.message}',
+      );
+    } on TlsException catch (e) {
+      throw TlsException(
+        'TLS 连接失败（若服务器使用 8096 等 HTTP 端口，请关闭 HTTPS 开关或改用 http:// 地址）：${e.message}',
+      );
     } finally {
       deadline.cancel();
       client.close(force: true);
@@ -496,7 +630,7 @@ class JellyfinLibrary {
           'UserId': user,
           if (sid.isNotEmpty) 'MediaSourceId': sid,
           'IsPlayback': true,
-          'EnableDirectPlay': false,
+          'EnableDirectPlay': true,
           'EnableDirectStream': true,
           'EnableTranscoding': true,
         },
@@ -510,6 +644,25 @@ class JellyfinLibrary {
           (sources.isNotEmpty ? sources.first : null);
       final session = info['PlaySessionId']?.toString() ?? '';
       if (chosen != null) {
+        final rawPath = (chosen['Path']?.toString() ?? '').trim();
+        if (chosen['SupportsDirectPlay'] == true &&
+            (rawPath.toLowerCase().startsWith('http://') ||
+                rawPath.toLowerCase().startsWith('https://'))) {
+          final pathUri = Uri.tryParse(rawPath);
+          final outHeaders = <String, String>{};
+          final reqHeaders = chosen['RequiredHttpHeaders'];
+          if (reqHeaders is Map) {
+            reqHeaders.forEach((k, v) {
+              final ks = k?.toString() ?? '';
+              final vs = v?.toString() ?? '';
+              if (ks.isNotEmpty && vs.isNotEmpty) outHeaders[ks] = vs;
+            });
+          }
+          if (pathUri != null && pathUri.origin == base.origin) {
+            outHeaders.addAll(headers);
+          }
+          return CmsEpisode(name: episode.name, url: rawPath, headers: outHeaders);
+        }
         final direct = chosen['SupportsDirectStream'] == true ||
             chosen['SupportsDirectPlay'] == true;
         final transcode = chosen['TranscodingUrl']?.toString() ?? '';
@@ -616,11 +769,17 @@ class PlexLibrary {
     final deadline =
         Timer(const Duration(seconds: 15), () => client.close(force: true));
     try {
-      final req = await client.getUrl(_url(path, params));
-      req.followRedirects = false;
-      req.headers.set('Accept', 'application/json');
-      req.headers.set('X-Plex-Token', token);
-      final resp = await req.close();
+      final resp = await ExternalMediaLibrary.sendSameOriginRedirects(
+        client: client,
+        originUri: base,
+        initialUri: _url(path, params),
+        method: 'GET',
+        serviceLabel: 'Plex',
+        configureRequest: (req) {
+          req.headers.set('Accept', 'application/json');
+          req.headers.set('X-Plex-Token', token);
+        },
+      );
       if (resp.statusCode == 401 || resp.statusCode == 403) {
         throw StateError('Plex Token 无效或无权访问该媒体库');
       }
@@ -640,6 +799,10 @@ class PlexLibrary {
         throw const FormatException('Plex 返回的数据格式无效');
       }
       return Map<String, dynamic>.from(decoded);
+    } on HandshakeException catch (e) {
+      throw HandshakeException('SSL 握手失败（请检查 HTTP / HTTPS 协议或端口号）：${e.message}');
+    } on TlsException catch (e) {
+      throw TlsException('TLS 连接失败（请检查 HTTP / HTTPS 协议或端口号）：${e.message}');
     } finally {
       deadline.cancel();
       client.close(force: true);
@@ -932,6 +1095,7 @@ class WebDavMediaLibrary {
           uri.path.endsWith('/') ? uri : uri.replace(path: '${uri.path}/');
       final req = await client.openUrl('PROPFIND', target);
       req.followRedirects = false;
+      req.headers.set('User-Agent', 'MarcoMovie/1.0');
       req.headers.set('Depth', '1');
       req.headers.set('Accept', 'application/xml, text/xml');
       _authHeaders.forEach((k, v) => req.headers.set(k, v));
@@ -966,6 +1130,10 @@ class WebDavMediaLibrary {
         );
       }
       return parsePropfindXml(body, target);
+    } on HandshakeException catch (e) {
+      throw HandshakeException('SSL 握手失败（若使用 HTTP WebDAV 端口请改用 http://）：${e.message}');
+    } on TlsException catch (e) {
+      throw TlsException('TLS 连接失败（若使用 HTTP WebDAV 端口请改用 http://）：${e.message}');
     } finally {
       deadline.cancel();
       client.close(force: true);
@@ -1143,14 +1311,20 @@ class AlistNasLibrary {
     final deadline =
         Timer(const Duration(seconds: 15), () => client.close(force: true));
     try {
-      final req = await client.postUrl(base.replace(path: '${base.path}$path'));
-      req.followRedirects = false;
-      req.headers.contentType = ContentType.json;
-      if (token.isNotEmpty) {
-        req.headers.set('Authorization', token);
-      }
-      req.write(jsonEncode(body));
-      final resp = await req.close();
+      final resp = await ExternalMediaLibrary.sendSameOriginRedirects(
+        client: client,
+        originUri: base,
+        initialUri: base.replace(path: '${base.path}$path'),
+        method: 'POST',
+        bodyBytes: utf8.encode(jsonEncode(body)),
+        serviceLabel: 'AList / OpenList',
+        configureRequest: (req) {
+          req.headers.contentType = ContentType.json;
+          if (token.isNotEmpty) {
+            req.headers.set('Authorization', token);
+          }
+        },
+      );
       final bytes = <int>[];
       await for (final chunk in resp) {
         if (bytes.length + chunk.length > 4 * 1024 * 1024) break;
@@ -1174,6 +1348,10 @@ class AlistNasLibrary {
         throw StateError(json['message']?.toString() ?? 'AList HTTP $code');
       }
       return json;
+    } on HandshakeException catch (e) {
+      throw HandshakeException('SSL 握手失败（若使用 HTTP 端口请改用 http:// 地址）：${e.message}');
+    } on TlsException catch (e) {
+      throw TlsException('TLS 连接失败（若使用 HTTP 端口请改用 http:// 地址）：${e.message}');
     } finally {
       deadline.cancel();
       client.close(force: true);

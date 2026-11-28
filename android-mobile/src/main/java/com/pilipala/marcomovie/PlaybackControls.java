@@ -4472,19 +4472,7 @@ final class PlaybackControls {
     }
 
     void openInExternalPlayer() {
-        if (resolved == null || resolved.url == null || resolved.url.isEmpty()) {
-            a.toast("当前播放地址尚未就绪");
-            return;
-        }
-        try {
-            android.content.Intent intent =
-                    new android.content.Intent(android.content.Intent.ACTION_VIEW);
-            intent.setDataAndType(android.net.Uri.parse(resolved.url), "video/*");
-            intent.putExtra("title", video.title + " - " + resolved.name);
-            a.startActivity(android.content.Intent.createChooser(intent, "选择外部播放器打开"));
-        } catch (Exception e) {
-            a.toast("未找到可用的外部播放器");
-        }
+        PlaybackController.launchExternalPlayer(a, video, resolved);
     }
 
     void danmaku() {
@@ -7106,6 +7094,7 @@ final class PlaybackControls {
                 DanmuSettingsPanel.saveConfig(a, dmCfg);
             }
             danmaku.applyConfig(dmCfg);
+            applyMobileDanmakuStyle();
             if (dmCfg.enabled && !dmCfg.serverUrls.isEmpty()) {
                 startSegmentedDanmuSession(dmCfg, false);
             }

@@ -18,6 +18,7 @@ import '../core/netdisk_session.dart';
 import '../core/storage_service.dart';
 import '../core/quark_account.dart';
 import 'apple_theme.dart';
+import 'add_resource_library_sheet.dart' show openEditMediaServerSheet;
 import 'ios_drive_priority_sheet.dart';
 import 'ios_liquid_glass.dart';
 import 'ios_settings.dart';
@@ -1284,6 +1285,40 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
                           ),
                         ),
                       ),
+                      if (lib.id.startsWith('emby_') ||
+                          lib.id.startsWith('jellyfin_'))
+                        Semantics(
+                          button: true,
+                          label: '编辑 ${lib.name}',
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () async {
+                              await openEditMediaServerSheet(
+                                context,
+                                storage: widget.storage,
+                                existing: lib,
+                                onLibraryUpdated: () {
+                                  widget.onChanged?.call();
+                                  if (mounted) setState(() {});
+                                },
+                              );
+                            },
+                            child: const Padding(
+                              padding: EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 6,
+                              ),
+                              child: Text(
+                                '编辑',
+                                style: TextStyle(
+                                  color: AppleColors.systemBlue,
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
                       if (widget.onOpenLibrarySubscription != null)
                         Semantics(
                           button: true,

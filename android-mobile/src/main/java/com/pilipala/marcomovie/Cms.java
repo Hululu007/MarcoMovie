@@ -3879,6 +3879,281 @@ public final class Cms {
         return (HttpURLConnection) url.openConnection();
     }
 
+    static final class MediaConnection {
+        final HttpURLConnection conn;
+        final int statusCode;
+        final String finalUrl;
+        final Map<String, String> effectiveHeaders;
+
+        MediaConnection(
+                HttpURLConnection conn,
+                int statusCode,
+                String finalUrl,
+                Map<String, String> effectiveHeaders) {
+            this.conn = conn;
+            this.statusCode = statusCode;
+            this.finalUrl = finalUrl;
+            this.effectiveHeaders = effectiveHeaders;
+        }
+    }
+
+    private static String findHeaderIgnoreCase(Map<String, String> headers, String targetKey) {
+        if (headers == null || targetKey == null) return null;
+        for (Map.Entry<String, String> e : headers.entrySet()) {
+            if (e.getKey() != null && targetKey.equalsIgnoreCase(e.getKey())) {
+                return e.getValue();
+            }
+        }
+        return null;
+    }
+
+    private static boolean hasCrossOriginReferer(Map<String, String> headers, URL targetUrl) {
+        String ref = findHeaderIgnoreCase(headers, "Referer");
+        if (ref == null || ref.trim().isEmpty() || targetUrl == null) return false;
+        try {
+            String refHost = new URL(ref.trim()).getHost();
+            String tgtHost = targetUrl.getHost();
+            return refHost != null && tgtHost != null && !refHost.equalsIgnoreCase(tgtHost);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static MediaConnection openMediaOnce(
+            URL startUrl,
+            Map<String, String> baseHeaders,
+            String rangeHeader,
+            String overrideUa,
+            boolean stripCrossOriginReferer,
+            boolean useDoh,
+            int connectTimeoutMs,
+            int readTimeoutMs)
+            throws IOException {
+        URL cur = startUrl;
+        Map<String, String> forwarded = new LinkedHashMap<>();
+        if (baseHeaders != null) {
+            for (Map.Entry<String, String> e : baseHeaders.entrySet()) {
+                String k = e.getKey();
+                String v = e.getValue();
+                if (k == null
+                        || v == null
+                        || v.isEmpty()
+                        || k.equalsIgnoreCase("Host")
+                        || k.equalsIgnoreCase("Range")) {
+                    continue;
+                }
+                if (stripCrossOriginReferer && k.equalsIgnoreCase("Referer")) {
+                    continue;
+                }
+                forwarded.put(k, v);
+            }
+        }
+        if (overrideUa != null && !overrideUa.isEmpty()) {
+            for (Iterator<String> it = forwarded.keySet().iterator(); it.hasNext(); ) {
+                if ("User-Agent".equalsIgnoreCase(it.next())) it.remove();
+            }
+            forwarded.put("User-Agent", overrideUa);
+        } else {
+            String existingUa = findHeaderIgnoreCase(forwarded, "User-Agent");
+            if (existingUa == null || existingUa.trim().isEmpty()) {
+                forwarded.put("User-Agent", USER_AGENT);
+            }
+        }
+
+        Map<String, RedirectCookie> redirectCookies = new LinkedHashMap<>();
+        boolean forceDirect = false;
+        for (int hop = 0; hop < 6; hop++) {
+            if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
+            InetAddress dohOverride = null;
+            if (useDoh) {
+                List<InetAddress> addrs = resolveViaDoh(cur.getHost());
+                if (!addrs.isEmpty()) dohOverride = addrs.get(0);
+            }
+            boolean canFallbackDirect =
+                    !forceDirect && dohOverride == null && hasActiveHttpProxy(cur);
+            HttpURLConnection c = openConnectionWithOverride(cur, dohOverride, forceDirect);
+            c.setConnectTimeout(connectTimeoutMs);
+            c.setReadTimeout(readTimeoutMs);
+            c.setInstanceFollowRedirects(false);
+            for (Map.Entry<String, String> e : forwarded.entrySet()) {
+                c.setRequestProperty(e.getKey(), e.getValue());
+            }
+            if (rangeHeader != null && !rangeHeader.isEmpty()) {
+                c.setRequestProperty("Range", rangeHeader);
+            }
+            RequestScope.attach(c);
+            int status;
+            try {
+                status = c.getResponseCode();
+            } catch (ConnectException | SocketTimeoutException proxyIo) {
+                RequestScope.detach(c);
+                c.disconnect();
+                if (canFallbackDirect) {
+                    forceDirect = true;
+                    hop--;
+                    continue;
+                }
+                throw proxyIo;
+            } catch (IOException ioErr) {
+                RequestScope.detach(c);
+                c.disconnect();
+                throw ioErr;
+            }
+            if (canFallbackDirect && (status == 502 || status == 503 || status == 504)) {
+                RequestScope.detach(c);
+                c.disconnect();
+                forceDirect = true;
+                hop--;
+                continue;
+            }
+            List<String> setCookies = null;
+            for (Map.Entry<String, List<String>> entry : c.getHeaderFields().entrySet()) {
+                if ("set-cookie".equalsIgnoreCase(entry.getKey())) {
+                    setCookies = entry.getValue();
+                    break;
+                }
+            }
+            for (RedirectCookie cookie : parseSetCookies(setCookies, cur)) {
+                redirectCookies.put(
+                        cookie.domain
+                                + "|"
+                                + cookie.hostOnly
+                                + "|"
+                                + cookie.path
+                                + "|"
+                                + cookie.name,
+                        cookie);
+            }
+            if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+                String loc = c.getHeaderField("Location");
+                RequestScope.detach(c);
+                c.disconnect();
+                if (loc == null || loc.trim().isEmpty()) {
+                    throw new IOException("重定向缺少地址");
+                }
+                String resolvedStr =
+                        ProxyAddress.normalizeMediaHttpUrl(new URL(cur, loc.trim()).toString());
+                if (!isHttp(resolvedStr)) {
+                    throw new IOException("不支持此重定向协议");
+                }
+                URL target = new URL(resolvedStr);
+                if (target.getUserInfo() != null) {
+                    throw new IOException("来源重定向不能注入登录凭据");
+                }
+                forwarded = inheritedHeaders(cur.toString(), target.toString(), forwarded);
+                mergeRedirectCookies(forwarded, redirectCookies.values(), target);
+                cur = target;
+                continue;
+            }
+            return new MediaConnection(
+                    c,
+                    status,
+                    cur.toString(),
+                    Collections.unmodifiableMap(new LinkedHashMap<>(forwarded)));
+        }
+        throw new IOException("媒体重定向次数过多");
+    }
+
+    static MediaConnection openMediaConnection(
+            String rawUrl,
+            Map<String, String> headers,
+            String rangeHeader,
+            int connectTimeoutMs,
+            int readTimeoutMs)
+            throws IOException {
+        String normalized = ProxyAddress.normalizeMediaHttpUrl(rawUrl);
+        if (!isHttp(normalized)) {
+            throw new IOException("不支持的媒体地址");
+        }
+        URL startUrl = new URL(normalized);
+        String callerUa = findHeaderIgnoreCase(headers, "User-Agent");
+        boolean defaultUa =
+                callerUa == null
+                        || callerUa.trim().isEmpty()
+                        || callerUa.startsWith("okhttp/")
+                        || callerUa.startsWith("MarcoMovie/");
+        try {
+            MediaConnection mc =
+                    openMediaOnce(
+                            startUrl,
+                            headers,
+                            rangeHeader,
+                            null,
+                            false,
+                            false,
+                            connectTimeoutMs,
+                            readTimeoutMs);
+            if (mc.statusCode == 403
+                    && !(isLoopbackUrlHost(startUrl.getHost())
+                            && startUrl.getPort() == ProxyAddress.port)) {
+                if (defaultUa) {
+                    RequestScope.detach(mc.conn);
+                    mc.conn.disconnect();
+                    mc =
+                            openMediaOnce(
+                                    startUrl,
+                                    headers,
+                                    rangeHeader,
+                                    MOBILE_USER_AGENT,
+                                    false,
+                                    false,
+                                    connectTimeoutMs,
+                                    readTimeoutMs);
+                }
+                if (mc.statusCode == 403 && hasCrossOriginReferer(headers, startUrl)) {
+                    RequestScope.detach(mc.conn);
+                    mc.conn.disconnect();
+                    mc =
+                            openMediaOnce(
+                                    startUrl,
+                                    headers,
+                                    rangeHeader,
+                                    MOBILE_USER_AGENT,
+                                    true,
+                                    false,
+                                    connectTimeoutMs,
+                                    readTimeoutMs);
+                }
+            }
+            return mc;
+        } catch (IOException firstErr) {
+            if (Thread.currentThread().isInterrupted()
+                    || isLoopbackUrlHost(startUrl.getHost())
+                    || shouldBypassDoh(startUrl.getHost())) {
+                throw firstErr;
+            }
+            List<InetAddress> dohAddrs = resolveViaDoh(startUrl.getHost());
+            if (dohAddrs.isEmpty()) {
+                throw firstErr;
+            }
+            MediaConnection dohMc =
+                    openMediaOnce(
+                            startUrl,
+                            headers,
+                            rangeHeader,
+                            null,
+                            false,
+                            true,
+                            connectTimeoutMs,
+                            readTimeoutMs);
+            if (dohMc.statusCode == 403 && defaultUa) {
+                RequestScope.detach(dohMc.conn);
+                dohMc.conn.disconnect();
+                dohMc =
+                        openMediaOnce(
+                                startUrl,
+                                headers,
+                                rangeHeader,
+                                MOBILE_USER_AGENT,
+                                false,
+                                true,
+                                connectTimeoutMs,
+                                readTimeoutMs);
+            }
+            return dohMc;
+        }
+    }
+
     public static void assertMedia(String address, Map<String, String> headers) throws Exception {
         if (!isHttp(address)) throw new IOException("此剧集不是 HTTP(S) 直连媒体，基础版不能播放");
         HttpURLConnection c = openHttpConnection(new URL(normalizeHttp(address)), false);

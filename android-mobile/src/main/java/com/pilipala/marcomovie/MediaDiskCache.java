@@ -13,6 +13,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -20,6 +21,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.zip.GZIPInputStream;
 import org.json.JSONObject;
 
 /**
@@ -55,6 +57,12 @@ public final class MediaDiskCache {
         long contentLength = -1L;
         String contentType = "application/octet-stream";
         boolean rangeSupported = true;
+        boolean isHlsManifest = false;
+        boolean isDashManifest = false;
+        boolean isHtmlError = false;
+        String finalUrl = "";
+        Map<String, String> effectiveHeaders = Collections.emptyMap();
+        byte[] prefetchedPayload = null;
     }
 
     private final File rootDir;
@@ -106,6 +114,7 @@ public final class MediaDiskCache {
     }
 
     public static boolean isCacheableDirectUrl(String url, String declaredMime) {
+        url = ProxyAddress.normalizeMediaHttpUrl(url);
         if (url == null || !Cms.isHttp(url)) return false;
         if (HlsStreamProxy.looksLikeHls(url, declaredMime)) return false;
         if (declaredMime != null && declaredMime.toLowerCase(Locale.ROOT).contains("dash")) {
@@ -202,13 +211,44 @@ public final class MediaDiskCache {
         if (!entryDir.exists()) entryDir.mkdirs();
 
         Meta meta = loadMeta(entryDir);
+        Meta detectedMeta = null;
         if (meta == null) {
-            meta = probeUpstream(session, entryDir);
+            detectedMeta = probeUpstream(session, entryDir);
+            meta = detectedMeta;
         }
         touchMeta(entryDir);
 
+        if (detectedMeta != null
+                && detectedMeta.isHlsManifest
+                && detectedMeta.prefetchedPayload != null) {
+            return HlsStreamProxy.servePlaylistPayload(
+                    detectedMeta.prefetchedPayload,
+                    detectedMeta.finalUrl != null && !detectedMeta.finalUrl.isEmpty()
+                            ? detectedMeta.finalUrl
+                            : session.url,
+                    effectiveHeaders(session, detectedMeta),
+                    false,
+                    method,
+                    out);
+        }
+        if (detectedMeta != null
+                && detectedMeta.isDashManifest
+                && detectedMeta.prefetchedPayload != null) {
+            return servePrefetchedBytes(
+                    detectedMeta.prefetchedPayload,
+                    detectedMeta.contentType != null && !detectedMeta.contentType.isEmpty()
+                            ? detectedMeta.contentType
+                            : "application/dash+xml",
+                    method,
+                    out);
+        }
+        if (detectedMeta != null && detectedMeta.isHtmlError) {
+            LocalProxy.simple(out, 502, "Upstream returned HTML instead of media");
+            return false;
+        }
+
         if (meta == null || meta.contentLength <= 0 || !meta.rangeSupported) {
-            return passthroughStream(session, method, rangeHeader, out);
+            return passthroughStream(session, meta, method, rangeHeader, out);
         }
 
         long total = meta.contentLength;
@@ -312,22 +352,27 @@ public final class MediaDiskCache {
         long blockEnd = Math.min(meta.contentLength - 1L, blockStart + BLOCK_SIZE - 1L);
         if (blockStart > blockEnd) return new byte[0];
 
-        HttpURLConnection conn =
-                openUpstream(session.url, session.headers, "bytes=" + blockStart + "-" + blockEnd);
+        Cms.MediaConnection upstream =
+                Cms.openMediaConnection(
+                        effectiveUrl(session, meta),
+                        effectiveHeaders(session, meta),
+                        "bytes=" + blockStart + "-" + blockEnd,
+                        15000,
+                        25000);
         try {
-            int code = conn.getResponseCode();
+            int code = upstream.statusCode;
             if (code == 416) {
                 // Retry once without Range for servers that reject bounded partial fetches.
-                RequestScope.detach(conn);
-                conn.disconnect();
-                return fetchBlockWithoutRange(session, blockStart, blockEnd);
+                closeUpstream(upstream);
+                return fetchBlockWithoutRange(session, meta, blockStart, blockEnd);
             }
             if (code != 206 && code != 200) {
                 throw new IOException("Upstream block HTTP " + code);
             }
             byte[] data;
             if (code == 206) {
-                long[] cr = LocalProxy.parseContentRange(conn.getHeaderField("Content-Range"));
+                long[] cr =
+                        LocalProxy.parseContentRange(upstream.conn.getHeaderField("Content-Range"));
                 if (cr != null && cr[0] != blockStart) {
                     throw new IOException(
                             "Upstream Content-Range mismatch: expected "
@@ -335,7 +380,9 @@ public final class MediaDiskCache {
                                     + " got "
                                     + cr[0]);
                 }
-                data = readExactUpTo(conn.getInputStream(), (int) (blockEnd - blockStart + 1L));
+                data =
+                        readExactUpTo(
+                                upstream.conn.getInputStream(), (int) (blockEnd - blockStart + 1L));
             } else {
                 // Never linearly download and discard gigabytes on a tail seek (e.g. 40 GiB MKV
                 // Cues).
@@ -344,7 +391,7 @@ public final class MediaDiskCache {
                 }
                 data =
                         readSliceFromFull(
-                                conn.getInputStream(),
+                                upstream.conn.getInputStream(),
                                 blockStart,
                                 (int) (blockEnd - blockStart + 1L));
             }
@@ -353,48 +400,93 @@ public final class MediaDiskCache {
             }
             return data;
         } finally {
-            RequestScope.detach(conn);
-            conn.disconnect();
+            closeUpstream(upstream);
         }
     }
 
-    private byte[] fetchBlockWithoutRange(Session session, long blockStart, long blockEnd)
-            throws IOException {
+    private byte[] fetchBlockWithoutRange(
+            Session session, Meta meta, long blockStart, long blockEnd) throws IOException {
         if (blockStart > 2L * 1024L * 1024L) {
             throw new IOException("Upstream rejected Range for tail offset " + blockStart);
         }
-        HttpURLConnection retry = openUpstream(session.url, session.headers, null);
+        Cms.MediaConnection retry =
+                Cms.openMediaConnection(
+                        effectiveUrl(session, meta),
+                        effectiveHeaders(session, meta),
+                        null,
+                        15000,
+                        25000);
         try {
-            int code = retry.getResponseCode();
+            int code = retry.statusCode;
             if (code < 200 || code >= 300) {
                 throw new IOException("Upstream fallback HTTP " + code);
             }
             return readSliceFromFull(
-                    retry.getInputStream(), blockStart, (int) (blockEnd - blockStart + 1L));
+                    retry.conn.getInputStream(), blockStart, (int) (blockEnd - blockStart + 1L));
         } finally {
-            RequestScope.detach(retry);
-            retry.disconnect();
+            closeUpstream(retry);
         }
     }
 
     private Meta probeUpstream(Session session, File entryDir) throws IOException {
-        HttpURLConnection conn =
-                openUpstream(session.url, session.headers, "bytes=0-" + (BLOCK_SIZE - 1));
+        Cms.MediaConnection upstream =
+                Cms.openMediaConnection(
+                        session.url, session.headers, "bytes=0-" + (BLOCK_SIZE - 1), 15000, 25000);
         try {
-            int code = conn.getResponseCode();
+            int code = upstream.statusCode;
             Meta meta = new Meta();
-            String ct = conn.getContentType();
+            meta.finalUrl = upstream.finalUrl;
+            meta.effectiveHeaders = upstream.effectiveHeaders;
+            String ct = upstream.conn.getContentType();
             if (ct != null && !ct.trim().isEmpty()) meta.contentType = ct.trim();
+            boolean gzip = isGzipEncoding(upstream.conn.getHeaderField("Content-Encoding"));
 
-            if (code == 206) {
-                long[] cr = LocalProxy.parseContentRange(conn.getHeaderField("Content-Range"));
-                if (cr != null && cr[2] > 0) {
+            if (code == 206 && !gzip) {
+                long[] cr =
+                        LocalProxy.parseContentRange(upstream.conn.getHeaderField("Content-Range"));
+                if (cr != null && cr[0] == 0 && cr[2] > 0) {
                     meta.contentLength = cr[2];
                     meta.rangeSupported = true;
                     byte[] firstBlock =
                             readExactUpTo(
-                                    conn.getInputStream(),
+                                    upstream.conn.getInputStream(),
                                     (int) Math.min((long) BLOCK_SIZE, meta.contentLength));
+                    if (looksLikeHtmlPayload(ct, firstBlock)) {
+                        meta.isHtmlError = true;
+                        meta.rangeSupported = false;
+                        return meta;
+                    }
+                    if (looksLikeHlsPayload(ct, firstBlock)
+                            && meta.contentLength <= 2 * 1024 * 1024) {
+                        byte[] rest =
+                                meta.contentLength > firstBlock.length
+                                        ? readRemainingManifest(
+                                                upstream.conn.getInputStream(),
+                                                2 * 1024 * 1024 - firstBlock.length)
+                                        : new byte[0];
+                        byte[] full = concatBytes(firstBlock, rest);
+                        if (full.length < meta.contentLength) {
+                            closeUpstream(upstream);
+                            Cms.MediaConnection fullConn =
+                                    Cms.openMediaConnection(
+                                            effectiveUrl(session, meta),
+                                            effectiveHeaders(session, meta),
+                                            null,
+                                            15000,
+                                            25000);
+                            try {
+                                full =
+                                        readRemainingManifest(
+                                                fullConn.conn.getInputStream(), 2 * 1024 * 1024);
+                            } finally {
+                                closeUpstream(fullConn);
+                            }
+                        }
+                        meta.isHlsManifest = true;
+                        meta.prefetchedPayload = full;
+                        meta.rangeSupported = false;
+                        return meta;
+                    }
                     if (maxBytes > 0 && firstBlock.length > 0) {
                         writeAtomically(new File(entryDir, "b_0.bin"), firstBlock);
                     }
@@ -402,18 +494,65 @@ public final class MediaDiskCache {
                     return meta;
                 }
             } else if (code == 200) {
-                long len = parseContentLength(conn);
+                long len = gzip ? -1L : parseContentLength(upstream.conn);
                 meta.contentLength = len;
                 meta.rangeSupported =
-                        "bytes".equalsIgnoreCase(conn.getHeaderField("Accept-Ranges"));
-                if (len > 0 && len <= BLOCK_SIZE) {
-                    byte[] whole = readExactUpTo(conn.getInputStream(), (int) len);
-                    meta.contentLength = whole.length;
+                        !gzip
+                                && "bytes"
+                                        .equalsIgnoreCase(
+                                                upstream.conn.getHeaderField("Accept-Ranges"));
+                InputStream rawIn = upstream.conn.getInputStream();
+                InputStream in = gzip ? new GZIPInputStream(rawIn) : rawIn;
+                byte[] firstBlock = readExactUpTo(in, BLOCK_SIZE);
+                if (looksLikeHtmlPayload(ct, firstBlock)) {
+                    meta.isHtmlError = true;
+                    meta.rangeSupported = false;
+                    return meta;
+                }
+                if (looksLikeHlsPayload(ct, firstBlock)) {
+                    byte[] full =
+                            firstBlock.length >= BLOCK_SIZE
+                                    ? concatBytes(
+                                            firstBlock,
+                                            readRemainingManifest(
+                                                    in, 2 * 1024 * 1024 - firstBlock.length))
+                                    : firstBlock;
+                    meta.isHlsManifest = true;
+                    meta.prefetchedPayload = full;
+                    meta.rangeSupported = false;
+                    return meta;
+                }
+                if (looksLikeDashPayload(ct, firstBlock)) {
+                    byte[] full =
+                            firstBlock.length >= BLOCK_SIZE
+                                    ? concatBytes(
+                                            firstBlock,
+                                            readRemainingManifest(
+                                                    in, 2 * 1024 * 1024 - firstBlock.length))
+                                    : firstBlock;
+                    meta.isDashManifest = true;
+                    meta.prefetchedPayload = full;
+                    meta.rangeSupported = false;
+                    return meta;
+                }
+                if (!gzip && len > 0 && len <= BLOCK_SIZE && firstBlock.length == len) {
+                    meta.contentLength = firstBlock.length;
                     meta.rangeSupported = true;
-                    if (maxBytes > 0 && whole.length > 0) {
-                        writeAtomically(new File(entryDir, "b_0.bin"), whole);
+                    if (maxBytes > 0 && firstBlock.length > 0) {
+                        writeAtomically(new File(entryDir, "b_0.bin"), firstBlock);
                     }
                     saveMeta(entryDir, meta);
+                    return meta;
+                }
+                if (!gzip && len > BLOCK_SIZE && meta.rangeSupported && firstBlock.length > 0) {
+                    if (maxBytes > 0) {
+                        writeAtomically(new File(entryDir, "b_0.bin"), firstBlock);
+                    }
+                    saveMeta(entryDir, meta);
+                    return meta;
+                }
+                if (!gzip && firstBlock.length > 0 && len < 0) {
+                    meta.rangeSupported = false;
                     return meta;
                 }
             } else if (code == 416) {
@@ -422,30 +561,40 @@ public final class MediaDiskCache {
             }
             return meta;
         } finally {
-            RequestScope.detach(conn);
-            conn.disconnect();
+            closeUpstream(upstream);
         }
     }
 
     private boolean passthroughStream(
-            Session session, String method, String rangeHeader, OutputStream out)
+            Session session, Meta meta, String method, String rangeHeader, OutputStream out)
             throws IOException {
-        HttpURLConnection conn = openUpstream(session.url, session.headers, rangeHeader);
+        Cms.MediaConnection upstream =
+                Cms.openMediaConnection(
+                        effectiveUrl(session, meta),
+                        effectiveHeaders(session, meta),
+                        rangeHeader,
+                        15000,
+                        25000);
         try {
-            int code = conn.getResponseCode();
+            int code = upstream.statusCode;
             if (code == 416 && rangeHeader != null) {
-                RequestScope.detach(conn);
-                conn.disconnect();
-                conn = openUpstream(session.url, session.headers, null);
-                code = conn.getResponseCode();
+                closeUpstream(upstream);
+                upstream =
+                        Cms.openMediaConnection(
+                                effectiveUrl(session, meta),
+                                effectiveHeaders(session, meta),
+                                null,
+                                15000,
+                                25000);
+                code = upstream.statusCode;
             }
             if (code >= 400) {
                 LocalProxy.simple(out, code, "Upstream HTTP " + code);
                 return false;
             }
-            String ct = conn.getContentType();
-            long len = parseContentLength(conn);
-            String cr = conn.getHeaderField("Content-Range");
+            String ct = upstream.conn.getContentType();
+            long len = parseContentLength(upstream.conn);
+            String cr = upstream.conn.getHeaderField("Content-Range");
             StringBuilder head =
                     new StringBuilder("HTTP/1.1 ")
                             .append(code)
@@ -468,35 +617,137 @@ public final class MediaDiskCache {
             if (!"HEAD".equals(method)) {
                 byte[] buf = new byte[64 * 1024];
                 int n;
-                try (InputStream in = conn.getInputStream()) {
-                    if (len >= 0) {
-                        long rem = len;
-                        while (rem > 0
-                                && (n = in.read(buf, 0, (int) Math.min(buf.length, rem))) != -1) {
-                            if (n > 0) {
-                                out.write(buf, 0, n);
-                                rem -= n;
-                            }
-                        }
-                    } else {
-                        while ((n = in.read(buf)) != -1) {
-                            if (n == 0) continue;
-                            out.write(
-                                    (Integer.toHexString(n) + "\r\n")
-                                            .getBytes(StandardCharsets.US_ASCII));
+                InputStream in = upstream.conn.getInputStream();
+                if (len >= 0) {
+                    long rem = len;
+                    while (rem > 0
+                            && (n = in.read(buf, 0, (int) Math.min(buf.length, rem))) != -1) {
+                        if (n > 0) {
                             out.write(buf, 0, n);
-                            out.write(new byte[] {13, 10});
+                            rem -= n;
                         }
-                        out.write("0\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
                     }
+                } else {
+                    while ((n = in.read(buf)) != -1) {
+                        if (n == 0) continue;
+                        out.write(
+                                (Integer.toHexString(n) + "\r\n")
+                                        .getBytes(StandardCharsets.US_ASCII));
+                        out.write(buf, 0, n);
+                        out.write(new byte[] {13, 10});
+                    }
+                    out.write("0\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
                 }
             }
             out.flush();
             return false;
         } finally {
-            RequestScope.detach(conn);
-            conn.disconnect();
+            closeUpstream(upstream);
         }
+    }
+
+    private static void closeUpstream(Cms.MediaConnection mc) {
+        if (mc != null && mc.conn != null) {
+            RequestScope.detach(mc.conn);
+            mc.conn.disconnect();
+        }
+    }
+
+    private static boolean looksLikeHlsPayload(String contentType, byte[] data) {
+        if (data == null || data.length == 0) return false;
+        String ct = contentType == null ? "" : contentType.toLowerCase(Locale.ROOT);
+        int len = Math.min(data.length, 4096);
+        String prefix = new String(data, 0, len, StandardCharsets.UTF_8);
+        if (HlsStreamProxy.isValidM3uPayload(prefix)) return true;
+        return (ct.contains("mpegurl") || ct.contains("x-mpegurl"))
+                && prefix.trim().startsWith("#EXTM3U");
+    }
+
+    private static String effectiveUrl(Session session, Meta meta) {
+        if (meta != null && meta.finalUrl != null && !meta.finalUrl.isEmpty()) {
+            return meta.finalUrl;
+        }
+        return session.url;
+    }
+
+    private static Map<String, String> effectiveHeaders(Session session, Meta meta) {
+        if (meta != null && meta.effectiveHeaders != null && !meta.effectiveHeaders.isEmpty()) {
+            return meta.effectiveHeaders;
+        }
+        return session.headers;
+    }
+
+    private static boolean servePrefetchedBytes(
+            byte[] data, String contentType, String method, OutputStream out) throws IOException {
+        byte[] body = data == null ? new byte[0] : data;
+        String ct =
+                contentType != null && LocalProxy.safe(contentType)
+                        ? contentType
+                        : "application/octet-stream";
+        String head =
+                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: "
+                        + ct
+                        + "\r\nContent-Length: "
+                        + body.length
+                        + "\r\n\r\n";
+        out.write(head.getBytes(StandardCharsets.ISO_8859_1));
+        if (!"HEAD".equals(method) && body.length > 0) {
+            out.write(body);
+        }
+        out.flush();
+        return false;
+    }
+
+    private static boolean isGzipEncoding(String encoding) {
+        return encoding != null && encoding.toLowerCase(Locale.ROOT).contains("gzip");
+    }
+
+    private static boolean looksLikeHtmlPayload(String contentType, byte[] data) {
+        String ct = contentType == null ? "" : contentType.toLowerCase(Locale.ROOT);
+        if (data == null || data.length == 0) {
+            return ct.contains("text/html") || ct.contains("application/xhtml");
+        }
+        int len = Math.min(data.length, 512);
+        String prefix =
+                new String(data, 0, len, StandardCharsets.UTF_8).trim().toLowerCase(Locale.ROOT);
+        return prefix.startsWith("<!doctype html")
+                || prefix.startsWith("<html")
+                || (ct.contains("text/html") && (prefix.startsWith("<") || prefix.isEmpty()));
+    }
+
+    private static boolean looksLikeDashPayload(String contentType, byte[] data) {
+        String ct = contentType == null ? "" : contentType.toLowerCase(Locale.ROOT);
+        if (ct.contains("dash+xml")) return true;
+        if (data == null || data.length == 0) return false;
+        int len = Math.min(data.length, 512);
+        String prefix =
+                new String(data, 0, len, StandardCharsets.UTF_8).trim().toLowerCase(Locale.ROOT);
+        return prefix.contains("<mpd");
+    }
+
+    private static byte[] readRemainingManifest(InputStream in, int maxAdditionalBytes)
+            throws IOException {
+        if (in == null || maxAdditionalBytes <= 0) return new byte[0];
+        ByteArrayOutputStream out = new ByteArrayOutputStream(Math.min(maxAdditionalBytes, 32768));
+        byte[] buf = new byte[8192];
+        int remaining = maxAdditionalBytes;
+        while (remaining > 0) {
+            int n = in.read(buf, 0, Math.min(buf.length, remaining));
+            if (n < 0) break;
+            if (n > 0) {
+                out.write(buf, 0, n);
+                remaining -= n;
+            }
+        }
+        return out.toByteArray();
+    }
+
+    private static byte[] concatBytes(byte[] a, byte[] b) {
+        if (b == null || b.length == 0) return a;
+        if (a == null || a.length == 0) return b;
+        byte[] out = Arrays.copyOf(a, a.length + b.length);
+        System.arraycopy(b, 0, out, a.length, b.length);
+        return out;
     }
 
     static long[] parseRangeHeader(String rangeHeader, long total) {

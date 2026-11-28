@@ -2566,6 +2566,29 @@ final class MobileSettingsScreen {
         logBox.setBackground(MobileTheme.subtleBg(a, 14));
         content.addView(logBox, new LinearLayout.LayoutParams(-1, -2));
 
+        if (!dump.isEmpty()) {
+            a.gap(content, 10);
+            TextView copyBtn = a.text("复制全部诊断日志", 13.5f, p.accentOnFill);
+            copyBtn.setTypeface(null, Typeface.BOLD);
+            copyBtn.setGravity(Gravity.CENTER);
+            copyBtn.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
+            copyBtn.setBackground(MobileTheme.accentPillBg(a, 12));
+            MobileMotion.bindPress(copyBtn, 0.95f);
+            copyBtn.setOnClickListener(
+                    v -> {
+                        android.content.ClipboardManager cm =
+                                (android.content.ClipboardManager)
+                                        a.getSystemService(
+                                                android.content.Context.CLIPBOARD_SERVICE);
+                        if (cm != null) {
+                            cm.setPrimaryClip(
+                                    android.content.ClipData.newPlainText("MarcoMovie Logs", dump));
+                            a.toast("已复制运行诊断日志");
+                        }
+                    });
+            content.addView(copyBtn, new LinearLayout.LayoutParams(-1, -2));
+        }
+
         final MobileBottomSheet.SheetHandle[] hRef = new MobileBottomSheet.SheetHandle[1];
         hRef[0] =
                 MobileBottomSheet.showHandle(
@@ -3618,7 +3641,9 @@ final class MobileSettingsScreen {
         box.addView(
                 buildSheetActionPill(a, p, "保存密钥", true, onSave),
                 new LinearLayout.LayoutParams(-1, a.dp(44)));
-        hRef[0] = MobileBottomSheet.showHandle(a, title, "仅保存在本机应用私有偏好中", "保存", onSave, box, false);
+        hRef[0] =
+                MobileBottomSheet.showHandle(
+                        a, title, "保存在本机应用私有偏好中，不加密，不随系统备份或云同步上传", "保存", onSave, box, false);
     }
 
     // =========================================================================
@@ -3911,7 +3936,51 @@ final class MobileSettingsScreen {
                                         fullLabels,
                                         selectedIdx,
                                         idx -> {
-                                            sp.edit().putInt(prefKey, values[idx]).apply();
+                                            int chosenVal = values[idx];
+                                            sp.edit().putInt(prefKey, chosenVal).apply();
+                                            if (a.prefs != null) {
+                                                if (Prefs.DANMAKU_AREA.equals(prefKey)) {
+                                                    float[] areas = {0.25f, 0.50f, 0.75f, 1.00f};
+                                                    a.prefs
+                                                            .edit()
+                                                            .putFloat(
+                                                                    DanmuSettingsPanel
+                                                                            .KEY_DISPLAY_AREA,
+                                                                    areas[
+                                                                            Math.max(
+                                                                                    0,
+                                                                                    Math.min(
+                                                                                            3,
+                                                                                            chosenVal))])
+                                                            .apply();
+                                                } else if (Prefs.DANMAKU_OPACITY.equals(prefKey)) {
+                                                    a.prefs
+                                                            .edit()
+                                                            .putFloat(
+                                                                    DanmuSettingsPanel.KEY_OPACITY,
+                                                                    Math.max(
+                                                                                    20,
+                                                                                    Math.min(
+                                                                                            100,
+                                                                                            chosenVal))
+                                                                            / 100f)
+                                                            .apply();
+                                                } else if (Prefs.DANMAKU_SPEED.equals(prefKey)) {
+                                                    float mult =
+                                                            chosenVal == 0
+                                                                    ? 0.75f
+                                                                    : (chosenVal == 2
+                                                                            ? 1.25f
+                                                                            : 1.00f);
+                                                    a.prefs
+                                                            .edit()
+                                                            .putFloat(
+                                                                    DanmuSettingsPanel
+                                                                            .KEY_SPEED_MULTIPLIER,
+                                                                    mult)
+                                                            .apply();
+                                                }
+                                            }
                                             if (reRenderShell) {
                                                 applyThemePreservingScroll(a, sv);
                                             } else {

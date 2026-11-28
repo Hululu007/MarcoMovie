@@ -787,7 +787,9 @@ public final class MpvPlayer extends MoviePlayer {
                     String userAgent = defaultUserAgent(context);
                     String referer = "";
                     MPVLib.setPropertyString("http-header-fields", "");
-                    for (Map.Entry<String, String> entry : headers.entrySet()) {
+                    Map<String, String> effectiveHeaders =
+                            ProxyAddress.sanitizeLoopbackHeaders(mediaUri.getHost(), headers);
+                    for (Map.Entry<String, String> entry : effectiveHeaders.entrySet()) {
                         String key = entry.getKey();
                         String value = entry.getValue();
                         if (key == null || value == null || value.isEmpty()) continue;
@@ -806,9 +808,7 @@ public final class MpvPlayer extends MoviePlayer {
                         }
                     }
                     MPVLib.setPropertyString("user-agent", userAgent);
-                    if (!referer.isEmpty()) {
-                        MPVLib.setPropertyString("referrer", referer);
-                    }
+                    MPVLib.setPropertyString("referrer", referer);
                     MPVLib.setPropertyBoolean("pause", Boolean.TRUE);
                     MPVLib.command(new String[] {"loadfile", mediaUri.toString(), "replace"});
                     return null;

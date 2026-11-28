@@ -169,13 +169,13 @@ final class UiWidgets {
             LinearLayout clipCard = a.row();
             clipCard.setGravity(Gravity.CENTER_VERTICAL);
             clipCard.setPadding(a.dp(14), a.dp(13), a.dp(14), a.dp(13));
-            clipCard.setBackground(a.bg(p.accent, 16));
+            clipCard.setBackground(MobileTheme.accentPillBg(a, 16));
             MobileMotion.bindPress(clipCard, 0.96f);
 
             FrameLayout clipBadge = new FrameLayout(a);
-            clipBadge.setBackground(a.bg(MobileTheme.withAlpha(p.accentOnFill, 0x26), 10));
+            clipBadge.setBackground(a.bg(MobileTheme.withAlpha(p.accent, 0x22), 10));
             MobileIcons.IconView clipIcon =
-                    MobileIcons.create(a, MobileIcons.IC_CLIPBOARD, 18f, p.accentOnFill);
+                    MobileIcons.create(a, MobileIcons.IC_CLIPBOARD, 18f, p.accent);
             clipBadge.addView(
                     clipIcon, new FrameLayout.LayoutParams(a.dp(18), a.dp(18), Gravity.CENTER));
             LinearLayout.LayoutParams badgeLp = new LinearLayout.LayoutParams(a.dp(34), a.dp(34));
@@ -183,17 +183,13 @@ final class UiWidgets {
             clipCard.addView(clipBadge, badgeLp);
 
             LinearLayout clipTextCol = a.vertical();
-            TextView clipTitle = a.text("检测到剪贴板影视源，一键导入", 14.5f, p.accentOnFill);
+            TextView clipTitle = a.text("检测到剪贴板影视源，一键导入", 14.5f, p.accent);
             clipTitle.setTypeface(null, Typeface.BOLD);
             clipTitle.setSingleLine(true);
             clipTitle.setEllipsize(TextUtils.TruncateAt.END);
             clipTextCol.addView(clipTitle);
 
-            TextView clipSub =
-                    a.text(
-                            kind + " · " + preview,
-                            12f,
-                            MobileTheme.withAlpha(p.accentOnFill, 0xCC));
+            TextView clipSub = a.text(kind + " · " + preview, 12f, p.textSecondary);
             clipSub.setSingleLine(true);
             clipSub.setEllipsize(TextUtils.TruncateAt.MIDDLE);
             clipSub.setPadding(0, a.dp(2), 0, 0);
@@ -201,7 +197,7 @@ final class UiWidgets {
             clipCard.addView(clipTextCol, new LinearLayout.LayoutParams(0, -2, 1f));
 
             MobileIcons.IconView arrow =
-                    MobileIcons.create(a, MobileIcons.IC_CHEVRON_RIGHT, 15f, p.accentOnFill);
+                    MobileIcons.create(a, MobileIcons.IC_CHEVRON_RIGHT, 15f, p.accent);
             LinearLayout.LayoutParams arrowLp = new LinearLayout.LayoutParams(a.dp(15), a.dp(15));
             arrowLp.leftMargin = a.dp(8);
             clipCard.addView(arrow, arrowLp);
@@ -234,14 +230,12 @@ final class UiWidgets {
         panel.addView(input, new LinearLayout.LayoutParams(-1, -2));
         a.gap(panel, 10);
 
-        TextView submitBtn =
-                a.text("导入输入内容", 14.5f, detectedClip != null ? p.textPrimary : p.accentOnFill);
+        TextView submitBtn = a.text("导入输入内容", 14.5f, p.accentOnFill);
         submitBtn.setTypeface(null, Typeface.BOLD);
         submitBtn.setGravity(Gravity.CENTER);
         submitBtn.setMinimumHeight(a.dp(46));
         submitBtn.setPadding(a.dp(16), a.dp(12), a.dp(16), a.dp(12));
-        submitBtn.setBackground(
-                detectedClip != null ? MobileTheme.subtleBg(a, 14) : a.bg(p.accent, 14));
+        submitBtn.setBackground(a.bg(p.accent, 14));
         MobileMotion.bindPress(submitBtn, 0.96f);
         submitBtn.setOnClickListener(
                 v -> {
@@ -303,6 +297,17 @@ final class UiWidgets {
                         () -> {
                             if (handleRef[0] != null) handleRef[0].dismiss();
                             EmbyEngine.connect(a);
+                        }));
+        rows.add(
+                MobileSectionGroup.navRow(
+                        a,
+                        MobileIcons.IC_FOLDER,
+                        0xFF0EA5E9,
+                        "挂载 AList / OpenList 网盘",
+                        null,
+                        () -> {
+                            if (handleRef[0] != null) handleRef[0].dismiss();
+                            AlistAccounts.openManager(a);
                         }));
         LinearLayout actionsGroup = MobileSectionGroup.create(a, "更多导入方式", null, rows);
         panel.addView(actionsGroup, new LinearLayout.LayoutParams(-1, -2));

@@ -486,7 +486,7 @@ class _MarcoMovieAppState extends State<MarcoMovieApp> {
               scaffoldBackgroundColor: ApplePalette.light.background,
               barBackgroundColor: ApplePalette.light.navBarBg,
               textTheme: CupertinoTextThemeData(
-                primaryColor: ApplePalette.light.labelPrimary,
+                primaryColor: ApplePalette.light.accent,
                 textStyle: TextStyle(
                   color: ApplePalette.light.labelPrimary,
                   fontFamily: primaryFont,
@@ -525,7 +525,7 @@ class _MarcoMovieAppState extends State<MarcoMovieApp> {
               scaffoldBackgroundColor: AppleColors.background,
               barBackgroundColor: const Color(0xB81C1C1E),
               textTheme: CupertinoTextThemeData(
-                primaryColor: AppleColors.labelPrimary,
+                primaryColor: AppleColors.systemBlue,
                 textStyle: TextStyle(
                   color: AppleColors.labelPrimary,
                   fontFamily: primaryFont,

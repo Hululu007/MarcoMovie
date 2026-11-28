@@ -601,6 +601,23 @@ public final class DanmuSettingsPanel {
                 .putInt(KEY_MAX_ROWS, config.maxRows)
                 .putString(KEY_BLOCK_RULES, rulesJoined.toString())
                 .apply();
+        if (!config.tvProfile) {
+            int areaIdx =
+                    config.displayArea <= 0.30f
+                            ? 0
+                            : (config.displayArea <= 0.60f
+                                    ? 1
+                                    : (config.displayArea <= 0.85f ? 2 : 3));
+            int opacityPct = Math.max(20, Math.min(100, Math.round(config.opacity * 100f)));
+            int speedIdx =
+                    config.speedMultiplier < 0.90f ? 0 : (config.speedMultiplier > 1.10f ? 2 : 1);
+            context.getSharedPreferences(Prefs.MOBILE_FILE, Context.MODE_PRIVATE)
+                    .edit()
+                    .putInt(Prefs.DANMAKU_AREA, areaIdx)
+                    .putInt(Prefs.DANMAKU_OPACITY, opacityPct)
+                    .putInt(Prefs.DANMAKU_SPEED, speedIdx)
+                    .apply();
+        }
         DanmuSourceManager.syncFromServerUrlsText(context, config.serverUrls);
     }
 

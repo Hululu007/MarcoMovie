@@ -126,6 +126,54 @@ class _LibrarySectionSpec {
   });
 }
 
+/// Opens the structured Emby / Jellyfin editor sheet (or iOS page) for an
+/// existing saved library subscription entry.
+Future<void> openEditMediaServerSheet(
+  BuildContext context, {
+  required StorageService storage,
+  required SubscriptionEntry existing,
+  required VoidCallback onLibraryUpdated,
+  Future<void> Function()? onNeedsPrivacyPassword,
+}) async {
+  final isEmby = existing.id.startsWith('emby_');
+  final savedCfg = await ExternalMediaLibrary.readAccountConfig(existing.id);
+  if (!context.mounted) return;
+  final title = isEmby ? '编辑 Emby' : '编辑 Jellyfin';
+  final body = _MediaServerFormSheet(
+    isEmby: isEmby,
+    storage: storage,
+    initialGroup: existing.group.trim().isEmpty ? '默认分组' : existing.group.trim(),
+    initialIsPrivate: existing.isPrivate,
+    existing: existing,
+    initialConfig: savedCfg,
+    onSaved: (entry, isPrivate) async {
+      await storage.upsertSubscriptions([entry]);
+      onLibraryUpdated();
+      if (isPrivate && !storage.hasPrivacyPassword) {
+        await onNeedsPrivacyPassword?.call();
+      }
+    },
+  );
+  if (defaultTargetPlatform == TargetPlatform.iOS) {
+    await Navigator.of(context).push<void>(
+      buildApplePageRoute<void>(
+        builder: (_) => IosSettingsScaffold(
+          title: title,
+          backLabel: '配置中心',
+          body: body,
+        ),
+      ),
+    );
+    return;
+  }
+  await showIos27LiquidSheet<void>(
+    context: context,
+    title: title,
+    maxWidth: 520,
+    builder: (_) => body,
+  );
+}
+
 /// Reorganized "添加资源库" hub with four clear aligned sections (Media Servers,
 /// Network Storage, Personal Cloud Drives, Local & Subscriptions), zero scatter
 /// animation, and real end-to-end verified connectors.
@@ -285,42 +333,10 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
         await _openPersonalNetdiskPicker(PersonalCloudProvider.ali);
         return;
       case _LibraryTileId.emby:
-        await _openServerForm(
-          title: '连接 Emby 媒体库',
-          accentColor: const Color(0xFF52B54B),
-          addressHint: 'https://emby.example:8096',
-          fields: const [
-            _FormFieldSpec('address', '服务器地址', 'https://emby.example:8096'),
-            _FormFieldSpec('user', '用户名', '填写 Emby 账号'),
-            _FormFieldSpec('pass', '密码', '填写登录密码', obscure: true),
-          ],
-          onConnect: (values, group, isPriv) => EmbyLibrary.login(
-            values['address'] ?? '',
-            values['user'] ?? '',
-            values['pass'] ?? '',
-            group: group,
-            isPrivate: isPriv,
-          ),
-        );
+        await _openMediaServerForm(isEmby: true);
         return;
       case _LibraryTileId.jellyfin:
-        await _openServerForm(
-          title: '连接 Jellyfin 媒体库',
-          accentColor: const Color(0xFF7B61FF),
-          addressHint: 'https://jellyfin.example:8096',
-          fields: const [
-            _FormFieldSpec('address', '服务器地址', 'https://jellyfin.example:8096'),
-            _FormFieldSpec('user', '用户名', '填写 Jellyfin 账号'),
-            _FormFieldSpec('pass', '密码', '填写登录密码', obscure: true),
-          ],
-          onConnect: (values, group, isPriv) => JellyfinLibrary.login(
-            values['address'] ?? '',
-            values['user'] ?? '',
-            values['pass'] ?? '',
-            group: group,
-            isPrivate: isPriv,
-          ),
-        );
+        await _openMediaServerForm(isEmby: false);
         return;
       case _LibraryTileId.plex:
         await _openServerForm(
@@ -542,6 +558,21 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
     }
   }
 
+  Future<void> _openMediaServerForm({required bool isEmby}) async {
+    await _pushSubForm(
+      title: isEmby ? '连接 Emby 媒体库' : '连接 Jellyfin 媒体库',
+      builder: (_) => _MediaServerFormSheet(
+        isEmby: isEmby,
+        storage: widget.storage,
+        initialGroup: widget.initialGroup,
+        initialIsPrivate: widget.initialIsPrivate,
+        onSaved: (entry, isPrivate) async {
+          await _commitSubscriptionEntry(entry, isPrivate: isPrivate);
+        },
+      ),
+    );
+  }
+
   Future<void> _openServerForm({
     required String title,
     required Color accentColor,
@@ -619,7 +650,8 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
                   height: 48,
                   child: CupertinoButton(
                     padding: EdgeInsets.zero,
-                    color: accentColor,
+                    color: palette.accent,
+                    disabledColor: palette.accent.withValues(alpha: 0.55),
                     borderRadius: BorderRadius.circular(14),
                     onPressed: busy
                         ? null
@@ -838,7 +870,8 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
                   child: CupertinoButton(
                     key: const ValueKey('manual-import-submit-btn'),
                     padding: EdgeInsets.zero,
-                    color: AppleColors.systemBlue,
+                    color: palette.accent,
+                    disabledColor: palette.accent.withValues(alpha: 0.55),
                     borderRadius: BorderRadius.circular(14),
                     onPressed: submitting ? null : handleImport,
                     child: submitting
@@ -980,44 +1013,20 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
     TextInputType? keyboardType,
     ValueChanged<String>? onChanged,
   }) {
-    final palette = ApplePalette.of(ctx);
-    final isDark = palette.isDark;
-    return TextSelectionMouseGuard(
-      child: CupertinoTextField(
-        controller: controller,
-        placeholder: placeholder,
-        obscureText: obscure,
-        minLines: minLines,
-        maxLines: obscure ? 1 : maxLines,
-        keyboardType: keyboardType,
-        autocorrect: false,
-        enableSuggestions: false,
-        smartQuotesType: SmartQuotesType.disabled,
-        smartDashesType: SmartDashesType.disabled,
-        cursorColor: AppleColors.systemBlue,
-        onChanged: onChanged,
-        padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 11),
-        style: TextStyle(
-          color: palette.labelPrimary,
-          fontSize: 14.5,
-          fontWeight: FontWeight.w500,
-        ),
-        placeholderStyle: TextStyle(
-          color: isDark ? const Color(0xFF9A9AA6) : const Color(0xFF6B7280),
-          fontSize: 13.5,
-        ),
-        decoration: BoxDecoration(
-          color: isDark ? const Color(0xFF2C2C2E) : Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: isDark
-                ? Colors.white.withValues(alpha: 0.14)
-                : const Color(0xFFCBD5E1),
-            width: 0.85,
-          ),
-        ),
-      ),
+    return _buildSharedStyledInput(
+      ctx,
+      controller: controller,
+      placeholder: placeholder,
+      obscure: obscure,
+      minLines: minLines,
+      maxLines: maxLines,
+      keyboardType: keyboardType,
+      onChanged: onChanged,
     );
+  }
+
+  Widget _buildErrorBanner(String text) {
+    return _buildSharedErrorBanner(context, text);
   }
 
   Widget _buildPrivacyToggleRow(
@@ -1057,25 +1066,6 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
             onChanged: onChanged,
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildErrorBanner(String text) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: const Color(0x24FF453A),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0x66FF453A), width: 0.7),
-      ),
-      child: Text(
-        text,
-        style: const TextStyle(
-          color: AppleColors.systemRed,
-          fontSize: 13,
-          height: 1.4,
-        ),
       ),
     );
   }
@@ -1333,6 +1323,552 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
           },
         ),
       ],
+    );
+  }
+}
+
+String _cleanLibraryErrorText(Object error) {
+  return error
+      .toString()
+      .replaceFirst(RegExp(r'^(?:Exception|FormatException|StateError):\s*'), '')
+      .trim();
+}
+
+Widget _buildSharedStyledInput(
+  BuildContext ctx, {
+  required TextEditingController controller,
+  required String placeholder,
+  bool obscure = false,
+  int minLines = 1,
+  int maxLines = 1,
+  TextInputType? keyboardType,
+  ValueChanged<String>? onChanged,
+}) {
+  final palette = ApplePalette.of(ctx);
+  final isDark = palette.isDark;
+  var hidden = obscure;
+  return StatefulBuilder(
+    builder: (ctx, setInputState) => TextSelectionMouseGuard(
+      child: CupertinoTextField(
+        controller: controller,
+        placeholder: placeholder,
+        obscureText: hidden,
+        minLines: minLines,
+        maxLines: obscure ? 1 : maxLines,
+        keyboardType: keyboardType,
+        autocorrect: false,
+        enableSuggestions: false,
+        smartQuotesType: SmartQuotesType.disabled,
+        smartDashesType: SmartDashesType.disabled,
+        cursorColor: palette.accent,
+        onChanged: onChanged,
+        suffix: obscure
+            ? CupertinoButton(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                minimumSize: const Size(32, 32),
+                onPressed: () => setInputState(() => hidden = !hidden),
+                child: Icon(
+                  hidden ? CupertinoIcons.eye : CupertinoIcons.eye_slash,
+                  size: 18,
+                  color: palette.labelSecondary,
+                ),
+              )
+            : null,
+        padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 11),
+        style: TextStyle(
+          color: palette.labelPrimary,
+          fontSize: 14.5,
+          fontWeight: FontWeight.w500,
+        ),
+        placeholderStyle: TextStyle(
+          color: isDark ? const Color(0xFF9A9AA6) : const Color(0xFF6B7280),
+          fontSize: 13.5,
+        ),
+        decoration: BoxDecoration(
+          color: isDark ? const Color(0xFF2C2C2E) : Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: isDark
+                ? Colors.white.withValues(alpha: 0.14)
+                : const Color(0xFFCBD5E1),
+            width: 0.85,
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+Widget _buildSharedErrorBanner(BuildContext ctx, String text) {
+  final isDark = ApplePalette.of(ctx).isDark;
+  return Container(
+    padding: const EdgeInsets.all(12),
+    decoration: BoxDecoration(
+      color: isDark ? const Color(0x28FF453A) : const Color(0x16DC2626),
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(
+        color: isDark ? const Color(0x66FF453A) : const Color(0x52DC2626),
+        width: 0.75,
+      ),
+    ),
+    child: Text(
+      text,
+      style: TextStyle(
+        color: isDark ? const Color(0xFFFF6961) : const Color(0xFFB91C1C),
+        fontSize: 13,
+        fontWeight: FontWeight.w500,
+        height: 1.4,
+      ),
+    ),
+  );
+}
+
+class _MediaServerFormSheet extends StatefulWidget {
+  final bool isEmby;
+  final StorageService storage;
+  final String initialGroup;
+  final bool initialIsPrivate;
+  final SubscriptionEntry? existing;
+  final Map<String, dynamic>? initialConfig;
+  final Future<void> Function(SubscriptionEntry entry, bool isPrivate) onSaved;
+
+  const _MediaServerFormSheet({
+    required this.isEmby,
+    required this.storage,
+    required this.initialGroup,
+    required this.initialIsPrivate,
+    this.existing,
+    this.initialConfig,
+    required this.onSaved,
+  });
+
+  @override
+  State<_MediaServerFormSheet> createState() => _MediaServerFormSheetState();
+}
+
+class _MediaServerFormSheetState extends State<_MediaServerFormSheet> {
+  static const List<String> _presetGroups = [
+    '默认分组',
+    '主力影视',
+    '超清专线',
+    '电视直播',
+    '动漫番剧',
+  ];
+
+  late final TextEditingController _groupCtrl;
+  late final TextEditingController _nameCtrl;
+  late final TextEditingController _hostCtrl;
+  late final TextEditingController _pathCtrl;
+  late final TextEditingController _portCtrl;
+  late final TextEditingController _userCtrl;
+  late final TextEditingController _passCtrl;
+
+  late bool _isPrivate;
+  late bool _allowCloudSync;
+  late bool _useHttps;
+  bool _programmaticHost = false;
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    final cfg = widget.initialConfig;
+    var initHttps = false;
+    var initHost = '';
+    var initPath = '';
+    var initPort = '8096';
+    var initLabel = '';
+    var initUser = '';
+    var initAllowSync = true;
+
+    if (cfg != null) {
+      initLabel = cfg['label']?.toString().trim() ?? '';
+      initUser = cfg['username']?.toString().trim() ?? '';
+      initAllowSync = cfg['allowCloudSync'] != false;
+      if (cfg.containsKey('rawHost')) {
+        initHttps = cfg['rawHttps'] == true;
+        initHost = cfg['rawHost']?.toString() ?? '';
+        initPath = cfg['rawSubpath']?.toString() ?? '';
+        initPort = cfg['rawPort']?.toString() ?? (initHttps ? '443' : '8096');
+      } else {
+        final split = EmbyLibrary.splitServerUrl(cfg['base']?.toString() ?? '');
+        initHttps = split.useHttps;
+        initHost = split.host;
+        initPath = split.subpath.toLowerCase() == '/emby' ? '' : split.subpath;
+        initPort = split.port;
+      }
+    }
+
+    _groupCtrl = TextEditingController(text: widget.initialGroup);
+    _nameCtrl = TextEditingController(text: initLabel);
+    _hostCtrl = TextEditingController(text: initHost);
+    _pathCtrl = TextEditingController(text: initPath);
+    _portCtrl = TextEditingController(text: initPort);
+    _userCtrl = TextEditingController(text: initUser);
+    _passCtrl = TextEditingController();
+    _isPrivate = widget.initialIsPrivate;
+    _allowCloudSync = initAllowSync;
+    _useHttps = initHttps;
+  }
+
+  @override
+  void dispose() {
+    _groupCtrl.dispose();
+    _nameCtrl.dispose();
+    _hostCtrl.dispose();
+    _pathCtrl.dispose();
+    _portCtrl.dispose();
+    _userCtrl.dispose();
+    _passCtrl.dispose();
+    super.dispose();
+  }
+
+  void _onHostChanged(String value) {
+    if (_programmaticHost) return;
+    final trimmed = value.trim();
+    if (!trimmed.toLowerCase().startsWith('http://') &&
+        !trimmed.toLowerCase().startsWith('https://')) {
+      return;
+    }
+    final split = EmbyLibrary.splitServerUrl(trimmed);
+    if (split.host.isEmpty) return;
+    _programmaticHost = true;
+    try {
+      setState(() {
+        _useHttps = split.useHttps;
+        if (split.subpath.isNotEmpty && _pathCtrl.text.trim().isEmpty) {
+          _pathCtrl.text = split.subpath.toLowerCase() == '/emby' ? '' : split.subpath;
+        }
+        if (split.port.isNotEmpty) {
+          _portCtrl.text = split.port;
+        }
+        _hostCtrl.value = TextEditingValue(
+          text: split.host,
+          selection: TextSelection.collapsed(offset: split.host.length),
+        );
+      });
+    } finally {
+      _programmaticHost = false;
+    }
+  }
+
+  Future<void> _submit() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final group = _groupCtrl.text.trim().isEmpty ? '默认分组' : _groupCtrl.text.trim();
+      final label = _nameCtrl.text.trim();
+      final rawHost = _hostCtrl.text.trim();
+      final rawSubpath = _pathCtrl.text.trim();
+      final rawPort = _portCtrl.text.trim();
+      final username = _userCtrl.text.trim();
+      final password = _passCtrl.text;
+      if (rawHost.isEmpty || username.isEmpty) {
+        throw const FormatException('请填写服务器地址和用户名');
+      }
+      final uri = EmbyLibrary.resolveServerUrl(
+        hostOrUrl: rawHost,
+        useHttps: _useHttps,
+        port: rawPort,
+        subpath: rawSubpath,
+      );
+      final existing = widget.existing;
+      final cfg = widget.initialConfig;
+      if (existing != null && cfg != null && password.isEmpty) {
+        final oldBase = (cfg['base']?.toString() ?? '').replaceFirst(RegExp(r'/+$'), '');
+        final candRoot = uri.toString().replaceFirst(RegExp(r'/+$'), '');
+        final oldUser = cfg['username']?.toString().trim() ?? '';
+        final sameTarget = oldBase.toLowerCase() == candRoot.toLowerCase() ||
+            oldBase.toLowerCase() == '${candRoot.toLowerCase()}/emby';
+        if (sameTarget && username == oldUser) {
+          final updated = widget.isEmby
+              ? await EmbyLibrary.updateAccountMeta(
+                  existing: existing,
+                  label: label,
+                  group: group,
+                  isPrivate: _isPrivate,
+                  allowCloudSync: _allowCloudSync,
+                  useHttps: _useHttps,
+                  rawHost: rawHost,
+                  rawPort: rawPort,
+                  rawSubpath: rawSubpath,
+                )
+              : await JellyfinLibrary.updateAccountMeta(
+                  existing: existing,
+                  label: label,
+                  group: group,
+                  isPrivate: _isPrivate,
+                  allowCloudSync: _allowCloudSync,
+                  useHttps: _useHttps,
+                  rawHost: rawHost,
+                  rawPort: rawPort,
+                  rawSubpath: rawSubpath,
+                );
+          if (mounted) Navigator.of(context).pop();
+          await widget.onSaved(updated, _isPrivate);
+          return;
+        }
+      }
+
+      final entry = widget.isEmby
+          ? await EmbyLibrary.login(
+              uri.toString(),
+              username,
+              password,
+              group: group,
+              isPrivate: _isPrivate,
+              label: label,
+              allowCloudSync: _allowCloudSync,
+            )
+          : await JellyfinLibrary.login(
+              uri.toString(),
+              username,
+              password,
+              group: group,
+              isPrivate: _isPrivate,
+              label: label,
+              allowCloudSync: _allowCloudSync,
+            );
+      if (existing != null && existing.id != entry.id) {
+        await widget.storage.removeSubscription(existing.id);
+      }
+      if (mounted) Navigator.of(context).pop();
+      await widget.onSaved(entry, _isPrivate);
+    } catch (e) {
+      if (mounted) {
+        final detail = _cleanLibraryErrorText(e);
+        setState(() {
+          _busy = false;
+          _error = '连接失败：$detail（已有资源库不受影响，请检查地址、HTTP/HTTPS 协议或凭据后重试）';
+        });
+      }
+    }
+  }
+
+  Widget _buildToggleRow(
+    BuildContext ctx, {
+    required String label,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+  }) {
+    final palette = ApplePalette.of(ctx);
+    final isDark = palette.isDark;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF2C2C2E) : Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: isDark ? Colors.white.withValues(alpha: 0.14) : const Color(0xFFCBD5E1),
+          width: 0.85,
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(
+                color: palette.labelPrimary,
+                fontSize: 14.5,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          CupertinoSwitch(
+            value: value,
+            activeTrackColor: AppleColors.systemGreen,
+            onChanged: onChanged,
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = ApplePalette.of(context);
+    final isEdit = widget.existing != null;
+    final showPrivacy = widget.initialIsPrivate || !widget.storage.hasPrivacyConfigured;
+    final labelStyle = TextStyle(
+      color: palette.labelSecondary,
+      fontSize: 13,
+      fontWeight: FontWeight.w600,
+    );
+
+    return SingleChildScrollView(
+      padding: EdgeInsets.fromLTRB(
+        20,
+        18,
+        20,
+        24 + MediaQuery.viewInsetsOf(context).bottom,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('订阅分组', style: labelStyle),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final g in _presetGroups)
+                GestureDetector(
+                  key: ValueKey('import-group-pill-$g'),
+                  onTap: () => setState(() => _groupCtrl.text = g),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 160),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                    decoration: BoxDecoration(
+                      color: _groupCtrl.text.trim() == g
+                          ? palette.accent
+                          : (palette.isDark
+                              ? Colors.white.withValues(alpha: 0.08)
+                              : Colors.black.withValues(alpha: 0.06)),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      g,
+                      style: TextStyle(
+                        color: _groupCtrl.text.trim() == g
+                            ? Colors.white
+                            : palette.labelPrimary,
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          _buildSharedStyledInput(
+            context,
+            controller: _groupCtrl,
+            placeholder: '或输入自定义分组名（如：主力4K）',
+            onChanged: (_) => setState(() {}),
+          ),
+          const SizedBox(height: 14),
+          Text('名称', style: labelStyle),
+          const SizedBox(height: 6),
+          _buildSharedStyledInput(
+            context,
+            controller: _nameCtrl,
+            placeholder: '例如：4K影视库（选填）',
+          ),
+          const SizedBox(height: 14),
+          Text('同步', style: labelStyle),
+          const SizedBox(height: 6),
+          _buildToggleRow(
+            context,
+            label: '是否允许云端同步',
+            value: _allowCloudSync,
+            onChanged: (v) => setState(() => _allowCloudSync = v),
+          ),
+          const SizedBox(height: 14),
+          Text('协议', style: labelStyle),
+          const SizedBox(height: 6),
+          _buildToggleRow(
+            context,
+            label: 'HTTPS',
+            value: _useHttps,
+            onChanged: (v) => setState(() {
+              _useHttps = v;
+              final cur = _portCtrl.text.trim();
+              if (v && (cur.isEmpty || cur == '8096')) {
+                _portCtrl.text = '8920';
+              } else if (!v && (cur.isEmpty || cur == '8920' || cur == '443')) {
+                _portCtrl.text = '8096';
+              }
+            }),
+          ),
+          const SizedBox(height: 14),
+          Text('服务器地址', style: labelStyle),
+          const SizedBox(height: 6),
+          _buildSharedStyledInput(
+            context,
+            controller: _hostCtrl,
+            placeholder: 'emby.example 或粘贴完整 URL',
+            keyboardType: TextInputType.url,
+            onChanged: _onHostChanged,
+          ),
+          const SizedBox(height: 14),
+          Text('路径', style: labelStyle),
+          const SizedBox(height: 6),
+          _buildSharedStyledInput(
+            context,
+            controller: _pathCtrl,
+            placeholder: '选填(/path)',
+            keyboardType: TextInputType.url,
+          ),
+          const SizedBox(height: 14),
+          Text('端口号', style: labelStyle),
+          const SizedBox(height: 6),
+          _buildSharedStyledInput(
+            context,
+            controller: _portCtrl,
+            placeholder: '8096',
+            keyboardType: TextInputType.number,
+          ),
+          const SizedBox(height: 14),
+          Text('用户名', style: labelStyle),
+          const SizedBox(height: 6),
+          _buildSharedStyledInput(
+            context,
+            controller: _userCtrl,
+            placeholder: '填写账号用户名',
+          ),
+          const SizedBox(height: 14),
+          Text('密码', style: labelStyle),
+          const SizedBox(height: 6),
+          _buildSharedStyledInput(
+            context,
+            controller: _passCtrl,
+            placeholder: isEdit ? '留空则仅保存名称与同步设置' : '填写登录密码',
+            obscure: true,
+          ),
+          if (showPrivacy) ...[
+            const SizedBox(height: 14),
+            _buildToggleRow(
+              context,
+              label: '设为隐私分组',
+              value: _isPrivate,
+              onChanged: (v) => setState(() => _isPrivate = v),
+            ),
+          ],
+          if (_error != null) ...[
+            const SizedBox(height: 14),
+            _buildSharedErrorBanner(context, _error!),
+          ],
+          const SizedBox(height: 18),
+          SizedBox(
+            height: 48,
+            child: CupertinoButton(
+              padding: EdgeInsets.zero,
+              color: palette.accent,
+              disabledColor: palette.accent.withValues(alpha: 0.55),
+              borderRadius: BorderRadius.circular(14),
+              onPressed: _busy ? null : _submit,
+              child: _busy
+                  ? const CupertinoActivityIndicator(
+                      color: Colors.white,
+                      radius: 10,
+                    )
+                  : Text(
+                      isEdit ? '保存更改' : '验证并添加资源库',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 15.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

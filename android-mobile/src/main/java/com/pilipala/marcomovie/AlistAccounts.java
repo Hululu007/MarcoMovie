@@ -254,7 +254,8 @@ final class AlistAccounts {
         final EditText tokenInput = pair3[0];
         final EditText dirPassInput = pair3[1];
 
-        final TextView status = a.text("", 13, 0xff7ac0ff);
+        final MobileTheme.Palette p = MobileTheme.of(a);
+        final TextView status = a.text("", 13, p.accent);
         status.setVisibility(View.GONE);
         LinearLayout.LayoutParams stLp = new LinearLayout.LayoutParams(-1, -2);
         stLp.topMargin = a.dp(6);
@@ -276,14 +277,14 @@ final class AlistAccounts {
                         String rawUrl = urlInput.getText().toString().trim();
                         if (rawUrl.isEmpty()) {
                             status.setText("请先填写 AList 服务地址");
-                            status.setTextColor(0xffff6961);
+                            status.setTextColor(p.danger);
                             status.setVisibility(View.VISIBLE);
                             return;
                         }
                         String normUrl = AlistEngine.normalizeBaseUrl(rawUrl);
                         if (!Cms.isHttp(normUrl)) {
                             status.setText("服务地址格式不正确，请输入 http:// 或 https:// 地址");
-                            status.setTextColor(0xffff6961);
+                            status.setTextColor(p.danger);
                             status.setVisibility(View.VISIBLE);
                             return;
                         }
@@ -299,7 +300,7 @@ final class AlistAccounts {
                                         dirPassInput.getText().toString());
                         saveBtn.setEnabled(false);
                         status.setText("正在连接 AList 并校验目录…");
-                        status.setTextColor(0xff7ac0ff);
+                        status.setTextColor(p.accent);
                         status.setVisibility(View.VISIBLE);
                         new Thread(
                                         () -> {
@@ -338,7 +339,7 @@ final class AlistAccounts {
                                                             } catch (Exception mergeErr) {
                                                                 saveBtn.setEnabled(true);
                                                                 status.setText(a.message(mergeErr));
-                                                                status.setTextColor(0xffff6961);
+                                                                status.setTextColor(p.danger);
                                                                 status.setVisibility(View.VISIBLE);
                                                                 return;
                                                             }
@@ -363,7 +364,7 @@ final class AlistAccounts {
                                                             if (a.isFinishing()) return;
                                                             saveBtn.setEnabled(true);
                                                             status.setText(a.message(err));
-                                                            status.setTextColor(0xffff6961);
+                                                            status.setTextColor(p.danger);
                                                             status.setVisibility(View.VISIBLE);
                                                         });
                                             }
@@ -459,7 +460,8 @@ final class AlistAccounts {
             String hint,
             boolean password,
             String qrLabel) {
-        TextView lbl = a.text(label, 12.5f, MainActivity.MUTED);
+        final MobileTheme.Palette p = MobileTheme.of(a);
+        TextView lbl = a.text(label, 12.5f, p.textSecondary);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
         lp.topMargin = a.dp(6);
         lp.bottomMargin = a.dp(4);
@@ -468,12 +470,12 @@ final class AlistAccounts {
         EditText et = new EditText(a);
         et.setText(value);
         et.setHint(hint);
-        et.setTextColor(MainActivity.WHITE);
-        et.setHintTextColor(0xff8e98a8);
+        et.setTextColor(p.textPrimary);
+        et.setHintTextColor(p.textTertiary);
         et.setSingleLine(true);
         et.setTextSize(14f);
         et.setPadding(a.dp(12), a.dp(8), a.dp(12), a.dp(8));
-        et.setBackground(a.bg(0x3a000000, 12));
+        et.setBackground(MobileTheme.subtleBg(a, 12));
         if (password) {
             et.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         } else {

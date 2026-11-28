@@ -20,18 +20,194 @@ class EmbyLibrary {
     ).join();
   }
 
-  static Uri _base(String address) {
-    final u = Uri.parse(address.trim());
-    if (!['http', 'https'].contains(u.scheme) ||
+  static ({bool useHttps, String host, String port, String subpath})
+  splitServerUrl(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) {
+      return (useHttps: false, host: '', port: '8096', subpath: '');
+    }
+    final hasScheme = trimmed.contains('://');
+    final u = Uri.tryParse(hasScheme ? trimmed : 'http://$trimmed');
+    if (u == null || u.host.isEmpty) {
+      return (useHttps: false, host: trimmed, port: '8096', subpath: '');
+    }
+    final scheme = u.scheme.toLowerCase();
+    final portNum = u.hasPort ? u.port : 0;
+    final useHttps =
+        scheme == 'https' || portNum == 443 || portNum == 8920;
+    var host = u.host;
+    if (host.contains(':') && !host.startsWith('[')) {
+      host = '[$host]';
+    }
+    var path = u.path.replaceFirst(RegExp(r'/+$'), '');
+    final lower = path.toLowerCase();
+    final webIdx = lower.indexOf('/web/');
+    if (webIdx >= 0) {
+      path = path.substring(0, webIdx).replaceFirst(RegExp(r'/+$'), '');
+    } else if (lower.endsWith('/web')) {
+      path = path.substring(0, path.length - 4).replaceFirst(RegExp(r'/+$'), '');
+    }
+    final portStr = portNum > 0 ? '$portNum' : (useHttps ? '443' : '8096');
+    return (useHttps: useHttps, host: host, port: portStr, subpath: path);
+  }
+
+  static Uri resolveServerUrl({
+    required String hostOrUrl,
+    bool useHttps = false,
+    String port = '',
+    String subpath = '',
+  }) {
+    var rawHost = hostOrUrl.trim();
+    if (rawHost.isEmpty) {
+      throw const FormatException('请填写 Emby 服务器地址');
+    }
+    var rawSub = subpath.trim();
+    var rawPort = port.trim();
+    var effectiveHttps = useHttps;
+    if (rawHost.contains('://')) {
+      final split = splitServerUrl(rawHost);
+      final parsed = Uri.tryParse(rawHost);
+      if (parsed == null ||
+          !['http', 'https'].contains(parsed.scheme.toLowerCase()) ||
+          parsed.host.isEmpty ||
+          parsed.userInfo.isNotEmpty) {
+        throw const FormatException('请输入含 HTTP 或 HTTPS 的 Emby 服务器根地址');
+      }
+      effectiveHttps = parsed.scheme.toLowerCase() == 'https';
+      rawHost = split.host;
+      if (rawSub.isEmpty) rawSub = split.subpath;
+      if (rawPort.isEmpty && parsed.hasPort) rawPort = '${parsed.port}';
+    } else {
+      final slash = rawHost.indexOf('/');
+      if (slash >= 0) {
+        if (rawSub.isEmpty) rawSub = rawHost.substring(slash);
+        rawHost = rawHost.substring(0, slash).trim();
+      }
+      if (!rawHost.startsWith('[')) {
+        final colon = rawHost.lastIndexOf(':');
+        if (colon > 0 && colon == rawHost.indexOf(':')) {
+          final inlinePort = rawHost.substring(colon + 1).trim();
+          if (rawPort.isEmpty && RegExp(r'^\d+$').hasMatch(inlinePort)) {
+            rawPort = inlinePort;
+          }
+          rawHost = rawHost.substring(0, colon).trim();
+        }
+      }
+    }
+    if (rawHost.isEmpty) {
+      throw const FormatException('请输入有效的服务器地址');
+    }
+    final cleanHost = rawHost.startsWith('[') && rawHost.endsWith(']')
+        ? rawHost.substring(1, rawHost.length - 1)
+        : rawHost;
+    int? parsedPort;
+    if (rawPort.isNotEmpty) {
+      parsedPort = int.tryParse(rawPort);
+      if (parsedPort == null || parsedPort <= 0 || parsedPort > 65535) {
+        throw FormatException('端口号无效：$rawPort');
+      }
+      if ((effectiveHttps && parsedPort == 443) ||
+          (!effectiveHttps && parsedPort == 80)) {
+        parsedPort = null;
+      }
+    }
+    var cleanPath = rawSub.replaceFirst(RegExp(r'/+$'), '');
+    if (cleanPath.isNotEmpty && !cleanPath.startsWith('/')) {
+      cleanPath = '/$cleanPath';
+    }
+    return _normalizeRoot(
+      Uri(
+        scheme: effectiveHttps ? 'https' : 'http',
+        host: cleanHost,
+        port: parsedPort,
+        path: cleanPath,
+      ).toString(),
+    );
+  }
+
+  static Uri _normalizeRoot(String address) {
+    var trimmed = address.trim();
+    final hash = trimmed.indexOf('#');
+    if (hash >= 0 && trimmed.toLowerCase().contains('/web/')) {
+      trimmed = trimmed.substring(0, hash);
+    }
+    final u = Uri.tryParse(trimmed);
+    if (u == null ||
+        !['http', 'https'].contains(u.scheme.toLowerCase()) ||
         u.host.isEmpty ||
         u.userInfo.isNotEmpty ||
         u.hasQuery ||
         u.hasFragment) {
       throw const FormatException('请输入含 HTTP 或 HTTPS 的 Emby 服务器根地址');
     }
-    final path = u.path.replaceFirst(RegExp(r'/+$'), '');
-    return u.replace(
-      path: path.toLowerCase().endsWith('/emby') ? path : '$path/emby',
+    var path = u.path.replaceFirst(RegExp(r'/+$'), '');
+    final lower = path.toLowerCase();
+    final webIdx = lower.indexOf('/web/');
+    if (webIdx >= 0) {
+      path = path.substring(0, webIdx).replaceFirst(RegExp(r'/+$'), '');
+    } else if (lower.endsWith('/web')) {
+      path = path.substring(0, path.length - 4).replaceFirst(RegExp(r'/+$'), '');
+    }
+    return u.replace(path: path);
+  }
+
+  static Future<Map<String, dynamic>?> readAccountConfig(String subId) async {
+    if (!subId.startsWith('emby_')) return null;
+    final key = subId.substring('emby_'.length);
+    final raw =
+        (await SharedPreferences.getInstance()).getString('emby.account.$key');
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is Map ? Map<String, dynamic>.from(decoded) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<SubscriptionEntry> updateAccountMeta({
+    required SubscriptionEntry existing,
+    required String label,
+    required String group,
+    required bool isPrivate,
+    required bool allowCloudSync,
+    required bool useHttps,
+    required String rawHost,
+    required String rawPort,
+    required String rawSubpath,
+  }) async {
+    final key = existing.id.substring('emby_'.length);
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('emby.account.$key');
+    if (raw == null) throw StateError('请重新验证媒体库凭据');
+    final saved = Map<String, dynamic>.from(jsonDecode(raw) as Map);
+    final cleanLabel = label.trim();
+    final fallbackUser = saved['username']?.toString().trim() ?? '';
+    final display = cleanLabel.isNotEmpty
+        ? cleanLabel
+        : (fallbackUser.isNotEmpty ? fallbackUser : 'Emby');
+    final name = display.startsWith('Emby') ? display : 'Emby · $display';
+    final api = '$prefix$key';
+    saved['label'] = cleanLabel;
+    saved['allowCloudSync'] = allowCloudSync;
+    saved['rawHttps'] = useHttps;
+    saved['rawHost'] = rawHost.trim();
+    saved['rawPort'] = rawPort.trim();
+    saved['rawSubpath'] = rawSubpath.trim();
+    await prefs.setString('emby.account.$key', jsonEncode(saved));
+    return SubscriptionEntry(
+      id: existing.id,
+      name: name,
+      group: group,
+      isPrivate: isPrivate,
+      format: 'Emby',
+      siteCount: 1,
+      updatedAt: DateTime.now().millisecondsSinceEpoch,
+      rawContent: jsonEncode({
+        'sites': [
+          {'key': existing.id, 'name': name, 'type': 1, 'api': api},
+        ],
+      }),
     );
   }
 
@@ -41,17 +217,48 @@ class EmbyLibrary {
     String password, {
     required String group,
     required bool isPrivate,
+    String label = '',
+    bool allowCloudSync = true,
   }) async {
-    final base = _base(address);
+    final bareRoot = _normalizeRoot(address);
+    final userSpecifiedEmby = bareRoot.path.toLowerCase().endsWith('/emby');
+    var base = userSpecifiedEmby
+        ? bareRoot
+        : bareRoot.replace(path: '${bareRoot.path}/emby');
     final prefs = await SharedPreferences.getInstance();
     final device = prefs.getString('emby.device') ?? _nonce();
     if (!await prefs.setString('emby.device', device))
       throw StateError('无法保存设备标识');
-    final login = EmbyLibrary._(base, '', '', device);
-    final json = await login._api(
-      '/Users/AuthenticateByName',
-      body: {'Username': username.trim(), 'Pw': password},
-    );
+    final cleanUser = username.trim();
+    final authBody = {'Username': cleanUser, 'Pw': password};
+    Map<String, dynamic> json;
+    try {
+      json = await EmbyLibrary._(base, '', '', device)._api(
+        '/Users/AuthenticateByName',
+        body: authBody,
+      );
+    } on HttpException catch (err) {
+      if (!userSpecifiedEmby &&
+          (err.message.contains('404') || err.message.contains('405'))) {
+        base = bareRoot;
+        json = await EmbyLibrary._(base, '', '', device)._api(
+          '/Users/AuthenticateByName',
+          body: authBody,
+        );
+      } else {
+        rethrow;
+      }
+    } on FormatException {
+      if (!userSpecifiedEmby) {
+        base = bareRoot;
+        json = await EmbyLibrary._(base, '', '', device)._api(
+          '/Users/AuthenticateByName',
+          body: authBody,
+        );
+      } else {
+        rethrow;
+      }
+    }
     final user = json['User']?['Id'];
     final token = json['AccessToken'];
     if (user is! String || user.isEmpty || token is! String || token.isEmpty) {
@@ -65,8 +272,11 @@ class EmbyLibrary {
       throw StateError('Emby 未返回有效媒体库目录，请检查当前账号的媒体库访问权限');
     }
     final key = sha256.convert(utf8.encode('$base\n$user')).toString();
-    final name = 'Emby · ${username.trim()}';
+    final cleanLabel = label.trim();
+    final display = cleanLabel.isNotEmpty ? cleanLabel : cleanUser;
+    final name = display.startsWith('Emby') ? display : 'Emby · $display';
     final api = '$prefix$key';
+    final split = splitServerUrl(bareRoot.toString());
     if (!await prefs.setString(
       'emby.account.$key',
       jsonEncode({
@@ -74,6 +284,13 @@ class EmbyLibrary {
         'user': user,
         'token': token,
         'device': device,
+        'label': cleanLabel,
+        'username': cleanUser,
+        'allowCloudSync': allowCloudSync,
+        'rawHttps': split.useHttps,
+        'rawHost': split.host,
+        'rawPort': split.port,
+        'rawSubpath': split.subpath.toLowerCase() == '/emby' ? '' : split.subpath,
       }),
     ))
       throw StateError('无法保存 Emby 登录状态');
@@ -100,7 +317,12 @@ class EmbyLibrary {
     );
     if (value == null) throw StateError('请在本机重新登录 Emby');
     final s = jsonDecode(value);
-    return EmbyLibrary._(_base(s['base']), s['user'], s['token'], s['device']);
+    return EmbyLibrary._(
+      _normalizeRoot(s['base'].toString()),
+      s['user'],
+      s['token'],
+      s['device'],
+    );
   }
 
   static bool isImage(String raw) =>
@@ -134,21 +356,45 @@ class EmbyLibrary {
       () => client.close(force: true),
     );
     try {
-      final r = await client.openUrl(
-        body == null ? 'GET' : 'POST',
-        _url(path, params),
-      );
-      r.followRedirects = false;
-      r.headers.set(
-        'Authorization',
-        'Emby Client="Marco Movie", Device="${Platform.operatingSystem}", DeviceId="$device", Version="1"',
-      );
-      if (token.isNotEmpty) r.headers.set('X-Emby-Token', token);
-      if (body != null) {
-        r.headers.contentType = ContentType.json;
-        r.write(jsonEncode(body));
+      var target = _url(path, params);
+      final method = body == null ? 'GET' : 'POST';
+      final authHeader =
+          'Emby Client="Marco Movie", Device="${Platform.operatingSystem}", DeviceId="$device", Version="1"${token.isNotEmpty ? ', Token="$token"' : ''}';
+      HttpClientResponse? response;
+      for (var hop = 0; hop < 6; hop++) {
+        final r = await client.openUrl(method, target);
+        r.followRedirects = false;
+        r.headers.set('Authorization', authHeader);
+        r.headers.set('X-Emby-Authorization', authHeader);
+        r.headers.set('User-Agent', 'MarcoMovie/1.0');
+        r.headers.set('Accept', 'application/json');
+        if (token.isNotEmpty) r.headers.set('X-Emby-Token', token);
+        if (body != null) {
+          r.headers.contentType = ContentType.json;
+          r.write(jsonEncode(body));
+        }
+        final resp = await r.close();
+        if (const {301, 302, 303, 307, 308}.contains(resp.statusCode)) {
+          await resp.drain<void>();
+          final loc = resp.headers.value(HttpHeaders.locationHeader);
+          if (loc == null || loc.trim().isEmpty) {
+            throw HttpException('Emby 重定向地址缺失（HTTP ${resp.statusCode}）');
+          }
+          final next = target.resolve(loc.trim());
+          if (!['http', 'https'].contains(next.scheme.toLowerCase()) ||
+              next.origin != base.origin ||
+              next.userInfo.isNotEmpty) {
+            throw const FormatException('Emby 拒绝跨源重定向以保护账号凭据');
+          }
+          target = next;
+          continue;
+        }
+        response = resp;
+        break;
       }
-      final response = await r.close();
+      if (response == null) {
+        throw const FormatException('Emby 重定向次数过多');
+      }
       if (response.statusCode == 401 || response.statusCode == 403)
         throw StateError('Emby 拒绝访问，请检查账号或重新登录');
       if (response.statusCode < 200 || response.statusCode >= 300)
@@ -159,9 +405,20 @@ class EmbyLibrary {
           throw const FormatException('Emby 响应过大');
         bytes.addAll(chunk);
       }
-      return bytes.isEmpty
-          ? <String, dynamic>{}
-          : jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
+      if (bytes.isEmpty) return <String, dynamic>{};
+      final decoded = jsonDecode(utf8.decode(bytes));
+      if (decoded is! Map) {
+        throw const FormatException('Emby 响应格式无效');
+      }
+      return Map<String, dynamic>.from(decoded);
+    } on HandshakeException catch (e) {
+      throw HandshakeException(
+        'SSL 握手失败（若服务器使用 8096 等 HTTP 端口，请关闭 HTTPS 开关或改用 http:// 地址）：${e.message}',
+      );
+    } on TlsException catch (e) {
+      throw TlsException(
+        'TLS 连接失败（若服务器使用 8096 等 HTTP 端口，请关闭 HTTPS 开关或改用 http:// 地址）：${e.message}',
+      );
     } finally {
       deadline.cancel();
       client.close(force: true);
@@ -198,6 +455,9 @@ class EmbyLibrary {
         .whereType<Map>()
         .map((v) => CmsCategory(id: v['Id'], name: v['Name']))
         .toList();
+    if (groups.isEmpty) {
+      groups.add(const CmsCategory(id: '', name: '全部媒体'));
+    }
     return (groups, await list('', '', 1));
   }
 
@@ -318,7 +578,7 @@ class EmbyLibrary {
         if (wanted != id) 'MediaSourceId': wanted,
         'IsPlayback': true,
         'AutoOpenLiveStream': false,
-        'EnableDirectPlay': false,
+        'EnableDirectPlay': true,
         'EnableDirectStream': true,
         'EnableTranscoding': true,
         'MaxStreamingBitrate': 80000000,
@@ -328,9 +588,9 @@ class EmbyLibrary {
           'DirectPlayProfiles': [
             {
               'Type': 'Video',
-              'Container': 'mp4,m4v,mkv,mov,ts',
-              'VideoCodec': 'h264',
-              'AudioCodec': 'aac,mp3',
+              'Container': 'mp4,m4v,mkv,mov,ts,webm',
+              'VideoCodec': 'h264,hevc,h265,vp9,av1',
+              'AudioCodec': 'aac,mp3,ac3,eac3,dts,truehd,flac,opus',
             },
           ],
           'TranscodingProfiles': [
@@ -368,6 +628,42 @@ class EmbyLibrary {
     final direct =
         source['SupportsDirectStream'] == true ||
         source['SupportsDirectPlay'] == true;
+    final rawPath = (source['Path']?.toString() ?? '').trim();
+    if (source['SupportsDirectPlay'] == true &&
+        (rawPath.toLowerCase().startsWith('http://') ||
+            rawPath.toLowerCase().startsWith('https://'))) {
+      final pathUri = Uri.tryParse(rawPath);
+      final outHeaders = <String, String>{};
+      final reqHeaders = source['RequiredHttpHeaders'];
+      if (reqHeaders is Map) {
+        reqHeaders.forEach((k, v) {
+          final ks = k?.toString() ?? '';
+          final vs = v?.toString() ?? '';
+          if (ks.isNotEmpty && vs.isNotEmpty) outHeaders[ks] = vs;
+        });
+      }
+      if (pathUri != null && pathUri.origin == base.origin) {
+        outHeaders['X-Emby-Token'] = token;
+      }
+      return CmsEpisode(
+        name: episode.name,
+        url: rawPath,
+        headers: outHeaders,
+        playbackSession: {
+          'ItemId': id,
+          'MediaSourceId': sourceId,
+          'PlaySessionId': session,
+          'PlayMethod': 'DirectPlay',
+          'CanSeek': true,
+        },
+        sourceSeasonNumber: episode.sourceSeasonNumber,
+        sourceEpisodeNumber: episode.sourceEpisodeNumber,
+        sourceItemId: episode.sourceItemId.isNotEmpty ? episode.sourceItemId : id,
+        originalFileName: episode.originalFileName,
+        directoryPath: episode.directoryPath,
+        containerTags: episode.containerTags,
+      );
+    }
     if (!direct &&
         (source['SupportsTranscoding'] != true ||
             (source['TranscodingUrl']?.toString() ?? '').isEmpty)) {

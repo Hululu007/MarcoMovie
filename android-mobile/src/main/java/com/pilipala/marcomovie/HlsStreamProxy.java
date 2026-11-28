@@ -21,14 +21,15 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.GZIPInputStream;
 
 /**
- * Loopback HLS proxy with real-time 64 KiB MPEG-TS sync detection (strips fake PNG/GIF/JPEG
+ * Loopback HLS proxy with real-time 256 KiB MPEG-TS sync detection (strips fake PNG/GIF/JPEG
  * disguise headers without full-segment buffering), nested playlist/key URI rewriting, and opt-in
  * heuristic discontinuity ad-block stripping.
  */
 public final class HlsStreamProxy {
-    static final int PROBE_LIMIT = 64 * 1024;
+    static final int PROBE_LIMIT = 256 * 1024;
     static final int TS_PACKET_SIZE = 188;
     private static final int MAX_SESSIONS = 64;
     private static final Pattern URI_ATTR = Pattern.compile("URI=\"([^\"]+)\"");
@@ -200,9 +201,12 @@ public final class HlsStreamProxy {
         if (relative == null) return "";
         String trimmed = relative.trim();
         if (trimmed.isEmpty()) return "";
-        if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return trimmed;
+        if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+            return ProxyAddress.normalizeMediaHttpUrl(trimmed);
+        }
         try {
-            return new URL(new URL(baseUrl), trimmed).toString();
+            return ProxyAddress.normalizeMediaHttpUrl(
+                    new URL(new URL(baseUrl), trimmed).toString());
         } catch (Exception ignored) {
             return trimmed;
         }
@@ -243,9 +247,7 @@ public final class HlsStreamProxy {
                     StringBuffer sb = new StringBuffer();
                     while (m.find()) {
                         String resolved = resolveUrl(baseUrl, m.group(1));
-                        boolean isPlaylist =
-                                isMediaPlaylistTag
-                                        && resolved.toLowerCase(Locale.ROOT).contains(".m3u");
+                        boolean isPlaylist = isMediaPlaylistTag;
                         String replacement =
                                 Cms.isHttp(resolved)
                                         ? rewriter.rewrite(resolved, isPlaylist, !isPlaylist)
@@ -261,11 +263,11 @@ public final class HlsStreamProxy {
             } else {
                 String resolved = resolveUrl(baseUrl, trimmed);
                 if (Cms.isHttp(resolved)) {
+                    String cleanExt = resolved.split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
                     boolean isPlaylist =
                             nextIsVariantPlaylist
-                                    || resolved.split("[?#]", 2)[0]
-                                            .toLowerCase(Locale.ROOT)
-                                            .endsWith(".m3u8");
+                                    || cleanExt.endsWith(".m3u8")
+                                    || cleanExt.endsWith(".m3u");
                     out.append(rewriter.rewrite(resolved, isPlaylist, false));
                 } else {
                     out.append(line);
@@ -470,47 +472,153 @@ public final class HlsStreamProxy {
         return serveSegment(session, targetUrl, method, raw, requestHeaders, out);
     }
 
+    static boolean servePlaylistPayload(
+            byte[] rawBytes,
+            String finalUrl,
+            Map<String, String> headers,
+            boolean stripAds,
+            String method,
+            OutputStream out)
+            throws IOException {
+        byte[] decoded = Cms.gunzipIfNeeded(rawBytes);
+        String text = new String(decoded, StandardCharsets.UTF_8);
+        if (!isValidM3uPayload(text)) {
+            AppLog.w("HlsStreamProxy", "upstream returned non-M3U payload", null);
+            LocalProxy.simple(out, 502, "Upstream returned non-M3U payload");
+            return false;
+        }
+        LocalProxy.hlsRouteHandler = HlsStreamProxy::handle;
+        String sid = UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        Session session = new Session(sid, headers, stripAds);
+        SESSIONS.put(sid, session);
+        return writeRewrittenPlaylist(session, text, finalUrl, method, out);
+    }
+
+    static boolean isValidM3uPayload(String text) {
+        if (text == null) return false;
+        String trimmed = text.replaceFirst("^\\uFEFF", "").trim();
+        if (trimmed.isEmpty() || Cms.isHtml(trimmed)) return false;
+        return trimmed.startsWith("#EXTM3U")
+                || trimmed.contains("#EXTINF:")
+                || trimmed.contains("#EXT-X-STREAM-INF");
+    }
+
+    private static boolean writeRewrittenPlaylist(
+            Session session, String text, String finalUrl, String method, OutputStream out)
+            throws IOException {
+        String rewritten =
+                rewritePlaylist(
+                        text,
+                        finalUrl,
+                        session.stripAds,
+                        (resolved, isPlaylist, isRaw) -> {
+                            int id = session.registerUrl(resolved);
+                            return buildLocalUrl(
+                                    isPlaylist ? "/hls" : "/seg", session.id, id, isRaw);
+                        });
+        byte[] payload = rewritten.getBytes(StandardCharsets.UTF_8);
+        String headers =
+                "HTTP/1.1 200 OK\r\n"
+                        + "Content-Type: application/vnd.apple.mpegurl; charset=utf-8\r\n"
+                        + "Cache-Control: no-store\r\n"
+                        + "Connection: close\r\n"
+                        + "Content-Length: "
+                        + payload.length
+                        + "\r\n\r\n";
+        out.write(headers.getBytes(StandardCharsets.ISO_8859_1));
+        if (!"HEAD".equals(method)) {
+            out.write(payload);
+        }
+        out.flush();
+        return false;
+    }
+
     private static boolean servePlaylist(
             Session session, String targetUrl, String method, OutputStream out) throws IOException {
-        HttpURLConnection conn = openUpstream(targetUrl, session.headers, null);
+        Cms.MediaConnection mc;
         try {
-            int code = conn.getResponseCode();
-            String finalUrl = conn.getURL() != null ? conn.getURL().toString() : targetUrl;
+            mc = Cms.openMediaConnection(targetUrl, session.headers, null, 15000, 25000);
+        } catch (IOException err) {
+            AppLog.w("HlsStreamProxy", "playlist upstream failed", err);
+            throw err;
+        }
+        try {
+            int code = mc.statusCode;
+            String finalUrl = mc.finalUrl;
             if (code >= 400) {
+                AppLog.w("HlsStreamProxy", "playlist upstream HTTP " + code, null);
                 LocalProxy.simple(out, code, "Upstream playlist HTTP " + code);
                 return false;
             }
-            byte[] rawBytes = readAllBounded(conn.getInputStream(), 8 * 1024 * 1024);
-            String text = new String(rawBytes, StandardCharsets.UTF_8);
-            String rewritten =
-                    rewritePlaylist(
-                            text,
-                            finalUrl,
-                            session.stripAds,
-                            (resolved, isPlaylist, isRaw) -> {
-                                int id = session.registerUrl(resolved);
-                                return buildLocalUrl(
-                                        isPlaylist ? "/hls" : "/seg", session.id, id, isRaw);
-                            });
-            byte[] payload = rewritten.getBytes(StandardCharsets.UTF_8);
-            String headers =
-                    "HTTP/1.1 200 OK\r\n"
-                            + "Content-Type: application/vnd.apple.mpegurl; charset=utf-8\r\n"
-                            + "Cache-Control: no-store\r\n"
-                            + "Connection: close\r\n"
-                            + "Content-Length: "
-                            + payload.length
-                            + "\r\n\r\n";
-            out.write(headers.getBytes(StandardCharsets.ISO_8859_1));
-            if (!"HEAD".equals(method)) {
-                out.write(payload);
+            InputStream rawIn = mc.conn.getInputStream();
+            if ("gzip".equalsIgnoreCase(mc.conn.getContentEncoding())) {
+                rawIn = new GZIPInputStream(rawIn);
             }
-            out.flush();
-            return false;
+            byte[] rawBytes;
+            try (InputStream in = rawIn) {
+                rawBytes = Cms.gunzipIfNeeded(readAllBounded(in, 8 * 1024 * 1024));
+            }
+            String text = new String(rawBytes, StandardCharsets.UTF_8);
+            if (!isValidM3uPayload(text)) {
+                AppLog.w("HlsStreamProxy", "upstream returned non-M3U payload", null);
+                LocalProxy.simple(out, 502, "Upstream returned non-M3U payload");
+                return false;
+            }
+            return writeRewrittenPlaylist(session, text, finalUrl, method, out);
         } finally {
-            RequestScope.detach(conn);
-            conn.disconnect();
+            RequestScope.detach(mc.conn);
+            mc.conn.disconnect();
         }
+    }
+
+    static String resolveSegmentMime(
+            byte[] probe,
+            int filled,
+            int strippedOffset,
+            String upstreamContentType,
+            String lowerPath) {
+        if (lowerPath != null && lowerPath.endsWith(".vtt")) {
+            return "text/vtt";
+        }
+        if (strippedOffset > 0) {
+            return "video/mp2t";
+        }
+        if (probe != null
+                && ((filled >= TS_PACKET_SIZE + 1
+                                && (probe[0] & 0xFF) == 0x47
+                                && (probe[TS_PACKET_SIZE] & 0xFF) == 0x47)
+                        || (filled > 0
+                                && filled < TS_PACKET_SIZE + 1
+                                && (probe[0] & 0xFF) == 0x47))) {
+            return "video/mp2t";
+        }
+        if (probe != null
+                && filled >= 8
+                && ((probe[4] == 'f' && probe[5] == 't' && probe[6] == 'y' && probe[7] == 'p')
+                        || (probe[4] == 's'
+                                && probe[5] == 't'
+                                && probe[6] == 'y'
+                                && probe[7] == 'p')
+                        || (probe[4] == 's'
+                                && probe[5] == 'i'
+                                && probe[6] == 'd'
+                                && probe[7] == 'x')
+                        || (probe[4] == 'm'
+                                && probe[5] == 'o'
+                                && probe[6] == 'o'
+                                && probe[7] == 'f'))) {
+            return "video/mp4";
+        }
+        if (upstreamContentType != null && LocalProxy.safe(upstreamContentType)) {
+            String ctLower = upstreamContentType.toLowerCase(Locale.ROOT);
+            if (ctLower.startsWith("image/")
+                    || ctLower.contains("text/html")
+                    || ctLower.contains("text/plain")) {
+                return "video/mp2t";
+            }
+            return upstreamContentType;
+        }
+        return "video/mp2t";
     }
 
     private static boolean serveSegment(
@@ -522,16 +630,23 @@ public final class HlsStreamProxy {
             OutputStream out)
             throws IOException {
         String range = requestHeaders != null ? requestHeaders.get("range") : null;
-        HttpURLConnection conn = openUpstream(targetUrl, session.headers, range);
+        Cms.MediaConnection mc;
         try {
-            int code = conn.getResponseCode();
+            mc = Cms.openMediaConnection(targetUrl, session.headers, range, 15000, 25000);
+        } catch (IOException err) {
+            AppLog.w("HlsStreamProxy", "segment upstream failed", err);
+            throw err;
+        }
+        try {
+            int code = mc.statusCode;
             if (code >= 400) {
+                AppLog.w("HlsStreamProxy", "segment upstream HTTP " + code, null);
                 LocalProxy.simple(out, code, "Upstream segment HTTP " + code);
                 return false;
             }
-            String contentType = conn.getContentType();
-            long upstreamLength = parseContentLength(conn);
-            String contentRange = conn.getHeaderField("Content-Range");
+            String contentType = mc.conn.getContentType();
+            long upstreamLength = parseContentLength(mc.conn);
+            String contentRange = mc.conn.getHeaderField("Content-Range");
             if ("HEAD".equals(method)) {
                 StringBuilder head =
                         new StringBuilder("HTTP/1.1 ")
@@ -552,7 +667,7 @@ public final class HlsStreamProxy {
                 return false;
             }
 
-            String lowerPath = targetUrl.split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
+            String lowerPath = mc.finalUrl.split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
             boolean skipProbe =
                     raw
                             || range != null
@@ -561,12 +676,14 @@ public final class HlsStreamProxy {
                             || lowerPath.endsWith(".key")
                             || lowerPath.endsWith(".vtt");
 
-            try (InputStream upstream = conn.getInputStream()) {
+            try (InputStream upstream = mc.conn.getInputStream()) {
                 InputStream bodyStream = upstream;
+                byte[] probe = null;
+                int filled = 0;
                 int strippedOffset = 0;
                 if (!skipProbe) {
-                    byte[] probe = new byte[PROBE_LIMIT];
-                    int filled = readFullyUpTo(upstream, probe, probe.length);
+                    probe = new byte[PROBE_LIMIT];
+                    filled = readFullyUpTo(upstream, probe, probe.length);
                     strippedOffset = findTsSyncOffset(probe, filled);
                     ByteArrayInputStream prefixStream =
                             new ByteArrayInputStream(
@@ -575,11 +692,7 @@ public final class HlsStreamProxy {
                 }
 
                 String responseMime =
-                        strippedOffset > 0
-                                ? "video/mp2t"
-                                : (contentType != null && LocalProxy.safe(contentType)
-                                        ? contentType
-                                        : "video/mp2t");
+                        resolveSegmentMime(probe, filled, strippedOffset, contentType, lowerPath);
                 long finalLength =
                         upstreamLength >= 0 ? Math.max(0L, upstreamLength - strippedOffset) : -1L;
                 StringBuilder head =
@@ -626,8 +739,8 @@ public final class HlsStreamProxy {
                 return false;
             }
         } finally {
-            RequestScope.detach(conn);
-            conn.disconnect();
+            RequestScope.detach(mc.conn);
+            mc.conn.disconnect();
         }
     }
 
@@ -641,30 +754,6 @@ public final class HlsStreamProxy {
         }
         int legacy = conn.getContentLength();
         return legacy >= 0 ? legacy : -1L;
-    }
-
-    private static HttpURLConnection openUpstream(
-            String url, Map<String, String> headers, String range) throws IOException {
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        RequestScope.attach(conn);
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(25000);
-        conn.setInstanceFollowRedirects(true);
-        boolean hasUa = false;
-        for (Map.Entry<String, String> entry : headers.entrySet()) {
-            String k = entry.getKey();
-            String v = entry.getValue();
-            if (k == null || v == null || k.equalsIgnoreCase("Host")) continue;
-            if (k.equalsIgnoreCase("User-Agent")) hasUa = true;
-            conn.setRequestProperty(k, v);
-        }
-        if (!hasUa) {
-            conn.setRequestProperty("User-Agent", "MarcoMovie/0.2.0");
-        }
-        if (range != null && !range.isEmpty()) {
-            conn.setRequestProperty("Range", range);
-        }
-        return conn;
     }
 
     private static int readFullyUpTo(InputStream in, byte[] dst, int maxBytes) throws IOException {

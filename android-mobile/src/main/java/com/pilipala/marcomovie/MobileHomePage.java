@@ -121,6 +121,23 @@ final class MobileHomePage {
 
     private MobileHomePage() {}
 
+    static boolean isBenignLoadCancellation(Throwable e, boolean finishing, boolean superseded) {
+        if (finishing || superseded) return true;
+        boolean threadInterrupted = Thread.currentThread().isInterrupted();
+        Throwable cur = e;
+        for (int depth = 0; cur != null && depth < 12; depth++) {
+            if (cur instanceof InterruptedException) return true;
+            if (cur instanceof java.io.InterruptedIOException) {
+                if (!(cur instanceof java.net.SocketTimeoutException) || threadInterrupted) {
+                    return true;
+                }
+            }
+            if (cur.getCause() == cur) break;
+            cur = cur.getCause();
+        }
+        return false;
+    }
+
     private static void commitLoadingSite(MainActivity a, String siteKey) {
         if (a == null || a.prefs == null) return;
         a.prefs.edit().putString(Prefs.LOADING_SITE, siteKey == null ? "" : siteKey).commit();
@@ -1519,6 +1536,15 @@ final class MobileHomePage {
                                                 }
                                             });
                                 } catch (Throwable e) {
+                                    if (isBenignLoadCancellation(
+                                            e,
+                                            a.isFinishing(),
+                                            ticket != a.generation
+                                                    || myReq != reqId[0]
+                                                    || MobileRootShell.activeTab
+                                                            != MobileRootShell.TAB_HOME)) {
+                                        return;
+                                    }
                                     AppLog.w("MobileHomePage", "home/category load failed", e);
                                     a.ui.post(
                                             () -> {

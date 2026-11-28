@@ -3,6 +3,7 @@ package com.pilipala.marcomovie;
 import java.io.*;
 import java.net.*;
 import java.util.*;
+import javax.net.ssl.SSLException;
 import org.json.*;
 
 /** Android Mobile / Tablet Emby REST client (isolated from shared/java/ per P1-10). */
@@ -152,6 +153,104 @@ public final class MobileEmbyLibrary {
         return URLEncoder.encode(value, "UTF-8");
     }
 
+    public static JSONObject splitServerUrl(String rawUrl) {
+        JSONObject out = new JSONObject();
+        try {
+            String trimmed = rawUrl == null ? "" : rawUrl.trim();
+            if (trimmed.isEmpty()) {
+                return out.put("useHttps", false)
+                        .put("host", "")
+                        .put("port", "8096")
+                        .put("subpath", "");
+            }
+            boolean hasScheme = trimmed.contains("://");
+            URI uri = new URI(hasScheme ? trimmed : ("http://" + trimmed));
+            String scheme =
+                    uri.getScheme() == null ? "http" : uri.getScheme().toLowerCase(Locale.US);
+            int port = uri.getPort();
+            boolean useHttps = "https".equals(scheme) || port == 443 || port == 8920;
+            String host = uri.getHost() == null ? "" : uri.getHost();
+            if (host.indexOf(':') >= 0 && !host.startsWith("[")) {
+                host = "[" + host + "]";
+            }
+            String path = uri.getPath() == null ? "" : uri.getPath().replaceAll("/+$", "");
+            int webIdx = path.toLowerCase(Locale.US).indexOf("/web/");
+            if (webIdx >= 0) {
+                path = path.substring(0, webIdx).replaceAll("/+$", "");
+            } else if (path.toLowerCase(Locale.US).endsWith("/web")) {
+                path = path.substring(0, path.length() - 4).replaceAll("/+$", "");
+            }
+            String portStr = port > 0 ? String.valueOf(port) : (useHttps ? "443" : "8096");
+            out.put("useHttps", useHttps);
+            out.put("host", host);
+            out.put("port", portStr);
+            out.put("subpath", path);
+        } catch (Exception ignored) {
+            try {
+                out.put("useHttps", false)
+                        .put("host", rawUrl == null ? "" : rawUrl.trim())
+                        .put("port", "8096")
+                        .put("subpath", "");
+            } catch (Exception ignored2) {
+            }
+        }
+        return out;
+    }
+
+    public static String assembleServerUrl(
+            boolean useHttps, String hostOrUrl, String subpath, String port) throws IOException {
+        String rawHost = hostOrUrl == null ? "" : hostOrUrl.trim();
+        if (rawHost.isEmpty()) throw new IOException("请填写服务器地址");
+        String rawSub = subpath == null ? "" : subpath.trim();
+        String rawPort = port == null ? "" : port.trim();
+        if (rawHost.regionMatches(true, 0, "http://", 0, 7)
+                || rawHost.regionMatches(true, 0, "https://", 0, 8)) {
+            JSONObject parsed = splitServerUrl(rawHost);
+            useHttps = rawHost.regionMatches(true, 0, "https://", 0, 8);
+            rawHost = parsed.optString("host", "");
+            if (rawSub.isEmpty()) rawSub = parsed.optString("subpath", "");
+            if (rawPort.isEmpty()) rawPort = parsed.optString("port", "");
+        } else {
+            int slash = rawHost.indexOf('/');
+            if (slash >= 0) {
+                if (rawSub.isEmpty()) rawSub = rawHost.substring(slash);
+                rawHost = rawHost.substring(0, slash).trim();
+            }
+            if (!rawHost.startsWith("[")) {
+                int colon = rawHost.lastIndexOf(':');
+                if (colon > 0 && colon == rawHost.indexOf(':')) {
+                    String inlinePort = rawHost.substring(colon + 1).trim();
+                    if (rawPort.isEmpty() && inlinePort.matches("\\d+")) {
+                        rawPort = inlinePort;
+                    }
+                    rawHost = rawHost.substring(0, colon).trim();
+                }
+            }
+        }
+        if (rawHost.isEmpty()) throw new IOException("请输入有效的服务器地址");
+        if (rawHost.indexOf(':') >= 0 && !rawHost.startsWith("[")) {
+            rawHost = "[" + rawHost + "]";
+        }
+        String portSuffix = "";
+        if (!rawPort.isEmpty()) {
+            int p;
+            try {
+                p = Integer.parseInt(rawPort);
+            } catch (NumberFormatException nfe) {
+                throw new IOException("端口号无效：" + rawPort);
+            }
+            if (p <= 0 || p > 65535) throw new IOException("端口号超出范围：" + rawPort);
+            if (!(useHttps && p == 443) && !(!useHttps && p == 80)) {
+                portSuffix = ":" + p;
+            }
+        }
+        String normSub = rawSub.replaceAll("/+$", "");
+        if (!normSub.isEmpty() && !normSub.startsWith("/")) {
+            normSub = "/" + normSub;
+        }
+        return (useHttps ? "https://" : "http://") + rawHost + portSuffix + normSub;
+    }
+
     private static JSONObject request(String url, String device, String token, JSONObject body)
             throws Exception {
         String currentUrl = url;
@@ -170,11 +269,14 @@ public final class MobileEmbyLibrary {
                 c.setInstanceFollowRedirects(false);
                 c.setConnectTimeout(10000);
                 c.setReadTimeout(15000);
-                c.setRequestProperty(
-                        "Authorization",
+                String authHeader =
                         "Emby Client=\"Marco Movie\", Device=\"Android\", DeviceId=\""
                                 + device
-                                + "\", Version=\"1\"");
+                                + "\", Version=\"1\""
+                                + (token.length() > 0 ? ", Token=\"" + token + "\"" : "");
+                c.setRequestProperty("Authorization", authHeader);
+                c.setRequestProperty("X-Emby-Authorization", authHeader);
+                c.setRequestProperty("User-Agent", "MarcoMovie/1.0");
                 if (token.length() > 0) c.setRequestProperty("X-Emby-Token", token);
                 c.setRequestProperty("Accept", "application/json");
                 if (body != null) {
@@ -222,12 +324,20 @@ public final class MobileEmbyLibrary {
                         if (out.size() + n > 4 * 1024 * 1024) throw new IOException("Emby 响应过大");
                         out.write(buf, 0, n);
                     }
-                    return out.size() == 0
-                            ? new JSONObject()
-                            : new JSONObject(out.toString("UTF-8"));
+                    if (out.size() == 0) return new JSONObject();
+                    try {
+                        return new JSONObject(out.toString("UTF-8"));
+                    } catch (JSONException jsonErr) {
+                        throw new IOException("Emby 响应非有效 JSON 数据", jsonErr);
+                    }
                 } finally {
                     in.close();
                 }
+            } catch (SSLException sslErr) {
+                throw new IOException(
+                        "SSL/HTTPS 握手失败（若服务器使用 8096 等 HTTP 端口，请关闭 HTTPS 开关或改用 http:// 地址）："
+                                + sslErr.getMessage(),
+                        sslErr);
             } finally {
                 c.disconnect();
             }
@@ -237,19 +347,28 @@ public final class MobileEmbyLibrary {
 
     public static JSONObject login(String address, String name, String password, String device)
             throws Exception {
+        return login(address, name, password, device, "");
+    }
+
+    public static JSONObject login(
+            String address, String name, String password, String device, String customDisplayName)
+            throws Exception {
         String bareRoot = normalizeRoot(address);
         boolean userSpecifiedEmby = bareRoot.toLowerCase(Locale.US).endsWith("/emby");
         String base = userSpecifiedEmby ? bareRoot : bareRoot + "/emby";
-        JSONObject authBody = new JSONObject().put("Username", name).put("Pw", password);
+        String cleanUser = name == null ? "" : name.trim();
+        JSONObject authBody = new JSONObject().put("Username", cleanUser).put("Pw", password);
         JSONObject response;
         try {
             response = request(base + "/Users/AuthenticateByName", device, "", authBody);
         } catch (IOException firstErr) {
-            // If user entered a bare root / reverse-proxy subpath without /emby and auto-appended
-            // /emby returned 404, retry directly on the bare root (e.g. Jellyfin or /emby-stripped
-            // proxy).
+            // Retry bare root when /emby subpath returns 404/405 or HTML proxy page.
             String msg = firstErr.getMessage();
-            if (!userSpecifiedEmby && msg != null && msg.contains("HTTP 404")) {
+            if (!userSpecifiedEmby
+                    && msg != null
+                    && (msg.contains("HTTP 404")
+                            || msg.contains("HTTP 405")
+                            || msg.contains("非有效 JSON"))) {
                 base = bareRoot;
                 response = request(base + "/Users/AuthenticateByName", device, "", authBody);
             } else {
@@ -264,12 +383,15 @@ public final class MobileEmbyLibrary {
         if (views.optJSONArray("Items") == null) {
             throw new IOException("Emby 账号无权读取媒体库视图（Views 响应缺少 Items）");
         }
+        String cleanLabel = customDisplayName == null ? "" : customDisplayName.trim();
         return new JSONObject()
                 .put("base", base)
                 .put("token", token)
                 .put("device", device)
                 .put("user", userId)
-                .put("name", name == null ? "" : name.trim());
+                .put("username", cleanUser)
+                .put("label", cleanLabel)
+                .put("name", cleanLabel.length() > 0 ? cleanLabel : cleanUser);
     }
 
     public Map<String, String> headersFor(String address) throws Exception {
@@ -370,7 +492,7 @@ public final class MobileEmbyLibrary {
                         .put("UserId", user)
                         .put("IsPlayback", true)
                         .put("AutoOpenLiveStream", false)
-                        .put("EnableDirectPlay", !legacyPlayer)
+                        .put("EnableDirectPlay", true)
                         .put("EnableDirectStream", true)
                         .put("EnableTranscoding", true)
                         .put("MaxStreamingBitrate", 80000000)
@@ -396,6 +518,36 @@ public final class MobileEmbyLibrary {
         boolean direct =
                 source.optBoolean("SupportsDirectStream")
                         || source.optBoolean("SupportsDirectPlay");
+        String rawPath = source.optString("Path", "").trim();
+        if (source.optBoolean("SupportsDirectPlay")
+                && (rawPath.regionMatches(true, 0, "http://", 0, 7)
+                        || rawPath.regionMatches(true, 0, "https://", 0, 8))) {
+            Map<String, String> outHeaders = new LinkedHashMap<String, String>();
+            JSONObject reqHeaders = source.optJSONObject("RequiredHttpHeaders");
+            if (reqHeaders != null) {
+                Iterator<String> keys = reqHeaders.keys();
+                while (keys.hasNext()) {
+                    String k = keys.next();
+                    String val = reqHeaders.optString(k, "");
+                    if (val.length() > 0) outHeaders.put(k, val);
+                }
+            }
+            if (isSameOriginUrl(rawPath)) {
+                outHeaders.put("X-Emby-Token", token);
+            }
+            JSONObject metadata =
+                    new JSONObject()
+                            .put("ItemId", id)
+                            .put("MediaSourceId", sourceId)
+                            .put("PlaySessionId", session)
+                            .put("PlayMethod", "DirectPlay")
+                            .put("CanSeek", true);
+            return new JSONObject()
+                    .put("parse", 0)
+                    .put("url", rawPath)
+                    .put("header", new JSONObject(outHeaders))
+                    .put("embySession", metadata);
+        }
         Map<String, String> params = new LinkedHashMap<String, String>();
         String stream;
         if (direct) {
@@ -910,6 +1062,9 @@ public final class MobileEmbyLibrary {
                     new JSONObject()
                             .put("type_id", row.getString("Id"))
                             .put("type_name", row.optString("Name")));
+        }
+        if (groups.length() == 0) {
+            groups.put(new JSONObject().put("type_id", "").put("type_name", "全部媒体"));
         }
         return new JSONObject().put("class", groups).put("list", new JSONArray());
     }

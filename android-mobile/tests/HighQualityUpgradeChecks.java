@@ -40,6 +40,7 @@ public final class HighQualityUpgradeChecks {
         testHlsLoopbackIntegration();
         testMediaDiskCacheIntegration();
         testSourceEngineEligibility();
+        testPlaybackUrlNormalizationAndHeaderSanitization();
         System.out.println("PASS HighQualityUpgradeChecks (" + passed + " checks)");
     }
 
@@ -438,6 +439,35 @@ public final class HighQualityUpgradeChecks {
         check(
                 !WebViewJsEngine.shouldFallbackFromJsError(new JsEngine.DrpyRuleDetected("rule")),
                 "WebViewJsEngine fallback does not swallow DrpyRuleDetected");
+    }
+
+    private static void testPlaybackUrlNormalizationAndHeaderSanitization() {
+        String encoded =
+                ProxyAddress.normalizeMediaHttpUrl(
+                        "https://cdn.example/video/第01集 4K%20HDR.mp4?token=a+b");
+        check(
+                encoded.contains("%E7%AC%AC01%E9%9B%86%204K%20HDR.mp4")
+                        && !encoded.contains("%2520"),
+                "normalizeMediaHttpUrl encodes UTF-8/spaces once without double-encoding");
+
+        Map<String, String> rawHeaders = new LinkedHashMap<>();
+        rawHeaders.put("Origin", "https://origin.example");
+        rawHeaders.put("Host", "origin.example");
+        rawHeaders.put("Referer", "https://origin.example/play");
+        Map<String, String> sanitized =
+                ProxyAddress.sanitizeLoopbackHeaders("127.0.0.1", rawHeaders);
+        check(
+                !sanitized.containsKey("Origin")
+                        && !sanitized.containsKey("Host")
+                        && "https://origin.example".equals(sanitized.get("X-Movie-Origin"))
+                        && "origin.example".equals(sanitized.get("X-Movie-Host"))
+                        && "https://origin.example/play".equals(sanitized.get("Referer")),
+                "sanitizeLoopbackHeaders remaps Origin/Host only for loopback URLs");
+        Map<String, String> remotePassthrough =
+                ProxyAddress.sanitizeLoopbackHeaders("cdn.example", rawHeaders);
+        check(
+                "https://origin.example".equals(remotePassthrough.get("Origin")),
+                "sanitizeLoopbackHeaders preserves Origin on non-loopback URLs");
     }
 
     private static byte[] httpGet(String url) throws Exception {

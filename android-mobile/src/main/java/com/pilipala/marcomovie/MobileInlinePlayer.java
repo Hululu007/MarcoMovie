@@ -111,6 +111,8 @@ final class MobileInlinePlayer {
     private MoviePlayer player;
     private PlaybackController.EnginePlan activeEnginePlan;
     private Surface renderSurface;
+    private int surfaceWidth;
+    private int surfaceHeight;
     private boolean prepared;
     private boolean userSeeking;
     private boolean closed;
@@ -226,6 +228,23 @@ final class MobileInlinePlayer {
         titleLabel.setShadowLayer(activity.dp(3), 0, activity.dp(1), 0xAA000000);
         titleLabel.setPadding(activity.dp(8), 0, activity.dp(8), 0);
         topBar.addView(titleLabel, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        FrameLayout extBtn =
+                buildInlineIconButton(
+                        activity,
+                        MobileIcons.IC_EXTERNAL,
+                        15f,
+                        "外部播放",
+                        0x33000000,
+                        () -> {
+                            Cms.Episode target =
+                                    resolvedEpisode != null ? resolvedEpisode : rawEpisode;
+                            PlaybackController.launchExternalPlayer(a, video, target);
+                        });
+        LinearLayout.LayoutParams extLp =
+                new LinearLayout.LayoutParams(activity.dp(32), activity.dp(32));
+        extLp.rightMargin = activity.dp(6);
+        topBar.addView(extBtn, extLp);
 
         FrameLayout castBtn =
                 buildInlineIconButton(
@@ -451,6 +470,8 @@ final class MobileInlinePlayer {
 
                     @Override
                     public void resized(int width, int height) {
+                        surfaceWidth = width;
+                        surfaceHeight = height;
                         if (player != null) player.setSurfaceSize(width, height);
                     }
 
@@ -936,6 +957,9 @@ final class MobileInlinePlayer {
                                                 true);
                                     }
                                     mp.setSurface(renderSurface);
+                                    if (surfaceWidth > 0 && surfaceHeight > 0) {
+                                        mp.setSurfaceSize(surfaceWidth, surfaceHeight);
+                                    }
                                     mp.setOnPreparedListener(
                                             p -> {
                                                 if (closed
@@ -979,6 +1003,17 @@ final class MobileInlinePlayer {
                                                         || player != mp) {
                                                     return true;
                                                 }
+                                                AppLog.w(
+                                                        "MobileInlinePlayer",
+                                                        "Inline error what="
+                                                                + what
+                                                                + " extra="
+                                                                + extra
+                                                                + " engine="
+                                                                + actualPlan.engineLabel
+                                                                + " url="
+                                                                + effective,
+                                                        null);
                                                 boolean autoSwitch =
                                                         a.mobilePrefs()
                                                                 .getBoolean(
@@ -989,7 +1024,11 @@ final class MobileInlinePlayer {
                                                                 ep.media,
                                                                 actualPlan.engine,
                                                                 actualPlan.softwareFallback,
-                                                                autoSwitch);
+                                                                autoSwitch,
+                                                                MpvPlayer.isAvailable(),
+                                                                PlaybackController
+                                                                        .wasLoopbackCacheOrHlsUrl(
+                                                                                effective));
                                                 if (reason != null) {
                                                     int resumePos = captureResumePosition();
                                                     if (resumePos > 0) {
@@ -999,12 +1038,67 @@ final class MobileInlinePlayer {
                                                     startResolvedStream();
                                                     return true;
                                                 }
+                                                if (autoSwitch
+                                                        && video != null
+                                                        && video.lines != null
+                                                        && video.lines.size() > 1
+                                                        && activeLine != null
+                                                        && rawEpisode != null) {
+                                                    int curLineIdx =
+                                                            video.lines.indexOf(activeLine);
+                                                    int hopCount =
+                                                            rawEpisode.media != null
+                                                                    ? rawEpisode.media.optInt(
+                                                                            "_lineHopCount", 0)
+                                                                    : 0;
+                                                    if (curLineIdx >= 0
+                                                            && hopCount
+                                                                    < Math.min(
+                                                                            3,
+                                                                            video.lines.size()
+                                                                                    - 1)) {
+                                                        Cms.Line nextLine =
+                                                                video.lines.get(
+                                                                        (curLineIdx + 1)
+                                                                                % video.lines
+                                                                                        .size());
+                                                        Cms.Episode nextEp =
+                                                                PlaybackController
+                                                                        .findMatchingEpisode(
+                                                                                nextLine,
+                                                                                activeLine,
+                                                                                rawEpisode);
+                                                        if (nextEp != null
+                                                                && nextLine != activeLine) {
+                                                            if (nextEp.media == null) {
+                                                                nextEp.media = new JSONObject();
+                                                            }
+                                                            try {
+                                                                nextEp.media.put(
+                                                                        "_lineHopCount",
+                                                                        hopCount + 1);
+                                                            } catch (Exception ignored) {
+                                                            }
+                                                            int resumePos = captureResumePosition();
+                                                            if (resumePos > 0) {
+                                                                a.resumeAt = resumePos;
+                                                            }
+                                                            a.toast(
+                                                                    "当前线路异常，已自动切换至 "
+                                                                            + nextLine.name);
+                                                            startEpisode(
+                                                                    site, video, nextLine, nextEp,
+                                                                    tmdbId, isTv, seasonNum, epNum);
+                                                            return true;
+                                                        }
+                                                    }
+                                                }
                                                 flushHistoryProgress();
                                                 showInlineStatus(
                                                         autoSwitch
                                                                 ? ("播放失败（"
                                                                         + actualPlan.engineLabel
-                                                                        + "），点击右下角全屏切核重试")
+                                                                        + "），可点右上角外部播放或右下角全屏重试")
                                                                 : ("播放失败（"
                                                                         + actualPlan.engineLabel
                                                                         + "，已关闭自动切核），请手动切换内核或线路"),

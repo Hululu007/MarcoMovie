@@ -60,11 +60,45 @@ final class EmbyEngine implements SourceEngine {
         new AppDialog.Builder(a)
                 .setTitle(name)
                 .setItems(
-                        new String[] {"立即进入媒体库", "移除此 Emby 连接"},
+                        new String[] {"立即进入媒体库", "编辑 Emby 配置", "移除此 Emby 连接"},
                         (d, which) -> {
                             if (which == 0) {
                                 openEmbySite(a, siteJson);
                             } else if (which == 1) {
+                                MobileEmbyAccounts.openEditor(
+                                        a,
+                                        siteJson,
+                                        updatedSite -> {
+                                            if (a.config != null && a.config.sites != null) {
+                                                String nextApi = updatedSite.optString("api", "");
+                                                for (java.util.Iterator<Cms.Site> it =
+                                                                a.config.sites.iterator();
+                                                        it.hasNext(); ) {
+                                                    Cms.Site s = it.next();
+                                                    if (s != null
+                                                            && (api.equals(s.api)
+                                                                    || nextApi.equals(s.api))) {
+                                                        it.remove();
+                                                    }
+                                                }
+                                            }
+                                            SourceController.mergeOrSaveConfig(
+                                                    a,
+                                                    Cms.parseConfig(
+                                                            new JSONObject()
+                                                                    .put(
+                                                                            "sites",
+                                                                            new JSONArray()
+                                                                                    .put(
+                                                                                            updatedSite))
+                                                                    .toString(),
+                                                            ""),
+                                                    "",
+                                                    true);
+                                            a.closeEngines();
+                                            a.refresh();
+                                        });
+                            } else if (which == 2) {
                                 MobileEmbyAccounts.remove(a, api);
                                 if (a.config != null && a.config.sites != null) {
                                     for (java.util.Iterator<Cms.Site> it =
