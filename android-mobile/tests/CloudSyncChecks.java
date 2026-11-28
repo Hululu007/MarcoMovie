@@ -1815,8 +1815,7 @@ public final class CloudSyncChecks {
     }
 
     private static void testWebdavBindCryptoAndLanEndpoint() throws Exception {
-        byte[] key =
-                hexToBytes("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+        byte[] key = hexToBytes("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
         byte[] nonce = hexToBytes("a0a1a2a3a4a5a6a7a8a9aaabacadaeaf");
         String plaintext =
                 "{\"v\":1,\"type\":\"webdav_bind\",\"mode\":\"push\",\"url\":\"https://dav.example/dav/\",\"username\":\"alice\",\"password\":\"secret\"}";

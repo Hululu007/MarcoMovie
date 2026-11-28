@@ -49,6 +49,7 @@ final class TvCuratedHome {
         pool.allowCoreThreadTimeOut(true);
         return pool;
     }
+
     private static final Pattern YEAR_PATTERN = Pattern.compile("\\b((?:19|20)\\d{2})\\b");
     private static final Pattern SEASON_CN_PATTERN =
             Pattern.compile("第\\s*([一二三四五六七八九十\\d]+)\\s*季");

@@ -1118,7 +1118,8 @@ public final class JsEngine implements SourceEngine {
                 while (hKeys.hasNext()) {
                     String hk = hKeys.next();
                     if ("content-type".equalsIgnoreCase(hk)) {
-                        explicitContentType = inputHeaders.optString(hk, "").toLowerCase(Locale.ROOT);
+                        explicitContentType =
+                                inputHeaders.optString(hk, "").toLowerCase(Locale.ROOT);
                         break;
                     }
                 }
@@ -1135,7 +1136,9 @@ public final class JsEngine implements SourceEngine {
                     if (form.length() > 0) form.append('&');
                     form.append(URLEncoder.encode(key, "UTF-8"))
                             .append('=')
-                            .append(URLEncoder.encode(((JSONObject) payload).optString(key), "UTF-8"));
+                            .append(
+                                    URLEncoder.encode(
+                                            ((JSONObject) payload).optString(key), "UTF-8"));
                 }
                 body = form.toString().getBytes("UTF-8");
             } else {
@@ -1407,7 +1410,8 @@ public final class JsEngine implements SourceEngine {
         else extracted = first.attr(attribute);
         if (regex != null && !extracted.isEmpty()) {
             try {
-                java.util.regex.Matcher m = java.util.regex.Pattern.compile(regex).matcher(extracted);
+                java.util.regex.Matcher m =
+                        java.util.regex.Pattern.compile(regex).matcher(extracted);
                 if (m.find()) {
                     extracted = m.groupCount() >= 1 ? m.group(1) : m.group(0);
                 }
@@ -1453,8 +1457,7 @@ public final class JsEngine implements SourceEngine {
     private static Elements selectWithEqTokens(Elements roots, String mainSel) {
         String[] tokens = mainSel.trim().split("\\s+");
         Elements current = roots;
-        java.util.regex.Pattern eqPat =
-                java.util.regex.Pattern.compile("^(.*?):eq\\((-?\\d+)\\)$");
+        java.util.regex.Pattern eqPat = java.util.regex.Pattern.compile("^(.*?):eq\\((-?\\d+)\\)$");
         for (String tok : tokens) {
             if (tok.isEmpty()) continue;
             java.util.regex.Matcher m = eqPat.matcher(tok);

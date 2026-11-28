@@ -412,8 +412,7 @@ public final class Cms {
         while (m.find()) {
             if (first < 0) first = m.start();
             if (key != null) {
-                out.headers.put(
-                        canonicalImageHeaderName(key), working.substring(start, m.start()));
+                out.headers.put(canonicalImageHeaderName(key), working.substring(start, m.start()));
             }
             key = working.substring(m.start() + 1, m.end() - 1);
             start = m.end();

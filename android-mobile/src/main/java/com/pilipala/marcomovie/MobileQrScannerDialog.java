@@ -103,15 +103,13 @@ final class MobileQrScannerDialog {
         root.addView(
                 previewView,
                 new FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT));
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         ViewfinderOverlay overlay = new ViewfinderOverlay(a);
         root.addView(
                 overlay,
                 new FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT));
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         LinearLayout topBar = new LinearLayout(a);
         topBar.setOrientation(LinearLayout.HORIZONTAL);
@@ -355,8 +353,7 @@ final class MobileQrScannerDialog {
         if (yuv == null || width <= 0 || height <= 0) return null;
         Map<DecodeHintType, Object> hints = new EnumMap<>(DecodeHintType.class);
         hints.put(
-                DecodeHintType.POSSIBLE_FORMATS,
-                Collections.singletonList(BarcodeFormat.QR_CODE));
+                DecodeHintType.POSSIBLE_FORMATS, Collections.singletonList(BarcodeFormat.QR_CODE));
         hints.put(DecodeHintType.TRY_HARDER, Boolean.TRUE);
         QRCodeReader reader = new QRCodeReader();
         try {

@@ -400,7 +400,8 @@ public final class DanmuEngineChecks {
             BlockFilter single = BlockFilter.compile(Collections.singletonList(rule));
             double maxCallMs = 0.0;
             for (String sample : adversarialInputs) {
-                // Warm up JVM bytecode before timing to avoid cold-interpreter spikes on CI runners.
+                // Warm up JVM bytecode before timing to avoid cold-interpreter spikes on CI
+                // runners.
                 single.isBlocked(sample);
                 single.isBlocked(sample);
                 for (int run = 0; run < 6; run++) {

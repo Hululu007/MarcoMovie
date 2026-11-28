@@ -3202,8 +3202,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
         SearchCoordinator.configureMaxPoolThreads(tvDevice ? (lowRam ? 6 : 8) : 14);
         SearchCoordinator.configureThreads(effectiveThreads);
         long rawSearchTimeoutMs =
-                Prefs.clampSearchTimeoutSeconds(a.prefs.getInt(Prefs.SEARCH_TIMEOUT, 20))
-                        * 1000L;
+                Prefs.clampSearchTimeoutSeconds(a.prefs.getInt(Prefs.SEARCH_TIMEOUT, 20)) * 1000L;
         long effectiveSearchTimeoutMs =
                 sources.size() > 3 ? Math.min(10000L, rawSearchTimeoutMs) : rawSearchTimeoutMs;
         final SearchCoordinator[] sessionOwner = new SearchCoordinator[1];
@@ -4943,10 +4942,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
     private String formatCardMeta(Cms.Video video, Cms.Site site) {
         String sourceName = clean(site == null ? "" : site.name);
         String year = video == null || video.year == null ? "" : video.year.trim();
-        String remarks =
-                video == null || video.remarks == null
-                        ? ""
-                        : video.remarks.trim();
+        String remarks = video == null || video.remarks == null ? "" : video.remarks.trim();
         StringBuilder sb = new StringBuilder();
         if (!remarks.isEmpty()) sb.append(remarks);
         if (!year.isEmpty()) {
@@ -5577,15 +5573,12 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         int pos = holder.getBindingAdapterPosition();
                         if (pos == RecyclerView.NO_POSITION) return false;
                         GridLayoutManager.SpanSizeLookup ssl =
-                                tvResultLayout != null
-                                        ? tvResultLayout.getSpanSizeLookup()
-                                        : null;
-                        int spanIdx = ssl != null ? ssl.getSpanIndex(pos, columns) : (pos % columns);
+                                tvResultLayout != null ? tvResultLayout.getSpanSizeLookup() : null;
+                        int spanIdx =
+                                ssl != null ? ssl.getSpanIndex(pos, columns) : (pos % columns);
                         int spanSize = ssl != null ? ssl.getSpanSize(pos) : 1;
                         int groupIdx =
-                                ssl != null
-                                        ? ssl.getSpanGroupIndex(pos, columns)
-                                        : (pos / columns);
+                                ssl != null ? ssl.getSpanGroupIndex(pos, columns) : (pos / columns);
                         if (keyCode == KeyEvent.KEYCODE_DPAD_UP && groupIdx == 0) {
                             Button tab = filterButtons.get(activeFilter);
                             if (tab != null && tab.isShown()) {

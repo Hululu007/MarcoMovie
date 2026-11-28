@@ -109,25 +109,78 @@ public final class MobileEmbyAccounts {
         card.addView(title);
 
         TextView subtitle = new TextView(a);
-        subtitle.setText("输入家庭 NAS 或远程 Emby 服务器地址与账号凭据");
+        subtitle.setText("默认使用 HTTP（8096），也支持直接粘贴完整 HTTPS 地址");
         subtitle.setTextSize(12.5f);
         subtitle.setTextColor(0xa8ebebf5);
-        subtitle.setPadding(0, dp(a, 4), 0, dp(a, 14));
+        subtitle.setPadding(0, dp(a, 4), 0, dp(a, 12));
         card.addView(subtitle);
+
+        final ScrollView scroller = new ScrollView(a);
+        final LinearLayout form = new LinearLayout(a);
+        form.setOrientation(LinearLayout.VERTICAL);
+
+        final boolean[] useHttps = new boolean[] {false};
+        LinearLayout protoRow = new LinearLayout(a);
+        protoRow.setOrientation(LinearLayout.HORIZONTAL);
+        protoRow.setGravity(Gravity.CENTER_VERTICAL);
+        final Button httpBtn = actionButton(a, "HTTP（默认）", true);
+        final Button httpsBtn = actionButton(a, "HTTPS", false);
+        LinearLayout.LayoutParams protoLp = new LinearLayout.LayoutParams(0, dp(a, 34), 1f);
+        protoLp.rightMargin = dp(a, 8);
+        protoRow.addView(httpBtn, protoLp);
+        protoRow.addView(httpsBtn, new LinearLayout.LayoutParams(0, dp(a, 34), 1f));
+        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(-1, -2);
+        rowLp.bottomMargin = dp(a, 10);
+        form.addView(protoRow, rowLp);
 
         final EditText server =
                 field(
                         a,
-                        card,
-                        "https://emby.example:8920",
+                        form,
+                        "服务器域名或 IP（如 emby.example）",
                         InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        final EditText user = field(a, card, "用户名", InputType.TYPE_CLASS_TEXT);
+        final EditText portField =
+                field(a, form, "端口号（HTTP 默认 8096，HTTPS 默认 443）", InputType.TYPE_CLASS_NUMBER);
+        portField.setText("8096");
+        final EditText pathField =
+                field(
+                        a,
+                        form,
+                        "路径（选填，如 /path，留空自动识别）",
+                        InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        final EditText user = field(a, form, "用户名", InputType.TYPE_CLASS_TEXT);
         final EditText pass =
                 field(
                         a,
-                        card,
+                        form,
                         "密码（可留空）",
                         InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+
+        httpBtn.setOnClickListener(
+                new android.view.View.OnClickListener() {
+                    public void onClick(android.view.View v) {
+                        useHttps[0] = false;
+                        styleToggle(a, httpBtn, true);
+                        styleToggle(a, httpsBtn, false);
+                        if (portField.getText().toString().trim().length() == 0) {
+                            portField.setText("8096");
+                        }
+                    }
+                });
+        httpsBtn.setOnClickListener(
+                new android.view.View.OnClickListener() {
+                    public void onClick(android.view.View v) {
+                        useHttps[0] = true;
+                        styleToggle(a, httpBtn, false);
+                        styleToggle(a, httpsBtn, true);
+                        if ("8096".equals(portField.getText().toString().trim())) {
+                            portField.setText("");
+                        }
+                    }
+                });
+
+        scroller.addView(form);
+        card.addView(scroller, new LinearLayout.LayoutParams(-1, 0, 1f));
 
         final TextView status = new TextView(a);
         status.setTextSize(12.5f);
@@ -175,10 +228,13 @@ public final class MobileEmbyAccounts {
         submit.setOnClickListener(
                 new android.view.View.OnClickListener() {
                     public void onClick(android.view.View v) {
-                        final String address = server.getText().toString().trim(),
+                        final String rawHost = server.getText().toString().trim(),
+                                portText = portField.getText().toString().trim(),
+                                pathText = pathField.getText().toString().trim(),
                                 name = user.getText().toString().trim(),
                                 pw = pass.getText().toString();
-                        if (address.length() == 0 || name.length() == 0) {
+                        final boolean httpsMode = useHttps[0];
+                        if (rawHost.length() == 0 || name.length() == 0) {
                             status.setText("请填写服务器地址和用户名");
                             return;
                         }
@@ -195,6 +251,10 @@ public final class MobileEmbyAccounts {
                                         new Runnable() {
                                             public void run() {
                                                 try {
+                                                    final String address =
+                                                            MobileEmbyLibrary.composeServerAddress(
+                                                                    httpsMode, rawHost, portText,
+                                                                    pathText);
                                                     final JSONObject session =
                                                             MobileEmbyLibrary.login(
                                                                     address, name, pw, device);
@@ -264,6 +324,15 @@ public final class MobileEmbyAccounts {
                                 .start();
                     }
                 });
+    }
+
+    private static void styleToggle(Activity a, Button b, boolean active) {
+        b.setTextColor(active ? Color.WHITE : 0xe6f5f5f7);
+        GradientDrawable gd = new GradientDrawable();
+        gd.setCornerRadius(dp(a, 999));
+        gd.setColor(active ? 0xff0a84ff : 0x22ffffff);
+        if (!active) gd.setStroke(Math.max(1, dp(a, 1)), 0x2cffffff);
+        b.setBackgroundDrawable(gd);
     }
 
     private static EditText field(Activity a, LinearLayout parent, String hint, int type) {

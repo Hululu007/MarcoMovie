@@ -575,7 +575,8 @@ final class SourceController {
                         () -> {
                             try {
                                 timing.dispatched = SystemClock.elapsedRealtime();
-                                final boolean skipDetailCache = site != null && site.isNetdiskSite();
+                                final boolean skipDetailCache =
+                                        site != null && site.isNetdiskSite();
                                 String raw = skipDetailCache ? null : a.detailCache.get(key);
                                 if (raw != null) {
                                     Cms.Listing memListing = Cms.listing(raw);

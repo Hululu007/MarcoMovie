@@ -164,8 +164,7 @@ final class TvSeriesScrapeDialog {
             "🔍 搜索并重新刮削剧集（豆瓣 / Bangumi）",
             "🔢 集数整体偏移校正 · 当前：" + offsetText,
             "↕ 按刮削集数智能排序 · 当前：" + (effectiveSort ? "已开启" : "已关闭"),
-            "🏷 选集标题显示 · 当前："
-                    + (record.preferRawEpisodeNames ? "原始清理名（不改写集号）" : "自动刮削精简名"),
+            "🏷 选集标题显示 · 当前：" + (record.preferRawEpisodeNames ? "原始清理名（不改写集号）" : "自动刮削精简名"),
             "🎬 隐藏预告 / 花絮 / SP 特辑 · 当前：" + (record.hideSpecials ? "已隐藏" : "全部显示"),
             "✏️ 手动校正单集集号"
                     + (record.episodeNumberOverrides.isEmpty()

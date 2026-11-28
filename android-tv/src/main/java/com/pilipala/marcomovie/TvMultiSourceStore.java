@@ -1715,11 +1715,7 @@ final class TvMultiSourceStore {
                                     : selectedLeaf.origin);
             ConfigLibrary.Entry saved =
                     library.remember(
-                            combined,
-                            rememberOrigin,
-                            target.name,
-                            "",
-                            Math.max(1L, updatedAt));
+                            combined, rememberOrigin, target.name, "", Math.max(1L, updatedAt));
             String readBack = library.raw(saved);
             if (!readBack.equals(combined)) {
                 verifiedParsed = Cms.parseConfig(readBack, selectedLeaf.origin);
@@ -1732,8 +1728,7 @@ final class TvMultiSourceStore {
             if (!verifiedParsed.sites.isEmpty()
                     && verifiedParsed.sites.get(0) != null
                     && !verifiedParsed.sites.get(0).key.isEmpty()) {
-                String rawFirst =
-                        stripOwnStableSuffix(target.id, verifiedParsed.sites.get(0).key);
+                String rawFirst = stripOwnStableSuffix(target.id, verifiedParsed.sites.get(0).key);
                 st.currentSubscriptionId = target.id;
                 st.currentRawSiteKey = rawFirst;
                 st.currentStableSiteKey = stableSiteKey(target.id, rawFirst);

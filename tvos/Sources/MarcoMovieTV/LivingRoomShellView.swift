@@ -294,7 +294,10 @@ public struct LanQrPushModalView: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 680)
 
-            QrCodeImageView(payload: appModel.lanQrUrl, size: 230)
+            QrCodeImageView(
+                payload: appModel.lanBindQrPayload.isEmpty ? appModel.lanQrUrl : appModel.lanBindQrPayload,
+                size: 230
+            )
 
             if !appModel.lanQrUrl.isEmpty {
                 Text(appModel.lanQrUrl)

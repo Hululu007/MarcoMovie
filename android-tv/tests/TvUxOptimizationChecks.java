@@ -3180,7 +3180,8 @@ public final class TvUxOptimizationChecks {
                 "TvCuratedHome stale-while-revalidate returns cached posters immediately when >6h old while strict check still triggers refresh");
 
         long ancientSavedAt = now - TvCuratedHome.STALE_CACHE_MAX_AGE_MS - 1000L;
-        String ancientPayload = payload.replace(String.valueOf(staleSavedAt), String.valueOf(ancientSavedAt));
+        String ancientPayload =
+                payload.replace(String.valueOf(staleSavedAt), String.valueOf(ancientSavedAt));
         try (java.io.FileOutputStream fos = new java.io.FileOutputStream(tmp)) {
             fos.write(ancientPayload.getBytes(StandardCharsets.UTF_8));
         }
@@ -3214,7 +3215,8 @@ public final class TvUxOptimizationChecks {
                 TvCuratedHome.sameCatalogVisuals(cat1, cat2),
                 "TvCuratedHome.sameCatalogVisuals matches stale and fresh catalogs with identical visuals");
 
-        // 4. HomeScreen immediate hero & first-shelf eager loading policy (eliminates 3.2s/5s/6s delays)
+        // 4. HomeScreen immediate hero & first-shelf eager loading policy (eliminates 3.2s/5s/6s
+        // delays)
         check(
                 HomeScreen.curatedHeroLoadDelayMs(true, false) == 0L
                         && HomeScreen.curatedHeroLoadDelayMs(false, true) == 0L

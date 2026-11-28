@@ -15999,92 +15999,178 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     String group,
     bool isPrivate,
   ) async {
-    String server = '', username = '', password = '', error = '';
+    bool useHttps = false;
+    final serverCtrl = TextEditingController();
+    final portCtrl = TextEditingController(text: '8096');
+    final pathCtrl = TextEditingController();
+    final nameCtrl = TextEditingController();
+    final userCtrl = TextEditingController();
+    final passCtrl = TextEditingController();
+    String error = '';
     bool busy = false;
-    return await _openIosOrModalPage<bool>(
-          hostContext: parent,
-          title: '连接 Emby 媒体库',
-          backLabel: '导入订阅',
-          builder: (sheet) => StatefulBuilder(
-            builder: (ctx, update) => SingleChildScrollView(
-              padding: EdgeInsets.fromLTRB(
-                18,
-                18,
-                18,
-                18 + MediaQuery.viewInsetsOf(ctx).bottom,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextSelectionMouseGuard(
-                    child: CupertinoTextField(
-                      placeholder: '服务器地址（含端口或子路径）',
-                      keyboardType: TextInputType.url,
-                      autocorrect: false,
-                      onChanged: (v) => server = v,
+    try {
+      return await _openIosOrModalPage<bool>(
+            hostContext: parent,
+            title: '连接 Emby 媒体库',
+            backLabel: '导入订阅',
+            builder: (sheet) => StatefulBuilder(
+              builder: (ctx, update) => SingleChildScrollView(
+                padding: EdgeInsets.fromLTRB(
+                  18,
+                  18,
+                  18,
+                  18 + MediaQuery.viewInsetsOf(ctx).bottom,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    CupertinoSlidingSegmentedControl<bool>(
+                      groupValue: useHttps,
+                      children: const {
+                        false: Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 10),
+                          child: Text('HTTP（默认 8096）'),
+                        ),
+                        true: Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 10),
+                          child: Text('HTTPS'),
+                        ),
+                      },
+                      onValueChanged: (val) {
+                        if (val == null) return;
+                        update(() {
+                          useHttps = val;
+                          final curPort = portCtrl.text.trim();
+                          if (useHttps && curPort == '8096') {
+                            portCtrl.text = '';
+                          } else if (!useHttps && curPort.isEmpty) {
+                            portCtrl.text = '8096';
+                          }
+                        });
+                      },
                     ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextSelectionMouseGuard(
-                    child: CupertinoTextField(
-                      placeholder: '用户名',
-                      autocorrect: false,
-                      onChanged: (v) => username = v,
+                    const SizedBox(height: 12),
+                    TextSelectionMouseGuard(
+                      child: CupertinoTextField(
+                        controller: serverCtrl,
+                        placeholder: '服务器域名或 IP（如 emby.example）',
+                        keyboardType: TextInputType.url,
+                        autocorrect: false,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextSelectionMouseGuard(
-                    child: CupertinoTextField(
-                      placeholder: '密码',
-                      obscureText: true,
-                      onChanged: (v) => password = v,
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextSelectionMouseGuard(
+                            child: CupertinoTextField(
+                              controller: portCtrl,
+                              placeholder: useHttps ? '端口（默认 443）' : '端口（默认 8096）',
+                              keyboardType: TextInputType.number,
+                              autocorrect: false,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextSelectionMouseGuard(
+                            child: CupertinoTextField(
+                              controller: pathCtrl,
+                              placeholder: '路径（选填 /path）',
+                              autocorrect: false,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                  ),
-                  if (error.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 10),
-                      child: Text(error),
+                    const SizedBox(height: 10),
+                    TextSelectionMouseGuard(
+                      child: CupertinoTextField(
+                        controller: nameCtrl,
+                        placeholder: '名称（选填，留空自动识别）',
+                        autocorrect: false,
+                      ),
                     ),
-                  CupertinoButton(
-                    onPressed: busy
-                        ? null
-                        : () async {
-                            if (server.trim().isEmpty ||
-                                username.trim().isEmpty) {
-                              update(() => error = '请填写服务器地址和用户名');
-                              return;
-                            }
-                            update(() {
-                              busy = true;
-                              error = '';
-                            });
-                            try {
-                              final entry = await EmbyLibrary.login(
-                                server,
-                                username,
-                                password,
-                                group: group.isEmpty ? '默认分组' : group,
-                                isPrivate: isPrivate,
-                              );
-                              if (!ctx.mounted) return;
-                              await widget.storage.upsertSubscriptions([entry]);
-                              if (ctx.mounted) Navigator.of(ctx).pop(true);
-                            } catch (e) {
-                              if (ctx.mounted)
-                                update(() {
-                                  busy = false;
-                                  error = e.toString();
-                                });
-                            }
-                          },
-                    child: Text(busy ? '正在连接…' : '登录并添加'),
-                  ),
-                ],
+                    const SizedBox(height: 10),
+                    TextSelectionMouseGuard(
+                      child: CupertinoTextField(
+                        controller: userCtrl,
+                        placeholder: '用户名',
+                        autocorrect: false,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextSelectionMouseGuard(
+                      child: CupertinoTextField(
+                        controller: passCtrl,
+                        placeholder: '密码（可留空）',
+                        obscureText: true,
+                      ),
+                    ),
+                    if (error.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 10),
+                        child: Text(error),
+                      ),
+                    const SizedBox(height: 12),
+                    CupertinoButton.filled(
+                      onPressed: busy
+                          ? null
+                          : () async {
+                              final host = serverCtrl.text.trim();
+                              final uname = userCtrl.text.trim();
+                              if (host.isEmpty || uname.isEmpty) {
+                                update(() => error = '请填写服务器地址和用户名');
+                                return;
+                              }
+                              update(() {
+                                busy = true;
+                                error = '';
+                              });
+                              try {
+                                final composed = EmbyLibrary.composeServerAddress(
+                                  useHttps: useHttps,
+                                  hostOrUrl: host,
+                                  port: portCtrl.text.trim(),
+                                  path: pathCtrl.text.trim(),
+                                );
+                                final entry = await EmbyLibrary.login(
+                                  composed,
+                                  uname,
+                                  passCtrl.text,
+                                  group: group.isEmpty ? '默认分组' : group,
+                                  isPrivate: isPrivate,
+                                  label: nameCtrl.text.trim(),
+                                );
+                                if (!ctx.mounted) return;
+                                await widget.storage.upsertSubscriptions([entry]);
+                                if (ctx.mounted) Navigator.of(ctx).pop(true);
+                              } catch (e) {
+                                if (ctx.mounted) {
+                                  update(() {
+                                    busy = false;
+                                    error = e.toString();
+                                  });
+                                }
+                              }
+                            },
+                      child: Text(busy ? '正在连接…' : '登录并添加'),
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-        ) ??
-        false;
+          ) ??
+          false;
+    } finally {
+      serverCtrl.dispose();
+      portCtrl.dispose();
+      pathCtrl.dispose();
+      nameCtrl.dispose();
+      userCtrl.dispose();
+      passCtrl.dispose();
+    }
   }
   Future<void> _showImportConfigDialog({
     String? initialInput,

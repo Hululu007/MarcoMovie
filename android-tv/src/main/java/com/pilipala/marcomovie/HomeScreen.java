@@ -244,9 +244,8 @@ final class HomeScreen {
                                                                     || pendingSwitchAnchor
                                                                             .userMovedFocus) {
                                                                 View match =
-                                                                        curatedHost
-                                                                                .findViewWithTag(
-                                                                                        restoreCuratedTag);
+                                                                        curatedHost.findViewWithTag(
+                                                                                restoreCuratedTag);
                                                                 if (match != null
                                                                         && match.isShown()) {
                                                                     match.requestFocus();
@@ -1503,8 +1502,7 @@ final class HomeScreen {
                                         });
                             };
                     boolean hasMem =
-                            ImmersivePoster.hasFeatheredHeroInCache(
-                                    item, heroTargetW, heroTargetH);
+                            ImmersivePoster.hasFeatheredHeroInCache(item, heroTargetW, heroTargetH);
                     boolean hasDisk = ImmersivePoster.hasDiskWideBackdrop(a, item);
                     if (hasMem) {
                         loadHeroNow.run();

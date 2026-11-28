@@ -3685,8 +3685,7 @@ final class PlaybackControls {
         int rawIdx = episodeIndex();
         int epNum =
                 (rawIdx >= 0 && rawIdx < eps.size())
-                        ? TvSeriesScraper.resolveDanmuEpisodeNumber(
-                                rawTitle, eps, rawIdx, null)
+                        ? TvSeriesScraper.resolveDanmuEpisodeNumber(rawTitle, eps, rawIdx, null)
                         : DandanplayProvider.extractEpisodeNum(epName);
         if (activeDialog != null && activeDialog.isShowing()) {
             try {
@@ -3749,8 +3748,7 @@ final class PlaybackControls {
         }
         SeriesScrapeStore.save(a, siteKey, videoId, rawTitle, rec);
 
-        DanmuSettingsPanel.DanmuConfig refreshed =
-                DanmuSettingsPanel.loadConfig(a, a.isTvDevice());
+        DanmuSettingsPanel.DanmuConfig refreshed = DanmuSettingsPanel.loadConfig(a, a.isTvDevice());
         if (!refreshed.enabled) {
             a.prefs.edit().putBoolean(Prefs.DANMAKU_DEFAULT, true).apply();
             refreshed = DanmuSettingsPanel.loadConfig(a, a.isTvDevice());
@@ -5514,8 +5512,7 @@ final class PlaybackControls {
                         else
                             a.player.setRepeatOne(
                                     shouldEnableNativeRepeatOne(
-                                            a.prefs.getInt(Prefs.REPEAT_MODE, 0),
-                                            clamped == 0));
+                                            a.prefs.getInt(Prefs.REPEAT_MODE, 0), clamped == 0));
                     }
                     renderSec.accept(clamped);
                 };

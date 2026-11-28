@@ -3008,8 +3008,7 @@ public final class MainActivity extends Activity {
             Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
             intent.setType("image/*");
             intent.addCategory(Intent.CATEGORY_OPENABLE);
-            startActivityForResult(
-                    Intent.createChooser(intent, "选择包含二维码的图片"), REQ_PICK_QR_IMAGE);
+            startActivityForResult(Intent.createChooser(intent, "选择包含二维码的图片"), REQ_PICK_QR_IMAGE);
         } catch (Throwable err) {
             pendingQrImageCallback = null;
             toast("无法打开系统相册，请改用摄像头扫码或粘贴链接");
@@ -3023,8 +3022,7 @@ public final class MainActivity extends Activity {
             MobileQrScannerDialog.UriCallback cb = pendingQrImageCallback;
             pendingQrImageCallback = null;
             if (cb != null) {
-                cb.onUriPicked(
-                        result == RESULT_OK && data != null ? data.getData() : null);
+                cb.onUriPicked(result == RESULT_OK && data != null ? data.getData() : null);
             }
             return;
         }

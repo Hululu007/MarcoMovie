@@ -441,6 +441,30 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                 '局域网设备已完成双向同步（历史 $historyCount · 收藏 $favoriteCount$subPart）';
           });
         },
+        onWebdavBound: (url) {
+          if (!mounted) return;
+          setState(() {
+            _urlCtrl.text = widget.storage.webdavUrl;
+            _userCtrl.text = widget.storage.webdavUser;
+            _passCtrl.text = widget.storage.webdavPass;
+            _autoSync = widget.storage.webdavAuto;
+            _syncSubs = widget.storage.webdavSyncSubs;
+            _feedbackIsError = false;
+            _feedbackMessage = '已通过扫码自动绑定 WebDAV：$url';
+          });
+          widget.onSynced?.call(subscriptionsChanged: false);
+          if (widget.storage.webdavAuto) {
+            unawaited(
+              widget.storage.syncWithWebdav().then(
+                (r) {
+                  if (!mounted) return;
+                  widget.onSynced?.call(subscriptionsChanged: r.subscriptionsChanged);
+                },
+                onError: (_) {},
+              ),
+            );
+          }
+        },
       );
       if (!mounted) {
         await server.close();
@@ -472,12 +496,27 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
       _feedbackMessage = null;
     });
     try {
-      final res = await widget.storage.syncWithLanPeer(peerInput);
+      final res = await widget.storage.bindOrSyncWithLanQr(peerInput);
+      if (res.boundWebdav && mounted) {
+        setState(() {
+          _urlCtrl.text = widget.storage.webdavUrl;
+          _userCtrl.text = widget.storage.webdavUser;
+          _passCtrl.text = widget.storage.webdavPass;
+          _autoSync = widget.storage.webdavAuto;
+          _syncSubs = widget.storage.webdavSyncSubs;
+        });
+      }
       widget.onSynced?.call(subscriptionsChanged: res.subscriptionsChanged);
       final subPart = _syncSubs ? ' · 订阅 ${res.subscriptionCount} 个' : '';
+      final prefix = switch (res.bindStatus) {
+        'pushed' => '已将本机 WebDAV 绑定至对方设备，并',
+        'pulled' => '已导入绑定对方 WebDAV 配置，并',
+        'unconfigured' => '对方尚未配置 WebDAV，已',
+        _ => '已',
+      };
       _notifyNotice(
         '局域网同步完成',
-        '已双向合并观看历史 ${res.historyCount} 条 · 收藏 ${res.favoriteCount} 部$subPart。',
+        '${prefix}双向合并观看历史 ${res.historyCount} 条 · 收藏 ${res.favoriteCount} 部$subPart。',
       );
     } catch (e) {
       final msg = e is FormatException ? e.message : e.toString();
@@ -570,6 +609,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
         ? _lanHosts[_selectedLanHostIndex.clamp(0, _lanHosts.length - 1)]
         : '127.0.0.1';
     final receiverUrl = activeServer?.addressForHost(currentHost) ?? '';
+    final receiverQrData = activeServer?.bindQrUrlForHost(currentHost) ?? '';
 
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -942,7 +982,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(16),
                       ),
-                      child: LocalQrCode(data: receiverUrl),
+                      child: LocalQrCode(data: receiverQrData),
                     ),
                     const SizedBox(height: 12),
                     Text(

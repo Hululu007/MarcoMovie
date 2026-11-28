@@ -3907,7 +3907,8 @@ final class SourcePicker {
         }
         for (int i = 0; i < rows.length(); i++) {
             org.json.JSONObject row = rows.optJSONObject(i);
-            names[i + (canMergeAll ? 1 : 0)] = row == null ? ("子仓库 " + (i + 1)) : row.optString("name");
+            names[i + (canMergeAll ? 1 : 0)] =
+                    row == null ? ("子仓库 " + (i + 1)) : row.optString("name");
         }
         new AppDialog.Builder(a)
                 .wrapChoices()
@@ -3928,7 +3929,8 @@ final class SourcePicker {
                                             ? explicitSubId
                                             : rowObj.optString("_subId", "");
                             final String rowWarehouseRoot =
-                                    explicitWarehouseRoot != null && !explicitWarehouseRoot.isEmpty()
+                                    explicitWarehouseRoot != null
+                                                    && !explicitWarehouseRoot.isEmpty()
                                             ? explicitWarehouseRoot
                                             : rowObj.optString("_warehouseRoot", "");
                             a.toast("正在读取子仓库…");

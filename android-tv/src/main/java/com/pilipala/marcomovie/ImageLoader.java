@@ -969,7 +969,9 @@ final class ImageLoader {
         try {
             Cms.ImageRequest source = Cms.imageRequest(address);
             String resolvedUrl = Cms.normalizeHttp(source.url);
-            if (resolvedUrl == null || resolvedUrl.isEmpty() || resolvedUrl.startsWith("catpaw://")) {
+            if (resolvedUrl == null
+                    || resolvedUrl.isEmpty()
+                    || resolvedUrl.startsWith("catpaw://")) {
                 return false;
             }
             String targetUrl = upgradePosterUrl(resolvedUrl, detail);
@@ -1110,7 +1112,9 @@ final class ImageLoader {
                 deleteDiskCachedPosterQuietly(a, candidate);
             }
             for (String ua : userAgents) {
-                for (int refererMode = 0; refererMode < (hasExplicitReferer ? 1 : 2); refererMode++) {
+                for (int refererMode = 0;
+                        refererMode < (hasExplicitReferer ? 1 : 2);
+                        refererMode++) {
                     HttpURLConnection connection = null;
                     try {
                         String currentUrl = candidate;

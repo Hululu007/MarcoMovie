@@ -431,14 +431,12 @@ final class HomeAmbient extends View {
 
     private Bitmap acquireTvScratchBitmap() {
         if (cachedScratchA == null || cachedScratchA.isRecycled()) {
-            cachedScratchA =
-                    Bitmap.createBitmap(TV_CACHE_W, TV_CACHE_H, Bitmap.Config.RGB_565);
+            cachedScratchA = Bitmap.createBitmap(TV_CACHE_W, TV_CACHE_H, Bitmap.Config.RGB_565);
             return cachedScratchA;
         }
         if (cachedCurrBitmap == cachedScratchA) {
             if (cachedScratchB == null || cachedScratchB.isRecycled()) {
-                cachedScratchB =
-                        Bitmap.createBitmap(TV_CACHE_W, TV_CACHE_H, Bitmap.Config.RGB_565);
+                cachedScratchB = Bitmap.createBitmap(TV_CACHE_W, TV_CACHE_H, Bitmap.Config.RGB_565);
             }
             return cachedScratchB;
         }

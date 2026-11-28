@@ -89,10 +89,8 @@ final class TvDanmuSearchDialog {
         stylePaneList(a, animeList);
         stylePaneList(a, epList);
 
-        final ArrayAdapter<String> animeAdapter =
-                buildPaneAdapter(a, animeLabels);
-        final ArrayAdapter<String> epAdapter =
-                buildPaneAdapter(a, epLabels);
+        final ArrayAdapter<String> animeAdapter = buildPaneAdapter(a, animeLabels);
+        final ArrayAdapter<String> epAdapter = buildPaneAdapter(a, epLabels);
         animeList.setAdapter(animeAdapter);
         epList.setAdapter(epAdapter);
 
@@ -137,10 +135,12 @@ final class TvDanmuSearchDialog {
                                                                         ? ("第" + (i + 1) + "集")
                                                                         : c.episodeTitle;
                                                         epLabels.add(label);
-                                                        if (selectPos < 0 && currentEpisodeNumber > 0) {
+                                                        if (selectPos < 0
+                                                                && currentEpisodeNumber > 0) {
                                                             int parsed =
-                                                                    DandanplayProvider.extractEpisodeNum(
-                                                                            c.episodeTitle);
+                                                                    DandanplayProvider
+                                                                            .extractEpisodeNum(
+                                                                                    c.episodeTitle);
                                                             if (parsed == currentEpisodeNumber) {
                                                                 selectPos = epHits.size() - 1;
                                                             }
@@ -171,8 +171,7 @@ final class TvDanmuSearchDialog {
                                                         || token.isCancelled()) {
                                                     return;
                                                 }
-                                                statusLabel.setText(
-                                                        "读取分集失败：" + a.message(err));
+                                                statusLabel.setText("读取分集失败：" + a.message(err));
                                             });
                                 }
                             });
@@ -254,8 +253,7 @@ final class TvDanmuSearchDialog {
                                                         || token.isCancelled()) {
                                                     return;
                                                 }
-                                                statusLabel.setText(
-                                                        "搜索弹幕失败：" + a.message(err));
+                                                statusLabel.setText("搜索弹幕失败：" + a.message(err));
                                             });
                                 }
                             });

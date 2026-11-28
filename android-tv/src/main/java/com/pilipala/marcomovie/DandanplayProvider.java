@@ -783,8 +783,7 @@ public final class DandanplayProvider implements DanmuProvider {
             try {
                 boolean anyFromSearchAnime = false;
                 try {
-                    String animeUrl =
-                            origin + "/api/v2/search/anime?keyword=" + percentEncode(q);
+                    String animeUrl = origin + "/api/v2/search/anime?keyword=" + percentEncode(q);
                     String body = executeHttp(origin, animeUrl, "GET", null, token);
                     JSONObject root = new JSONObject(body);
                     JSONArray animes = root.optJSONArray("animes");
@@ -807,8 +806,7 @@ public final class DandanplayProvider implements DanmuProvider {
                 } catch (Exception ignored) {
                 }
                 if (!anyFromSearchAnime) {
-                    String epUrl =
-                            origin + "/api/v2/search/episodes?anime=" + percentEncode(q);
+                    String epUrl = origin + "/api/v2/search/episodes?anime=" + percentEncode(q);
                     String body = executeHttp(origin, epUrl, "GET", null, token);
                     JSONObject root = new JSONObject(body);
                     JSONArray animes = root.optJSONArray("animes");

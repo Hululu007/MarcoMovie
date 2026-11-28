@@ -174,7 +174,14 @@ final class TvSeriesScraper {
                 boolean multiSeason,
                 int regularCount,
                 int specialCount) {
-            this(episodes, sourceOrderScrambled, multiSeason, regularCount, specialCount, false, false);
+            this(
+                    episodes,
+                    sourceOrderScrambled,
+                    multiSeason,
+                    regularCount,
+                    specialCount,
+                    false,
+                    false);
         }
 
         ScrapedLine(
@@ -274,11 +281,15 @@ final class TvSeriesScraper {
     private static final Pattern TRAILING_LENTICULAR_BLOCK =
             Pattern.compile("\\s*【[^】]{2,80}】\\s*$");
     private static final Pattern LEADING_SIZE_TAG_PATTERN =
-            Pattern.compile("(?i)^\\s*[\\[【(（]\\s*\\d+(?:\\.\\d+)?\\s*(?:gb|mb|kb|gib|mib|g|m)\\s*[\\]】)）]\\s*");
+            Pattern.compile(
+                    "(?i)^\\s*[\\[【(（]\\s*\\d+(?:\\.\\d+)?\\s*(?:gb|mb|kb|gib|mib|g|m)\\s*[\\]】)）]\\s*");
     private static final Pattern TRAILING_COPY_COUNTER_PATTERN =
-            Pattern.compile("\\s*[(（]\\s*[1-9]\\d?\\s*[)）]\\s*(?=(?:\\.[a-z0-9]{2,4})?$)", Pattern.CASE_INSENSITIVE);
+            Pattern.compile(
+                    "\\s*[(（]\\s*[1-9]\\d?\\s*[)）]\\s*(?=(?:\\.[a-z0-9]{2,4})?$)",
+                    Pattern.CASE_INSENSITIVE);
     private static final Pattern FILE_EXT_PATTERN =
-            Pattern.compile("(?i)\\.(?:mkv|mp4|m4v|avi|mov|ts|m2ts|flv|rmvb|wmv|webm|mpg|mpeg|vob|iso|strm|m3u8|srt|ass|vtt)$");
+            Pattern.compile(
+                    "(?i)\\.(?:mkv|mp4|m4v|avi|mov|ts|m2ts|flv|rmvb|wmv|webm|mpg|mpeg|vob|iso|strm|m3u8|srt|ass|vtt)$");
     private static final Pattern PART_AFTER_EP_PATTERN =
             Pattern.compile(
                     "(?i)(?:第\\s*(?:\\d{1,4}|[一二三四五六七八九十百千零〇两兩]{1,6})\\s*[集话話回期篇章]|ep?\\.?\\s*\\d{1,4})\\s*[._\\-·(（\\[]*\\s*(上|中|下)(?:篇|集|期|部)?(?=$|[\\s._\\-·)）\\]]|4k|8k|2k|1080|2160|720|hdr|加更|沉浸|纯享|抢先|完整|会员|花絮|幕后|彩蛋|未播|衍生|\\.)");
@@ -391,7 +402,13 @@ final class TvSeriesScraper {
         String s = normalizeSequelNumerals(raw).replaceAll("[\\p{Cntrl}]+", " ").trim();
         s = TITLE_NOISE_TAGS.matcher(s).replaceAll(" ");
         s = BRACKET_YEAR_PATTERN.matcher(s).replaceAll(" ");
-        String techTrimmed = TECH_NOISE_PATTERN.matcher(s).replaceAll(" ").replaceAll("[._]+", " ").replaceAll("\\s+", " ").trim();
+        String techTrimmed =
+                TECH_NOISE_PATTERN
+                        .matcher(s)
+                        .replaceAll(" ")
+                        .replaceAll("[._]+", " ")
+                        .replaceAll("\\s+", " ")
+                        .trim();
         if (!techTrimmed.isEmpty()) {
             s = techTrimmed;
         }
@@ -478,7 +495,8 @@ final class TvSeriesScraper {
                 || EXPLICIT_EP_PATTERN.matcher(probe).find()
                 || ATTACHED_EP_PATTERN.matcher(probe).find()
                 || VARIETY_DATE_CAPTURE_PATTERN.matcher(without).find()
-                || LOOSE_NUMBER_PATTERN.matcher(VARIETY_DATE_PATTERN.matcher(probe).replaceAll(" "))
+                || LOOSE_NUMBER_PATTERN
+                        .matcher(VARIETY_DATE_PATTERN.matcher(probe).replaceAll(" "))
                         .find()) {
             return without;
         }
@@ -841,8 +859,9 @@ final class TvSeriesScraper {
             Cms.Episode ep = episodes.get(i);
             String raw = ep != null && ep.name != null ? ep.name.trim() : "";
             if (!raw.isEmpty()) nonEmptyCount++;
-            String core = stripCopySuffixIfOtherNumberPresent(
-                    stripTrailingNetdiskSuffix(raw, commonTrailingBlock));
+            String core =
+                    stripCopySuffixIfOtherNumberPresent(
+                            stripTrailingNetdiskSuffix(raw, commonTrailingBlock));
             String readableRaw = cleanReadableEpisodeName(raw, commonTrailingBlock);
             String[] dateInfo = extractDateInfo(core);
             String dateKey = dateInfo != null ? dateInfo[0] : "";
@@ -993,12 +1012,14 @@ final class TvSeriesScraper {
         boolean isVarietyLine =
                 nonEmptyCount > 0
                         && (varietyTokenCount >= 2
-                                || (varietyTokenCount >= 1 && varietyTokenCount * 2 >= nonEmptyCount)
+                                || (varietyTokenCount >= 1
+                                        && varietyTokenCount * 2 >= nonEmptyCount)
                                 || (datedCount >= 2 && datedCount * 2 >= nonEmptyCount));
 
         List<ScrapedEpisode> finalized = new ArrayList<>(out.size());
         for (ScrapedEpisode item : out) {
-            boolean usePeriodUnit = item.isVarietyPeriod || (isVarietyLine && item.episodeNumber > 0);
+            boolean usePeriodUnit =
+                    item.isVarietyPeriod || (isVarietyLine && item.episodeNumber > 0);
             String fullDateLabel =
                     item.dateKey.length() == 8
                             ? (multiYearDates
@@ -1011,8 +1032,7 @@ final class TvSeriesScraper {
                             : item.dateLabel;
             String cleanLabel;
             if (preferRawNames && !item.manualOverride) {
-                cleanLabel =
-                        item.cleanedRawLabel.isEmpty() ? item.rawName : item.cleanedRawLabel;
+                cleanLabel = item.cleanedRawLabel.isEmpty() ? item.rawName : item.cleanedRawLabel;
             } else if (item.isSpecial) {
                 if (!fullDateLabel.isEmpty() && !item.specialLabel.isEmpty()) {
                     cleanLabel = fullDateLabel + "·" + item.specialLabel;
@@ -1030,10 +1050,11 @@ final class TvSeriesScraper {
                                 item.partTag,
                                 item.variantTag);
             } else if (!fullDateLabel.isEmpty()) {
-                cleanLabel = formatDatedFallbackLabel(fullDateLabel, item.variantTag, item.cleanedRawLabel);
-            } else {
                 cleanLabel =
-                        item.cleanedRawLabel.isEmpty() ? item.rawName : item.cleanedRawLabel;
+                        formatDatedFallbackLabel(
+                                fullDateLabel, item.variantTag, item.cleanedRawLabel);
+            } else {
+                cleanLabel = item.cleanedRawLabel.isEmpty() ? item.rawName : item.cleanedRawLabel;
             }
             finalized.add(
                     new ScrapedEpisode(
@@ -1088,8 +1109,7 @@ final class TvSeriesScraper {
      * (such as {@code 第01集 | 第01集}). Appends date, distinguishing spec/language token, or falls
      * back to cleaned readable raw name whenever collisions remain.
      */
-    private static void disambiguateDuplicateLabels(
-            List<ScrapedEpisode> list, String seriesTitle) {
+    private static void disambiguateDuplicateLabels(List<ScrapedEpisode> list, String seriesTitle) {
         if (list.size() < 2) return;
         Map<String, List<Integer>> byLabel = new LinkedHashMap<>();
         for (int i = 0; i < list.size(); i++) {
@@ -1121,7 +1141,10 @@ final class TvSeriesScraper {
             if (allHaveDates && dates.size() > 1) {
                 for (int idx : indices) {
                     ScrapedEpisode ep = list.get(idx);
-                    list.set(idx, ep.withCleanDisplayLabel(ep.cleanDisplayLabel + " (" + ep.dateLabel + ")"));
+                    list.set(
+                            idx,
+                            ep.withCleanDisplayLabel(
+                                    ep.cleanDisplayLabel + " (" + ep.dateLabel + ")"));
                 }
                 if (allDistinctLabels(list, indices)) continue;
             }

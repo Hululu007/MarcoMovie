@@ -26,8 +26,10 @@ public final class LanConfigServer: @unchecked Sendable {
     public let cmsClient: CmsClient
     public let token: String
     public let tokenPath: String
+    public let bindKey: Data
     public let expiresAt: Date
     public var onApplied: (@Sendable (LanConfigAppliedEvent) -> Void)?
+    public var onWebDavBound: (@Sendable (WebDavConfig) -> Void)?
 
     private let queue = DispatchQueue(label: "com.pilipala.marcoMovie.tv.lan-config")
     private let lock = NSLock()
@@ -40,7 +42,8 @@ public final class LanConfigServer: @unchecked Sendable {
         syncService: WebDavSyncService? = nil,
         cmsClient: CmsClient = CmsClient(),
         ttlSeconds: TimeInterval = 600,
-        onApplied: (@Sendable (LanConfigAppliedEvent) -> Void)? = nil
+        onApplied: (@Sendable (LanConfigAppliedEvent) -> Void)? = nil,
+        onWebDavBound: (@Sendable (WebDavConfig) -> Void)? = nil
     ) {
         self.storage = storage
         self.syncService = syncService ?? WebDavSyncService(storage: storage)
@@ -50,8 +53,10 @@ public final class LanConfigServer: @unchecked Sendable {
         let hex = bytes.map { String(format: "%02x", $0) }.joined()
         self.token = hex
         self.tokenPath = "/configure/\(hex)"
+        self.bindKey = WebdavBindCrypto.generateKey()
         self.expiresAt = Date().addingTimeInterval(ttlSeconds)
         self.onApplied = onApplied
+        self.onWebDavBound = onWebDavBound
     }
 
     deinit {
@@ -75,6 +80,11 @@ public final class LanConfigServer: @unchecked Sendable {
 
     public func syncUrl(forHost host: String) -> String {
         "\(configureUrl(forHost: host))/sync"
+    }
+
+    public func bindQrUrl(forHost host: String) -> String {
+        (try? WebdavBindCrypto.buildBindQrUrl(baseEndpointUrl: configureUrl(forHost: host), key: bindKey))
+            ?? configureUrl(forHost: host)
     }
 
     public func netdiskUrl(forHost host: String) -> String {
@@ -347,15 +357,25 @@ public final class LanConfigServer: @unchecked Sendable {
 
         let pushPath = "\(tokenPath)/push"
         let syncPath = "\(tokenPath)/sync"
+        let bindPath = "\(tokenPath)/bind"
         let netdiskPath = "\(tokenPath)/netdisk"
         let isNetdiskApi = (rawPath == netdiskPath)
-        guard rawPath == tokenPath || rawPath == pushPath || rawPath == syncPath || isNetdiskApi else {
+        guard rawPath == tokenPath || rawPath == pushPath || rawPath == syncPath || rawPath == bindPath || isNetdiskApi else {
             sendText(connection: connection, status: 404, text: "页面不存在")
             return
         }
 
         if isExpired {
             sendText(connection: connection, status: 410, text: "局域网配置会话已过期，请在 Apple TV 上重新打开二维码")
+            return
+        }
+
+        if rawPath == bindPath {
+            if let originHeader = headers["origin"], !originHeader.isEmpty {
+                sendText(connection: connection, status: 403, text: "禁止跨站绑定")
+                return
+            }
+            handleBindRequest(connection: connection, method: method, bodyData: bodyData)
             return
         }
 
@@ -539,6 +559,87 @@ public final class LanConfigServer: @unchecked Sendable {
             } catch {
                 self.sendJsonObject(connection: connection, status: 400, obj: ["ok": false, "error": error.localizedDescription])
             }
+        }
+    }
+
+    private func handleBindRequest(connection: NWConnection, method: String, bodyData: Data) {
+        if method == "GET" {
+            do {
+                let cfg = storage.loadWebDavConfig()
+                let trimmedUrl = cfg.url.trimmingCharacters(in: .whitespacesAndNewlines)
+                let parsed = URL(string: trimmedUrl)
+                let scheme = parsed?.scheme?.lowercased() ?? ""
+                let valid = cfg.isConfigured && (scheme == "http" || scheme == "https") && !(parsed?.host ?? "").isEmpty
+                let payload: [String: Any]
+                if valid {
+                    payload = [
+                        "v": 1,
+                        "type": "webdav_bind",
+                        "mode": "config",
+                        "url": trimmedUrl,
+                        "username": cfg.username,
+                        "password": cfg.password,
+                        "auto": cfg.autoSync,
+                        "syncSubs": cfg.syncSubscriptions,
+                        "syncHistory": cfg.syncHistory,
+                    ]
+                } else {
+                    payload = [
+                        "v": 1,
+                        "type": "webdav_bind",
+                        "mode": "unconfigured",
+                    ]
+                }
+                let sealed = try WebdavBindCrypto.sealJson(key: bindKey, payload: payload)
+                sendJson(connection: connection, status: 200, json: sealed)
+            } catch {
+                sendText(connection: connection, status: 500, text: error.localizedDescription)
+            }
+            return
+        }
+        guard method == "POST" else {
+            sendText(connection: connection, status: 405, text: "请求方式不支持")
+            return
+        }
+        guard bodyData.count >= 2 && bodyData.count <= 65_536 else {
+            sendText(connection: connection, status: 413, text: "绑定请求大小不合法")
+            return
+        }
+        do {
+            let envelopeStr = String(decoding: bodyData, as: UTF8.self)
+            let obj = try WebdavBindCrypto.openJson(key: bindKey, envelopeJson: envelopeStr)
+            guard (obj["type"] as? String) == "webdav_bind",
+                  let rawUrl = obj["url"] as? String else {
+                sendText(connection: connection, status: 400, text: "不支持的绑定载荷")
+                return
+            }
+            let url = rawUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let parsed = URL(string: url),
+                  let scheme = parsed.scheme?.lowercased(),
+                  (scheme == "http" || scheme == "https"),
+                  let host = parsed.host,
+                  !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                sendText(connection: connection, status: 400, text: "WebDAV 地址仅支持 HTTP/HTTPS")
+                return
+            }
+            var cfg = storage.loadWebDavConfig()
+            cfg.url = url
+            cfg.username = ((obj["username"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            cfg.password = (obj["password"] as? String) ?? ""
+            cfg.autoSync = (obj["auto"] as? Bool) ?? true
+            cfg.syncSubscriptions = (obj["syncSubs"] as? Bool) ?? true
+            cfg.syncHistory = (obj["syncHistory"] as? Bool) ?? true
+            try storage.saveWebDavConfig(cfg)
+            onWebDavBound?(cfg)
+            let ack = try WebdavBindCrypto.sealJson(key: bindKey, payload: [
+                "v": 1,
+                "type": "webdav_bind_ack",
+                "ok": true,
+                "url": url,
+            ])
+            sendJson(connection: connection, status: 200, json: ack)
+        } catch {
+            sendText(connection: connection, status: 400, text: "绑定处理失败")
         }
     }
 

@@ -121,6 +121,7 @@ public final class AppViewModel: ObservableObject {
     @Published public var showNetdiskSheet = false
     @Published public var selectedNetdiskDriveKey: String = "quark"
     @Published public private(set) var lanQrUrl: String = ""
+    @Published public private(set) var lanBindQrPayload: String = ""
     @Published public var statusBannerMessage: String?
     @Published public private(set) var isSyncingWebDav = false
 
@@ -902,19 +903,31 @@ public final class AppViewModel: ObservableObject {
         let server = LanConfigServer(
             storage: storage,
             syncService: webdavService,
-            cmsClient: cmsClient
-        ) { [weak self] event in
-            Task { @MainActor [weak self] in
-                guard let strongSelf = self else { return }
-                strongSelf.statusBannerMessage = event.message
-                strongSelf.reloadLocalState()
-                await strongSelf.loadHomeForActiveSite()
+            cmsClient: cmsClient,
+            onApplied: { [weak self] event in
+                Task { @MainActor [weak self] in
+                    guard let strongSelf = self else { return }
+                    strongSelf.statusBannerMessage = event.message
+                    strongSelf.reloadLocalState()
+                    await strongSelf.loadHomeForActiveSite()
+                }
+            },
+            onWebDavBound: { [weak self] cfg in
+                Task { @MainActor [weak self] in
+                    guard let strongSelf = self else { return }
+                    strongSelf.webdavConfig = cfg
+                    strongSelf.statusBannerMessage = "已通过扫码自动绑定 WebDAV（\(cfg.url)）"
+                    if cfg.autoSync {
+                        await strongSelf.triggerManualWebDavSync()
+                    }
+                }
             }
-        }
+        )
         if let _ = try? await server.start() {
             lanServer = server
             let host = LanConfigServer.discoverLanAddresses().first ?? "127.0.0.1"
             lanQrUrl = server.configureUrl(forHost: host)
+            lanBindQrPayload = server.bindQrUrl(forHost: host)
         }
     }
 

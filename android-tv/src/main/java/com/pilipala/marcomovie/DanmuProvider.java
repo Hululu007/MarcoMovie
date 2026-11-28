@@ -1516,7 +1516,8 @@ public interface DanmuProvider {
 
     List<Candidate> matchOrSearch(MatchQuery query, CancellationToken token) throws IOException;
 
-    default List<AnimeHit> searchAnimes(String keyword, CancellationToken token) throws IOException {
+    default List<AnimeHit> searchAnimes(String keyword, CancellationToken token)
+            throws IOException {
         return Collections.emptyList();
     }
 

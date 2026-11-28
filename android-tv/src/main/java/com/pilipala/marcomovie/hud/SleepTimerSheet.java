@@ -32,13 +32,7 @@ public final class SleepTimerSheet {
     public static final long EXTEND_STEP_MS = 15L * 60_000L;
 
     public static final String[] PRESET_LABELS = {
-        "关闭（默认）",
-        "15 分钟后停止",
-        "30 分钟后停止",
-        "45 分钟后停止",
-        "60 分钟后停止",
-        "90 分钟后停止",
-        "播完本集后停止"
+        "关闭（默认）", "15 分钟后停止", "30 分钟后停止", "45 分钟后停止", "60 分钟后停止", "90 分钟后停止", "播完本集后停止"
     };
 
     private static final AtomicInteger FALLBACK_VIEW_ID = new AtomicInteger(0x4d300000);

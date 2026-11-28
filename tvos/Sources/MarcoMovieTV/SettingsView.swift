@@ -573,6 +573,16 @@ public struct SettingsView: View {
                 Spacer()
 
                 Button {
+                    appModel.openLanQrModal()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "qrcode.viewfinder")
+                        Text("手机扫码绑定")
+                    }
+                }
+                .buttonStyle(TvPillButtonStyle())
+
+                Button {
                     Task { await appModel.triggerManualWebDavSync() }
                 } label: {
                     if appModel.isSyncingWebDav {

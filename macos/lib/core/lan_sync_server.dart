@@ -5,6 +5,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'storage_service.dart';
+import 'webdav_bind_crypto.dart';
 
 typedef LanSyncAppliedCallback = void Function({
   required int historyCount,
@@ -14,14 +15,19 @@ typedef LanSyncAppliedCallback = void Function({
   required bool subscriptionsChanged,
 });
 
+typedef LanWebdavBoundCallback = void Function(String url);
+
 /// Short-lived, token-scoped LAN HTTP receiver compatible with Android's
-/// `ConfigTransferServer` (`/configure/<token>` and `/configure/<token>/sync`).
+/// `ConfigTransferServer` (`/configure/<token>`, `/configure/<token>/sync`, and
+/// `/configure/<token>/bind`).
 class LanSyncServer {
   final StorageService storage;
   final LanSyncAppliedCallback? onSynced;
+  final LanWebdavBoundCallback? onWebdavBound;
   final HttpServer _server;
   final int port;
   final String tokenPath;
+  final Uint8List bindKey;
   final DateTime expiresAt;
   bool _closed = false;
   bool _busy = false;
@@ -31,8 +37,10 @@ class LanSyncServer {
     required this.storage,
     required HttpServer server,
     required this.tokenPath,
+    required this.bindKey,
     required this.expiresAt,
     this.onSynced,
+    this.onWebdavBound,
   })  : _server = server,
         port = server.port {
     final remaining = expiresAt.difference(DateTime.now());
@@ -59,6 +67,8 @@ class LanSyncServer {
 
   String addressForHost(String host) => '$_httpPrefix$host:$port$tokenPath';
   String syncEndpointForHost(String host) => '${addressForHost(host)}/sync';
+  String bindQrUrlForHost(String host) =>
+      WebdavBindCrypto.buildBindQrUrl(addressForHost(host), bindKey);
 
   static Future<LanSyncServer> start(
     StorageService storage, {
@@ -66,12 +76,14 @@ class LanSyncServer {
     InternetAddress? bindAddress,
     int port = 0,
     LanSyncAppliedCallback? onSynced,
+    LanWebdavBoundCallback? onWebdavBound,
   }) async {
     final rng = Random.secure();
     final tokenBytes = List<int>.generate(16, (_) => rng.nextInt(256));
     final token = tokenBytes
         .map((b) => b.toRadixString(16).padLeft(2, '0'))
         .join();
+    final bindKey = WebdavBindCrypto.generateKey();
     final server = await HttpServer.bind(
       bindAddress ?? InternetAddress.anyIPv4,
       port,
@@ -81,8 +93,10 @@ class LanSyncServer {
       storage: storage,
       server: server,
       tokenPath: '/configure/$token',
+      bindKey: bindKey,
       expiresAt: DateTime.now().add(ttl),
       onSynced: onSynced,
+      onWebdavBound: onWebdavBound,
     );
   }
 
@@ -190,13 +204,23 @@ class LanSyncServer {
       }
       final reqPath = req.uri.path;
       final syncPath = '$tokenPath/sync';
-      if (reqPath != tokenPath && reqPath != syncPath) {
+      final bindPath = '$tokenPath/bind';
+      if (reqPath != tokenPath && reqPath != syncPath && reqPath != bindPath) {
         await _sendText(res, HttpStatus.notFound, '页面不存在');
         return;
       }
       if (isExpired) {
         await _sendText(res, HttpStatus.gone, '局域网同步会话已过期，请重新打开接收码');
         scheduleMicrotask(() => close(force: false));
+        return;
+      }
+      if (reqPath == bindPath) {
+        final origin = req.headers.value('origin');
+        if (origin != null && origin.isNotEmpty) {
+          await _sendText(res, HttpStatus.forbidden, '禁止跨站绑定');
+          return;
+        }
+        await _handleBindRequest(req, res);
         return;
       }
       final origin = req.headers.value('origin');
@@ -262,6 +286,92 @@ class LanSyncServer {
       try {
         await _sendText(res, HttpStatus.internalServerError, '局域网同步处理失败');
       } catch (_) {}
+    }
+  }
+
+  Future<void> _handleBindRequest(HttpRequest req, HttpResponse res) async {
+    if (req.method == 'GET') {
+      final rawUrl = storage.webdavUrl;
+      final uri = Uri.tryParse(rawUrl);
+      final scheme = uri?.scheme.toLowerCase() ?? '';
+      final isValidWebdav = rawUrl.isNotEmpty &&
+          (scheme == 'http' || scheme == 'https') &&
+          (uri?.host.trim().isNotEmpty ?? false);
+      if (isValidWebdav) {
+        final pass = await storage.readWebdavPassword();
+        final sealed = WebdavBindCrypto.sealJson(bindKey, {
+          'v': 1,
+          'type': 'webdav_bind',
+          'mode': 'config',
+          'url': rawUrl,
+          'username': storage.webdavUser,
+          'password': pass,
+          'auto': storage.webdavAuto,
+          'syncSubs': storage.webdavSyncSubs,
+          'syncHistory': storage.webdavSyncHistory,
+        });
+        await _sendJson(res, HttpStatus.ok, sealed);
+      } else {
+        final sealed = WebdavBindCrypto.sealJson(bindKey, {
+          'v': 1,
+          'type': 'webdav_bind',
+          'mode': 'unconfigured',
+        });
+        await _sendJson(res, HttpStatus.ok, sealed);
+      }
+      return;
+    }
+    if (req.method != 'POST') {
+      await _sendText(res, HttpStatus.methodNotAllowed, '请求方式不支持');
+      return;
+    }
+    if (_busy) {
+      await _sendText(res, HttpStatus.conflict, '正在处理上一次绑定，请稍候重试');
+      return;
+    }
+    _busy = true;
+    try {
+      final bytes = await _readBoundedBody(req, 65536);
+      final reqObj = WebdavBindCrypto.openJson(bindKey, utf8.decode(bytes));
+      if (reqObj['type'] != 'webdav_bind') {
+        throw const FormatException('不支持的绑定载荷类型');
+      }
+      final url = (reqObj['url'] as String? ?? '').trim();
+      final parsed = Uri.tryParse(url);
+      final scheme = parsed?.scheme.toLowerCase() ?? '';
+      if ((scheme != 'http' && scheme != 'https') ||
+          (parsed?.host.trim().isEmpty ?? true)) {
+        throw const FormatException('WebDAV 地址仅支持 HTTP/HTTPS');
+      }
+      final user = (reqObj['username'] as String? ?? '').trim();
+      final pass = reqObj['password'] as String? ?? '';
+      final auto = reqObj['auto'] is bool ? reqObj['auto'] as bool : true;
+      final syncSubs =
+          reqObj['syncSubs'] is bool ? reqObj['syncSubs'] as bool : true;
+      final syncHist =
+          reqObj['syncHistory'] is bool ? reqObj['syncHistory'] as bool : true;
+      await storage.saveWebdavConfig(
+        url: url,
+        user: user,
+        pass: pass,
+        auto: auto,
+        syncSubs: syncSubs,
+        syncHistory: syncHist,
+      );
+      onWebdavBound?.call(url);
+      final ack = WebdavBindCrypto.sealJson(bindKey, {
+        'v': 1,
+        'type': 'webdav_bind_ack',
+        'ok': true,
+        'url': url,
+      });
+      await _sendJson(res, HttpStatus.ok, ack);
+    } on _PayloadTooLargeException {
+      await _sendText(res, HttpStatus.requestEntityTooLarge, '绑定请求超出大小限制');
+    } catch (_) {
+      await _sendText(res, HttpStatus.badRequest, '绑定处理失败');
+    } finally {
+      _busy = false;
     }
   }
 

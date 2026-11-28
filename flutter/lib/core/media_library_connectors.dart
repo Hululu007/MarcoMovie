@@ -212,14 +212,23 @@ class ExternalMediaLibrary {
   }
 
   static Uri _validateHttpBase(String address, String label) {
-    final u = Uri.tryParse(address.trim());
+    var cleaned = address
+        .replaceAll(RegExp(r'[\u200B-\u200D\uFEFF]'), '')
+        .replaceAll('：', ':')
+        .replaceAll('／', '/')
+        .trim();
+    if (cleaned.isNotEmpty &&
+        !RegExp(r'^[a-zA-Z][a-zA-Z0-9+.-]*://').hasMatch(cleaned)) {
+      cleaned = 'http://$cleaned';
+    }
+    final u = Uri.tryParse(cleaned);
     if (u == null ||
         !['http', 'https'].contains(u.scheme.toLowerCase()) ||
         u.host.isEmpty) {
       throw FormatException('请输入有效的 HTTP / HTTPS $label 服务器地址');
     }
     final cleanPath = u.path.replaceFirst(RegExp(r'/+$'), '');
-    return u.replace(path: cleanPath, query: null, fragment: null);
+    return u.replace(scheme: u.scheme.toLowerCase(), path: cleanPath, query: null, fragment: null);
   }
 }
 
@@ -496,7 +505,7 @@ class JellyfinLibrary {
           'UserId': user,
           if (sid.isNotEmpty) 'MediaSourceId': sid,
           'IsPlayback': true,
-          'EnableDirectPlay': false,
+          'EnableDirectPlay': true,
           'EnableDirectStream': true,
           'EnableTranscoding': true,
         },

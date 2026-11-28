@@ -1278,8 +1278,7 @@ final class CloudSyncDialog {
         conn.setRequestProperty("Accept", "application/json");
         try {
             if ("POST".equals(method)) {
-                byte[] bytes =
-                        (jsonBody == null ? "" : jsonBody).getBytes(StandardCharsets.UTF_8);
+                byte[] bytes = (jsonBody == null ? "" : jsonBody).getBytes(StandardCharsets.UTF_8);
                 conn.setDoOutput(true);
                 conn.setFixedLengthStreamingMode(bytes.length);
                 conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
@@ -1369,8 +1368,7 @@ final class CloudSyncDialog {
                             push.put("syncHistory", isSyncHistoryEnabled(a));
                             String reqEnv = WebdavBindCrypto.sealJson(target.key, push);
                             String ackEnv = exchangeLanBindHttp(target.bindUrl, "POST", reqEnv);
-                            org.json.JSONObject ack =
-                                    WebdavBindCrypto.openJson(target.key, ackEnv);
+                            org.json.JSONObject ack = WebdavBindCrypto.openJson(target.key, ackEnv);
                             if (!ack.optBoolean("ok", false)) {
                                 throw new IOException("对方拒绝了 WebDAV 绑定");
                             }
@@ -1388,7 +1386,13 @@ final class CloudSyncDialog {
                                 boolean rSubs = remote.optBoolean("syncSubs", true);
                                 boolean rHist = remote.optBoolean("syncHistory", true);
                                 applyBoundWebdavPrefs(
-                                        a, appCtx, remoteUrl, remoteUser, remotePass, auto, rSubs,
+                                        a,
+                                        appCtx,
+                                        remoteUrl,
+                                        remoteUser,
+                                        remotePass,
+                                        auto,
+                                        rSubs,
                                         rHist);
                                 statusMsg = "已从对方设备导入并绑定 WebDAV";
                                 triggerFollowUpWebdavSync = auto;

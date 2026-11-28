@@ -519,8 +519,7 @@ public final class Tv063Batch3Checks {
         check(
                 "TvSeriesScraper preserves year inside title (请回答1988)",
                 "请回答1988".equals(TvSeriesScraper.cleanWorkTitle("请回答1988")));
-        String danmuQuery =
-                TvSeriesScraper.cleanNetdiskDanmuQuery("凡人修仙传.4K.HDR.高码率", "第01集.mp4");
+        String danmuQuery = TvSeriesScraper.cleanNetdiskDanmuQuery("凡人修仙传.4K.HDR.高码率", "第01集.mp4");
         check(
                 "TvSeriesScraper.cleanNetdiskDanmuQuery strips release noise",
                 danmuQuery != null && danmuQuery.contains("凡人修仙传"));

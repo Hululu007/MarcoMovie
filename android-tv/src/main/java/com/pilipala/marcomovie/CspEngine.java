@@ -33,7 +33,8 @@ public final class CspEngine implements SourceEngine {
     static volatile PluginApplication pluginAppWrapper;
     private static volatile String pendingPluginSubtitlePath = "";
     private static volatile long pendingPluginSubtitleAtMs = 0L;
-    private static final java.util.WeakHashMap<ClassLoader, java.lang.ref.WeakReference<android.app.Activity>>
+    private static final java.util.WeakHashMap<
+                    ClassLoader, java.lang.ref.WeakReference<android.app.Activity>>
             SYNCED_ACTIVITY_BY_LOADER = new java.util.WeakHashMap<>();
 
     static boolean hasGrantedAllFilesAccess() {
@@ -1293,7 +1294,8 @@ public final class CspEngine implements SourceEngine {
                                 signatureUnsupported = true;
                             }
                         }
-                        if ((signatureUnsupported || raw == null) && lastError == null || signatureUnsupported) {
+                        if ((signatureUnsupported || raw == null) && lastError == null
+                                || signatureUnsupported) {
                             try {
                                 String alt = spider.searchContent(keyword, false, "1");
                                 if (alt != null && !alt.trim().isEmpty()) {

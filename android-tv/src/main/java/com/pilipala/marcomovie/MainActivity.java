@@ -1316,9 +1316,8 @@ public final class MainActivity extends Activity {
                                                     CrashReportDialog.maybePromptOnStartup(
                                                             MainActivity.this);
                                                     if (priorBootCrashes < 2) {
-                                                        SourceController
-                                                                .runDailyAutoUpdateIfNeeded(
-                                                                        MainActivity.this, false);
+                                                        SourceController.runDailyAutoUpdateIfNeeded(
+                                                                MainActivity.this, false);
                                                     }
                                                 }
                                             },
