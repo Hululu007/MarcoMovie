@@ -185,13 +185,39 @@ public final class Cms {
                     || lowerApi.contains("sokaka")
                     || lowerApi.contains("seedhub")
                     || lowerApi.contains("pansou")
+                    || lowerApi.contains("pansearch")
                     || lowerApi.contains("s_zps")
                     || lowerApi.contains("ypanso")
                     || lowerApi.contains("bpanso")
                     || lowerApi.contains("yiso")
                     || lowerApi.contains("panta")
                     || lowerApi.contains("mypan")
+                    || lowerApi.contains("quark")
+                    || lowerApi.contains("ucpan")
+                    || lowerApi.contains("alipan")
+                    || lowerApi.contains("pan123")
+                    || lowerApi.contains("panbaidu")
                     || lowerKey.contains("mypan")
+                    || lowerName.contains("盘搜")
+                    || lowerName.contains("搜盘")
+                    || lowerName.contains("夸克")
+                    || lowerName.contains("阿里")
+                    || lowerName.contains("百度")
+                    || lowerName.contains("迅雷")
+                    || lowerName.contains("天翼")
+                    || lowerName.contains("移动云")
+                    || lowerName.contains("115")
+                    || lowerName.contains("123盘")
+                    || lowerName.contains("uc")
+                    || lowerName.contains("玩偶")
+                    || lowerName.contains("木偶")
+                    || lowerName.contains("蜡笔")
+                    || lowerName.contains("至臻")
+                    || lowerName.contains("闪电")
+                    || lowerName.contains("虎斑")
+                    || lowerName.contains("二小")
+                    || lowerName.contains("多多")
+                    || lowerName.contains("欧哥")
                     || lowerName.contains("我的云盘")
                     || lowerName.contains("我的网盘")
                     || lowerName.contains("我的┃网盘")
@@ -338,23 +364,63 @@ public final class Cms {
         public final Map<String, String> headers = new LinkedHashMap<>();
     }
 
+    private static String canonicalImageHeaderName(String raw) {
+        if (raw == null) return "";
+        String t = raw.trim();
+        if ("referer".equalsIgnoreCase(t) || "referrer".equalsIgnoreCase(t)) return "Referer";
+        if ("user-agent".equalsIgnoreCase(t) || "ua".equalsIgnoreCase(t)) return "User-Agent";
+        if ("cookie".equalsIgnoreCase(t)) return "Cookie";
+        if ("origin".equalsIgnoreCase(t)) return "Origin";
+        if ("authorization".equalsIgnoreCase(t)) return "Authorization";
+        return t;
+    }
+
     public static ImageRequest imageRequest(String value) {
         ImageRequest out = new ImageRequest();
-        out.url = value;
+        if (value == null) {
+            out.url = "";
+            return out;
+        }
+        String working = value;
+        // Support TVBox-style @Headers={...} / @Header={...} JSON suffix first
+        java.util.regex.Matcher jsonHdrMatcher =
+                java.util.regex.Pattern.compile("(?i)@headers?=(\\{[^}]*\\})").matcher(working);
+        if (jsonHdrMatcher.find()) {
+            try {
+                JSONObject hdrObj = new JSONObject(jsonHdrMatcher.group(1));
+                Iterator<String> keys = hdrObj.keys();
+                while (keys.hasNext()) {
+                    String k = keys.next();
+                    String ck = canonicalImageHeaderName(k);
+                    String v = hdrObj.optString(k, "").trim();
+                    if (!ck.isEmpty() && !v.isEmpty()) out.headers.put(ck, v);
+                }
+            } catch (Exception ignored) {
+            }
+            working =
+                    working.substring(0, jsonHdrMatcher.start())
+                            + working.substring(jsonHdrMatcher.end());
+        }
+        out.url = working;
         java.util.regex.Matcher m =
-                java.util.regex.Pattern.compile("@(?i:Referer|User-Agent)=").matcher(value);
+                java.util.regex.Pattern.compile(
+                                "(?:@|\\|)(?i:Referer|User-Agent|Cookie|Origin|Authorization)=")
+                        .matcher(working);
         int first = -1;
         String key = null;
         int start = 0;
         while (m.find()) {
             if (first < 0) first = m.start();
-            if (key != null) out.headers.put(key, value.substring(start, m.start()));
-            key = value.substring(m.start() + 1, m.end() - 1);
+            if (key != null) {
+                out.headers.put(
+                        canonicalImageHeaderName(key), working.substring(start, m.start()));
+            }
+            key = working.substring(m.start() + 1, m.end() - 1);
             start = m.end();
         }
         if (key != null) {
-            out.headers.put(key, value.substring(start));
-            out.url = value.substring(0, first);
+            out.headers.put(canonicalImageHeaderName(key), working.substring(start));
+            out.url = working.substring(0, first);
         }
         for (Iterator<Map.Entry<String, String>> it = out.headers.entrySet().iterator();
                 it.hasNext(); ) {
@@ -479,12 +545,37 @@ public final class Cms {
         URL u = new URL(value);
         String host = u.getHost();
         if (!host.startsWith("[")) host = IDN.toASCII(host);
+        String rawFile = u.getFile();
+        StringBuilder safeFile = new StringBuilder(rawFile == null ? 0 : rawFile.length());
+        if (rawFile != null) {
+            for (int i = 0; i < rawFile.length(); ) {
+                int cp = rawFile.codePointAt(i);
+                int cc = Character.charCount(cp);
+                if (cp <= 0x20
+                        || cp >= 0x7f
+                        || cp == '{'
+                        || cp == '}'
+                        || cp == '|'
+                        || cp == '\\'
+                        || cp == '"'
+                        || cp == '^'
+                        || cp == '`') {
+                    byte[] utf8 = new String(Character.toChars(cp)).getBytes("UTF-8");
+                    for (byte b : utf8) {
+                        safeFile.append('%').append(String.format(Locale.ROOT, "%02X", b & 0xff));
+                    }
+                } else {
+                    safeFile.appendCodePoint(cp);
+                }
+                i += cc;
+            }
+        }
         return u.getProtocol()
                 + "://"
                 + (u.getUserInfo() != null ? u.getUserInfo() + "@" : "")
                 + host
                 + (u.getPort() >= 0 ? ":" + u.getPort() : "")
-                + u.getFile()
+                + safeFile
                 + (u.getRef() != null ? "#" + u.getRef() : "");
     }
 
@@ -868,6 +959,36 @@ public final class Cms {
             throw new IOException("配置超过 16 MB 限制");
         }
         String trimmed = text.trim().replaceFirst("^\\uFEFF", "");
+        if (!trimmed.startsWith("{")
+                && !trimmed.startsWith("[")
+                && !trimmed.startsWith("/")
+                && !trimmed.startsWith("<")) {
+            int star = trimmed.lastIndexOf("**");
+            if (star >= 0 && star + 2 < trimmed.length()) {
+                try {
+                    byte[] sub = trimmed.substring(star + 2).getBytes("US-ASCII");
+                    String decoded = decodeBase64Range(sub, 0, sub.length);
+                    if (looksLikeConfigPayload(decoded)) {
+                        text = decoded;
+                        trimmed = text.trim().replaceFirst("^\\uFEFF", "");
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            String compactHex = trimmed.replaceAll("\\s+", "");
+            if (compactHex.startsWith("2423")
+                    && compactHex.length() > 36
+                    && compactHex.length() % 2 == 0) {
+                try {
+                    String decrypted = decryptHexAes(compactHex);
+                    if (looksLikeConfigPayload(decrypted)) {
+                        text = decrypted;
+                        trimmed = text.trim().replaceFirst("^\\uFEFF", "");
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        }
         if (isHtml(trimmed)) {
             throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
         }
@@ -984,7 +1105,7 @@ public final class Cms {
         String taggedOrigin = optSafeString(root, Warehouse.ORIGIN, "").trim();
         if (!taggedOrigin.isEmpty()) origin = taggedOrigin;
         if (sites == null || sites.length() == 0) throw new IOException("配置中没有 sites 来源列表");
-        if (sites.length() > 500) throw new IOException("来源超过 500 个限制");
+        if (sites.length() > 2500) throw new IOException("来源超过 2500 个限制");
         Config out = new Config();
         out.raw = text;
         out.origin = origin == null ? "" : origin;
@@ -1183,12 +1304,8 @@ public final class Cms {
                     escaped = true;
                 } else if (ch == '"') {
                     quoted = false;
-                } else {
-                    int nq = source.indexOf('"', i + 1);
-                    int nb = source.indexOf('\\', i + 1);
-                    int next = nq < 0 ? nb : (nb < 0 ? nq : Math.min(nq, nb));
-                    if (next < 0) return false;
-                    i = next - 1;
+                } else if (ch < 0x20) {
+                    return true;
                 }
                 continue;
             }
@@ -1225,10 +1342,26 @@ public final class Cms {
         for (int i = 0; i < len; i++) {
             char ch = source.charAt(i);
             if (quoted) {
-                clean.append(ch);
-                if (escaped) escaped = false;
-                else if (ch == '\\') escaped = true;
-                else if (ch == '"') quoted = false;
+                if (escaped) {
+                    escaped = false;
+                    clean.append(ch);
+                } else if (ch == '\\') {
+                    escaped = true;
+                    clean.append(ch);
+                } else if (ch == '"') {
+                    quoted = false;
+                    clean.append(ch);
+                } else if (ch == '\n') {
+                    clean.append("\\n");
+                } else if (ch == '\r') {
+                    clean.append("\\r");
+                } else if (ch == '\t') {
+                    clean.append("\\t");
+                } else if (ch < 0x20) {
+                    clean.append(String.format(Locale.ROOT, "\\u%04x", (int) ch));
+                } else {
+                    clean.append(ch);
+                }
                 continue;
             }
             if (ch == '"') {

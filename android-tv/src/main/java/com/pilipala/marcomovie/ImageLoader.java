@@ -86,6 +86,25 @@ final class ImageLoader {
             new java.util.WeakHashMap<>();
     private static final ConcurrentHashMap<String, String> LAST_CACHE_KEY_BY_URL =
             new ConcurrentHashMap<>();
+    private static final java.util.concurrent.ExecutorService DISK_DECODE_POOL =
+            createDiskDecodePool();
+
+    private static java.util.concurrent.ExecutorService createDiskDecodePool() {
+        java.util.concurrent.ThreadPoolExecutor pool =
+                new java.util.concurrent.ThreadPoolExecutor(
+                        2,
+                        2,
+                        20L,
+                        java.util.concurrent.TimeUnit.SECONDS,
+                        new java.util.concurrent.LinkedBlockingQueue<Runnable>(),
+                        r -> {
+                            Thread t = new Thread(r, "artwork-disk");
+                            t.setDaemon(true);
+                            return t;
+                        });
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
+    }
 
     private static void putCachedBitmap(
             MainActivity a, String normalizedUrl, String key, Bitmap bitmap) {
@@ -502,7 +521,8 @@ final class ImageLoader {
         if (a == null || callback == null || address == null || address.isEmpty()) return;
         if (isScopeCancelled(scopeToken) || (ticket != 0 && ticket != a.generation)) return;
         final String normalized = normalizeArtworkAddress(address);
-        if (!Cms.isHttp(normalized)
+        String baseAddr = Cms.imageRequest(normalized).url;
+        if (!Cms.isHttp(baseAddr)
                 && !normalized.startsWith("catpaw://")
                 && !isLocalArtworkAddress(normalized)) {
             return;
@@ -543,9 +563,13 @@ final class ImageLoader {
             owned.waiters.add(selfWaiter);
             IN_FLIGHT.put(key, owned);
         }
+        final boolean preferDiskPool =
+                isLocalArtworkAddress(normalized) || hasFreshDiskCachedPoster(a, normalized, false);
+        java.util.concurrent.ExecutorService targetPool =
+                preferDiskPool ? DISK_DECODE_POOL : a.artwork;
         Future<?> request =
                 RequestScope.submit(
-                        a.artwork,
+                        targetPool,
                         () -> {
                             if (!hasActiveWaiters(key, owned, a.generation)) return;
                             try {
@@ -670,7 +694,8 @@ final class ImageLoader {
         image.setTag(TAG_SCOPE_TOKEN, Integer.valueOf(scopeToken));
         image.setTag(TAG_INFLIGHT_KEY, null);
         if (isScopeCancelled(scopeToken)) return;
-        if (!Cms.isHttp(normalized)
+        String baseAddr = Cms.imageRequest(normalized).url;
+        if (!Cms.isHttp(baseAddr)
                 && !normalized.startsWith("catpaw://")
                 && !isLocalArtworkAddress(normalized)) {
             image.setImageDrawable(null);
@@ -801,9 +826,13 @@ final class ImageLoader {
             owned.waiters.add(selfWaiter);
             IN_FLIGHT.put(key, owned);
         }
+        final boolean preferDiskPool =
+                isLocalArtworkAddress(address) || hasFreshDiskCachedPoster(a, address, detail);
+        java.util.concurrent.ExecutorService targetPool =
+                preferDiskPool ? DISK_DECODE_POOL : a.artwork;
         Future<?> request =
                 RequestScope.submit(
-                        a.artwork,
+                        targetPool,
                         () -> {
                             if (ticket != a.generation
                                     || !hasActiveWaiters(key, owned, a.generation)) {
@@ -935,15 +964,44 @@ final class ImageLoader {
         }
     }
 
-    private static byte[] readDiskCachedPoster(MainActivity a, String url) {
+    static boolean hasFreshDiskCachedPoster(MainActivity a, String address, boolean detail) {
+        if (a == null || address == null || address.isEmpty()) return false;
+        try {
+            Cms.ImageRequest source = Cms.imageRequest(address);
+            String resolvedUrl = Cms.normalizeHttp(source.url);
+            if (resolvedUrl == null || resolvedUrl.isEmpty() || resolvedUrl.startsWith("catpaw://")) {
+                return false;
+            }
+            String targetUrl = upgradePosterUrl(resolvedUrl, detail);
+            if (isDiskFileFresh(diskCacheFile(a, targetUrl))) return true;
+            if (!targetUrl.equals(resolvedUrl) && isDiskFileFresh(diskCacheFile(a, resolvedUrl))) {
+                return true;
+            }
+            if (detail) {
+                String nonDetail = upgradePosterUrl(resolvedUrl, false);
+                if (!nonDetail.equals(targetUrl)
+                        && !nonDetail.equals(resolvedUrl)
+                        && isDiskFileFresh(diskCacheFile(a, nonDetail))) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static boolean isDiskFileFresh(File f) {
+        if (f == null || !f.isFile()) return false;
+        long len = f.length();
+        if (len <= 128 || len > 8 * 1024 * 1024) return false;
+        return System.currentTimeMillis() - f.lastModified() <= 7L * 24 * 3600 * 1000L;
+    }
+
+    static byte[] readDiskCachedPoster(MainActivity a, String url) {
         try {
             File f = diskCacheFile(a, url);
-            if (f == null || !f.isFile()) return null;
+            if (!isDiskFileFresh(f)) return null;
             long len = f.length();
-            if (len <= 128 || len > 8 * 1024 * 1024) return null;
-            if (System.currentTimeMillis() - f.lastModified() > 7L * 24 * 3600 * 1000L) {
-                return null;
-            }
             byte[] buf = new byte[(int) len];
             try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {
                 int off = 0;
@@ -975,7 +1033,48 @@ final class ImageLoader {
         if (raw == null) return "";
         String trimmed = raw.trim();
         if (trimmed.startsWith("//")) return "https:" + trimmed;
+        if (trimmed.startsWith("proxy://")
+                || trimmed.startsWith("http://127.0.0.1:")
+                || trimmed.startsWith("http://localhost:")) {
+            Cms.ImageRequest req = Cms.imageRequest(trimmed);
+            String rewritten = LocalProxy.rewrite(req.url);
+            if (!rewritten.equals(req.url) && req.url.length() < trimmed.length()) {
+                return rewritten + trimmed.substring(req.url.length());
+            }
+            return rewritten;
+        }
         return trimmed;
+    }
+
+    private static String headerValueIgnoreCase(Map<String, String> headers, String target) {
+        if (headers == null || target == null) return null;
+        for (Map.Entry<String, String> e : headers.entrySet()) {
+            if (e.getKey() != null && target.equalsIgnoreCase(e.getKey())) {
+                return e.getValue();
+            }
+        }
+        return null;
+    }
+
+    private static boolean hasHeaderIgnoreCase(Map<String, String> headers, String target) {
+        String val = headerValueIgnoreCase(headers, target);
+        return val != null && !val.trim().isEmpty();
+    }
+
+    private static boolean isDecodablePosterBytes(byte[] bytes) {
+        if (bytes == null || bytes.length <= 128) return false;
+        BitmapFactory.Options opts = new BitmapFactory.Options();
+        opts.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.length, opts);
+        return opts.outWidth > 0 && opts.outHeight > 0;
+    }
+
+    private static void deleteDiskCachedPosterQuietly(MainActivity a, String url) {
+        try {
+            File f = diskCacheFile(a, url);
+            if (f != null && f.exists()) f.delete();
+        } catch (Throwable ignored) {
+        }
     }
 
     private static final String BROWSER_IMAGE_UA =
@@ -996,76 +1095,105 @@ final class ImageLoader {
                         : new String[] {targetUrl, resolvedUrl};
         Exception lastError = null;
         java.util.HashSet<String> tried = new java.util.HashSet<>();
-        boolean hasCustomUa = source.headers.containsKey("User-Agent");
+        String customUa = headerValueIgnoreCase(source.headers, "User-Agent");
+        boolean hasCustomUa = customUa != null && !customUa.trim().isEmpty();
+        boolean hasExplicitReferer = hasHeaderIgnoreCase(source.headers, "Referer");
         String[] userAgents =
                 hasCustomUa
-                        ? new String[] {source.headers.get("User-Agent")}
+                        ? new String[] {customUa}
                         : new String[] {BROWSER_IMAGE_UA, Cms.USER_AGENT};
         for (String candidate : candidates) {
             if (candidate == null || candidate.isEmpty() || !tried.add(candidate)) continue;
             byte[] cached = readDiskCachedPoster(a, candidate);
-            if (cached != null) return cached;
+            if (cached != null) {
+                if (isDecodablePosterBytes(cached)) return cached;
+                deleteDiskCachedPosterQuietly(a, candidate);
+            }
             for (String ua : userAgents) {
-                HttpURLConnection connection = null;
-                try {
-                    String currentUrl = candidate;
-                    for (int hop = 0; hop < 4; hop++) {
+                for (int refererMode = 0; refererMode < (hasExplicitReferer ? 1 : 2); refererMode++) {
+                    HttpURLConnection connection = null;
+                    try {
+                        String currentUrl = candidate;
+                        int lastCode = 0;
+                        for (int hop = 0; hop < 4; hop++) {
+                            if (connection != null) {
+                                RequestScope.detach(connection);
+                                connection.disconnect();
+                            }
+                            connection = ProxyAddress.openHttpConnection(new URL(currentUrl));
+                            connection.setInstanceFollowRedirects(false);
+                            Map<String, String> mergedHeaders =
+                                    ProxyAddress.requestHeaders(currentUrl, source.headers);
+                            for (Map.Entry<String, String> header : mergedHeaders.entrySet()) {
+                                connection.setRequestProperty(header.getKey(), header.getValue());
+                            }
+                            connection.setRequestProperty(
+                                    "Accept", "image/webp,image/png,image/jpeg,*/*;q=0.8");
+                            String fragment = new URL(currentUrl).getRef();
+                            if (fragment != null && fragment.startsWith("mm-emby=")) {
+                                com.pilipala.emby.EmbyLibrary library =
+                                        com.pilipala.emby.EmbyAccounts.open(
+                                                a, "emby://account/" + fragment.substring(8));
+                                for (Map.Entry<String, String> h :
+                                        library.imageHeaders(currentUrl).entrySet())
+                                    connection.setRequestProperty(h.getKey(), h.getValue());
+                            }
+                            if (refererMode == 0) {
+                                applyArtworkHeaders(connection, currentUrl, mergedHeaders);
+                            } else if (!hasExplicitReferer) {
+                                URL u = new URL(currentUrl);
+                                connection.setRequestProperty(
+                                        "Referer", u.getProtocol() + "://" + u.getHost() + "/");
+                            }
+                            connection.setConnectTimeout(4500);
+                            connection.setReadTimeout(5500);
+                            if (!hasCustomUa && ua != null) {
+                                connection.setRequestProperty("User-Agent", ua);
+                            }
+                            RequestScope.attach(connection);
+                            lastCode = connection.getResponseCode();
+                            if (lastCode >= 300 && lastCode < 400 && lastCode != 304) {
+                                String loc = connection.getHeaderField("Location");
+                                if (loc == null || loc.trim().isEmpty()) break;
+                                currentUrl =
+                                        Cms.normalizeHttp(
+                                                new URL(new URL(currentUrl), loc.trim())
+                                                        .toString());
+                                continue;
+                            }
+                            break;
+                        }
+                        if (connection == null) continue;
+                        if (lastCode == 403 && !hasExplicitReferer && refererMode == 0) {
+                            continue;
+                        }
+                        if (lastCode < 200 || lastCode >= 300) {
+                            lastError = new Cms.HttpStatusException(lastCode);
+                            continue;
+                        }
+                        try (InputStream in = connection.getInputStream()) {
+                            ByteArrayOutputStream out = new ByteArrayOutputStream();
+                            byte[] buffer = new byte[8192];
+                            int n;
+                            while ((n = in.read(buffer)) != -1) {
+                                RequestScope.current().check();
+                                if (out.size() + n > (detail ? 8 : 3) * 1024 * 1024)
+                                    throw new IOException("Poster too large");
+                                out.write(buffer, 0, n);
+                            }
+                            byte[] bytes = out.toByteArray();
+                            if (isDecodablePosterBytes(bytes)) {
+                                writeDiskCachedPoster(a, candidate, bytes);
+                                return bytes;
+                            }
+                        }
+                    } catch (Exception e) {
+                        lastError = e;
+                    } finally {
                         if (connection != null) {
                             RequestScope.detach(connection);
                             connection.disconnect();
                         }
-                        connection = ProxyAddress.openHttpConnection(new URL(currentUrl));
-                        connection.setInstanceFollowRedirects(false);
-                        for (Map.Entry<String, String> header : source.headers.entrySet())
-                            connection.setRequestProperty(header.getKey(), header.getValue());
-                        String fragment = new URL(currentUrl).getRef();
-                        if (fragment != null && fragment.startsWith("mm-emby=")) {
-                            com.pilipala.emby.EmbyLibrary library =
-                                    com.pilipala.emby.EmbyAccounts.open(
-                                            a, "emby://account/" + fragment.substring(8));
-                            for (Map.Entry<String, String> h :
-                                    library.imageHeaders(currentUrl).entrySet())
-                                connection.setRequestProperty(h.getKey(), h.getValue());
-                        }
-                        applyArtworkHeaders(connection, currentUrl, source.headers);
-                        connection.setConnectTimeout(4500);
-                        connection.setReadTimeout(5500);
-                        if (!hasCustomUa && ua != null) {
-                            connection.setRequestProperty("User-Agent", ua);
-                        }
-                        RequestScope.attach(connection);
-                        int code = connection.getResponseCode();
-                        if (code >= 300 && code < 400 && code != 304) {
-                            String loc = connection.getHeaderField("Location");
-                            if (loc == null || loc.trim().isEmpty()) break;
-                            currentUrl = new URL(new URL(currentUrl), loc.trim()).toString();
-                            continue;
-                        }
-                        break;
-                    }
-                    if (connection == null) continue;
-                    try (InputStream in = connection.getInputStream()) {
-                        ByteArrayOutputStream out = new ByteArrayOutputStream();
-                        byte[] buffer = new byte[8192];
-                        int n;
-                        while ((n = in.read(buffer)) != -1) {
-                            RequestScope.current().check();
-                            if (out.size() + n > (detail ? 8 : 3) * 1024 * 1024)
-                                throw new IOException("Poster too large");
-                            out.write(buffer, 0, n);
-                        }
-                        byte[] bytes = out.toByteArray();
-                        if (bytes.length > 128) {
-                            writeDiskCachedPoster(a, candidate, bytes);
-                            return bytes;
-                        }
-                    }
-                } catch (Exception e) {
-                    lastError = e;
-                } finally {
-                    if (connection != null) {
-                        RequestScope.detach(connection);
-                        connection.disconnect();
                     }
                 }
             }
@@ -1078,13 +1206,16 @@ final class ImageLoader {
         if (rawUrl == null || rawUrl.isEmpty()) return "";
         String url = rawUrl;
         if (url.contains("doubanio.com")) {
-            url =
-                    url.replaceAll(
-                            "https?://(?:img[4-9]|qnmob\\d*-sign)\\.doubanio\\.com/",
-                            "https://img1.doubanio.com/");
-            int qIdx = url.indexOf('?');
-            if (qIdx > 0 && url.substring(0, qIdx).endsWith(".jpg")) {
-                url = url.substring(0, qIdx);
+            boolean signedDouban = url.contains("qnmob") && url.contains("-sign.doubanio.com");
+            if (!signedDouban) {
+                url =
+                        url.replaceAll(
+                                "https?://img[4-8]\\.doubanio\\.com/",
+                                "https://img1.doubanio.com/");
+                int qIdx = url.indexOf('?');
+                if (qIdx > 0 && url.substring(0, qIdx).endsWith(".jpg")) {
+                    url = url.substring(0, qIdx);
+                }
             }
             if (detail) {
                 url =
@@ -1137,7 +1268,7 @@ final class ImageLoader {
 
     static void applyArtworkHeaders(
             HttpURLConnection connection, String url, Map<String, String> existing) {
-        if (existing != null && existing.containsKey("Referer")) return;
+        if (hasHeaderIgnoreCase(existing, "Referer")) return;
         String lower = url.toLowerCase(Locale.ROOT);
         if (lower.contains("doubanio.com") || lower.contains("douban.com")) {
             connection.setRequestProperty("Referer", "https://movie.douban.com/");
@@ -1153,6 +1284,19 @@ final class ImageLoader {
             connection.setRequestProperty("Referer", "https://cn.bing.com/");
         } else if (lower.contains("qpic.cn") || lower.contains("gtimg.cn")) {
             connection.setRequestProperty("Referer", "https://v.qq.com/");
+        } else if (lower.contains("ykimg.com")
+                || lower.contains("alicdn.com")
+                || lower.contains("iqiyipic.com")
+                || lower.contains("qiyipic.com")
+                || lower.contains("mgtv.com")
+                || lower.contains("hitv.com")) {
+            try {
+                String urlHost = connection.getURL() != null ? connection.getURL().getHost() : "";
+                if (urlHost != null && !urlHost.trim().isEmpty()) {
+                    connection.setRequestProperty("Referer", "https://" + urlHost + "/");
+                }
+            } catch (Exception ignored) {
+            }
         } else if (lower.contains("sinaimg.cn")) {
             connection.setRequestProperty("Referer", "https://weibo.com/");
         }

@@ -16,6 +16,7 @@ import { asset } from '@kit.AssetStoreKit';
 import { fileIo as fs, picker } from '@kit.CoreFileKit';
 import { window } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
+import { scanBarcode, scanCore } from '@kit.ScanKit';
 import {
   concatByteChunks,
   extractMethodArg,
@@ -379,6 +380,10 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
         case 'setPreferredOrientation': {
           const mode: string = String(this.getArg(call, 'mode') ?? 'auto');
           result.success(await this.handleSetPreferredOrientation(mode));
+          return;
+        }
+        case 'scanQrCode': {
+          result.success(await this.handleScanQrCode());
           return;
         }
         default: {
@@ -890,6 +895,28 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
     }
     await win.setPreferredOrientation(orientation);
     return true;
+  }
+
+  private async handleScanQrCode(): Promise<string> {
+    if (this.abilityContext === null) {
+      return '';
+    }
+    try {
+      if (!canIUse('SystemCapability.Multimedia.Scan.ScanBarcode')) {
+        return '';
+      }
+      const options: scanBarcode.ScanOptions = {
+        scanTypes: [scanCore.ScanType.ALL],
+        enableMultiMode: false,
+        enableAlbum: true
+      };
+      const scanResult: scanBarcode.ScanResult =
+        await scanBarcode.startScanForResult(this.abilityContext, options);
+      const val: string = (scanResult?.originalValue ?? '').trim();
+      return val;
+    } catch (_err) {
+      return '';
+    }
   }
 }
 

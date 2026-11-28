@@ -62,6 +62,12 @@ public final class NativePythonEngine implements SourceEngine {
     public static boolean eligible(Cms.Site s) {
         if (s == null || s.type != 3) return false;
         if ("csp_LocalPython".equals(s.api) && s.ext instanceof String) return true;
+        if (s.api != null
+                && s.api.startsWith("py_")
+                && s.ext instanceof String) {
+            String cleanExt = ((String) s.ext).trim().split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
+            if (cleanExt.endsWith(".py")) return true;
+        }
         if (s.api != null && (Cms.isHttp(s.api) || s.api.startsWith("file://"))) {
             String clean = s.api.split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
             if (clean.endsWith(".py")) return true;
@@ -225,7 +231,17 @@ public final class NativePythonEngine implements SourceEngine {
     }
 
     private static String materializeScript(Application app, Cms.Site s) throws Exception {
-        if ("csp_LocalPython".equals(s.api) && s.ext instanceof String) {
+        boolean pyAliasWithExtScript =
+                s.api != null
+                        && s.api.startsWith("py_")
+                        && s.ext instanceof String
+                        && ((String) s.ext)
+                                .trim()
+                                .split("[?#]", 2)[0]
+                                .toLowerCase(Locale.ROOT)
+                                .endsWith(".py");
+        if (("csp_LocalPython".equals(s.api) || pyAliasWithExtScript)
+                && s.ext instanceof String) {
             String extPath = ((String) s.ext).trim();
             if (extPath.startsWith("file://")) {
                 extPath = extPath.substring("file://".length());

@@ -131,11 +131,14 @@ final class TvSeriesScrapeDialog {
                 .append(episodes.size())
                 .append(" 项（识别正片 ")
                 .append(scraped.regularCount)
-                .append(" 集");
+                .append(scraped.isVarietyLine ? " 期" : " 集");
         if (scraped.specialCount > 0) {
             msg.append("，特辑/预告 ").append(scraped.specialCount).append(" 项");
         }
         msg.append("）");
+        if (scraped.isVarietyLine) {
+            msg.append(" · 综艺/分期模式");
+        }
         if (scraped.sourceOrderScrambled) {
             msg.append(" · 检测到片源乱序");
         }
@@ -161,6 +164,8 @@ final class TvSeriesScrapeDialog {
             "🔍 搜索并重新刮削剧集（豆瓣 / Bangumi）",
             "🔢 集数整体偏移校正 · 当前：" + offsetText,
             "↕ 按刮削集数智能排序 · 当前：" + (effectiveSort ? "已开启" : "已关闭"),
+            "🏷 选集标题显示 · 当前："
+                    + (record.preferRawEpisodeNames ? "原始清理名（不改写集号）" : "自动刮削精简名"),
             "🎬 隐藏预告 / 花絮 / SP 特辑 · 当前：" + (record.hideSpecials ? "已隐藏" : "全部显示"),
             "✏️ 手动校正单集集号"
                     + (record.episodeNumberOverrides.isEmpty()
@@ -191,17 +196,25 @@ final class TvSeriesScrapeDialog {
                                                 : "已切换为片源原始顺序");
                                 if (onUpdated != null) onUpdated.run();
                             } else if (which == 3) {
+                                record.preferRawEpisodeNames = !record.preferRawEpisodeNames;
+                                SeriesScrapeStore.save(a, siteKey, videoId, rawTitle, record);
+                                a.toast(
+                                        record.preferRawEpisodeNames
+                                                ? "已切换为原始清理名显示（适合复杂综艺/合集）"
+                                                : "已恢复自动刮削精简名显示");
+                                if (onUpdated != null) onUpdated.run();
+                            } else if (which == 4) {
                                 record.hideSpecials = !record.hideSpecials;
                                 SeriesScrapeStore.save(a, siteKey, videoId, rawTitle, record);
                                 a.toast(record.hideSpecials ? "已隐藏预告与特辑" : "已恢复显示全部条目");
                                 if (onUpdated != null) onUpdated.run();
-                            } else if (which == 4) {
+                            } else if (which == 5) {
                                 showEpisodeManualCorrectList(
                                         a, siteKey, videoId, rawTitle, line, record, onUpdated);
-                            } else if (which == 5) {
+                            } else if (which == 6) {
                                 showDanmuAnimeBinder(
                                         a, siteKey, videoId, rawTitle, record, onUpdated);
-                            } else if (which == 6) {
+                            } else if (which == 7) {
                                 SeriesScrapeStore.remove(a, siteKey, videoId, rawTitle);
                                 a.toast("已清除本剧刮削覆盖，恢复自动识别");
                                 if (onUpdated != null) onUpdated.run();
@@ -651,7 +664,51 @@ final class TvSeriesScrapeDialog {
         if (clean.isEmpty()) return merged;
         merged.addAll(searchDouban(clean));
         merged.addAll(searchBangumi(clean));
+        final String targetYear = extractOptionalYear(query);
+        if (merged.size() > 1) {
+            java.util.Collections.sort(
+                    merged,
+                    (a, b) -> {
+                        int sa =
+                                TvSeriesScraper.scoreMetadataCandidate(
+                                        query,
+                                        targetYear,
+                                        true,
+                                        0,
+                                        a.title,
+                                        a.year,
+                                        a.kind,
+                                        a.totalEpisodes,
+                                        a.posterUrl,
+                                        a.score);
+                        int sb =
+                                TvSeriesScraper.scoreMetadataCandidate(
+                                        query,
+                                        targetYear,
+                                        true,
+                                        0,
+                                        b.title,
+                                        b.year,
+                                        b.kind,
+                                        b.totalEpisodes,
+                                        b.posterUrl,
+                                        b.score);
+                        return Integer.compare(sb, sa);
+                    });
+        }
         return merged;
+    }
+
+    private static String extractOptionalYear(String raw) {
+        if (raw == null) return "";
+        java.util.regex.Matcher m =
+                java.util.regex.Pattern.compile("(?<![0-9])(19[4-9]\\d|20[0-3]\\d)(?![0-9])")
+                        .matcher(raw);
+        String found = "";
+        while (m.find()) {
+            found = m.group(1);
+        }
+        return found;
     }
 
     private static List<MediaCandidate> searchDouban(String query) {

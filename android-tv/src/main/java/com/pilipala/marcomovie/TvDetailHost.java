@@ -166,9 +166,35 @@ final class TvDetailHost {
         return aliasMatch;
     }
 
+    private static boolean isGenericPlaceholderVodId(String id) {
+        if (id == null) return true;
+        String trimmed = id.trim();
+        return trimmed.isEmpty() || "0".equals(trimmed) || "1".equals(trimmed);
+    }
+
+    private static boolean looksLikeNetdiskShareId(String id) {
+        if (id == null) return false;
+        String lower = id.trim().toLowerCase(java.util.Locale.ROOT);
+        return lower.startsWith("push://")
+                || lower.contains("pan.quark.cn")
+                || lower.contains("aliyundrive.com")
+                || lower.contains("alipan.com")
+                || lower.contains("pan.baidu.com")
+                || lower.contains("uc.cn")
+                || lower.contains("cloud.189.cn")
+                || lower.contains("123pan.com")
+                || lower.contains("pan.xunlei.com");
+    }
+
     private static void mergeListingFallback(Cms.Video target, Cms.Video fallback) {
         if (target == null || fallback == null) return;
-        if (target.id == null || target.id.trim().isEmpty()) target.id = fallback.id;
+        String fallbackId = fallback.id == null ? "" : fallback.id.trim();
+        if (!fallbackId.isEmpty()
+                && (isGenericPlaceholderVodId(target.id)
+                        || (looksLikeNetdiskShareId(fallbackId)
+                                && !looksLikeNetdiskShareId(target.id)))) {
+            target.id = fallbackId;
+        }
         if (target.title == null || target.title.isEmpty()) target.title = fallback.title;
         if (target.poster == null || target.poster.isEmpty()) target.poster = fallback.poster;
         if (target.year == null || target.year.isEmpty()) target.year = fallback.year;

@@ -29,8 +29,8 @@ final class SubscriptionManager {
     static final long AUTO_UPDATE_INTERVAL_MS = 24L * 60L * 60L * 1000L;
     static final String META_MULTI_SOURCES = "_marco_multi_sources";
     static final String MULTI_ORIGIN_PREFIX = "marco-multi://";
-    static final int MAX_BATCH_SOURCES = 16;
-    static final int MAX_MERGED_SITES = 500;
+    static final int MAX_BATCH_SOURCES = 64;
+    static final int MAX_MERGED_SITES = 2500;
     static final int MAX_TRANSFER_LENGTH = 16384;
 
     private static final Set<String> GENERIC_HOSTS;

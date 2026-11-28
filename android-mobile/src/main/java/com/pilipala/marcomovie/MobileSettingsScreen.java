@@ -2041,7 +2041,19 @@ final class MobileSettingsScreen {
                                                 CloudSyncDialog.showLanConnectDialog(
                                                         a,
                                                         () -> reloadPreservingScroll(shell, sv))),
-                                "ms-lan-sync")));
+                                "ms-lan-sync"),
+                        tagged(
+                                MobileSectionGroup.navRow(
+                                        a,
+                                        MobileIcons.IC_TV_LINK,
+                                        TINT_TEAL,
+                                        "扫码绑定电视 / 电脑 WebDAV",
+                                        "一扫互通同步",
+                                        () ->
+                                                CloudSyncDialog.startScanToBindPeer(
+                                                        a,
+                                                        () -> reloadPreservingScroll(shell, sv))),
+                                "ms-lan-scan-bind")));
 
         // Section ②: 电视端互联
         addSection(

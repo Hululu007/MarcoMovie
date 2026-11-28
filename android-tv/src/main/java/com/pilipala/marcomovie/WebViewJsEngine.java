@@ -233,6 +233,39 @@ public final class WebViewJsEngine implements SourceEngine {
         }
 
         @Override
+        public android.webkit.WebResourceResponse shouldInterceptRequest(
+                WebView view, android.webkit.WebResourceRequest request) {
+            String reqUrl =
+                    Build.VERSION.SDK_INT >= 21 && request != null && request.getUrl() != null
+                            ? request.getUrl().toString()
+                            : "";
+            if (reqUrl.startsWith("https://localhost/__lib/")) {
+                String name = reqUrl.substring("https://localhost/__lib/".length());
+                String assetPath = null;
+                if ("cat-lib.mjs".equals(name) || "cat.js".equals(name)) {
+                    assetPath = "js-host/cat-lib.mjs";
+                } else if ("catvod.mjs".equals(name)) {
+                    assetPath = "js-host/catvod.mjs";
+                } else if ("cheerio-bridge.mjs".equals(name)) {
+                    assetPath = "js-host/cheerio-bridge.mjs";
+                } else if ("http-shim.mjs".equals(name)) {
+                    assetPath = "js-host/http-shim.mjs";
+                }
+                if (assetPath != null) {
+                    try {
+                        InputStream in = app.getAssets().open(assetPath);
+                        java.util.Map<String, String> hdrs = new java.util.HashMap<>();
+                        hdrs.put("Access-Control-Allow-Origin", "*");
+                        return new android.webkit.WebResourceResponse(
+                                "text/javascript", "utf-8", 200, "OK", hdrs, in);
+                    } catch (IOException ignored) {
+                    }
+                }
+            }
+            return super.shouldInterceptRequest(view, request);
+        }
+
+        @Override
         public void onPageFinished(WebView view, String url) {
             if (ready.isDone()) return;
             if (Build.VERSION.SDK_INT >= 19) {

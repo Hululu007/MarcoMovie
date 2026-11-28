@@ -1111,16 +1111,40 @@ public final class JsEngine implements SourceEngine {
             if (!Base64.encodeToString(body, Base64.NO_WRAP).equals(encoded))
                 throw new IOException("脚本二进制请求体 Base64 无效");
         } else if (payload instanceof JSONObject) {
-            StringBuilder form = new StringBuilder();
-            Iterator<String> keys = ((JSONObject) payload).keys();
-            while (keys.hasNext()) {
-                String key = keys.next();
-                if (form.length() > 0) form.append('&');
-                form.append(URLEncoder.encode(key, "UTF-8"))
-                        .append('=')
-                        .append(URLEncoder.encode(((JSONObject) payload).optString(key), "UTF-8"));
+            String postType = opts.optString("postType", "").trim().toLowerCase(Locale.ROOT);
+            String explicitContentType = "";
+            if (inputHeaders != null) {
+                Iterator<String> hKeys = inputHeaders.keys();
+                while (hKeys.hasNext()) {
+                    String hk = hKeys.next();
+                    if ("content-type".equalsIgnoreCase(hk)) {
+                        explicitContentType = inputHeaders.optString(hk, "").toLowerCase(Locale.ROOT);
+                        break;
+                    }
+                }
             }
-            body = form.toString().getBytes("UTF-8");
+            boolean sendAsForm =
+                    "form".equals(postType)
+                            || "form-data".equals(postType)
+                            || explicitContentType.contains("application/x-www-form-urlencoded");
+            if (sendAsForm) {
+                StringBuilder form = new StringBuilder();
+                Iterator<String> keys = ((JSONObject) payload).keys();
+                while (keys.hasNext()) {
+                    String key = keys.next();
+                    if (form.length() > 0) form.append('&');
+                    form.append(URLEncoder.encode(key, "UTF-8"))
+                            .append('=')
+                            .append(URLEncoder.encode(((JSONObject) payload).optString(key), "UTF-8"));
+                }
+                body = form.toString().getBytes("UTF-8");
+            } else {
+                body = payload.toString().getBytes("UTF-8");
+                if (explicitContentType.isEmpty()) {
+                    if (inputHeaders == null) inputHeaders = new JSONObject();
+                    inputHeaders.put("Content-Type", "application/json; charset=UTF-8");
+                }
+            }
         } else if (payload != null && payload != JSONObject.NULL)
             body = String.valueOf(payload).getBytes("UTF-8");
         if (body != null && body.length > maxRequestBytes) throw new IOException("脚本请求体过大");
@@ -1307,17 +1331,41 @@ public final class JsEngine implements SourceEngine {
     }
 
     private static String html(String source, String expression, String kind) throws Exception {
-        String[] parts = expression.split("&&");
-        Elements elements = new Elements(Jsoup.parse(source));
-        boolean many = kind.equals("many");
+        boolean many = "many".equals(kind);
+        if (expression == null || expression.trim().isEmpty()) {
+            return many ? "[]" : "";
+        }
+        org.jsoup.nodes.Document doc = Jsoup.parse(source == null ? "" : source);
+        String[] alternatives = expression.split("\\|\\|");
+        for (String alt : alternatives) {
+            String expr = alt == null ? "" : alt.trim();
+            if (expr.isEmpty()) continue;
+            try {
+                String res = evalSingleHtmlExpr(doc, expr, many);
+                if (many) {
+                    if (res != null && !"[]".equals(res)) return res;
+                } else {
+                    if (res != null && !res.isEmpty()) return res;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return many ? "[]" : "";
+    }
+
+    private static String evalSingleHtmlExpr(
+            org.jsoup.nodes.Document doc, String expr, boolean many) throws Exception {
+        String[] parts = expr.split("&&");
+        Elements elements = new Elements(doc);
         int end = many ? parts.length : Math.max(0, parts.length - 1);
         for (int i = 0; i < end; i++) {
-            String selector = parts[i].trim();
-            if (selector.isEmpty()) continue;
-            Elements next = new Elements();
-            for (Element element : elements) next.addAll(element.select(selector));
-            elements = next;
-            if (!many && elements.size() > 1) elements = new Elements(elements.first());
+            String rawStep = parts[i].trim();
+            if (rawStep.isEmpty()) continue;
+            elements = selectStepWithExclusionsAndEq(elements, rawStep);
+            if (elements.isEmpty()) break;
+            if (!many && elements.size() > 1) {
+                elements = new Elements(elements.first());
+            }
         }
         if (many) {
             JSONArray a = new JSONArray();
@@ -1327,9 +1375,110 @@ public final class JsEngine implements SourceEngine {
         if (elements.isEmpty()) return "";
         Element first = elements.first();
         String attribute = parts.length == 0 ? "Text" : parts[parts.length - 1].trim();
-        if (attribute.equalsIgnoreCase("Text")) return first.text();
-        if (attribute.equalsIgnoreCase("Html")) return first.html();
-        return first.attr(attribute);
+        String regex = null;
+        if (parts.length >= 3) {
+            String last = parts[parts.length - 1].trim();
+            String prev = parts[parts.length - 2].trim();
+            if (!last.isEmpty()
+                    && !prev.isEmpty()
+                    && (last.contains("(")
+                            || last.contains("\\")
+                            || last.startsWith("/")
+                            || last.contains(".*")
+                            || last.contains("+"))) {
+                // Re-evaluate up to parts.length - 2 as selector chain and treat last as regex
+                Elements reSel = new Elements(doc);
+                for (int i = 0; i < parts.length - 2; i++) {
+                    String s = parts[i].trim();
+                    if (s.isEmpty()) continue;
+                    reSel = selectStepWithExclusionsAndEq(reSel, s);
+                    if (reSel.isEmpty()) break;
+                    if (reSel.size() > 1) reSel = new Elements(reSel.first());
+                }
+                if (reSel.isEmpty()) return "";
+                first = reSel.first();
+                attribute = prev;
+                regex = last;
+            }
+        }
+        String extracted;
+        if (attribute.equalsIgnoreCase("Text")) extracted = first.text();
+        else if (attribute.equalsIgnoreCase("Html")) extracted = first.html();
+        else extracted = first.attr(attribute);
+        if (regex != null && !extracted.isEmpty()) {
+            try {
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile(regex).matcher(extracted);
+                if (m.find()) {
+                    extracted = m.groupCount() >= 1 ? m.group(1) : m.group(0);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return extracted == null ? "" : extracted;
+    }
+
+    private static Elements selectStepWithExclusionsAndEq(Elements roots, String rawStep) {
+        String[] exclSplit = rawStep.split("--");
+        String mainSel = exclSplit[0].trim();
+        Elements selected = new Elements();
+        if (mainSel.isEmpty()) {
+            selected.addAll(roots);
+        } else if (mainSel.contains(":eq(")) {
+            selected = selectWithEqTokens(roots, mainSel);
+        } else {
+            for (Element root : roots) {
+                selected.addAll(root.select(mainSel));
+            }
+        }
+        if (exclSplit.length <= 1 || selected.isEmpty()) {
+            return selected;
+        }
+        Elements cleaned = new Elements();
+        for (Element el : selected) {
+            Element clone = el.clone();
+            for (int e = 1; e < exclSplit.length; e++) {
+                String ex = exclSplit[e].trim();
+                if (!ex.isEmpty()) {
+                    try {
+                        clone.select(ex).remove();
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+            cleaned.add(clone);
+        }
+        return cleaned;
+    }
+
+    private static Elements selectWithEqTokens(Elements roots, String mainSel) {
+        String[] tokens = mainSel.trim().split("\\s+");
+        Elements current = roots;
+        java.util.regex.Pattern eqPat =
+                java.util.regex.Pattern.compile("^(.*?):eq\\((-?\\d+)\\)$");
+        for (String tok : tokens) {
+            if (tok.isEmpty()) continue;
+            java.util.regex.Matcher m = eqPat.matcher(tok);
+            Elements next = new Elements();
+            if (m.matches()) {
+                String css = m.group(1).trim();
+                int idx = Integer.parseInt(m.group(2));
+                String query = css.isEmpty() ? "*" : css;
+                for (Element root : current) {
+                    Elements found = root.select(query);
+                    int actual = idx < 0 ? found.size() + idx : idx;
+                    if (actual >= 0 && actual < found.size()) {
+                        next.add(found.get(actual));
+                    }
+                }
+            } else {
+                for (Element root : current) {
+                    next.addAll(root.select(tok));
+                }
+            }
+            current = next;
+            if (current.isEmpty()) break;
+        }
+        return current;
     }
 
     private String call(String function, Object... args) throws Exception {

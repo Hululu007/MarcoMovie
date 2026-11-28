@@ -30,6 +30,25 @@ final class TvCuratedHome {
     static final String CURATED_SITE_KEY = "__tv_curated_home__";
     private static final String CACHE_FILE = "tv_curated_home_v1.json";
     private static final long CACHE_TTL_MS = 6L * 60L * 60L * 1000L;
+    static final long STALE_CACHE_MAX_AGE_MS = 14L * 24L * 60L * 60L * 1000L;
+    private static final java.util.concurrent.ThreadPoolExecutor CURATED_POOL = createCuratedPool();
+
+    private static java.util.concurrent.ThreadPoolExecutor createCuratedPool() {
+        java.util.concurrent.ThreadPoolExecutor pool =
+                new java.util.concurrent.ThreadPoolExecutor(
+                        4,
+                        4,
+                        20L,
+                        java.util.concurrent.TimeUnit.SECONDS,
+                        new java.util.concurrent.LinkedBlockingQueue<Runnable>(),
+                        r -> {
+                            Thread t = new Thread(r, "tv-curated-io");
+                            t.setDaemon(true);
+                            return t;
+                        });
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
+    }
     private static final Pattern YEAR_PATTERN = Pattern.compile("\\b((?:19|20)\\d{2})\\b");
     private static final Pattern SEASON_CN_PATTERN =
             Pattern.compile("第\\s*([一二三四五六七八九十\\d]+)\\s*季");
@@ -41,16 +60,27 @@ final class TvCuratedHome {
         final List<Cms.Video> hotDramas;
         final List<Cms.Video> hotMovies;
         final boolean live;
+        final boolean stale;
 
         Catalog(
                 List<Cms.Video> hero,
                 List<Cms.Video> hotDramas,
                 List<Cms.Video> hotMovies,
                 boolean live) {
+            this(hero, hotDramas, hotMovies, live, false);
+        }
+
+        Catalog(
+                List<Cms.Video> hero,
+                List<Cms.Video> hotDramas,
+                List<Cms.Video> hotMovies,
+                boolean live,
+                boolean stale) {
             this.hero = Collections.unmodifiableList(hero);
             this.hotDramas = Collections.unmodifiableList(hotDramas);
             this.hotMovies = Collections.unmodifiableList(hotMovies);
             this.live = live;
+            this.stale = stale;
         }
     }
 
@@ -90,37 +120,35 @@ final class TvCuratedHome {
         if (a != null && !a.privateMode) {
             try {
                 long now = System.currentTimeMillis();
-                Catalog disk = readDiskCache(new File(a.getCacheDir(), CACHE_FILE), now);
+                // Allow stale-while-revalidate on cold start so Home immediately renders real
+                // posters instead of poster-less offline seeds while fresh rankings load.
+                Catalog disk = readDiskCache(new File(a.getCacheDir(), CACHE_FILE), now, true);
                 if (disk != null) {
                     memoryCatalog = disk;
-                    memoryLoadedAtMs = now;
+                    memoryLoadedAtMs = disk.stale ? 0L : now;
                     return disk;
                 }
             } catch (Throwable ignored) {
             }
         }
-        return buildCatalog(seedDramas(), seedMovies(), false);
+        return buildCatalog(seedDramas(), seedMovies(), false, false);
     }
 
     static void loadAsync(final MainActivity a, final Listener listener) {
         if (a == null || a.privateMode || a.isFinishing()) return;
         final long now = System.currentTimeMillis();
         Catalog mem = memoryCatalog;
-        if (mem != null && mem.live && (now - memoryLoadedAtMs) < CACHE_TTL_MS) {
+        if (mem != null && mem.live && !mem.stale && (now - memoryLoadedAtMs) < CACHE_TTL_MS) {
             if (listener != null) a.ui.post(() -> listener.onReady(mem));
             return;
-        }
-        if (listener != null) {
-            final Catalog immediate = peekOrSeed();
-            a.ui.post(() -> listener.onReady(immediate));
         }
         if (fetchInFlight) return;
         fetchInFlight = true;
         final File cacheFile = new File(a.getCacheDir(), CACHE_FILE);
-        a.worker.execute(
+        CURATED_POOL.execute(
                 () -> {
                     try {
-                        Catalog disk = readDiskCache(cacheFile, now);
+                        Catalog disk = readDiskCache(cacheFile, now, false);
                         if (disk != null) {
                             memoryCatalog = disk;
                             memoryLoadedAtMs = now;
@@ -129,22 +157,48 @@ final class TvCuratedHome {
                             }
                             return;
                         }
+                        // Fetch the 4 Douban endpoints in parallel on CURATED_POOL without
+                        // occupying a.worker or spawning raw Threads.
+                        final String[][] specs = {
+                            {"tv_hot", "https://m.douban.com/tv/"},
+                            {"tv_domestic", "https://m.douban.com/tv/"},
+                            {"movie_hot_gaia", "https://m.douban.com/movie/"},
+                            {"movie_showing", "https://m.douban.com/movie/"}
+                        };
+                        final String[] bodies = new String[specs.length];
+                        java.util.List<java.util.concurrent.Future<?>> tasks =
+                                new ArrayList<>(specs.length);
+                        for (int i = 0; i < specs.length; i++) {
+                            final int idx = i;
+                            tasks.add(
+                                    CURATED_POOL.submit(
+                                            () -> {
+                                                String url =
+                                                        "https://m.douban.com/rexxar/api/v2/subject_collection/"
+                                                                + specs[idx][0]
+                                                                + "/items?start=0&count=24";
+                                                bodies[idx] = httpGet(url, specs[idx][1]);
+                                            }));
+                        }
+                        long deadlineMs = System.currentTimeMillis() + 5500L;
+                        for (java.util.concurrent.Future<?> f : tasks) {
+                            long rem = Math.max(1L, deadlineMs - System.currentTimeMillis());
+                            try {
+                                f.get(rem, java.util.concurrent.TimeUnit.MILLISECONDS);
+                            } catch (Throwable ignored) {
+                                f.cancel(true);
+                            }
+                        }
                         List<Cms.Video> dramas =
-                                mergeCollections(
-                                        new String[] {"tv_hot", "tv_domestic"},
-                                        "https://m.douban.com/tv/",
-                                        false,
-                                        18);
+                                mergeCollectionBodies(
+                                        new String[] {bodies[0], bodies[1]}, false, 18);
                         List<Cms.Video> movies =
-                                mergeCollections(
-                                        new String[] {"movie_hot_gaia", "movie_showing"},
-                                        "https://m.douban.com/movie/",
-                                        true,
-                                        18);
+                                mergeCollectionBodies(
+                                        new String[] {bodies[2], bodies[3]}, true, 18);
                         if (!dramas.isEmpty() || !movies.isEmpty()) {
                             List<Cms.Video> finalDramas = dramas.isEmpty() ? seedDramas() : dramas;
                             List<Cms.Video> finalMovies = movies.isEmpty() ? seedMovies() : movies;
-                            Catalog fresh = buildCatalog(finalDramas, finalMovies, true);
+                            Catalog fresh = buildCatalog(finalDramas, finalMovies, true, false);
                             memoryCatalog = fresh;
                             memoryLoadedAtMs = System.currentTimeMillis();
                             writeDiskCache(cacheFile, finalDramas, finalMovies, memoryLoadedAtMs);
@@ -158,6 +212,23 @@ final class TvCuratedHome {
                         fetchInFlight = false;
                     }
                 });
+    }
+
+    static List<Cms.Video> mergeCollectionBodies(String[] bodies, boolean isMovie, int limit) {
+        List<Cms.Video> out = new ArrayList<>();
+        if (bodies == null || limit <= 0) return out;
+        Set<String> seen = new LinkedHashSet<>();
+        for (String body : bodies) {
+            if (body == null || body.isEmpty()) continue;
+            for (Cms.Video v : parseCollectionVideos(body, isMovie)) {
+                String key = normalizeTitleForMatch(v.title);
+                if (!key.isEmpty() && seen.add(key)) {
+                    out.add(v);
+                    if (out.size() >= limit) return out;
+                }
+            }
+        }
+        return out;
     }
 
     private static void learnCuratedTitles(
@@ -330,6 +401,11 @@ final class TvCuratedHome {
     }
 
     static Catalog buildCatalog(List<Cms.Video> dramas, List<Cms.Video> movies, boolean live) {
+        return buildCatalog(dramas, movies, live, false);
+    }
+
+    static Catalog buildCatalog(
+            List<Cms.Video> dramas, List<Cms.Video> movies, boolean live, boolean stale) {
         List<Cms.Video> safeDramas = dramas == null ? Collections.emptyList() : dramas;
         List<Cms.Video> safeMovies = movies == null ? Collections.emptyList() : movies;
         List<Cms.Video> hero = new ArrayList<>();
@@ -339,7 +415,32 @@ final class TvCuratedHome {
             if (di < safeDramas.size()) hero.add(safeDramas.get(di++));
             if (hero.size() < maxHero && mi < safeMovies.size()) hero.add(safeMovies.get(mi++));
         }
-        return new Catalog(hero, safeDramas, safeMovies, live);
+        return new Catalog(hero, safeDramas, safeMovies, live, stale);
+    }
+
+    static boolean sameCatalogVisuals(Catalog a, Catalog b) {
+        if (a == b) return true;
+        if (a == null || b == null) return false;
+        return sameVideoListVisuals(a.hero, b.hero)
+                && sameVideoListVisuals(a.hotDramas, b.hotDramas)
+                && sameVideoListVisuals(a.hotMovies, b.hotMovies);
+    }
+
+    private static boolean sameVideoListVisuals(List<Cms.Video> a, List<Cms.Video> b) {
+        if (a == b) return true;
+        if (a == null || b == null || a.size() != b.size()) return false;
+        for (int i = 0; i < a.size(); i++) {
+            Cms.Video va = a.get(i);
+            Cms.Video vb = b.get(i);
+            if (va == vb) continue;
+            if (va == null || vb == null) return false;
+            String ta = va.title == null ? "" : va.title;
+            String tb = vb.title == null ? "" : vb.title;
+            String pa = va.poster == null ? "" : va.poster;
+            String pb = vb.poster == null ? "" : vb.poster;
+            if (!ta.equals(tb) || !pa.equals(pb)) return false;
+        }
+        return true;
     }
 
     /** Normalized title key for matching curated titles against user-added CMS sources. */
@@ -616,7 +717,7 @@ final class TvCuratedHome {
         return list;
     }
 
-    private static Catalog readDiskCache(File file, long now) {
+    static Catalog readDiskCache(File file, long now, boolean allowStale) {
         if (file == null || !file.isFile() || file.length() > 1024 * 1024) return null;
         try (InputStream in = new FileInputStream(file);
                 ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
@@ -625,14 +726,19 @@ final class TvCuratedHome {
             while ((n = in.read(buf)) != -1) bos.write(buf, 0, n);
             JSONObject obj = new JSONObject(new String(bos.toByteArray(), StandardCharsets.UTF_8));
             long savedAt = obj.optLong("savedAt", 0L);
-            if (savedAt <= 0L || (now - savedAt) >= CACHE_TTL_MS) return null;
+            long age = savedAt > 0L ? (now - savedAt) : Long.MAX_VALUE;
+            boolean expired = savedAt <= 0L || age >= CACHE_TTL_MS;
+            if (expired && (!allowStale || age < 0L || age >= STALE_CACHE_MAX_AGE_MS)) {
+                return null;
+            }
             List<Cms.Video> dramas = readVideosArray(obj.optJSONArray("dramas"));
             List<Cms.Video> movies = readVideosArray(obj.optJSONArray("movies"));
             if (dramas.isEmpty() && movies.isEmpty()) return null;
             return buildCatalog(
                     dramas.isEmpty() ? seedDramas() : dramas,
                     movies.isEmpty() ? seedMovies() : movies,
-                    true);
+                    true,
+                    expired);
         } catch (Throwable ignored) {
             return null;
         }

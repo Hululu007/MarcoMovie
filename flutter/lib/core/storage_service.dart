@@ -29,6 +29,7 @@ import 'secure_credential_store.dart';
 import 'series_scraper.dart';
 import 'spider_plugin_registry.dart';
 import 'storage_file_store.dart';
+import 'webdav_bind_crypto.dart';
 import 'windows_window_bounds.dart';
 
 export 'storage_file_store.dart';
@@ -5457,6 +5458,20 @@ class StorageService {
   String get webdavUser => (_prefs.getString(keyWebdavUser) ?? '').trim();
   String get webdavPass =>
       _credentialCache[keyWebdavPass] ?? _prefs.getString(keyWebdavPass) ?? '';
+
+  Future<String> readWebdavPassword() async {
+    await waitForCredentialsReady();
+    final cached = webdavPass;
+    if (cached.isNotEmpty) return cached;
+    try {
+      final stored = await _secureStore.read(keyWebdavPass);
+      if (stored != null && stored.isNotEmpty) {
+        _credentialCache[keyWebdavPass] = stored;
+        return stored;
+      }
+    } catch (_) {}
+    return '';
+  }
   bool get webdavAuto => _prefs.getBool(keyWebdavAuto) ?? true;
   bool get webdavSyncSubs => _prefs.getBool(keyWebdavSyncSubs) ?? true;
   bool get webdavSyncHistory => _prefs.getBool(keyWebdavSyncHistory) ?? true;
@@ -7403,7 +7418,118 @@ class StorageService {
     }
   }
 
-  // ==================== Cross-Platform Spider Adapter Packs & BYO Gateway ====================
+  Future<
+    ({
+      int historyCount,
+      int favoriteCount,
+      int subscriptionCount,
+      bool changed,
+      bool subscriptionsChanged,
+      String bindStatus,
+      bool boundWebdav,
+    })
+  >
+  bindOrSyncWithLanQr(String rawInput, {http.Client? client}) async {
+    final target = WebdavBindCrypto.parseBindQrInput(rawInput);
+    if (target == null) {
+      final res = await syncWithLanPeer(rawInput, client: client);
+      return (
+        historyCount: res.historyCount,
+        favoriteCount: res.favoriteCount,
+        subscriptionCount: res.subscriptionCount,
+        changed: res.changed,
+        subscriptionsChanged: res.subscriptionsChanged,
+        bindStatus: '',
+        boundWebdav: false,
+      );
+    }
+    if (_syncInFlight) {
+      throw StateError('正在同步中，请稍候');
+    }
+    final httpClient = client ?? http.Client();
+    final ownsClient = client == null;
+    var bindStatus = 'unconfigured';
+    var boundWebdav = false;
+    try {
+      if (isWebdavConfigured && _isHttpOriginUrl(webdavUrl)) {
+        final pass = await readWebdavPassword();
+        final sealedReq = WebdavBindCrypto.sealJson(target.key, {
+          'v': 1,
+          'type': 'webdav_bind',
+          'mode': 'push',
+          'url': webdavUrl,
+          'username': webdavUser,
+          'password': pass,
+          'auto': webdavAuto,
+          'syncSubs': webdavSyncSubs,
+          'syncHistory': webdavSyncHistory,
+        });
+        final resp = await httpClient
+            .post(
+              Uri.parse(target.bindUrl),
+              headers: const {'Content-Type': 'application/json; charset=utf-8'},
+              body: utf8.encode(sealedReq),
+            )
+            .timeout(const Duration(seconds: 8));
+        if (resp.statusCode == 410) {
+          throw const FormatException('对方设备的二维码会话已过期，请刷新后重试');
+        }
+        if (resp.statusCode < 200 || resp.statusCode >= 300) {
+          throw FormatException('WebDAV 绑定请求失败 (HTTP ${resp.statusCode})');
+        }
+        final ack = WebdavBindCrypto.openJson(target.key, utf8.decode(resp.bodyBytes));
+        if (ack['ok'] != true) {
+          throw const FormatException('对方设备拒绝了 WebDAV 绑定');
+        }
+        bindStatus = 'pushed';
+      } else {
+        final resp = await httpClient
+            .get(Uri.parse(target.bindUrl))
+            .timeout(const Duration(seconds: 8));
+        if (resp.statusCode == 410) {
+          throw const FormatException('对方设备的二维码会话已过期，请刷新后重试');
+        }
+        if (resp.statusCode < 200 || resp.statusCode >= 300) {
+          throw FormatException('读取对方 WebDAV 绑定配置失败 (HTTP ${resp.statusCode})');
+        }
+        final remote = WebdavBindCrypto.openJson(target.key, utf8.decode(resp.bodyBytes));
+        final mode = remote['mode'] as String? ?? '';
+        final remoteUrl = (remote['url'] as String? ?? '').trim();
+        final parsedUri = Uri.tryParse(remoteUrl);
+        final scheme = parsedUri?.scheme.toLowerCase() ?? '';
+        if (mode == 'config' &&
+            (scheme == 'http' || scheme == 'https') &&
+            (parsedUri?.host.trim().isNotEmpty ?? false)) {
+          await saveWebdavConfig(
+            url: remoteUrl,
+            user: (remote['username'] as String? ?? '').trim(),
+            pass: remote['password'] as String? ?? '',
+            auto: remote['auto'] is bool ? remote['auto'] as bool : true,
+            syncSubs: remote['syncSubs'] is bool ? remote['syncSubs'] as bool : true,
+            syncHistory:
+                remote['syncHistory'] is bool ? remote['syncHistory'] as bool : true,
+          );
+          boundWebdav = true;
+          bindStatus = 'pulled';
+        }
+      }
+      final res = await syncWithLanPeer(target.syncUrl, client: httpClient);
+      if (boundWebdav && webdavAuto && client == null && _webdavTestClient == null) {
+        unawaited(syncWithWebdav().then<void>((_) {}, onError: (_) {}));
+      }
+      return (
+        historyCount: res.historyCount,
+        favoriteCount: res.favoriteCount,
+        subscriptionCount: res.subscriptionCount,
+        changed: res.changed,
+        subscriptionsChanged: res.subscriptionsChanged,
+        bindStatus: bindStatus,
+        boundWebdav: boundWebdav,
+      );
+    } finally {
+      if (ownsClient) httpClient.close();
+    }
+  }
 
   List<SpiderAdapterPack> get spiderAdapterPacks {
     final raw = _prefs.getString(keySpiderAdapterPacks);

@@ -149,7 +149,7 @@ final class StartupIntro extends FrameLayout {
             paint.setStyle(Paint.Style.FILL);
             paint.setShader(null);
             paint.setAlpha(Math.round(255 * appear));
-            if (progress > .24f && progress < .65f) {
+            if (progress > .24f && progress < .65f && !a.isTvDevice()) {
                 int layer = c.saveLayer(logoBounds, null);
                 c.drawBitmap(logo, null, logoBounds, paint);
                 sweep.setTranslate(-180 + (progress - .24f) / .41f * 360, 0);

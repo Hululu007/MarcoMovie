@@ -204,6 +204,11 @@ final class PlaybackController {
 
     static boolean matchesHistoryFallbackBookmark(
             WatchHistory.Entry bm, Cms.Site failedSite, Cms.Video video) {
+        return matchesHistoryFallbackBookmark(null, bm, failedSite, video);
+    }
+
+    static boolean matchesHistoryFallbackBookmark(
+            MainActivity a, WatchHistory.Entry bm, Cms.Site failedSite, Cms.Video video) {
         if (bm == null || bm.title == null || bm.title.trim().isEmpty()) return false;
         if (failedSite == null
                 || failedSite.key == null
@@ -214,8 +219,11 @@ final class PlaybackController {
         if (video == null || video.id == null || video.id.isEmpty()) {
             return false;
         }
-        return TvMultiSourceStore.siteMatchesHistoryKey(failedSite, bm.site)
-                && video.id.equals(bm.id);
+        boolean siteMatch =
+                a != null
+                        ? TvMultiSourceStore.siteMatchesHistoryKey(a, failedSite, bm.site)
+                        : TvMultiSourceStore.siteMatchesHistoryKey(failedSite, bm.site);
+        return siteMatch && video.id.equals(bm.id);
     }
 
     private static boolean tryHistoryCrossSourceFailover(
@@ -234,7 +242,7 @@ final class PlaybackController {
         if (bm == null) {
             return false;
         }
-        if (!matchesHistoryFallbackBookmark(bm, failedSite, video)) {
+        if (!matchesHistoryFallbackBookmark(a, bm, failedSite, video)) {
             a.historyFallbackBookmark = null;
             return false;
         }
@@ -851,6 +859,89 @@ final class PlaybackController {
                                                                         || result.optInt("jx", 0)
                                                                                 != 0)));
                                 if (!primaryPlayable
+                                        && s != null
+                                        && (s.isNetdiskSite()
+                                                || looksLikeNetdiskLine(s, line, targetId))
+                                        && v != null
+                                        && v.id != null
+                                        && !v.id.trim().isEmpty()
+                                        && !"0".equals(v.id.trim())
+                                        && !"1".equals(v.id.trim())) {
+                                    // PanSou / netdisk detail URLs carry short-lived tokens; do
+                                    // one live detail refresh before failing over across sources.
+                                    try {
+                                        Cms.Listing freshList =
+                                                Cms.listing(a.engine(s).detail(v.id.trim()));
+                                        if (!freshList.videos.isEmpty()) {
+                                            Cms.Video freshVideo = freshList.videos.get(0);
+                                            int curIdx =
+                                                    line != null
+                                                            ? line.episodes.indexOf(chosenEp)
+                                                            : 0;
+                                            FreshOriginalTarget freshTarget =
+                                                    resolveFreshOriginalTarget(
+                                                            freshVideo,
+                                                            line,
+                                                            chosenEp,
+                                                            line != null ? line.name : "",
+                                                            chosenEp != null ? chosenEp.name : "",
+                                                            Math.max(0, curIdx));
+                                            if (freshTarget != null
+                                                    && freshTarget.line != null
+                                                    && freshTarget.episode != null
+                                                    && freshTarget.episode.url != null) {
+                                                DanmuOwnership.RequestContext freshCtx =
+                                                        beginDanmuContext(
+                                                                a,
+                                                                s,
+                                                                freshVideo,
+                                                                freshTarget.line,
+                                                                freshTarget.episode,
+                                                                true);
+                                                DanmuOwnership.RequestContext prevFreshScope =
+                                                        DanmuOwnership.GLOBAL.bindThreadScope(
+                                                                freshCtx);
+                                                JSONObject freshRes;
+                                                try {
+                                                    freshRes =
+                                                            new JSONObject(
+                                                                    a.engine(s)
+                                                                            .player(
+                                                                                    freshTarget
+                                                                                            .line
+                                                                                            .name,
+                                                                                    freshTarget
+                                                                                            .episode
+                                                                                            .url));
+                                                } finally {
+                                                    DanmuOwnership.GLOBAL.restoreThreadScope(
+                                                            prevFreshScope);
+                                                }
+                                                Cms.Episode freshResolved =
+                                                        MediaOptions.episode(
+                                                                s, freshTarget.episode, freshRes);
+                                                String freshUrl =
+                                                        freshResolved.url == null
+                                                                ? ""
+                                                                : freshResolved.url.trim();
+                                                if (!freshUrl.isEmpty()
+                                                        && (Cms.isMedia(freshUrl)
+                                                                || freshUrl.startsWith("magnet:?")
+                                                                || freshRes.optInt("parse", 0) != 0
+                                                                || freshRes.optInt("jx", 0) != 0)) {
+                                                    result = freshRes;
+                                                    resolvedCandidate = freshResolved;
+                                                    chosenLine = freshTarget.line;
+                                                    chosenEp = freshTarget.episode;
+                                                    primaryError = null;
+                                                    primaryPlayable = true;
+                                                }
+                                            }
+                                        }
+                                    } catch (Exception ignored) {
+                                    }
+                                }
+                                if (!primaryPlayable
                                         && v != null
                                         && v.lines != null
                                         && v.lines.size() > 1
@@ -978,10 +1069,6 @@ final class PlaybackController {
                                                 clearPlaybackLoading(a);
                                                 if (url.isEmpty()) {
                                                     a.changingMiniEpisode = false;
-                                                    if (tryHistoryCrossSourceFailover(
-                                                            a, s, v, a.resumeAt, "原片源未返回有效播放地址")) {
-                                                        return;
-                                                    }
                                                     String spiderMsg =
                                                             finalResult
                                                                     .optString(
@@ -993,10 +1080,27 @@ final class PlaybackController {
                                                                                                     "tip",
                                                                                                     "")))
                                                                     .trim();
+                                                    boolean isNetdisk =
+                                                            looksLikeNetdiskLine(
+                                                                    s, finalLine, finalEp.url);
+                                                    boolean authNeeded =
+                                                            isNetdisk
+                                                                    && looksLikeNetdiskAuthRequired(
+                                                                            spiderMsg);
+                                                    if (!authNeeded
+                                                            && tryHistoryCrossSourceFailover(
+                                                                    a,
+                                                                    s,
+                                                                    v,
+                                                                    a.resumeAt,
+                                                                    isNetdisk
+                                                                            ? "原网盘分享已失效"
+                                                                            : "原片源未返回有效播放地址")) {
+                                                        return;
+                                                    }
                                                     if (!spiderMsg.isEmpty()) {
                                                         failInPlaceSwitch(a, spiderMsg);
-                                                    } else if (looksLikeNetdiskLine(
-                                                            s, finalLine, finalEp.url)) {
+                                                    } else if (isNetdisk) {
                                                         failInPlaceSwitch(
                                                                 a,
                                                                 "该网盘线路未返回播放地址，请先在「网盘与账号」扫码登录对应网盘，或点击右上角"
@@ -1049,6 +1153,17 @@ final class PlaybackController {
                             }
                         });
         a.pageRequests.add(request);
+    }
+
+    private static boolean looksLikeNetdiskAuthRequired(String msg) {
+        if (msg == null || msg.trim().isEmpty()) return false;
+        String lower = msg.toLowerCase(Locale.ROOT);
+        return lower.contains("登录")
+                || lower.contains("扫码")
+                || lower.contains("cookie")
+                || lower.contains("token")
+                || lower.contains("授权")
+                || lower.contains("login");
     }
 
     private static String extractEmbeddedStreamUrl(String baseUrl, String body) {
@@ -1581,6 +1696,15 @@ final class PlaybackController {
             a.playingBookmark.poster = v.poster;
             a.playingBookmark.line = a.activeLine.name;
             a.playingBookmark.episode = a.activeEpisode.name;
+            String shareCand =
+                    (v.id != null && (v.id.startsWith("push://") || v.id.contains("://")))
+                            ? v.id.trim()
+                            : (a.activeEpisode != null
+                                            && a.activeEpisode.url != null
+                                            && a.activeEpisode.url.startsWith("push://")
+                                    ? a.activeEpisode.url.trim()
+                                    : "");
+            a.playingBookmark.shareUrl = shareCand;
             a.playingBookmark.index = a.activeLine.episodes.indexOf(a.activeEpisode);
             a.playingBookmark.position = Math.max(0, initialResume);
             a.playingBookmark.duration = saved != null ? Math.max(0, saved.duration) : 0;
@@ -1678,7 +1802,7 @@ final class PlaybackController {
         a.playbackControls =
                 new PlaybackControls(
                         a, a.playerChrome.dock, a.playerChrome.progress, surface, s, v, ep);
-        TouchPlayerGesture.attach(a, surface);
+        if (!a.isTvDevice()) TouchPlayerGesture.attach(a, surface);
         final PlaybackControls controls = a.playbackControls;
         a.root.addOnLayoutChangeListener(
                 (view, l, t, r, b, ol, ot, or, ob) -> {

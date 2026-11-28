@@ -1300,7 +1300,7 @@ final class SourcePicker {
                     } catch (Throwable ignored) {
                     }
                 },
-                2400L);
+                4500L);
     }
 
     private static void applyFastTextProps(TextView tv) {
@@ -2108,8 +2108,35 @@ final class SourcePicker {
                                 a.importDialog();
                             });
             final Button btnDone = a.navButton("完成", "source-close", dialog::dismiss);
-            final java.util.List<Button> footerBtns =
-                    java.util.Arrays.asList(btnManageSubs, btnManageLines, btnAddSource, btnDone);
+            final java.util.List<Button> footerBtns = new java.util.ArrayList<>();
+            footerBtns.add(btnManageSubs);
+            footerBtns.add(btnManageLines);
+            if (a.config != null && a.config.depots != null && a.config.depots.length() > 0) {
+                final Button btnWarehouses =
+                        a.navButton(
+                                "切换子仓库 (" + a.config.depots.length() + ")",
+                                "warehouse-switch",
+                                () -> {
+                                    handingOff = true;
+                                    dialog.dismiss();
+                                    showWarehouses(a);
+                                });
+                footerBtns.add(btnWarehouses);
+            }
+            if (CatPawSettings.available(a)) {
+                final Button btnCatPaw =
+                        a.navButton(
+                                "CatPaw 配置",
+                                "catpaw-settings",
+                                () -> {
+                                    handingOff = true;
+                                    dialog.dismiss();
+                                    CatPawSettings.choose(a);
+                                });
+                footerBtns.add(btnCatPaw);
+            }
+            footerBtns.add(btnAddSource);
+            footerBtns.add(btnDone);
             int maxFootNeed = 0;
             for (Button fb : footerBtns) {
                 fb.setId(View.generateViewId());
@@ -3235,6 +3262,32 @@ final class SourcePicker {
             actionLabels.add("刷新订阅");
             actionKeys.add("refresh");
         }
+        org.json.JSONArray subDepots = null;
+        try {
+            ConfigLibrary.Entry subEntry = null;
+            for (ConfigLibrary.Entry e : lib.entries()) {
+                if (e != null
+                        && (rec.libraryEntryId.equals(e.id)
+                                || (!rec.origin.isEmpty() && rec.origin.equals(e.origin)))) {
+                    subEntry = e;
+                    break;
+                }
+            }
+            if (subEntry != null) {
+                Cms.Config subCfg = Cms.parseConfig(lib.raw(subEntry), rec.origin);
+                if (subCfg != null && subCfg.depots != null && subCfg.depots.length() > 0) {
+                    subDepots = subCfg.depots;
+                    actionLabels.add("切换子仓库 (" + subDepots.length() + ")");
+                    actionKeys.add("switch-depot");
+                    if (subDepots.length() >= 2) {
+                        actionLabels.add("合并导入多个子仓…");
+                        actionKeys.add("merge-depots");
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        final org.json.JSONArray finalSubDepots = subDepots;
         actionLabels.add("重命名");
         actionKeys.add("rename");
         actionLabels.add("删除订阅");
@@ -3348,6 +3401,16 @@ final class SourcePicker {
                                                         });
                                             }
                                         });
+                            } else if ("switch-depot".equals(act) && finalSubDepots != null) {
+                                if (parentDialog != null && parentDialog.isShowing()) {
+                                    parentDialog.dismiss();
+                                }
+                                showWarehousesForRows(a, finalSubDepots, rec.id, rec.origin);
+                            } else if ("merge-depots".equals(act) && finalSubDepots != null) {
+                                if (parentDialog != null && parentDialog.isShowing()) {
+                                    parentDialog.dismiss();
+                                }
+                                showMergeWarehousesDialog(a, finalSubDepots);
                             } else if ("rename".equals(act)) {
                                 EditText input = new EditText(a);
                                 input.setHint("输入新的订阅名称");
@@ -3822,14 +3885,29 @@ final class SourcePicker {
 
     static void showWarehouses(MainActivity a) {
         Cms.Config previous = a.config;
-        org.json.JSONArray rows = previous.depots;
+        org.json.JSONArray rows = previous == null ? null : previous.depots;
+        if (rows == null || rows.length() == 0) {
+            a.toast("当前配置没有可切换的多仓子仓库");
+            return;
+        }
+        showWarehousesForRows(a, rows, "", previous.warehouse);
+    }
+
+    private static void showWarehousesForRows(
+            final MainActivity a,
+            final org.json.JSONArray rows,
+            final String explicitSubId,
+            final String explicitWarehouseRoot) {
+        if (a == null || rows == null || rows.length() == 0) return;
+        final Cms.Config previous = a.config;
         boolean canMergeAll = rows.length() >= 2;
         String[] names = new String[rows.length() + (canMergeAll ? 1 : 0)];
         if (canMergeAll) {
             names[0] = "⚡ 勾选多个子仓库合并并自动分组…";
         }
         for (int i = 0; i < rows.length(); i++) {
-            names[i + (canMergeAll ? 1 : 0)] = rows.optJSONObject(i).optString("name");
+            org.json.JSONObject row = rows.optJSONObject(i);
+            names[i + (canMergeAll ? 1 : 0)] = row == null ? ("子仓库 " + (i + 1)) : row.optString("name");
         }
         new AppDialog.Builder(a)
                 .wrapChoices()
@@ -3842,7 +3920,17 @@ final class SourcePicker {
                                 return;
                             }
                             int rowIdx = index - (canMergeAll ? 1 : 0);
-                            String url = rows.optJSONObject(rowIdx).optString("url");
+                            org.json.JSONObject rowObj = rows.optJSONObject(rowIdx);
+                            if (rowObj == null) return;
+                            final String url = rowObj.optString("url");
+                            final String rowSubId =
+                                    explicitSubId != null && !explicitSubId.isEmpty()
+                                            ? explicitSubId
+                                            : rowObj.optString("_subId", "");
+                            final String rowWarehouseRoot =
+                                    explicitWarehouseRoot != null && !explicitWarehouseRoot.isEmpty()
+                                            ? explicitWarehouseRoot
+                                            : rowObj.optString("_warehouseRoot", "");
                             a.toast("正在读取子仓库…");
                             a.worker.execute(
                                     () -> {
@@ -3851,11 +3939,48 @@ final class SourcePicker {
                                                     Cms.parseConfig(
                                                             SourceController.fetchImport(a, url),
                                                             url);
+                                            if (a.isTvDevice()
+                                                    && !a.privateMode
+                                                    && a.multiSourceStore != null
+                                                    && a.configStore != null
+                                                    && a.multiSourceStore.readState().initialized) {
+                                                ConfigLibrary lib =
+                                                        new ConfigLibrary(a.configStore.directory);
+                                                a.multiSourceStore.switchSubscriptionDepot(
+                                                        lib,
+                                                        rowSubId,
+                                                        rowWarehouseRoot,
+                                                        selected,
+                                                        System.currentTimeMillis());
+                                                final TvMultiSourceStore.EffectiveBuild built =
+                                                        a.multiSourceStore.buildEffectiveConfig(
+                                                                lib,
+                                                                a.prefs.getString(
+                                                                        Prefs.PREFERRED_SITE, ""),
+                                                                (cfg, st) ->
+                                                                        SourceController.available(
+                                                                                a, cfg, st));
+                                                a.ui.post(
+                                                        () -> {
+                                                            if (a.isFinishing() || built.stale) {
+                                                                return;
+                                                            }
+                                                            a.applyMultiSourceEffectiveBuild(
+                                                                    built,
+                                                                    false,
+                                                                    0,
+                                                                    0,
+                                                                    "已切换子仓库："
+                                                                            + rowObj.optString(
+                                                                                    "name", url));
+                                                        });
+                                                return;
+                                            }
                                             String combined =
                                                     com.pilipala.source.Warehouse.retainDirectory(
                                                             selected.raw,
                                                             selected.origin,
-                                                            previous.raw,
+                                                            previous != null ? previous.raw : "{}",
                                                             raw ->
                                                                     new org.json.JSONObject(
                                                                             Cms.withoutComments(

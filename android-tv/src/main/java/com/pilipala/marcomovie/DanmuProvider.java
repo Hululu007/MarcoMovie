@@ -214,6 +214,27 @@ public interface DanmuProvider {
         }
     }
 
+    final class AnimeHit {
+        public final String sourceOrigin;
+        public final String animeId;
+        public final String animeTitle;
+        public final String typeDescription;
+        public final int episodeCount;
+
+        public AnimeHit(
+                String sourceOrigin,
+                String animeId,
+                String animeTitle,
+                String typeDescription,
+                int episodeCount) {
+            this.sourceOrigin = sourceOrigin == null ? "" : sourceOrigin;
+            this.animeId = animeId == null ? "" : animeId;
+            this.animeTitle = animeTitle == null ? "" : animeTitle;
+            this.typeDescription = typeDescription == null ? "" : typeDescription;
+            this.episodeCount = Math.max(0, episodeCount);
+        }
+    }
+
     final class SegmentDescriptor {
         public final long startMs;
         public final long endMs;
@@ -1494,6 +1515,10 @@ public interface DanmuProvider {
     }
 
     List<Candidate> matchOrSearch(MatchQuery query, CancellationToken token) throws IOException;
+
+    default List<AnimeHit> searchAnimes(String keyword, CancellationToken token) throws IOException {
+        return Collections.emptyList();
+    }
 
     List<Candidate> listEpisodes(String sourceOrigin, String animeId, CancellationToken token)
             throws IOException;

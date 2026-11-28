@@ -376,6 +376,7 @@ final class WatchHistory {
         e.poster = src.poster;
         e.line = src.line;
         e.episode = src.episode;
+        e.shareUrl = src.shareUrl;
         e.index = src.index;
         e.position = src.position;
         e.duration = src.duration;
@@ -662,6 +663,7 @@ final class WatchHistory {
 
     static final class Entry {
         String site, id, title, poster, line, episode;
+        String shareUrl = "";
         int index, position, duration;
         long updated;
 
@@ -678,17 +680,22 @@ final class WatchHistory {
         }
 
         JSONObject json() throws JSONException {
-            return new JSONObject()
-                    .put("site", site)
-                    .put("id", id)
-                    .put("title", title)
-                    .put("poster", poster)
-                    .put("line", line)
-                    .put("episode", episode)
-                    .put("index", index)
-                    .put("position", position)
-                    .put("duration", duration)
-                    .put("updated", updated);
+            JSONObject obj =
+                    new JSONObject()
+                            .put("site", site)
+                            .put("id", id)
+                            .put("title", title)
+                            .put("poster", poster)
+                            .put("line", line)
+                            .put("episode", episode)
+                            .put("index", index)
+                            .put("position", position)
+                            .put("duration", duration)
+                            .put("updated", updated);
+            if (shareUrl != null && !shareUrl.isEmpty()) {
+                obj.put("shareUrl", shareUrl);
+            }
+            return obj;
         }
     }
 
@@ -714,6 +721,7 @@ final class WatchHistory {
                 e.poster = Cms.optSafeString(o, "poster");
                 e.line = Cms.optSafeString(o, "line");
                 e.episode = Cms.optSafeString(o, "episode");
+                e.shareUrl = Cms.optSafeString(o, "shareUrl");
                 e.index = Math.max(0, o.optInt("index"));
                 e.position = Math.max(0, o.optInt("position"));
                 e.duration = Math.max(0, o.optInt("duration"));

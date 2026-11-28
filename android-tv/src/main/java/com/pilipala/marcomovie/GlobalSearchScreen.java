@@ -115,7 +115,22 @@ public final class GlobalSearchScreen implements AutoCloseable {
     final List<TvSearchBudget.ProtectedItem> displayedItems = new ArrayList<>();
     LinearLayout resultGrid, lastRow;
     TextView emptyResult, resultHint;
-    TextView tvHeaderTitle, tvHeaderMeta;
+    TextView tvHeaderTitle, tvHeaderMeta, tvTopHint, tvCollapseBubble;
+    TvScrollView tvLeftPanel;
+    LinearLayout tvRightPanel;
+    LinearLayout tvInputCapsule;
+    GradientDrawable tvInputCapsuleBg;
+    View tvSearchGlyph;
+    Runnable pendingHideCollapseBubble;
+    boolean tvLeftCollapsed;
+    float tvContentWidthDp;
+    float tvFontScale = 1f;
+    int tvExpandedLeftWidthDp;
+    int tvExpandedSplitGapDp;
+    int tvSplitHeightPx;
+    int tvRightChromePx;
+    int tvCardChromePx;
+    int tvCellOuterMarginPx;
     Button moreResults, switchFuzzyBtn, retryAllBtn;
     LinearLayout tvStateContainer, tvRecentContainer, tvFooterRow;
     TvScrollView tvRecentScroll;
@@ -274,6 +289,23 @@ public final class GlobalSearchScreen implements AutoCloseable {
         return false;
     }
 
+    boolean handleMenuKey(KeyEvent event) {
+        if (!current() || !a.isTvDevice() || event == null) return false;
+        if (event.getKeyCode() != KeyEvent.KEYCODE_MENU) return false;
+        if (MainActivity.isMenuShortPress(
+                event.getAction(), event.isCanceled(), event.getFlags())) {
+            if (tvLeftCollapsed) {
+                expandLeftPanel(true);
+            } else if (!submitted.isEmpty()) {
+                collapseLeftPanel(true);
+                ensureRightPaneFocusAfterCollapse();
+            } else if (input != null && input.isShown()) {
+                input.requestFocus();
+            }
+        }
+        return true;
+    }
+
     /**
      * Fast TV resume path when returning via BACK from Detail: unhides the retained search tree
      * directly in {@code tvStage} instead of re-inflating keyboard/result views, restoring search
@@ -312,6 +344,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
             a.homeAmbient = null;
             a.presentRoot(retainedRoot, true);
             a.watchRootLayout(retainedRoot);
+            hideCollapseReminderBubble(false);
             updateMatchModeButtons();
             updateResultHeader();
             boolean needCards = resumeResultsSyncNeeded || hasUnrenderedResults();
@@ -370,8 +403,16 @@ public final class GlobalSearchScreen implements AutoCloseable {
                             });
                 }
             }
-            if (a.tvInitialFocus == null && input != null) {
-                a.tvInitialFocus = input;
+            if (a.tvInitialFocus == null) {
+                if (tvLeftCollapsed) {
+                    Button tab = filterButtons.get(activeFilter);
+                    if (tab == null) tab = filterButtons.get("");
+                    if (tab != null && tab.isShown()) {
+                        a.tvInitialFocus = tab;
+                    }
+                } else if (input != null) {
+                    a.tvInitialFocus = input;
+                }
             }
             return;
         }
@@ -493,6 +534,15 @@ public final class GlobalSearchScreen implements AutoCloseable {
         tvFooterRow = null;
         tvHeaderTitle = null;
         tvHeaderMeta = null;
+        tvTopHint = null;
+        tvLeftPanel = null;
+        tvRightPanel = null;
+        tvInputCapsule = null;
+        tvInputCapsuleBg = null;
+        tvSearchGlyph = null;
+        hideCollapseReminderBubble(false);
+        tvCollapseBubble = null;
+        tvLeftCollapsed = false;
         filterScrollView = null;
         pageTicket = a.generation;
         pageContext = new TvSearchContext(a.config, a.privateMode, a.engineEpoch);
@@ -540,31 +590,32 @@ public final class GlobalSearchScreen implements AutoCloseable {
         a.body.setClipChildren(false);
         a.body.setClipToPadding(false);
 
-        // Slim Apple TV top bar ("搜索" title + subtle brand & frosted remote hint pill)
+        // Slim top bar ("搜索" title + private-space tag when active + frosted remote hint pill)
         LinearLayout topBar = a.row();
         topBar.setGravity(Gravity.CENTER_VERTICAL);
         TextView pageTitle = a.text("搜索", 23, TEXT_PRIMARY);
         pageTitle.setTypeface(null, Typeface.BOLD);
         pageTitle.setIncludeFontPadding(false);
         topBar.addView(pageTitle, new LinearLayout.LayoutParams(-2, -2));
-        TextView brandSub =
-                a.text(a.privateMode ? " · 隐私空间" : " · Apple TV 搜索体验", 11.5f, TEXT_MUTED);
-        brandSub.setIncludeFontPadding(false);
-        LinearLayout.LayoutParams brandLp = new LinearLayout.LayoutParams(-2, -2);
-        brandLp.leftMargin = a.dp(8);
-        topBar.addView(brandSub, brandLp);
+        if (a.privateMode) {
+            TextView brandSub = a.text(" · 隐私空间", 11.5f, TEXT_MUTED);
+            brandSub.setIncludeFontPadding(false);
+            LinearLayout.LayoutParams brandLp = new LinearLayout.LayoutParams(-2, -2);
+            brandLp.leftMargin = a.dp(8);
+            topBar.addView(brandSub, brandLp);
+        }
         View spacer = new View(a);
         topBar.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1));
-        TextView topHint = a.text("↑↓←→ 移动  ·  确认选择  ·  返回退出", 10.5f, TEXT_SECONDARY);
-        topHint.setIncludeFontPadding(false);
-        topHint.setSingleLine(true);
-        topHint.setPadding(a.dp(10), a.dp(3), a.dp(10), a.dp(3));
+        tvTopHint = a.text("↑↓←→ 移动  ·  确认选择  ·  返回退出", 10.5f, TEXT_SECONDARY);
+        tvTopHint.setIncludeFontPadding(false);
+        tvTopHint.setSingleLine(true);
+        tvTopHint.setPadding(a.dp(10), a.dp(3), a.dp(10), a.dp(3));
         GradientDrawable hintPillBg = new GradientDrawable();
         hintPillBg.setColor(0x14ffffff);
         hintPillBg.setCornerRadius(a.dp(11));
         hintPillBg.setStroke(Math.max(1, a.dp(1)), 0x1affffff);
-        topHint.setBackground(hintPillBg);
-        topBar.addView(topHint, new LinearLayout.LayoutParams(-2, -2));
+        tvTopHint.setBackground(hintPillBg);
+        topBar.addView(tvTopHint, new LinearLayout.LayoutParams(-2, -2));
         int topBarH = a.dp(fontScale > 1.15f ? 30 : 32);
         int topBarGap = a.dp(fontScale > 1.15f ? 4 : 6);
         LinearLayout.LayoutParams topBarLp = new LinearLayout.LayoutParams(-1, topBarH);
@@ -580,9 +631,16 @@ public final class GlobalSearchScreen implements AutoCloseable {
         int splitGapDp = windowWidthDp < 780f ? 14 : 22;
         float rightWidthDp = Math.max(320f, contentWidthDp - leftWidthDp - splitGapDp);
 
+        tvContentWidthDp = contentWidthDp;
+        tvFontScale = fontScale;
+        tvExpandedLeftWidthDp = leftWidthDp;
+        tvExpandedSplitGapDp = splitGapDp;
+        tvSplitHeightPx = splitHeightPx;
+
         columns = computeTvSearchColumns(rightWidthDp, fontScale);
         int rightWidthPx = a.dp(Math.round(rightWidthDp));
         int cellOuterMarginPx = a.dp(10);
+        tvCellOuterMarginPx = cellOuterMarginPx;
         tvResultColumnWidthPx = Math.max(a.dp(92), (rightWidthPx - a.dp(8)) / Math.max(1, columns));
 
         // Reserve FULL 2 title lines + FULL 1 metadata line + focus-ring & chrome heights using
@@ -608,6 +666,8 @@ public final class GlobalSearchScreen implements AutoCloseable {
         int titleTwoLinesPx = (int) Math.ceil(2f * 13.5f * scaledDensity * 1.32f) + a.dp(6);
         int metaOneLinePx = (int) Math.ceil(11.5f * scaledDensity * 1.45f) + a.dp(6);
         int cardChromePx = a.dp(5 + 10 + 4 + 7 + 3 + 12) + titleTwoLinesPx + metaOneLinePx;
+        tvRightChromePx = rightChromePx;
+        tvCardChromePx = cardChromePx;
         int maxPosterH = Math.max(a.dp(108), splitHeightPx - rightChromePx - cardChromePx);
         int rawPosterW = Math.max(a.dp(76), tvResultColumnWidthPx - cellOuterMarginPx - a.dp(6));
         int cappedPosterW = Math.max(a.dp(72), Math.round(maxPosterH / 1.5f));
@@ -620,7 +680,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
         split.setClipToPadding(false);
         a.body.addView(split, new LinearLayout.LayoutParams(-1, splitHeightPx));
 
-        // ---- Left Input Panel (~31.5% width, Apple TV frosted glass dock) ----
+        // ---- Left Input Panel (~31.5% width, collapsible frosted glass dock) ----
         int leftPadHDp = 12;
         int leftPadVDp = 10;
         LinearLayout left = a.vertical();
@@ -640,36 +700,44 @@ public final class GlobalSearchScreen implements AutoCloseable {
         keyboardScroll.setClipChildren(true);
         keyboardScroll.setClipToPadding(false);
         keyboardScroll.addView(left, new ScrollView.LayoutParams(-1, -2));
+        tvLeftPanel = keyboardScroll;
         LinearLayout.LayoutParams leftLp = new LinearLayout.LayoutParams(a.dp(leftWidthDp), -1);
         leftLp.rightMargin = a.dp(splitGapDp);
         split.addView(keyboardScroll, leftLp);
 
         tvLeftInnerWidthPx = Math.max(a.dp(180), a.dp(leftWidthDp - leftPadHDp * 2));
 
-        // 1. Search Input Row (Apple TV capsule with crisp vector search glyph + inline QR icon)
+        // 1. Search Input Row: single unified focus capsule [glyph + EditText] + peer QR icon
+        int inputRowH = a.dp(fontScale > 1.15f ? 40 : 38);
+        int qrBtnPx = inputRowH;
+        tvInputCapsuleBg = new GradientDrawable();
+        tvInputCapsuleBg.setColor(BG_FIELD);
+        tvInputCapsuleBg.setCornerRadius(a.dp(10));
+        tvInputCapsuleBg.setStroke(Math.max(1, a.dp(1)), 0x26ffffff);
+
+        tvInputCapsule = a.row();
+        tvInputCapsule.setTag("search-input-capsule");
+        tvInputCapsule.setGravity(Gravity.CENTER_VERTICAL);
+        tvInputCapsule.setPadding(a.dp(8), 0, a.dp(8), 0);
+        tvInputCapsule.setBackground(tvInputCapsuleBg);
+
+        tvSearchGlyph = buildTvSearchGlyph();
+        LinearLayout.LayoutParams glyphLp = new LinearLayout.LayoutParams(a.dp(18), a.dp(18));
+        glyphLp.rightMargin = a.dp(6);
+        tvInputCapsule.addView(tvSearchGlyph, glyphLp);
+
         input = createSearchEditText(true);
+        tvInputCapsule.addView(input, new LinearLayout.LayoutParams(0, -1, 1f));
+
         LinearLayout inputRow = a.row();
         inputRow.setGravity(Gravity.CENTER_VERTICAL);
         inputRow.setClipChildren(false);
         inputRow.setClipToPadding(false);
-        GradientDrawable inputRowBg = new GradientDrawable();
-        inputRowBg.setColor(BG_FIELD);
-        inputRowBg.setCornerRadius(a.dp(12));
-        inputRowBg.setStroke(Math.max(1, a.dp(1)), 0x26ffffff);
-        inputRow.setBackground(inputRowBg);
-        int glyphW = a.dp(26);
-        int qrBtnPx = a.dp(36);
-        int inputW = Math.max(a.dp(102), tvLeftInnerWidthPx - glyphW - qrBtnPx - a.dp(8));
-        int inputRowH = a.dp(fontScale > 1.15f ? 44 : 40);
-        View searchGlyph = buildTvSearchGlyph();
-        LinearLayout.LayoutParams glyphLp = new LinearLayout.LayoutParams(glyphW, a.dp(24));
-        glyphLp.leftMargin = a.dp(4);
-        inputRow.addView(searchGlyph, glyphLp);
-        inputRow.addView(input, new LinearLayout.LayoutParams(inputW, inputRowH));
+        inputRow.addView(tvInputCapsule, new LinearLayout.LayoutParams(0, inputRowH, 1f));
+
         View qrIconBtn = buildTvQrIconButton();
-        LinearLayout.LayoutParams qrLp = new LinearLayout.LayoutParams(qrBtnPx, a.dp(34));
-        qrLp.rightMargin = a.dp(3);
-        qrLp.leftMargin = a.dp(2);
+        LinearLayout.LayoutParams qrLp = new LinearLayout.LayoutParams(qrBtnPx, inputRowH);
+        qrLp.leftMargin = a.dp(6);
         inputRow.addView(qrIconBtn, qrLp);
         left.addView(inputRow, new LinearLayout.LayoutParams(-1, inputRowH));
 
@@ -778,10 +846,11 @@ public final class GlobalSearchScreen implements AutoCloseable {
         addTvCommandButton(cmdRow, "搜索", "search-submit", true, cmdBtnW, cmdBtnH, () -> submit());
         left.addView(cmdRow, new LinearLayout.LayoutParams(-1, cmdBtnH + a.dp(4)));
 
-        // ---- Right Content Area (~68.5% width) ----
+        // ---- Right Content Area (~68.5% width; expands to 100% when left sidebar collapses) ----
         LinearLayout right = a.vertical();
         right.setClipChildren(false);
         right.setClipToPadding(false);
+        tvRightPanel = right;
         split.addView(right, new LinearLayout.LayoutParams(rightWidthPx, -1));
 
         // Right Header: Apple TV bold section title + glass pill mode & count badge
@@ -938,6 +1007,18 @@ public final class GlobalSearchScreen implements AutoCloseable {
         tvResultRecycler.setOverScrollMode(View.OVER_SCROLL_NEVER);
         tvResultRecycler.setPadding(a.dp(8), a.dp(8), a.dp(8), a.dp(10));
         tvResultLayout = new GridLayoutManager(a, columns);
+        tvResultLayout.setSpanSizeLookup(
+                new GridLayoutManager.SpanSizeLookup() {
+                    @Override
+                    public int getSpanSize(int position) {
+                        if (tvResultAdapter != null
+                                && tvResultAdapter.getItemViewType(position)
+                                        == TvSearchPosterAdapter.VIEW_TYPE_NETDISK_WIDE) {
+                            return Math.min(columns, Math.max(2, columns / 2));
+                        }
+                        return 1;
+                    }
+                });
         tvResultRecycler.setLayoutManager(tvResultLayout);
         tvResultAdapter = new TvSearchPosterAdapter();
         tvResultRecycler.setAdapter(tvResultAdapter);
@@ -1012,7 +1093,13 @@ public final class GlobalSearchScreen implements AutoCloseable {
             candidatePage = restoredCandidatePage;
             renderCandidates();
         }
-        a.tvInitialFocus = input;
+        if (tvLeftCollapsed) {
+            Button tab = filterButtons.get(activeFilter);
+            if (tab == null) tab = filterButtons.get("");
+            a.tvInitialFocus = (tab != null && tab.isShown()) ? tab : input;
+        } else {
+            a.tvInitialFocus = input;
+        }
     }
 
     private void buildLegacyLayout(
@@ -1162,11 +1249,6 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     private EditText createSearchEditText(boolean tvStyle) {
-        final GradientDrawable tvFieldBg = new GradientDrawable();
-        tvFieldBg.setColor(BG_FIELD);
-        tvFieldBg.setCornerRadius(a.dp(10));
-        tvFieldBg.setStroke(0, Color.TRANSPARENT);
-
         EditText field =
                 new EditText(a) {
                     @Override
@@ -1273,10 +1355,10 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         return super.onKeyUp(keyCode, event);
                     }
                 };
-        field.setTextSize(tvStyle ? 16 : 18);
+        field.setTextSize(tvStyle ? 14.5f : 18);
         field.setTextColor(TEXT_PRIMARY);
         field.setHintTextColor(TEXT_MUTED);
-        field.setHint(tvStyle ? "输入片名（双击调出输入法）" : "输入片名…（双击调出输入法）");
+        field.setHint(tvStyle ? "输入片名 · 双击输入法" : "输入片名…（双击调出输入法）");
         field.setGravity(Gravity.CENTER_VERTICAL);
         field.setIncludeFontPadding(false);
         field.setTag("primary");
@@ -1286,9 +1368,13 @@ public final class GlobalSearchScreen implements AutoCloseable {
         field.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
         field.setShowSoftInputOnFocus(false);
         field.setCursorVisible(false);
-        field.setEllipsize(TextUtils.TruncateAt.START);
-        field.setPadding(a.dp(12), a.dp(6), a.dp(10), a.dp(6));
-        field.setBackground(tvStyle ? tvFieldBg : a.bg(0xff29292e, 10));
+        field.setEllipsize(tvStyle ? TextUtils.TruncateAt.END : TextUtils.TruncateAt.START);
+        field.setPadding(
+                tvStyle ? a.dp(2) : a.dp(12),
+                tvStyle ? 0 : a.dp(6),
+                tvStyle ? a.dp(2) : a.dp(10),
+                tvStyle ? 0 : a.dp(6));
+        field.setBackground(tvStyle ? null : a.bg(0xff29292e, 10));
         UiCompat.setDefaultFocusHighlightEnabled(field, false);
         field.setFocusable(true);
         field.setFocusableInTouchMode(true);
@@ -1303,10 +1389,13 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         hideSystemIme();
                     }
                     if (tvStyle) {
-                        tvFieldBg.setColor(f ? BG_FIELD_FOCUS : BG_FIELD);
-                        tvFieldBg.setStroke(
-                                f ? Math.max(2, a.dp(2.5f)) : 0,
-                                f ? Color.WHITE : Color.TRANSPARENT);
+                        if (tvInputCapsuleBg != null) {
+                            tvInputCapsuleBg.setColor(f ? BG_FIELD_FOCUS : BG_FIELD);
+                            tvInputCapsuleBg.setStroke(
+                                    f ? Math.max(2, a.dp(2)) : Math.max(1, a.dp(1)),
+                                    f ? Color.WHITE : 0x26ffffff);
+                        }
+                        if (tvSearchGlyph != null) tvSearchGlyph.invalidate();
                     } else {
                         FocusMotion.style(
                                 a,
@@ -1341,6 +1430,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                     @Override
                     public void afterTextChanged(android.text.Editable s) {
                         if (!current() || syncingInput || keyboard == null) return;
+                        syncSearchInputEllipsize();
                         if (imeActive) {
                             if (imeConnectionDepth == 0) {
                                 if (pendingImeRead != null) a.ui.removeCallbacks(pendingImeRead);
@@ -1646,6 +1736,220 @@ public final class GlobalSearchScreen implements AutoCloseable {
         row.addView(b, lp);
     }
 
+    static boolean shouldAutoCollapseLeftPanelOnSubmit(
+            boolean tvDevice, boolean remember, boolean focusFirstOnResult, boolean hasQuery) {
+        return tvDevice && hasQuery && (remember || focusFirstOnResult);
+    }
+
+    private void syncSearchInputEllipsize() {
+        if (!a.isTvDevice() || input == null) return;
+        android.text.Editable text = input.getText();
+        TextUtils.TruncateAt desired =
+                (text == null || text.length() == 0)
+                        ? TextUtils.TruncateAt.END
+                        : TextUtils.TruncateAt.START;
+        if (input.getEllipsize() != desired) {
+            input.setEllipsize(desired);
+        }
+    }
+
+    private void recomputeTvPosterWallMetrics(float activeRightWidthDp) {
+        if (!a.isTvDevice() || activeRightWidthDp <= 0f || tvSplitHeightPx <= 0) return;
+        int nextColumns = computeTvSearchColumns(activeRightWidthDp, tvFontScale);
+        int rightWidthPx = a.dp(Math.round(activeRightWidthDp));
+        tvResultColumnWidthPx =
+                Math.max(a.dp(92), (rightWidthPx - a.dp(8)) / Math.max(1, nextColumns));
+        int maxPosterH = Math.max(a.dp(108), tvSplitHeightPx - tvRightChromePx - tvCardChromePx);
+        int rawPosterW = Math.max(a.dp(76), tvResultColumnWidthPx - tvCellOuterMarginPx - a.dp(6));
+        int cappedPosterW = Math.max(a.dp(72), Math.round(maxPosterH / 1.5f));
+        int nextPosterW = Math.min(rawPosterW, cappedPosterW);
+        int nextPosterH = Math.round(nextPosterW * 1.5f);
+        boolean spanChanged = nextColumns != columns;
+        boolean sizeChanged =
+                nextPosterW != tvCardPosterWidthPx || nextPosterH != tvCardPosterHeightPx;
+        columns = nextColumns;
+        tvCardPosterWidthPx = nextPosterW;
+        tvCardPosterHeightPx = nextPosterH;
+        if (tvResultLayout != null && spanChanged) {
+            tvResultLayout.setSpanCount(columns);
+        }
+        if (tvResultAdapter != null && (spanChanged || sizeChanged)) {
+            tvResultAdapter.refreshThemeAndSizes(tvResultRecycler);
+        }
+    }
+
+    private static boolean isFocusInside(ViewGroup group, View focus) {
+        if (group == null || focus == null) return false;
+        ViewParent p = focus == group ? group : focus.getParent();
+        if (focus == group) return true;
+        while (p != null) {
+            if (p == group) return true;
+            p = p.getParent();
+        }
+        return false;
+    }
+
+    private void collapseLeftPanel(boolean showBubbleHint) {
+        if (!a.isTvDevice() || tvLeftPanel == null || tvRightPanel == null) return;
+        if (tvLeftCollapsed) {
+            if (showBubbleHint) showCollapseReminderBubble();
+            return;
+        }
+        View currentFocus = a.getCurrentFocus();
+        if (currentFocus != null
+                && currentFocus.getTag() instanceof String
+                && isFocusInside(tvLeftPanel, currentFocus)) {
+            lastLeftFocusTag = (String) currentFocus.getTag();
+        }
+        if (imeActive && input != null) {
+            finishSystemIme(false);
+            hideSystemIme();
+            input.setCursorVisible(false);
+            input.setShowSoftInputOnFocus(false);
+        }
+        TvQrInputHelper.dismissActive();
+        tvLeftCollapsed = true;
+        tvLeftPanel.animate().cancel();
+        tvLeftPanel.setVisibility(View.GONE);
+        ViewGroup.LayoutParams rlp = tvRightPanel.getLayoutParams();
+        if (rlp != null && tvContentWidthDp > 0f) {
+            rlp.width = a.dp(Math.round(tvContentWidthDp));
+            tvRightPanel.setLayoutParams(rlp);
+        }
+        recomputeTvPosterWallMetrics(tvContentWidthDp);
+        if (tvTopHint != null) {
+            tvTopHint.setText("一直按左键 / 菜单键拉起搜索  ·  确认选择  ·  返回退出");
+        }
+        if (showBubbleHint) showCollapseReminderBubble();
+    }
+
+    private void expandLeftPanel(boolean restoreFocus) {
+        hideCollapseReminderBubble(false);
+        if (!a.isTvDevice() || tvLeftPanel == null || tvRightPanel == null) return;
+        if (tvLeftCollapsed) {
+            tvLeftCollapsed = false;
+            tvLeftPanel.animate().cancel();
+            tvLeftPanel.setVisibility(View.VISIBLE);
+            float rightWidthDp =
+                    Math.max(320f, tvContentWidthDp - tvExpandedLeftWidthDp - tvExpandedSplitGapDp);
+            ViewGroup.LayoutParams rlp = tvRightPanel.getLayoutParams();
+            if (rlp != null) {
+                rlp.width = a.dp(Math.round(rightWidthDp));
+                tvRightPanel.setLayoutParams(rlp);
+            }
+            recomputeTvPosterWallMetrics(rightWidthDp);
+            if (tvTopHint != null) {
+                tvTopHint.setText("↑↓←→ 移动  ·  确认选择  ·  返回退出");
+            }
+            if (!a.reduced) {
+                tvLeftPanel.setAlpha(0f);
+                tvLeftPanel.setTranslationX(-a.dp(24));
+                tvLeftPanel.animate().alpha(1f).translationX(0f).setDuration(160L).start();
+            } else {
+                tvLeftPanel.setAlpha(1f);
+                tvLeftPanel.setTranslationX(0f);
+            }
+        }
+        if (restoreFocus) {
+            focusLeftPanelTarget();
+            final TvScrollView panel = tvLeftPanel;
+            panel.post(
+                    () -> {
+                        if (current()
+                                && !tvLeftCollapsed
+                                && panel == tvLeftPanel
+                                && !isFocusInside(panel, a.getCurrentFocus())) {
+                            focusLeftPanelTarget();
+                        }
+                    });
+        }
+    }
+
+    private void ensureRightPaneFocusAfterCollapse() {
+        if (!current()) return;
+        if (focusSelectedResultsInternal()) return;
+        Button tab = filterButtons.get(activeFilter);
+        if (tab == null) tab = filterButtons.get("");
+        if (tab != null && tab.isShown()) {
+            tab.requestFocus();
+        }
+    }
+
+    private void showCollapseReminderBubble() {
+        if (!current() || !a.isTvDevice() || a.root == null) return;
+        if (tvCollapseBubble == null) {
+            TextView bubble = a.text("‹  已收起搜索框 · 一直按左键或按菜单键拉起", 13f, TEXT_PRIMARY);
+            bubble.setTag("search-collapse-bubble");
+            bubble.setTypeface(null, Typeface.BOLD);
+            bubble.setSingleLine(true);
+            bubble.setEllipsize(TextUtils.TruncateAt.END);
+            bubble.setIncludeFontPadding(false);
+            bubble.setFocusable(false);
+            bubble.setClickable(false);
+            if (android.os.Build.VERSION.SDK_INT >= 16) {
+                bubble.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            }
+            bubble.setPadding(a.dp(15), a.dp(8), a.dp(16), a.dp(8));
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(0xeb162030);
+            bg.setCornerRadius(a.dp(18));
+            bg.setStroke(Math.max(1, a.dp(1.2f)), 0xaa7dd3fc);
+            bubble.setBackground(bg);
+            if (android.os.Build.VERSION.SDK_INT >= 21) {
+                bubble.setElevation(a.dp(8));
+            }
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2);
+            lp.gravity = Gravity.BOTTOM | Gravity.START;
+            lp.leftMargin = a.dp(26);
+            lp.rightMargin = a.dp(26);
+            lp.bottomMargin = a.dp(46);
+            a.root.addView(bubble, lp);
+            tvCollapseBubble = bubble;
+        }
+        if (pendingHideCollapseBubble != null) {
+            a.ui.removeCallbacks(pendingHideCollapseBubble);
+            pendingHideCollapseBubble = null;
+        }
+        tvCollapseBubble.animate().cancel();
+        tvCollapseBubble.setVisibility(View.VISIBLE);
+        tvCollapseBubble.bringToFront();
+        if (a.reduced) {
+            tvCollapseBubble.setAlpha(1f);
+            tvCollapseBubble.setTranslationY(0f);
+        } else {
+            tvCollapseBubble.setAlpha(0f);
+            tvCollapseBubble.setTranslationY(a.dp(8));
+            tvCollapseBubble.animate().alpha(1f).translationY(0f).setDuration(180L).start();
+        }
+        pendingHideCollapseBubble =
+                () -> {
+                    pendingHideCollapseBubble = null;
+                    hideCollapseReminderBubble(!a.reduced);
+                };
+        a.ui.postDelayed(pendingHideCollapseBubble, 4200L);
+    }
+
+    private void hideCollapseReminderBubble(boolean animate) {
+        if (pendingHideCollapseBubble != null && a.ui != null) {
+            a.ui.removeCallbacks(pendingHideCollapseBubble);
+            pendingHideCollapseBubble = null;
+        }
+        final TextView bubble = tvCollapseBubble;
+        if (bubble == null || bubble.getVisibility() != View.VISIBLE) return;
+        bubble.animate().cancel();
+        if (animate && !a.reduced) {
+            bubble.animate()
+                    .alpha(0f)
+                    .translationY(a.dp(6))
+                    .setDuration(180L)
+                    .withEndAction(() -> bubble.setVisibility(View.GONE))
+                    .start();
+        } else {
+            bubble.setAlpha(0f);
+            bubble.setVisibility(View.GONE);
+        }
+    }
+
     private boolean focusRightFromLeft() {
         if (!current()) return false;
         if (submitted.isEmpty()) {
@@ -1661,10 +1965,14 @@ public final class GlobalSearchScreen implements AutoCloseable {
         }
         // Prefer remembered poster card, then first visible card, then active filter, then state
         // CTA.
-        if (focusSelectedResultsInternal()) return true;
+        if (focusSelectedResultsInternal()) {
+            collapseLeftPanel(true);
+            return true;
+        }
         Button tab = filterButtons.get(activeFilter);
         if (tab != null && tab.isShown()) {
             tab.requestFocus();
+            collapseLeftPanel(true);
             return true;
         }
         return false;
@@ -1688,7 +1996,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
         return null;
     }
 
-    private boolean restoreLeftFocus() {
+    private boolean focusLeftPanelTarget() {
         if (!current() || a.root == null) return false;
         if (lastLeftFocusTag != null && !lastLeftFocusTag.isEmpty()) {
             View v = a.root.findViewWithTag(lastLeftFocusTag);
@@ -1702,6 +2010,15 @@ public final class GlobalSearchScreen implements AutoCloseable {
             return true;
         }
         return false;
+    }
+
+    private boolean restoreLeftFocus() {
+        if (!current() || a.root == null) return false;
+        if (a.isTvDevice() && tvLeftCollapsed) {
+            expandLeftPanel(true);
+            return true;
+        }
+        return focusLeftPanelTarget();
     }
 
     private static View findFirstFocusable(View root) {
@@ -1763,6 +2080,8 @@ public final class GlobalSearchScreen implements AutoCloseable {
         close();
         retainedRoot = null;
         retainedBody = null;
+        tvCollapseBubble = null;
+        tvLeftCollapsed = false;
         contextDiscarded = true;
         submitted = edited = activeFilter = "";
         matchMode = loadPreferredMatchMode();
@@ -2149,7 +2468,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
 
     static int computeEffectiveSearchThreads(
             int requestedThreads, boolean tvDevice, boolean lowRamTv) {
-        int clamped = Math.max(2, Math.min(6, requestedThreads));
+        int clamped = Math.max(2, Math.min(8, requestedThreads));
         if (tvDevice && lowRamTv) {
             return Math.min(clamped, 3);
         }
@@ -2357,6 +2676,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
             }
         }
         syncingInput = false;
+        syncSearchInputEllipsize();
         updateAfterImeInput(resetCandidates);
     }
 
@@ -2435,7 +2755,9 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                             label.setTypeface(null, Typeface.BOLD);
                                             label.setPadding(0, 0, a.dp(8), 0);
                                             titleSuggestions.addView(label);
-                                            for (final String title : values) {
+                                            for (int sugIdx = 0; sugIdx < values.size(); sugIdx++) {
+                                                final String title = values.get(sugIdx);
+                                                final boolean isFirstSuggestion = (sugIdx == 0);
                                                 final Button choice = new Button(a);
                                                 choice.setText(title);
                                                 choice.setTag("search-title:" + title);
@@ -2491,6 +2813,20 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                                                             ? TEXT_ON_LIGHT
                                                                             : TEXT_PRIMARY);
                                                         });
+                                                if (a.isTvDevice() && isFirstSuggestion) {
+                                                    choice.setOnKeyListener(
+                                                            (v, keyCode, event) -> {
+                                                                if (keyCode
+                                                                                == KeyEvent
+                                                                                        .KEYCODE_DPAD_LEFT
+                                                                        && event.getAction()
+                                                                                == KeyEvent
+                                                                                        .ACTION_DOWN) {
+                                                                    return restoreLeftFocus();
+                                                                }
+                                                                return false;
+                                                            });
+                                                }
                                                 LinearLayout.LayoutParams size =
                                                         new LinearLayout.LayoutParams(-2, a.dp(32));
                                                 size.rightMargin = a.dp(7);
@@ -2627,6 +2963,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                 : "当前模糊搜索 · 支持片名片段、拼音与首字母");
             }
             showHistory();
+            if (tvLeftCollapsed) expandLeftPanel(true);
             return;
         }
         updateResultHeader();
@@ -2669,15 +3006,20 @@ public final class GlobalSearchScreen implements AutoCloseable {
             updateResultHeader();
             if (status != null) status.setText("请先输入片名；空关键词不会发起网络搜索。");
             showHistory();
+            if (tvLeftCollapsed) expandLeftPanel(true);
             return;
         }
         final String query = rawQuery.trim();
+        cache = null;
         cancelWork();
         restoringResults = false;
         pendingPaginationFocus = false;
         resumeSyncNeeded = false;
         resumeResultsSyncNeeded = false;
-        focusNewResults = focusFirstOnResult;
+        boolean autoCollapseLeft =
+                shouldAutoCollapseLeftPanelOnSubmit(
+                        a.isTvDevice(), remember, focusFirstOnResult, true);
+        focusNewResults = focusFirstOnResult || autoCollapseLeft;
         submitted = query;
         final TvSearchMatcher.Mode requestMode = matchMode;
         resultConfig = a.config;
@@ -2761,6 +3103,10 @@ public final class GlobalSearchScreen implements AutoCloseable {
             status.setText("正在" + requestMode.label + "全部 " + total + " 个来源…");
         }
         renderResults();
+        if (autoCollapseLeft) {
+            collapseLeftPanel(true);
+            ensureRightPaneFocusAfterCollapse();
+        }
 
         if (requestMode == TvSearchMatcher.Mode.EXACT) {
             // EXACT mode never needs phonetic dictionary expansion — launch immediately!
@@ -2775,7 +3121,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                 if (a.phonetic == null)
                                     try {
                                         a.phoneticReady.await(
-                                                8, java.util.concurrent.TimeUnit.SECONDS);
+                                                120, java.util.concurrent.TimeUnit.MILLISECONDS);
                                     } catch (InterruptedException cancelled) {
                                         Thread.currentThread().interrupt();
                                         return;
@@ -2844,7 +3190,9 @@ public final class GlobalSearchScreen implements AutoCloseable {
         final int initialPerSource = TvSearchBudget.initialPerSourceCap(total, tvDevice, lowRam);
         int effectiveThreads =
                 computeEffectiveSearchThreads(
-                        a.prefs.getInt(Prefs.SEARCH_THREADS, 6), tvDevice, lowRam);
+                        a.prefs.getInt(Prefs.SEARCH_THREADS, tvDevice && !lowRam ? 8 : 6),
+                        tvDevice,
+                        lowRam);
         SearchCoordinator.onLowMemoryHook =
                 () -> {
                     trimMemory(android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL);
@@ -2853,6 +3201,11 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 };
         SearchCoordinator.configureMaxPoolThreads(tvDevice ? (lowRam ? 6 : 8) : 14);
         SearchCoordinator.configureThreads(effectiveThreads);
+        long rawSearchTimeoutMs =
+                Prefs.clampSearchTimeoutSeconds(a.prefs.getInt(Prefs.SEARCH_TIMEOUT, 20))
+                        * 1000L;
+        long effectiveSearchTimeoutMs =
+                sources.size() > 3 ? Math.min(10000L, rawSearchTimeoutMs) : rawSearchTimeoutMs;
         final SearchCoordinator[] sessionOwner = new SearchCoordinator[1];
         sessionOwner[0] =
                 new SearchCoordinator(
@@ -3010,8 +3363,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                                 }
                                             }
                                         }),
-                        Prefs.clampSearchTimeoutSeconds(a.prefs.getInt(Prefs.SEARCH_TIMEOUT, 20))
-                                * 1000L,
+                        effectiveSearchTimeoutMs,
                         90000L,
                         tvDevice ? TvSearchPages.MAX_RESULTS : 24);
         coordinator = sessionOwner[0];
@@ -3057,7 +3409,8 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         variants,
                         TvSearchMatcher.videoPredicate(requestMode, query, a.phonetic),
                         (term, page) -> fetchSearchPage(context, site, term, page),
-                        maxRetained);
+                        maxRetained,
+                        0);
         if (!batches.put(site.key, pages)) {
             return Collections.emptyList();
         }
@@ -4093,7 +4446,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                     SourceResult result = results.get(key);
                     boolean hasMore =
                             result != null && result.pages != null && result.pages.hasMore();
-                    int siteCount = result == null ? 0 : collectRankedHitsForFilter(key).size();
+                    int siteCount = result == null ? 0 : result.videos.size();
                     suffix =
                             result == null
                                     ? " · 搜索中"
@@ -4590,8 +4943,55 @@ public final class GlobalSearchScreen implements AutoCloseable {
     private String formatCardMeta(Cms.Video video, Cms.Site site) {
         String sourceName = clean(site == null ? "" : site.name);
         String year = video == null || video.year == null ? "" : video.year.trim();
-        if (!year.isEmpty()) return year + " · " + sourceName;
-        return sourceName;
+        String remarks =
+                video == null || video.remarks == null
+                        ? ""
+                        : video.remarks.trim();
+        StringBuilder sb = new StringBuilder();
+        if (!remarks.isEmpty()) sb.append(remarks);
+        if (!year.isEmpty()) {
+            if (sb.length() > 0) sb.append(" · ");
+            sb.append(year);
+        }
+        if (!sourceName.isEmpty()) {
+            if (sb.length() > 0) sb.append(" · ");
+            sb.append(sourceName);
+        }
+        return sb.toString();
+    }
+
+    private String formatNetdiskSpecLine(Cms.Video video) {
+        if (video == null) return "";
+        LinkedHashSet<String> tags = new LinkedHashSet<>();
+        String remarks = video.remarks == null ? "" : video.remarks.trim();
+        if (!remarks.isEmpty()) tags.add(remarks);
+        String combined =
+                ((video.title == null ? "" : video.title)
+                                + " "
+                                + remarks
+                                + " "
+                                + (video.tag == null ? "" : video.tag))
+                        .toLowerCase(Locale.ROOT);
+        if (combined.contains("4k") || combined.contains("2160")) tags.add("4K超清");
+        if (combined.contains("原盘") || combined.contains("iso") || combined.contains("bdmv")) {
+            tags.add("原盘");
+        }
+        if (combined.contains("remux")) tags.add("REMUX");
+        if (combined.contains("高码")) tags.add("高码率");
+        if (combined.contains("臻彩") || combined.contains("hdr10")) tags.add("HDR");
+        if (combined.contains("杜比") || combined.contains("dovi") || combined.contains("atmos")) {
+            tags.add("杜比视界/全景声");
+        }
+        if (combined.contains("60fps") || combined.contains("60帧") || combined.contains("高帧")) {
+            tags.add("60帧");
+        }
+        if (tags.isEmpty()) return "网盘资源（点击查看目录文件）";
+        StringBuilder out = new StringBuilder();
+        for (String tag : tags) {
+            if (out.length() > 0) out.append(" · ");
+            out.append(tag);
+        }
+        return out.toString();
     }
 
     /**
@@ -4675,7 +5075,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
 
     /** Single leaf View replacing 5 nested poster/badge/clip/focus-ring Views per TV search card. */
     private static final class TvSearchPosterArtView extends View {
-        final TvSearchArtTheme t;
+        TvSearchArtTheme t;
         final Paint posterPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
         final Rect srcRect = new Rect();
         final RectF dstRect = new RectF();
@@ -4691,6 +5091,10 @@ public final class GlobalSearchScreen implements AutoCloseable {
 
         TvSearchPosterArtView(MainActivity a, TvSearchArtTheme theme) {
             super(a);
+            applyThemeBounds(theme);
+        }
+
+        private void applyThemeBounds(TvSearchArtTheme theme) {
             this.t = theme;
             dstRect.set(0f, 0f, t.artW, t.artH);
             float cs = t.cornerSizePx;
@@ -4698,6 +5102,47 @@ public final class GlobalSearchScreen implements AutoCloseable {
             dstTr.set(t.artW - cs, 0f, t.artW, cs);
             dstBl.set(0f, t.artH - cs, cs, t.artH);
             dstBr.set(t.artW - cs, t.artH - cs, t.artW, t.artH);
+            if (!badgeText.isEmpty()) {
+                float tw = t.badgeTextPaint.measureText(badgeText);
+                float bw = tw + t.badgePadH * 2f;
+                badgeRect.set(
+                        t.artW - t.badgeMargin - bw,
+                        t.badgeMargin,
+                        t.artW - t.badgeMargin,
+                        t.badgeMargin + t.badgeBoxH);
+            }
+            if (posterBitmap != null && !posterBitmap.isRecycled()) {
+                recomputeSrcRect(posterBitmap);
+            }
+        }
+
+        void updateTheme(TvSearchArtTheme theme) {
+            if (theme == null || theme == this.t) return;
+            applyThemeBounds(theme);
+            requestLayout();
+            invalidate();
+        }
+
+        private void recomputeSrcRect(Bitmap bmp) {
+            int bw = bmp.getWidth();
+            int bh = bmp.getHeight();
+            if (bw <= 0 || bh <= 0) {
+                hasSrcRect = false;
+                return;
+            }
+            float targetRatio = (float) t.artW / (float) Math.max(1, t.artH);
+            float bmpRatio = (float) bw / (float) bh;
+            if (bmpRatio > targetRatio) {
+                int cropW = Math.max(1, Math.min(bw, Math.round(bh * targetRatio)));
+                int left = (bw - cropW) / 2;
+                srcRect.set(left, 0, left + cropW, bh);
+            } else {
+                int cropH =
+                        Math.max(1, Math.min(bh, Math.round(bw / Math.max(0.01f, targetRatio))));
+                int top = (bh - cropH) / 2;
+                srcRect.set(0, top, bw, top + cropH);
+            }
+            hasSrcRect = true;
         }
 
         void clearPoster() {
@@ -4797,8 +5242,11 @@ public final class GlobalSearchScreen implements AutoCloseable {
     /** Lightweight DiffUtil-backed RecyclerView adapter for TV 2:3 Apple TV poster wall. */
     private final class TvSearchPosterAdapter
             extends RecyclerView.Adapter<TvSearchPosterAdapter.CardHolder> {
+        static final int VIEW_TYPE_POSTER = 0;
+        static final int VIEW_TYPE_NETDISK_WIDE = 1;
         private final List<TvSearchMatcher.RankedHit> items = new ArrayList<>();
         private TvSearchArtTheme artTheme;
+        private TvSearchArtTheme netdiskThumbTheme;
 
         private TvSearchArtTheme ensureArtTheme() {
             if (artTheme == null
@@ -4807,6 +5255,53 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 artTheme = new TvSearchArtTheme(a, tvCardPosterWidthPx, tvCardPosterHeightPx);
             }
             return artTheme;
+        }
+
+        private TvSearchArtTheme ensureNetdiskThumbTheme() {
+            if (netdiskThumbTheme == null) {
+                netdiskThumbTheme = new TvSearchArtTheme(a, a.dp(74), a.dp(106));
+            }
+            return netdiskThumbTheme;
+        }
+
+        @Override
+        public int getItemViewType(int position) {
+            if (position >= 0 && position < items.size()) {
+                Cms.Site s = items.get(position).site;
+                if (s != null && s.isNetdiskSite()) return VIEW_TYPE_NETDISK_WIDE;
+            }
+            return VIEW_TYPE_POSTER;
+        }
+
+        void refreshThemeAndSizes(RecyclerView rv) {
+            TvSearchArtTheme theme = ensureArtTheme();
+            if (rv == null) return;
+            for (int i = 0; i < rv.getChildCount(); i++) {
+                View child = rv.getChildAt(i);
+                RecyclerView.ViewHolder vh = rv.getChildViewHolder(child);
+                if (vh instanceof CardHolder) {
+                    CardHolder h = (CardHolder) vh;
+                    if (h.isWide) continue;
+                    h.posterArt.updateTheme(theme);
+                    ViewGroup.LayoutParams pLp = h.posterArt.getLayoutParams();
+                    if (pLp != null) {
+                        pLp.width = tvCardPosterWidthPx;
+                        pLp.height = tvCardPosterHeightPx;
+                        h.posterArt.setLayoutParams(pLp);
+                    }
+                    ViewGroup.LayoutParams tLp = h.title.getLayoutParams();
+                    if (tLp != null) {
+                        tLp.width = tvCardPosterWidthPx;
+                        h.title.setLayoutParams(tLp);
+                    }
+                    ViewGroup.LayoutParams mLp = h.meta.getLayoutParams();
+                    if (mLp != null) {
+                        mLp.width = tvCardPosterWidthPx;
+                        h.meta.setLayoutParams(mLp);
+                    }
+                }
+            }
+            rv.requestLayout();
         }
 
         void clearAll() {
@@ -4846,6 +5341,8 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                     TvSearchMatcher.RankedHit n = newList.get(newPos);
                                     return TextUtils.equals(o.video.title, n.video.title)
                                             && TextUtils.equals(o.video.year, n.video.year)
+                                            && TextUtils.equals(o.video.remarks, n.video.remarks)
+                                            && TextUtils.equals(o.video.tag, n.video.tag)
                                             && TextUtils.equals(o.video.poster, n.video.poster)
                                             && TextUtils.equals(o.site.name, n.site.name);
                                 }
@@ -4871,6 +5368,68 @@ public final class GlobalSearchScreen implements AutoCloseable {
 
         @Override
         public CardHolder onCreateViewHolder(ViewGroup parent, int viewType) {
+            if (viewType == VIEW_TYPE_NETDISK_WIDE) {
+                LinearLayout card = a.row();
+                card.setGravity(Gravity.CENTER_VERTICAL);
+                card.setClipChildren(true);
+                card.setClipToPadding(false);
+                card.setPadding(a.dp(10), a.dp(10), a.dp(12), a.dp(10));
+                GradientDrawable wideBg = new GradientDrawable();
+                wideBg.setCornerRadius(a.dp(10));
+                wideBg.setColor(0xaa131924);
+                wideBg.setStroke(Math.max(1, a.dp(1)), 0x26ffffff);
+                card.setBackground(wideBg);
+                card.setFocusable(true);
+                card.setFocusableInTouchMode(true);
+                card.setClickable(true);
+                UiCompat.setDefaultFocusHighlightEnabled(card, false);
+
+                TvSearchArtTheme thumbTheme = ensureNetdiskThumbTheme();
+                TvSearchPosterArtView posterArt = new TvSearchPosterArtView(a, thumbTheme);
+                LinearLayout.LayoutParams posterLp =
+                        new LinearLayout.LayoutParams(thumbTheme.artW, thumbTheme.artH);
+                card.addView(posterArt, posterLp);
+
+                LinearLayout infoCol = a.vertical();
+                LinearLayout.LayoutParams colLp = new LinearLayout.LayoutParams(0, -2, 1f);
+                colLp.leftMargin = a.dp(12);
+                card.addView(infoCol, colLp);
+
+                TextView title = a.text("", 14f, 0xffeef4fc);
+                title.setTypeface(null, Typeface.BOLD);
+                title.setMaxLines(3);
+                title.setEllipsize(TextUtils.TruncateAt.END);
+                title.setLineSpacing(a.dp(1.5f), 1f);
+                title.setIncludeFontPadding(false);
+                infoCol.addView(title, new LinearLayout.LayoutParams(-1, -2));
+
+                TextView specs = a.text("", 12f, 0xfffbbf24);
+                specs.setTypeface(null, Typeface.BOLD);
+                specs.setMaxLines(2);
+                specs.setEllipsize(TextUtils.TruncateAt.END);
+                specs.setIncludeFontPadding(false);
+                LinearLayout.LayoutParams specsLp = new LinearLayout.LayoutParams(-1, -2);
+                specsLp.topMargin = a.dp(5);
+                infoCol.addView(specs, specsLp);
+
+                TextView meta = a.text("", 11.5f, TEXT_MUTED);
+                meta.setSingleLine(true);
+                meta.setEllipsize(TextUtils.TruncateAt.END);
+                meta.setIncludeFontPadding(false);
+                LinearLayout.LayoutParams metaLp = new LinearLayout.LayoutParams(-1, -2);
+                metaLp.topMargin = a.dp(4);
+                infoCol.addView(meta, metaLp);
+
+                RecyclerView.LayoutParams cellLp =
+                        new RecyclerView.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT);
+                cellLp.setMargins(a.dp(4), a.dp(2), a.dp(4), a.dp(8));
+                card.setLayoutParams(cellLp);
+
+                return new CardHolder(card, wideBg, posterArt, title, specs, meta, true);
+            }
+
             LinearLayout card = a.vertical();
             card.setGravity(Gravity.CENTER_HORIZONTAL);
             card.setClipChildren(true);
@@ -4914,7 +5473,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
             cellLp.setMargins(0, 0, 0, a.dp(4));
             card.setLayoutParams(cellLp);
 
-            return new CardHolder(card, posterArt, title, meta);
+            return new CardHolder(card, null, posterArt, title, null, meta, false);
         }
 
         @Override
@@ -4929,21 +5488,24 @@ public final class GlobalSearchScreen implements AutoCloseable {
             holder.itemView.setTag(cardTag);
             holder.title.setText(video.title == null ? "" : video.title);
             holder.meta.setText(formatCardMeta(video, site));
+            if (holder.specs != null) {
+                holder.specs.setText(formatNetdiskSpecLine(video));
+            }
             holder.itemView.setContentDescription(
                     (video.title == null ? "" : video.title) + " " + formatCardMeta(video, site));
 
+            final int artW = holder.isWide ? ensureNetdiskThumbTheme().artW : tvCardPosterWidthPx;
+            final int artH = holder.isWide ? ensureNetdiskThumbTheme().artH : tvCardPosterHeightPx;
             final int scope = searchArtworkScope;
             ImageLoader.unbindBitmapTarget(holder.posterArt);
-            Bitmap cached =
-                    ImageLoader.cachedPosterBitmap(
-                            a, video.poster, tvCardPosterWidthPx, tvCardPosterHeightPx);
+            Bitmap cached = ImageLoader.cachedPosterBitmap(a, video.poster, artW, artH);
             holder.posterArt.setPosterBitmap(cached);
             if (cached == null && video.poster != null && !video.poster.isEmpty()) {
                 ImageLoader.loadPosterBitmap(
                         a,
                         video.poster,
-                        tvCardPosterWidthPx,
-                        tvCardPosterHeightPx,
+                        artW,
+                        artH,
                         pageTicket,
                         scope,
                         holder.posterArt,
@@ -5014,20 +5576,34 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
                         int pos = holder.getBindingAdapterPosition();
                         if (pos == RecyclerView.NO_POSITION) return false;
-                        if (keyCode == KeyEvent.KEYCODE_DPAD_UP && pos < columns) {
+                        GridLayoutManager.SpanSizeLookup ssl =
+                                tvResultLayout != null
+                                        ? tvResultLayout.getSpanSizeLookup()
+                                        : null;
+                        int spanIdx = ssl != null ? ssl.getSpanIndex(pos, columns) : (pos % columns);
+                        int spanSize = ssl != null ? ssl.getSpanSize(pos) : 1;
+                        int groupIdx =
+                                ssl != null
+                                        ? ssl.getSpanGroupIndex(pos, columns)
+                                        : (pos / columns);
+                        if (keyCode == KeyEvent.KEYCODE_DPAD_UP && groupIdx == 0) {
                             Button tab = filterButtons.get(activeFilter);
                             if (tab != null && tab.isShown()) {
                                 tab.requestFocus();
                                 return true;
                             }
-                        } else if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT && (pos % columns) == 0) {
+                        } else if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT && spanIdx == 0) {
                             return restoreLeftFocus();
                         } else if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
-                                && (((pos + 1) % columns) == 0 || pos == items.size() - 1)) {
+                                && (spanIdx + spanSize >= columns || pos == items.size() - 1)) {
                             return true;
-                        } else if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN
-                                && pos + columns >= items.size()) {
-                            if (moreResults != null
+                        } else if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                            int lastGroup =
+                                    ssl != null
+                                            ? ssl.getSpanGroupIndex(items.size() - 1, columns)
+                                            : ((items.size() - 1) / columns);
+                            if (groupIdx >= lastGroup
+                                    && moreResults != null
                                     && moreResults.getVisibility() == View.VISIBLE) {
                                 moreResults.requestFocus();
                                 return true;
@@ -5049,18 +5625,30 @@ public final class GlobalSearchScreen implements AutoCloseable {
         }
 
         final class CardHolder extends RecyclerView.ViewHolder {
+            final GradientDrawable wideBg;
             final TvSearchPosterArtView posterArt;
             final TextView title;
+            final TextView specs;
             final TextView meta;
+            final boolean isWide;
             String boundKey = "";
             int bindSeq;
 
             CardHolder(
-                    View itemView, TvSearchPosterArtView posterArt, TextView title, TextView meta) {
+                    View itemView,
+                    GradientDrawable wideBg,
+                    TvSearchPosterArtView posterArt,
+                    TextView title,
+                    TextView specs,
+                    TextView meta,
+                    boolean isWide) {
                 super(itemView);
+                this.wideBg = wideBg;
                 this.posterArt = posterArt;
                 this.title = title;
+                this.specs = specs;
                 this.meta = meta;
+                this.isWide = isWide;
             }
 
             void applyFocusVisual(boolean focused, boolean animate) {
@@ -5068,7 +5656,16 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 // layout passes, zero stencil clip masks, zero path tessellation, zero texture
                 // scaling.
                 posterArt.setArtFocused(focused);
+                if (wideBg != null) {
+                    wideBg.setColor(focused ? 0xff1c2536 : 0xaa131924);
+                    wideBg.setStroke(
+                            Math.max(1, a.dp(focused ? 2f : 1f)),
+                            focused ? 0xff5fa8ff : 0x26ffffff);
+                }
                 title.setTextColor(focused ? TEXT_PRIMARY : 0xffcfd9e6);
+                if (specs != null) {
+                    specs.setTextColor(focused ? 0xfffde68a : 0xfffbbf24);
+                }
                 meta.setTextColor(focused ? 0xffc6d4e6 : TEXT_MUTED);
             }
         }
@@ -5687,7 +6284,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         p.setStyle(Paint.Style.STROKE);
                         p.setStrokeWidth(Math.max(1.8f, s * 0.12f));
                         p.setStrokeCap(Paint.Cap.ROUND);
-                        p.setColor(TEXT_MUTED);
+                        p.setColor(input != null && input.hasFocus() ? TEXT_PRIMARY : TEXT_MUTED);
                         canvas.drawCircle(cx, cy, r, p);
                         float d = r * 0.72f;
                         canvas.drawLine(cx + d, cy + d, cx + r * 1.42f, cy + r * 1.42f, p);
@@ -5799,6 +6396,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
      * while keeping {@code retainedRoot} attached in {@code tvStage} for fast BACK resume.
      */
     void pauseForChildPage() {
+        hideCollapseReminderBubble(false);
         cancelSuggestions();
         if (imeActive && keyboard != null && contextMatches()) {
             readImeDraft();
@@ -5849,11 +6447,17 @@ public final class GlobalSearchScreen implements AutoCloseable {
         boolean unrendered = hasUnrenderedResults();
         resumeSyncNeeded = hadPendingRender || markedAnyBusy || unrendered;
         resumeResultsSyncNeeded = hadPendingRender || unrendered;
+        if (matched == 0 && busy > 0) {
+            cache = null;
+            return;
+        }
         cacheResults();
     }
 
     @Override
     public void close() {
+        hideCollapseReminderBubble(false);
+        tvCollapseBubble = null;
         retainedRoot = null;
         retainedBody = null;
         resumeSyncNeeded = false;

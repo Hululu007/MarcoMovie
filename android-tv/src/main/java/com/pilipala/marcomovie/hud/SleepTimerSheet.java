@@ -23,15 +23,22 @@ public final class SleepTimerSheet {
     public static final int MODE_OFF = 0;
     public static final int MODE_15M = 1;
     public static final int MODE_30M = 2;
-    public static final int MODE_60M = 3;
-    public static final int MODE_90M = 4;
-    public static final int MODE_END_OF_EPISODE = 5;
+    public static final int MODE_45M = 3;
+    public static final int MODE_60M = 4;
+    public static final int MODE_90M = 5;
+    public static final int MODE_END_OF_EPISODE = 6;
 
     public static final long WARNING_WINDOW_MS = 30_000L;
     public static final long EXTEND_STEP_MS = 15L * 60_000L;
 
     public static final String[] PRESET_LABELS = {
-        "关闭（默认）", "15 分钟后停止", "30 分钟后停止", "60 分钟后停止", "90 分钟后停止", "播完本集后停止"
+        "关闭（默认）",
+        "15 分钟后停止",
+        "30 分钟后停止",
+        "45 分钟后停止",
+        "60 分钟后停止",
+        "90 分钟后停止",
+        "播完本集后停止"
     };
 
     private static final AtomicInteger FALLBACK_VIEW_ID = new AtomicInteger(0x4d300000);
@@ -106,6 +113,8 @@ public final class SleepTimerSheet {
                     return 15L;
                 case MODE_30M:
                     return 30L;
+                case MODE_45M:
+                    return 45L;
                 case MODE_60M:
                     return 60L;
                 case MODE_90M:
@@ -202,6 +211,21 @@ public final class SleepTimerSheet {
             if (sec < 60L) return "剩 " + sec + " 秒";
             long min = (sec + 59L) / 60L;
             return "剩 " + min + " 分钟";
+        }
+
+        public String formatLivePillLabel(long nowMs) {
+            if (!isActive()) return "";
+            if (mode == MODE_END_OF_EPISODE) return "定时 · 本集后停";
+            long rem = remainingMs(nowMs);
+            if (rem <= 0L) return "定时 · 00:00";
+            long sec = (rem + 999L) / 1000L;
+            long h = sec / 3600L;
+            long m = (sec % 3600L) / 60L;
+            long s = sec % 60L;
+            if (h > 0L) {
+                return String.format(java.util.Locale.ROOT, "定时 %d:%02d:%02d", h, m, s);
+            }
+            return String.format(java.util.Locale.ROOT, "定时 %02d:%02d", m, s);
         }
     }
 

@@ -186,34 +186,29 @@ final class LocalMediaScraper {
             LocalMediaLibrary.LocalVideoItem item,
             List<TvSeriesScrapeDialog.MediaCandidate> candidates) {
         if (item == null || candidates == null || candidates.isEmpty()) return null;
-        String targetCore = TvSeriesScraper.normalizeCoreKey(item.title);
+        int epCount = item.episodes != null ? item.episodes.size() : 0;
         TvSeriesScrapeDialog.MediaCandidate best = null;
-        int bestScore = -100;
+        int bestScore = -1000;
         for (TvSeriesScrapeDialog.MediaCandidate c : candidates) {
             if (c == null || c.title == null || c.title.trim().isEmpty()) continue;
-            int score = 0;
-            String candCore = TvSeriesScraper.normalizeCoreKey(c.title);
-            if (!targetCore.isEmpty() && targetCore.equals(candCore)) {
-                score += 60;
-            } else if (!targetCore.isEmpty()
-                    && (candCore.contains(targetCore) || targetCore.contains(candCore))) {
-                score += 35 - Math.min(20, Math.abs(candCore.length() - targetCore.length()) * 2);
-            } else {
-                score -= 20;
-            }
-            if (!item.year.isEmpty() && item.year.equals(c.year)) {
-                score += 20;
-            }
-            if (item.isSeries && "tv".equals(c.kind)) score += 12;
-            if (!item.isSeries && "movie".equals(c.kind)) score += 12;
-            if (!c.posterUrl.isEmpty()) score += 8;
-            if (c.score > 1.0) score += 5;
+            int score =
+                    TvSeriesScraper.scoreMetadataCandidate(
+                            item.title,
+                            item.year,
+                            item.isSeries,
+                            epCount,
+                            c.title,
+                            c.year,
+                            c.kind,
+                            c.totalEpisodes,
+                            c.posterUrl,
+                            c.score);
             if (score > bestScore) {
                 bestScore = score;
                 best = c;
             }
         }
-        return bestScore >= 20 ? best : null;
+        return bestScore >= 50 ? best : null;
     }
 
     private static String extractAndCacheFrame(Context context, String itemId, String mediaUri) {

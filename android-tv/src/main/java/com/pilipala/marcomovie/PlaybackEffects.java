@@ -10,6 +10,15 @@ final class PlaybackEffects implements java.io.Closeable {
     BassBoost bass;
     LoudnessEnhancer loudness;
 
+    /**
+     * Platform {@code android.media.audiofx} session effects conflict with Amlogic/Xiaomi TV
+     * post-processing HALs ({@code Hpeq}/{@code Avl}/{@code MS12 DAP}). Only fall back to platform
+     * session effects when the active player backend has no in-app PCM/audio-filter pipeline.
+     */
+    static boolean shouldUsePlatformAudioFx(boolean supportsInAppAudioEffects, boolean isMpv) {
+        return !supportsInAppAudioEffects && !isMpv;
+    }
+
     void applyLoudness(int session, int boostDb) {
         if (loudness != null) {
             try {

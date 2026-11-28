@@ -28,6 +28,7 @@ with tempfile.TemporaryDirectory(prefix='home-refresh-') as directory:
           static class View {static int VISIBLE=0,GONE=8;}
           static class Button {String text="重新加载"; boolean focus; int visibility=0;
             String getText(){return text;} boolean hasFocus(){return focus;}
+            int getVisibility(){return visibility;}
             void setText(String s){text=s;} void setVisibility(int v){visibility=v;}}
           static class State {boolean ready,categoryFailed; int windowStart;}
           Button more=new Button(), earlier=new Button(); State state=new State();

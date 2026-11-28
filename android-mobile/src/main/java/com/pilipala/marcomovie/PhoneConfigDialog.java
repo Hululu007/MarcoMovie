@@ -128,8 +128,10 @@ final class PhoneConfigDialog {
                                     throw new java.io.IOException("Apply timeout");
                                 if (failure.get() != null) throw failure.get();
                             },
-                            CloudSyncDialog.lanSyncHandler(a));
+                            CloudSyncDialog.lanSyncHandler(a))
+                    .withBindHandler(CloudSyncDialog.lanBindHandler(a, null));
             String address = server.address(ip);
+            String qrPayload = server.bindQrAddress(ip);
             LinearLayout panel = a.vertical();
             panel.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
             TextView note =
@@ -142,7 +144,7 @@ final class PhoneConfigDialog {
             int qrSize =
                     Math.min(a.dp(172), Math.max(a.dp(132), Math.round(a.windowHeight() * 0.29f)));
             BitMatrix matrix =
-                    new QRCodeWriter().encode(address, BarcodeFormat.QR_CODE, qrSize, qrSize);
+                    new QRCodeWriter().encode(qrPayload, BarcodeFormat.QR_CODE, qrSize, qrSize);
             int[] pixels = new int[qrSize * qrSize];
             for (int y = 0; y < qrSize; y++)
                 for (int x = 0; x < qrSize; x++)
@@ -229,8 +231,10 @@ final class PhoneConfigDialog {
                                             });
                                 }
                                 return merged;
-                            });
+                            })
+                    .withBindHandler(CloudSyncDialog.lanBindHandler(a, onUpdated));
             final String address = server.address(ip);
+            final String qrPayload = server.bindQrAddress(ip);
             LinearLayout panel = a.vertical();
             panel.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
             TextView note =
@@ -244,7 +248,7 @@ final class PhoneConfigDialog {
             int qrSize =
                     Math.min(a.dp(172), Math.max(a.dp(132), Math.round(a.windowHeight() * 0.29f)));
             BitMatrix matrix =
-                    new QRCodeWriter().encode(address, BarcodeFormat.QR_CODE, qrSize, qrSize);
+                    new QRCodeWriter().encode(qrPayload, BarcodeFormat.QR_CODE, qrSize, qrSize);
             int[] pixels = new int[qrSize * qrSize];
             for (int y = 0; y < qrSize; y++)
                 for (int x = 0; x < qrSize; x++)

@@ -219,6 +219,7 @@ public class MoviePlayer {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Context context;
     private ExoPlayer exo;
+    private TvAudioEffectProcessor audioEffects;
     private Uri uri;
     private Map<String, String> headers = Collections.emptyMap();
     private OnPreparedListener preparedListener;
@@ -449,16 +450,19 @@ public class MoviePlayer {
         if (!initializeExo) return;
         onMain(
                 () -> {
-                    int userDecoder =
-                            this.context
-                                    .getSharedPreferences(Prefs.FILE, 0)
-                                    .getInt(Prefs.DECODER_MODE, 0);
+                    android.content.SharedPreferences initialPrefs =
+                            this.context.getSharedPreferences(Prefs.FILE, 0);
+                    int userDecoder = initialPrefs.getInt(Prefs.DECODER_MODE, 0);
                     int decoderMode =
                             requestedDecoder >= 0
                                     ? requestedDecoder
                                     : (this.ijkMode && userDecoder == 0 ? 3 : userDecoder);
+                    audioEffects =
+                            new TvAudioEffectProcessor(
+                                    initialPrefs.getInt(Prefs.AUDIO_EFFECT, 0),
+                                    initialPrefs.getInt(Prefs.LOUDNESS_BOOST, 0));
                     DefaultRenderersFactory renderers =
-                            new DecoderRenderersFactory(this.context, decoderMode);
+                            new DecoderRenderersFactory(this.context, decoderMode, audioEffects);
                     renderers.setMediaCodecSelector(
                             (mime, secure, tunneling) -> {
                                 java.util.List<androidx.media3.exoplayer.mediacodec.MediaCodecInfo>
@@ -1830,6 +1834,20 @@ public class MoviePlayer {
 
     public int getAudioSessionId() {
         return onMain(() -> released || exo == null ? 0 : exo.getAudioSessionId());
+    }
+
+    public boolean supportsInAppAudioEffects() {
+        return exo != null && audioEffects != null && !released;
+    }
+
+    public void applyInAppAudioEffect(int preset) {
+        TvAudioEffectProcessor dsp = audioEffects;
+        if (dsp != null) dsp.setAudioEffect(preset);
+    }
+
+    public void applyInAppLoudnessBoost(int boostDb) {
+        TvAudioEffectProcessor dsp = audioEffects;
+        if (dsp != null) dsp.setLoudnessBoostDb(boostDb);
     }
 
     public long getFirstFrameMs() {

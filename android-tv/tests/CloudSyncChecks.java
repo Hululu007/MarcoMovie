@@ -54,6 +54,7 @@ public final class CloudSyncChecks {
         testMainActivityRestartWatchHistoryBackup();
         testUiLatchTimeoutAndErrorPropagation();
         testRound2WebdavRobustness();
+        testWebdavBindCryptoAndLanEndpoint();
         System.out.println("ALL PASS (" + checks + " checks)");
     }
 
@@ -1802,6 +1803,132 @@ public final class CloudSyncChecks {
         } finally {
             r2Server.stop(0);
             cond412Server.stop(0);
+        }
+    }
+
+    private static byte[] hexToBytes(String hex) {
+        byte[] out = new byte[hex.length() / 2];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+        }
+        return out;
+    }
+
+    private static void testWebdavBindCryptoAndLanEndpoint() throws Exception {
+        byte[] key =
+                hexToBytes("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+        byte[] nonce = hexToBytes("a0a1a2a3a4a5a6a7a8a9aaabacadaeaf");
+        String plaintext =
+                "{\"v\":1,\"type\":\"webdav_bind\",\"mode\":\"push\",\"url\":\"https://dav.example/dav/\",\"username\":\"alice\",\"password\":\"secret\"}";
+
+        String envJson =
+                com.pilipala.source.WebdavBindCrypto.sealPlaintextWithNonce(key, nonce, plaintext);
+        JSONObject env = new JSONObject(envJson);
+        check(
+                env.optInt("v") == 1
+                        && com.pilipala.source.WebdavBindCrypto.ALG.equals(env.optString("alg"))
+                        && "oKGio6SlpqeoqaqrrK2urw".equals(env.optString("n"))
+                        && "xfDx9RrOpL1khU7sInR6r_FEkaUAWr2Gb1uRwQsipYvnlQXfmuWnU5fb1UB1NCg2Qgx2MIpAZ8fkGJgZrE4XXZddPAUF7j81s4Zo6uyIPLCLJTUuJuCXD8uI9zvN0-9vg3Kk1yHHvQGjKt_1Ol9xDa6I"
+                                .equals(env.optString("c"))
+                        && "RFROaISW8WSfiPGKWfQ6WwsFqQIsJsoJ3h7w0hgUPOM".equals(env.optString("t")),
+                "WebdavBindCrypto deterministic cross-platform vector matches");
+
+        JSONObject opened = com.pilipala.source.WebdavBindCrypto.openJson(key, envJson);
+        check(
+                "https://dav.example/dav/".equals(opened.optString("url"))
+                        && "alice".equals(opened.optString("username"))
+                        && "secret".equals(opened.optString("password")),
+                "WebdavBindCrypto openJson decrypts fields accurately");
+
+        boolean tamperedRejected = false;
+        try {
+            JSONObject badEnv = new JSONObject(envJson);
+            badEnv.put("t", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+            com.pilipala.source.WebdavBindCrypto.openJson(key, badEnv.toString());
+        } catch (java.security.GeneralSecurityException expected) {
+            tamperedRejected = true;
+        }
+        check(tamperedRejected, "WebdavBindCrypto rejects tampered authentication tag");
+
+        com.pilipala.source.WebdavBindCrypto.ParsedBindTarget parsedQr =
+                com.pilipala.source.WebdavBindCrypto.parseBindQrInput(
+                        com.pilipala.source.WebdavBindCrypto.buildBindQrUrl(
+                                "http://127.0.0.1:18080/configure/abcd", key));
+        check(
+                parsedQr != null
+                        && "http://127.0.0.1:18080/configure/abcd/bind".equals(parsedQr.bindUrl)
+                        && "http://127.0.0.1:18080/configure/abcd/sync".equals(parsedQr.syncUrl),
+                "WebdavBindCrypto QR URI codec resolves /bind and /sync endpoints");
+
+        final AtomicReference<String> serverUrl = new AtomicReference<>("");
+        ConfigTransferServer server =
+                new ConfigTransferServer(null, remoteJson -> "{}")
+                        .withBindHandler(
+                                (method, bindKey, body) -> {
+                                    if ("GET".equals(method)) {
+                                        JSONObject cfg = new JSONObject();
+                                        cfg.put("v", 1);
+                                        cfg.put("type", "webdav_bind");
+                                        cfg.put(
+                                                "mode",
+                                                serverUrl.get().isEmpty()
+                                                        ? "unconfigured"
+                                                        : "config");
+                                        cfg.put("url", serverUrl.get());
+                                        return com.pilipala.source.WebdavBindCrypto.sealJson(
+                                                bindKey, cfg);
+                                    }
+                                    JSONObject req =
+                                            com.pilipala.source.WebdavBindCrypto.openJson(
+                                                    bindKey, body);
+                                    serverUrl.set(req.optString("url", ""));
+                                    JSONObject ack = new JSONObject();
+                                    ack.put("v", 1);
+                                    ack.put("type", "webdav_bind_ack");
+                                    ack.put("ok", true);
+                                    return com.pilipala.source.WebdavBindCrypto.sealJson(
+                                            bindKey, ack);
+                                });
+        try {
+            com.pilipala.source.WebdavBindCrypto.ParsedBindTarget target =
+                    com.pilipala.source.WebdavBindCrypto.parseBindQrInput(
+                            server.bindQrAddress("127.0.0.1"));
+            check(target != null, "ConfigTransferServer emits parseable bind QR address");
+
+            JSONObject push = new JSONObject();
+            push.put("v", 1);
+            push.put("type", "webdav_bind");
+            push.put("url", "https://dav.example/dav/");
+            String reqEnv = com.pilipala.source.WebdavBindCrypto.sealJson(target.key, push);
+            java.net.HttpURLConnection postConn =
+                    (java.net.HttpURLConnection) new java.net.URL(target.bindUrl).openConnection();
+            postConn.setRequestMethod("POST");
+            postConn.setDoOutput(true);
+            postConn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            try (OutputStream os = postConn.getOutputStream()) {
+                os.write(reqEnv.getBytes(StandardCharsets.UTF_8));
+            }
+            check(postConn.getResponseCode() == 200, "POST /bind returns HTTP 200");
+            JSONObject ack =
+                    com.pilipala.source.WebdavBindCrypto.openJson(
+                            target.key, new String(readAll(postConn.getInputStream()), StandardCharsets.UTF_8));
+            check(
+                    ack.optBoolean("ok") && "https://dav.example/dav/".equals(serverUrl.get()),
+                    "POST /bind delivers encrypted WebDAV config");
+
+            java.net.HttpURLConnection getConn =
+                    (java.net.HttpURLConnection) new java.net.URL(target.bindUrl).openConnection();
+            getConn.setRequestMethod("GET");
+            check(getConn.getResponseCode() == 200, "GET /bind returns HTTP 200");
+            JSONObject got =
+                    com.pilipala.source.WebdavBindCrypto.openJson(
+                            target.key, new String(readAll(getConn.getInputStream()), StandardCharsets.UTF_8));
+            check(
+                    "config".equals(got.optString("mode"))
+                            && "https://dav.example/dav/".equals(got.optString("url")),
+                    "GET /bind returns sealed WebDAV configuration");
+        } finally {
+            server.close();
         }
     }
 }

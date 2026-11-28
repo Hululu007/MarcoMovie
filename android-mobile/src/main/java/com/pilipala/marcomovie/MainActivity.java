@@ -340,7 +340,11 @@ public final class MainActivity extends Activity {
     }
 
     static final int REQ_STORAGE_PERMISSION = 1409;
+    static final int REQ_CAMERA_PERMISSION = 1410;
+    static final int REQ_PICK_QR_IMAGE = 1411;
     private Runnable pendingStorageAction;
+    private Runnable pendingCameraAction;
+    private MobileQrScannerDialog.UriCallback pendingQrImageCallback;
 
     static boolean isManageAllFilesAction(String action) {
         return "android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION".equals(action)
@@ -536,6 +540,18 @@ public final class MainActivity extends Activity {
             }
             Runnable next = pendingStorageAction;
             pendingStorageAction = null;
+            if (next != null) ui.post(next);
+        } else if (requestCode == REQ_CAMERA_PERMISSION) {
+            boolean granted =
+                    grantResults != null
+                            && grantResults.length > 0
+                            && grantResults[0]
+                                    == android.content.pm.PackageManager.PERMISSION_GRANTED;
+            if (!granted) {
+                toast("未开启相机权限，可从相册选二维码图片或粘贴链接");
+            }
+            Runnable next = pendingCameraAction;
+            pendingCameraAction = null;
             if (next != null) ui.post(next);
         }
     }
@@ -2972,9 +2988,46 @@ public final class MainActivity extends Activity {
         SourceController.pickDocument(this, 41, "当前设备没有系统文件选择器。请安装文件管理器，或使用配置地址导入。");
     }
 
+    void runWithCameraPermission(Runnable action) {
+        if (action == null) return;
+        if (Build.VERSION.SDK_INT < 23
+                || checkSelfPermission(android.Manifest.permission.CAMERA)
+                        == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            action.run();
+            return;
+        }
+        pendingCameraAction = action;
+        requestPermissions(
+                new String[] {android.Manifest.permission.CAMERA}, REQ_CAMERA_PERMISSION);
+    }
+
+    void pickQrImage(MobileQrScannerDialog.UriCallback callback) {
+        if (callback == null) return;
+        pendingQrImageCallback = callback;
+        try {
+            Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+            intent.setType("image/*");
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            startActivityForResult(
+                    Intent.createChooser(intent, "选择包含二维码的图片"), REQ_PICK_QR_IMAGE);
+        } catch (Throwable err) {
+            pendingQrImageCallback = null;
+            toast("无法打开系统相册，请改用摄像头扫码或粘贴链接");
+        }
+    }
+
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == REQ_PICK_QR_IMAGE) {
+            MobileQrScannerDialog.UriCallback cb = pendingQrImageCallback;
+            pendingQrImageCallback = null;
+            if (cb != null) {
+                cb.onUriPicked(
+                        result == RESULT_OK && data != null ? data.getData() : null);
+            }
+            return;
+        }
         SourceController.onActivityResult(this, request, result, data);
     }
 

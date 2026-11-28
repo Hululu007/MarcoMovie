@@ -1,18 +1,18 @@
 {
   "windows": {
-    "versionName": "0.7.4",
-    "buildNumber": 81
+    "versionName": "0.7.5",
+    "buildNumber": 82
   },
   "ios": {
     "versionName": "0.7.11",
     "buildNumber": 104
   },
   "appletv": {
-    "versionName": "0.1.1",
-    "buildNumber": 2
+    "versionName": "0.1.3",
+    "buildNumber": 4
   },
   "harmonyos": {
-    "versionName": "0.1.2",
-    "buildNumber": 1000003
+    "versionName": "0.1.3",
+    "buildNumber": 1000004
   }
 }

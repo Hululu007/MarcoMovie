@@ -1634,6 +1634,87 @@ public final class TvSearchAcceptanceChecks {
                     "R18 P2: budget protection with bijective key film%3Ahk:p24 protects film:hk only");
         }
 
+        // 0.6.4 TV UX Fixes: Search header branding removal, unified search input focus capsule,
+        // collapsible left search sidebar + reminder bubble + Menu/left-edge recall, and library
+        // triple-UP filter menu shortcut.
+        {
+            Path tvSrcDir = repoRoot.resolve("android-tv/src/main/java/com/pilipala/marcomovie");
+            String searchSrc =
+                    new String(
+                            Files.readAllBytes(tvSrcDir.resolve("GlobalSearchScreen.java")),
+                            StandardCharsets.UTF_8);
+            String mainSrc =
+                    new String(
+                            Files.readAllBytes(tvSrcDir.resolve("MainActivity.java")),
+                            StandardCharsets.UTF_8);
+            String homeSrc =
+                    new String(
+                            Files.readAllBytes(tvSrcDir.resolve("HomeScreen.java")),
+                            StandardCharsets.UTF_8);
+
+            // Fix #5: No "Apple TV" branding on search page header; private space tag preserved
+            check(
+                    !searchSrc.contains("Apple TV 搜索体验") && searchSrc.contains("· 隐私空间"),
+                    "TV UX #5: search header removes Apple TV branding while preserving private space tag");
+
+            // Fix #1: Unified search input capsule (single focus border around glyph+input,
+            // transparent EditText, non-clipped hint & dynamic ellipsize)
+            check(
+                    searchSrc.contains("search-input-capsule")
+                            && searchSrc.contains("输入片名 · 双击输入法")
+                            && searchSrc.contains("field.setBackground(tvStyle ? null")
+                            && searchSrc.contains("syncSearchInputEllipsize()"),
+                    "TV UX #1: search input uses unified focus capsule with transparent EditText and non-clipped hint");
+
+            // Fix #2: Collapsible left search/keyboard sidebar, reminder bubble, left-edge & Menu
+            // recall
+            check(
+                    GlobalSearchScreen.shouldAutoCollapseLeftPanelOnSubmit(true, true, false, true)
+                            && GlobalSearchScreen.shouldAutoCollapseLeftPanelOnSubmit(
+                                    true, false, true, true)
+                            && !GlobalSearchScreen.shouldAutoCollapseLeftPanelOnSubmit(
+                                    true, false, false, true)
+                            && !GlobalSearchScreen.shouldAutoCollapseLeftPanelOnSubmit(
+                                    true, true, true, false)
+                            && !GlobalSearchScreen.shouldAutoCollapseLeftPanelOnSubmit(
+                                    false, true, true, true),
+                    "TV UX #2: left panel auto-collapses on explicit TV search start, not typing debounce or blank query");
+            check(
+                    GlobalSearchScreen.computeTvSearchColumns(908f, 1.0f)
+                            > GlobalSearchScreen.computeTvSearchColumns(599f, 1.0f),
+                    "TV UX #2: collapsing left search sidebar expands poster wall column count");
+            check(
+                    searchSrc.contains("search-collapse-bubble")
+                            && searchSrc.contains("一直按左键或按菜单键拉起")
+                            && searchSrc.contains("boolean handleMenuKey(KeyEvent event)")
+                            && mainSrc.contains("searchScreen.handleMenuKey(event)"),
+                    "TV UX #2: collapsible sidebar wires reminder bubble, left-edge restore, and Menu key recall");
+
+            // Fix #4: Library triple-UP filter menu shortcut (discrete 3 taps within 1s, no hold)
+            check(
+                    HomeScreen.isFilterTripleUpEligible("home-video:10", true, true)
+                            && HomeScreen.isFilterTripleUpEligible("home-more", true, true)
+                            && HomeScreen.isFilterTripleUpEligible("home-earlier", true, true)
+                            && !HomeScreen.isFilterTripleUpEligible("home-video:0", true, false)
+                            && !HomeScreen.isFilterTripleUpEligible("home-tab:1", true, true)
+                            && !HomeScreen.isFilterTripleUpEligible(
+                                    "home-filter:area:0", true, true)
+                            && !HomeScreen.isFilterTripleUpEligible("home-video:10", false, true),
+                    "TV UX #4: filter triple-UP eligibility matches scrolled library grid items only");
+            HomeKeyTracker tracker = new HomeKeyTracker();
+            check(
+                    !tracker.up(1000L, 0) && !tracker.up(1300L, 0) && tracker.up(1600L, 0),
+                    "TV UX #4: 3 discrete UP taps within 1s trigger filter menu shortcut");
+            check(
+                    !tracker.up(2000L, 0) && !tracker.up(2200L, 1) && !tracker.up(2400L, 0),
+                    "TV UX #4: holding UP (repeat>0) resets tracker and never triggers shortcut");
+            check(
+                    mainSrc.contains("canTriggerFilterTripleUp()")
+                            && mainSrc.contains("jumpToFilterMenu()")
+                            && homeSrc.contains("boolean jumpToFilterMenu()"),
+                    "TV UX #4: MainActivity dispatches TV library triple-UP to HomeScreen.jumpToFilterMenu()");
+        }
+
         JSONObject summary =
                 new JSONObject()
                         .put("ok", true)

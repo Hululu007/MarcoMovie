@@ -18,7 +18,16 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import com.pilipala.source.WebdavBindCrypto;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -1155,6 +1164,299 @@ final class CloudSyncDialog {
         };
     }
 
+    static ConfigTransferServer.BindHandler lanBindHandler(
+            final MainActivity a, final Runnable onBound) {
+        return (method, bindKey, requestBody) -> {
+            if (a == null || a.privateMode || a.prefs == null) {
+                throw new IOException("当前状态不支持 WebDAV 绑定");
+            }
+            final Context appCtx =
+                    a.getApplicationContext() != null ? a.getApplicationContext() : a;
+            if ("GET".equalsIgnoreCase(method)) {
+                String url = a.prefs.getString(Prefs.WEBDAV_URL, "").trim();
+                org.json.JSONObject out = new org.json.JSONObject();
+                out.put("v", 1);
+                out.put("type", "webdav_bind");
+                if (isValidHttpUrl(url)) {
+                    String user = a.prefs.getString(Prefs.WEBDAV_USER, "").trim();
+                    String pass = SecureStorage.getWebdavPass(appCtx);
+                    if (pass == null) pass = "";
+                    out.put("mode", "config");
+                    out.put("url", url);
+                    out.put("username", user);
+                    out.put("password", pass);
+                    out.put("auto", isAutoEnabled(a));
+                    out.put("syncSubs", isSyncSubscriptionsEnabled(a));
+                    out.put("syncHistory", isSyncHistoryEnabled(a));
+                } else {
+                    out.put("mode", "unconfigured");
+                }
+                return WebdavBindCrypto.sealJson(bindKey, out);
+            }
+            if ("POST".equalsIgnoreCase(method)) {
+                org.json.JSONObject req = WebdavBindCrypto.openJson(bindKey, requestBody);
+                if (!"webdav_bind".equals(req.optString("type", ""))) {
+                    throw new IOException("不支持的绑定载荷类型");
+                }
+                String url = req.optString("url", "").trim();
+                if (!isValidHttpUrl(url)) {
+                    throw new IOException("WebDAV 地址仅支持 HTTP/HTTPS");
+                }
+                String user = req.optString("username", "").trim();
+                String pass = req.optString("password", "");
+                boolean auto = req.optBoolean("auto", true);
+                boolean syncSubs = req.optBoolean("syncSubs", true);
+                boolean syncHist = req.optBoolean("syncHistory", true);
+                applyBoundWebdavPrefs(a, appCtx, url, user, pass, auto, syncSubs, syncHist);
+                mainHandler()
+                        .post(
+                                () -> {
+                                    if (a.isDestroyed() || a.isFinishing()) return;
+                                    a.toast("已通过局域网扫码自动绑定 WebDAV");
+                                    if (onBound != null) onBound.run();
+                                    if (auto) {
+                                        runWebdavSync(a, true, onBound);
+                                    }
+                                });
+                org.json.JSONObject ack = new org.json.JSONObject();
+                ack.put("v", 1);
+                ack.put("type", "webdav_bind_ack");
+                ack.put("ok", true);
+                ack.put("url", url);
+                return WebdavBindCrypto.sealJson(bindKey, ack);
+            }
+            throw new IOException("Unsupported bind HTTP method");
+        };
+    }
+
+    private static boolean isValidHttpUrl(String rawUrl) {
+        if (rawUrl == null) return false;
+        String trimmed = rawUrl.trim();
+        if (trimmed.isEmpty()) return false;
+        try {
+            URI uri = URI.create(trimmed);
+            String scheme = uri.getScheme();
+            return ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))
+                    && uri.getHost() != null
+                    && !uri.getHost().trim().isEmpty();
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static void applyBoundWebdavPrefs(
+            MainActivity a,
+            Context appCtx,
+            String url,
+            String user,
+            String pass,
+            boolean auto,
+            boolean syncSubs,
+            boolean syncHist) {
+        RUNTIME.tracker.resetBackoff();
+        a.prefs
+                .edit()
+                .putString(Prefs.WEBDAV_URL, url)
+                .putString(Prefs.WEBDAV_USER, user)
+                .putBoolean(Prefs.WEBDAV_AUTO, auto)
+                .putBoolean(Prefs.WEBDAV_SYNC_SUBS, syncSubs)
+                .putBoolean(PREF_WEBDAV_SYNC_HISTORY, syncHist)
+                .apply();
+        SecureStorage.setWebdavPass(appCtx, pass == null ? "" : pass);
+        SecureStorage.consumeReenterPasswordRequired(appCtx);
+    }
+
+    private static String exchangeLanBindHttp(String url, String method, String jsonBody)
+            throws IOException {
+        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        conn.setInstanceFollowRedirects(false);
+        conn.setConnectTimeout(8000);
+        conn.setReadTimeout(8000);
+        conn.setUseCaches(false);
+        conn.setRequestMethod(method);
+        conn.setRequestProperty("User-Agent", "MarcoMovie-Sync/2.0");
+        conn.setRequestProperty("Accept", "application/json");
+        try {
+            if ("POST".equals(method)) {
+                byte[] bytes =
+                        (jsonBody == null ? "" : jsonBody).getBytes(StandardCharsets.UTF_8);
+                conn.setDoOutput(true);
+                conn.setFixedLengthStreamingMode(bytes.length);
+                conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                try (OutputStream out = conn.getOutputStream()) {
+                    out.write(bytes);
+                }
+            }
+            int code = conn.getResponseCode();
+            if (code == 410) {
+                throw new IOException("对方设备的二维码会话已过期，请刷新后重试");
+            }
+            if (code < 200 || code >= 300) {
+                throw new IOException("WebDAV 绑定请求失败 (HTTP " + code + ")");
+            }
+            try (InputStream in = conn.getInputStream();
+                    ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
+                byte[] buf = new byte[4096];
+                int n;
+                while ((n = in.read(buf)) != -1) {
+                    if (bos.size() + n > 65536) {
+                        throw new IOException("绑定响应超出大小限制");
+                    }
+                    bos.write(buf, 0, n);
+                }
+                return new String(bos.toByteArray(), StandardCharsets.UTF_8);
+            }
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    static void startScanToBindPeer(final MainActivity a, final Runnable onComplete) {
+        if (a == null || a.privateMode) {
+            if (a != null && a.privateMode) a.toast("隐私空间数据不参与 WebDAV 绑定或局域网同步");
+            return;
+        }
+        MobileQrScannerDialog.show(
+                a,
+                rawText ->
+                        runLanWebdavBindAndSync(
+                                a,
+                                rawText,
+                                () -> {
+                                    if (onComplete != null) onComplete.run();
+                                    else a.refresh();
+                                }));
+    }
+
+    static void runLanWebdavBindAndSync(
+            final MainActivity a, final String rawInput, final Runnable onComplete) {
+        final WebdavBindCrypto.ParsedBindTarget target =
+                WebdavBindCrypto.parseBindQrInput(rawInput);
+        if (target == null) {
+            runLanPeerSync(a, rawInput, onComplete);
+            return;
+        }
+        if (a == null || a.privateMode) {
+            if (a != null && a.privateMode) a.toast("隐私空间数据不参与 WebDAV 绑定或局域网同步");
+            return;
+        }
+        if (!IN_FLIGHT.compareAndSet(false, true)) {
+            a.toast("正在同步中，请稍候…");
+            return;
+        }
+        final Context appCtx = a.getApplicationContext() != null ? a.getApplicationContext() : a;
+        final boolean syncSubs = isSyncSubscriptionsEnabled(a);
+        a.toast("正在通过加密通道绑定 WebDAV 并同步…");
+        SYNC_EXEC.execute(
+                () -> {
+                    boolean triggerFollowUpWebdavSync = false;
+                    try {
+                        String localUrl = a.prefs.getString(Prefs.WEBDAV_URL, "").trim();
+                        String statusMsg;
+                        if (isValidHttpUrl(localUrl)) {
+                            String localUser = a.prefs.getString(Prefs.WEBDAV_USER, "").trim();
+                            String localPass = SecureStorage.getWebdavPass(appCtx);
+                            if (localPass == null) localPass = "";
+                            org.json.JSONObject push = new org.json.JSONObject();
+                            push.put("v", 1);
+                            push.put("type", "webdav_bind");
+                            push.put("mode", "push");
+                            push.put("url", localUrl);
+                            push.put("username", localUser);
+                            push.put("password", localPass);
+                            push.put("auto", isAutoEnabled(a));
+                            push.put("syncSubs", isSyncSubscriptionsEnabled(a));
+                            push.put("syncHistory", isSyncHistoryEnabled(a));
+                            String reqEnv = WebdavBindCrypto.sealJson(target.key, push);
+                            String ackEnv = exchangeLanBindHttp(target.bindUrl, "POST", reqEnv);
+                            org.json.JSONObject ack =
+                                    WebdavBindCrypto.openJson(target.key, ackEnv);
+                            if (!ack.optBoolean("ok", false)) {
+                                throw new IOException("对方拒绝了 WebDAV 绑定");
+                            }
+                            statusMsg = "已推送 WebDAV 配置到对方设备";
+                        } else {
+                            String getEnv = exchangeLanBindHttp(target.bindUrl, "GET", null);
+                            org.json.JSONObject remote =
+                                    WebdavBindCrypto.openJson(target.key, getEnv);
+                            String mode = remote.optString("mode", "");
+                            String remoteUrl = remote.optString("url", "").trim();
+                            if ("config".equals(mode) && isValidHttpUrl(remoteUrl)) {
+                                String remoteUser = remote.optString("username", "").trim();
+                                String remotePass = remote.optString("password", "");
+                                boolean auto = remote.optBoolean("auto", true);
+                                boolean rSubs = remote.optBoolean("syncSubs", true);
+                                boolean rHist = remote.optBoolean("syncHistory", true);
+                                applyBoundWebdavPrefs(
+                                        a, appCtx, remoteUrl, remoteUser, remotePass, auto, rSubs,
+                                        rHist);
+                                statusMsg = "已从对方设备导入并绑定 WebDAV";
+                                triggerFollowUpWebdavSync = auto;
+                            } else {
+                                statusMsg = "对方未配置 WebDAV，已完成局域网同步";
+                            }
+                        }
+                        final long now = System.currentTimeMillis();
+                        final CloudSync.MergeResult r =
+                                CloudSync.syncLanPeer(
+                                        target.syncUrl,
+                                        new CloudSync.LanPeerCallback() {
+                                            @Override
+                                            public String exportLocalPayload() throws Exception {
+                                                return exportCurrentPayload(a, now);
+                                            }
+
+                                            @Override
+                                            public CloudSync.MergeResult applyMergedPayload(
+                                                    String remoteMergedPayloadJson)
+                                                    throws Exception {
+                                                return mergeAndPersistLocal(
+                                                        a, remoteMergedPayloadJson, now);
+                                            }
+                                        });
+                        final String okSummary = formatCounts(statusMsg, r, syncSubs);
+                        final boolean doWebdavFollowUp = triggerFollowUpWebdavSync;
+                        a.ui.post(
+                                () -> {
+                                    a.prefs
+                                            .edit()
+                                            .putLong(Prefs.SYNC_LAST_TIME, now)
+                                            .putString(Prefs.SYNC_LAST_STATUS, okSummary)
+                                            .apply();
+                                    if (!a.isFinishing()) {
+                                        a.toast(okSummary);
+                                        if (onComplete != null) onComplete.run();
+                                        if (doWebdavFollowUp) {
+                                            mainHandler()
+                                                    .post(() -> runWebdavSync(a, true, onComplete));
+                                        }
+                                    }
+                                });
+                    } catch (Exception e) {
+                        AppLog.w("CloudSync", "LAN WebDAV bind failed", e);
+                        final String errMsg =
+                                e.getMessage() == null
+                                        ? e.getClass().getSimpleName()
+                                        : e.getMessage();
+                        a.ui.post(
+                                () -> {
+                                    if (!a.isFinishing()) {
+                                        a.notice("局域网 WebDAV 绑定未完成：" + errMsg);
+                                    }
+                                });
+                    } finally {
+                        IN_FLIGHT.set(false);
+                        if (PENDING_RESYNC.getAndSet(false)
+                                && !a.isDestroyed()
+                                && !a.isFinishing()
+                                && !a.privateMode
+                                && !a.switchingPrivacy) {
+                            mainHandler().post(() -> scheduleAutoPush(a, true));
+                        }
+                    }
+                });
+    }
+
     private static String formatCounts(
             String prefix, CloudSync.MergeResult r, boolean includeSubs) {
         String base = prefix + " · 历史 " + r.historyCount + " / 收藏 " + r.favoriteCount;
@@ -1671,6 +1973,12 @@ final class CloudSyncDialog {
                     dismissActive.run();
                     showLanConnectDialog(a, onUpdated);
                 };
+        Runnable onScanBind =
+                () -> {
+                    saveToggleOnly(a, autoEnabled[0], syncSubsEnabled[0]);
+                    dismissActive.run();
+                    startScanToBindPeer(a, onUpdated);
+                };
 
         if (!tv) {
             TextView syncBtn = buildMobileSyncButton(a, p, "保存并立即 WebDAV 云同步", true, onSyncNow);
@@ -1705,6 +2013,12 @@ final class CloudSyncDialog {
             lanHint.setLineSpacing(a.dp(3), 1f);
             panel.addView(lanHint);
             a.gap(panel, 10);
+
+            TextView scanBindBtn =
+                    buildMobileSyncButton(a, p, "📷 扫一扫绑定电视 / 电脑 WebDAV", true, onScanBind);
+            scanBindBtn.setTag("cloud-sync-lan-scan-bind");
+            panel.addView(scanBindBtn, new LinearLayout.LayoutParams(-1, a.dp(44)));
+            a.gap(panel, 8);
 
             TextView qrBtn = buildMobileSyncButton(a, p, "打开本机局域网接收码（二维码 5 分钟有效）", false, onOpenQr);
             qrBtn.setTag("cloud-sync-lan-receive");
@@ -1755,6 +2069,11 @@ final class CloudSyncDialog {
         a.gap(panel, 8);
 
         LinearLayout lanRow = a.vertical();
+        Button scanBindBtn =
+                a.navButton("📷 扫一扫绑定电视 / 电脑 WebDAV", "cloud-sync-lan-scan-bind", onScanBind);
+        lanRow.addView(scanBindBtn, new LinearLayout.LayoutParams(-1, a.dp(42)));
+        a.gap(lanRow, 8);
+
         Button openQrBtn =
                 a.navButton("打开本机局域网接收码（二维码 5 分钟有效）", "cloud-sync-lan-receive", onOpenQr);
         lanRow.addView(openQrBtn, new LinearLayout.LayoutParams(-1, a.dp(42)));
@@ -1816,8 +2135,22 @@ final class CloudSyncDialog {
                 TvQrInputHelper.wrap(a, peerInput, "对方局域网同步地址"),
                 new LinearLayout.LayoutParams(-1, -2));
 
+        final MobileBottomSheet.SheetHandle[] hRef = new MobileBottomSheet.SheetHandle[1];
         if (!tv) {
             a.gap(panel, 10);
+            TextView scanQrBtn =
+                    buildMobileSyncButton(
+                            a,
+                            p,
+                            "📷 扫一扫电视 / 电脑二维码绑定",
+                            true,
+                            () -> {
+                                if (hRef[0] != null) hRef[0].dismiss();
+                                startScanToBindPeer(a, onUpdated);
+                            });
+            scanQrBtn.setTag("lan-sync-scan-qr");
+            panel.addView(scanQrBtn, new LinearLayout.LayoutParams(-1, a.dp(44)));
+            a.gap(panel, 8);
             TextView pasteBtn =
                     buildMobileSyncButton(
                             a,
@@ -1842,7 +2175,6 @@ final class CloudSyncDialog {
             panel.addView(pasteBtn, new LinearLayout.LayoutParams(-1, a.dp(42)));
             a.gap(panel, 8);
 
-            final MobileBottomSheet.SheetHandle[] hRef = new MobileBottomSheet.SheetHandle[1];
             Runnable onSubmit =
                     () -> {
                         String raw = peerInput.getText().toString().trim();
@@ -1851,7 +2183,7 @@ final class CloudSyncDialog {
                             return;
                         }
                         if (hRef[0] != null) hRef[0].dismiss();
-                        runLanPeerSync(
+                        runLanWebdavBindAndSync(
                                 a,
                                 raw,
                                 () -> {
@@ -1860,7 +2192,7 @@ final class CloudSyncDialog {
                                 });
                     };
             panel.addView(
-                    buildMobileSyncButton(a, p, "立即双向同步", true, onSubmit),
+                    buildMobileSyncButton(a, p, "立即双向同步 / 绑定 WebDAV", false, onSubmit),
                     new LinearLayout.LayoutParams(-1, a.dp(44)));
             hRef[0] =
                     MobileBottomSheet.showHandle(
@@ -1883,7 +2215,7 @@ final class CloudSyncDialog {
                                         a.toast("请输入对方设备的局域网同步地址");
                                         return;
                                     }
-                                    runLanPeerSync(
+                                    runLanWebdavBindAndSync(
                                             a,
                                             raw,
                                             () -> {

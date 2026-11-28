@@ -23,11 +23,17 @@ final class ConfigTransferServer implements Closeable {
         String sync(String remotePayloadJson) throws Exception;
     }
 
+    interface BindHandler {
+        String handleBind(String method, byte[] bindKey, String requestBody) throws Exception;
+    }
+
     final ServerSocket socket;
     final String path;
+    final byte[] bindKey;
     final long expires;
     final BatchImporter importer;
     final SyncHandler syncHandler;
+    volatile BindHandler bindHandler;
     volatile boolean closed;
     final AtomicBoolean importing = new AtomicBoolean(), applied = new AtomicBoolean();
     final ThreadPoolExecutor requests =
@@ -105,6 +111,7 @@ final class ConfigTransferServer implements Closeable {
         StringBuilder key = new StringBuilder();
         for (byte b : bytes) key.append(String.format(Locale.ROOT, "%02x", b & 255));
         path = "/configure/" + key;
+        bindKey = com.pilipala.source.WebdavBindCrypto.generateKey();
         socket = new ServerSocket();
         socket.bind(bind);
         Thread accept =
@@ -127,8 +134,17 @@ final class ConfigTransferServer implements Closeable {
         accept.start();
     }
 
+    ConfigTransferServer withBindHandler(BindHandler handler) {
+        this.bindHandler = handler;
+        return this;
+    }
+
     String address(String host) {
         return "http://" + host + ":" + socket.getLocalPort() + path;
+    }
+
+    String bindQrAddress(String host) {
+        return com.pilipala.source.WebdavBindCrypto.buildBindQrUrl(address(host), bindKey);
     }
 
     boolean expired() {
@@ -176,7 +192,8 @@ final class ConfigTransferServer implements Closeable {
             int qIdx = reqPath.indexOf('?');
             if (qIdx >= 0) reqPath = reqPath.substring(0, qIdx);
             boolean isSyncRequest = syncHandler != null && reqPath.equals(path + "/sync");
-            if (!reqPath.equals(path) && !isSyncRequest) {
+            boolean isBindRequest = bindHandler != null && reqPath.equals(path + "/bind");
+            if (!reqPath.equals(path) && !isSyncRequest && !isBindRequest) {
                 reply(out, 404, "text/plain", "页面不存在");
                 return;
             }
@@ -188,6 +205,10 @@ final class ConfigTransferServer implements Closeable {
             String expected = s.getLocalAddress().getHostAddress() + ":" + socket.getLocalPort();
             if (!host.equals(expected)) {
                 reply(out, 403, "text/plain", "请使用设备上的二维码地址");
+                return;
+            }
+            if (isBindRequest) {
+                serveBind(first[0], headers, in, out);
                 return;
             }
             if (isSyncRequest) {
@@ -358,6 +379,59 @@ final class ConfigTransferServer implements Closeable {
             reply(out, 400, "text/plain", "同步合并失败");
         } finally {
             importing.set(false);
+        }
+    }
+
+    private void serveBind(
+            String method, Map<String, String> headers, InputStream in, OutputStream out)
+            throws IOException {
+        String origin = headers.get("origin");
+        if (origin != null && !origin.isEmpty()) {
+            reply(out, 403, "text/plain", "禁止跨站绑定");
+            return;
+        }
+        String bodyStr = "";
+        if ("POST".equals(method)) {
+            String contentType =
+                    headers.containsKey("content-type")
+                            ? headers.get("content-type").toLowerCase(Locale.ROOT)
+                            : "";
+            if (!contentType.startsWith("application/json")
+                    || headers.containsKey("transfer-encoding")) {
+                reply(out, 415, "text/plain", "仅接受 JSON 绑定请求");
+                return;
+            }
+            int length;
+            try {
+                length =
+                        Integer.parseInt(
+                                headers.containsKey("content-length")
+                                        ? headers.get("content-length")
+                                        : "-1");
+            } catch (NumberFormatException e) {
+                length = -1;
+            }
+            if (length < 2 || length > 65536) {
+                reply(out, 413, "text/plain", "绑定请求大小不合法");
+                return;
+            }
+            byte[] body = new byte[length];
+            for (int n = 0; n < length; ) {
+                int got = in.read(body, n, length - n);
+                if (got < 0) throw new EOFException();
+                n += got;
+            }
+            bodyStr = new String(body, "UTF-8");
+        } else if (!"GET".equals(method)) {
+            reply(out, 405, "text/plain", "请求方式不支持");
+            return;
+        }
+        try {
+            if (expired()) throw new IOException("Session expired");
+            String resp = bindHandler.handleBind(method, bindKey, bodyStr);
+            reply(out, 200, "application/json", resp == null ? "{}" : resp);
+        } catch (Exception error) {
+            reply(out, 400, "text/plain", "绑定处理失败");
         }
     }
 

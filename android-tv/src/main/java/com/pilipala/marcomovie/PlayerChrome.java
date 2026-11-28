@@ -47,7 +47,9 @@ final class PlayerChrome {
 
     final FrameLayout loadingIndicatorSlot;
     final BrandLogoLoaderView brandLoader;
+    final TextView sleepHudPill;
     final TextView hudProgressView;
+    private String lastSleepHudText = "";
     final View hudDivider;
     final Button backBtn;
     final FrameLayout lockBtn;
@@ -1045,6 +1047,25 @@ final class PlayerChrome {
             tvTopRightHud.setBackground(null);
             tvTopRightHud.setPadding(0, 0, 0, 0);
 
+            sleepHudPill = a.text("", HUD_PROGRESS_SIZE_U, 0xfffbbf24);
+            sleepHudPill.setTag("player-sleep-countdown");
+            sleepHudPill.setFocusable(false);
+            sleepHudPill.setClickable(false);
+            sleepHudPill.setTextSize(
+                    android.util.TypedValue.COMPLEX_UNIT_PX, u * HUD_PROGRESS_SIZE_U);
+            sleepHudPill.setTypeface(Typeface.create(HUD_PROGRESS_FONT_FAMILY, Typeface.BOLD));
+            sleepHudPill.setFontFeatureSettings("tnum");
+            if (android.os.Build.VERSION.SDK_INT >= 21) {
+                sleepHudPill.setLetterSpacing(0.025f);
+            }
+            sleepHudPill.setIncludeFontPadding(false);
+            sleepHudPill.setSingleLine();
+            sleepHudPill.setShadowLayer(u * 3.2f, 0, u * 1.0f, 0xc0000000);
+            sleepHudPill.setVisibility(View.GONE);
+            LinearLayout.LayoutParams sleepHudLp = new LinearLayout.LayoutParams(-2, -2);
+            sleepHudLp.rightMargin = vp(a, 10);
+            tvTopRightHud.addView(sleepHudPill, sleepHudLp);
+
             hudProgressView = a.text("", HUD_PROGRESS_SIZE_U, 0xd6dce6f4);
             hudProgressView.setTag("player-hud-progress");
             hudProgressView.setFocusable(false);
@@ -1112,6 +1133,7 @@ final class PlayerChrome {
             a.playbackLayer.addView(tvTopRightHud, hudLp);
         } else {
             tvTopRightHud = null;
+            sleepHudPill = null;
             hudProgressView = null;
             hudDivider = null;
             persistentClock = a.text("", 12.5f, 0xeef3f6fc);
@@ -2208,6 +2230,9 @@ final class PlayerChrome {
                 lastPersistentClockText = now;
                 persistentClock.setText(styledWallTime(now));
             }
+            if (showHud) {
+                syncSleepHudPill(android.os.SystemClock.elapsedRealtime());
+            }
             if (a.controlsVisible && wallClock != null) {
                 if (!now.equals(lastWallClockText) || wallClock.getText().length() == 0) {
                     lastWallClockText = now;
@@ -2232,6 +2257,25 @@ final class PlayerChrome {
                 wallClock.setText(styledWallTime(now));
             }
             wallClock.setVisibility(alwaysShow ? View.GONE : View.VISIBLE);
+        }
+    }
+
+    void syncSleepHudPill(long elapsedMs) {
+        if (sleepHudPill == null) return;
+        String label = PlaybackControls.SESSION_SLEEP_TIMER.formatLivePillLabel(elapsedMs);
+        if (label.isEmpty()) {
+            lastSleepHudText = "";
+            if (sleepHudPill.getVisibility() != View.GONE) {
+                sleepHudPill.setVisibility(View.GONE);
+            }
+            return;
+        }
+        if (!label.equals(lastSleepHudText)) {
+            lastSleepHudText = label;
+            sleepHudPill.setText(label);
+        }
+        if (sleepHudPill.getVisibility() != View.VISIBLE) {
+            sleepHudPill.setVisibility(View.VISIBLE);
         }
     }
 
