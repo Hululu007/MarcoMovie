@@ -350,6 +350,21 @@ private enum MarcoNativeChannelRegistrar {
       }
     }
 
+    let qrScannerChannel = FlutterMethodChannel(name: "marco_movie/qr_scanner", binaryMessenger: messenger)
+    qrScannerChannel.setMethodCallHandler { call, result in
+      if call.method == "scanQrCode" {
+        DispatchQueue.main.async {
+          guard let host = preferredFlutterController(for: messenger) else {
+            result(nil)
+            return
+          }
+          QrScannerViewController.present(from: host, completion: result)
+        }
+      } else {
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
     MarcoWebSnifferAndJsHostRegistrar.register(messenger: messenger)
 
     if let avRegistrar = pluginRegistry.registrar(forPlugin: "MarcoAvPlayerPlugin") {
@@ -397,6 +412,181 @@ private enum MarcoNativeChannelRegistrar {
     }
     controller.setPhysicalOrientationMonitoring(true, channel: channel)
     binding.activeHost = controller
+  }
+
+  private final class QrScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate, UIAdaptivePresentationControllerDelegate {
+    private let completion: FlutterResult
+    private let captureSession = AVCaptureSession()
+    private var previewLayer: AVCaptureVideoPreviewLayer?
+    private var finished = false
+    private let statusLabel = UILabel()
+
+    init(completion: @escaping FlutterResult) {
+      self.completion = completion
+      super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) {
+      fatalError("init(coder:) has not been implemented")
+    }
+
+    static func present(from host: UIViewController, completion: @escaping FlutterResult) {
+      let vc = QrScannerViewController(completion: completion)
+      vc.modalPresentationStyle = .formSheet
+      let nav = UINavigationController(rootViewController: vc)
+      nav.modalPresentationStyle = .formSheet
+      nav.presentationController?.delegate = vc
+      host.present(nav, animated: true)
+    }
+
+    override func viewDidLoad() {
+      super.viewDidLoad()
+      view.backgroundColor = .black
+      title = "扫码绑定 WebDAV"
+      navigationItem.leftBarButtonItem = UIBarButtonItem(
+        title: "取消",
+        style: .plain,
+        target: self,
+        action: #selector(handleCancel)
+      )
+      navigationItem.rightBarButtonItem = UIBarButtonItem(
+        title: "粘贴链接",
+        style: .plain,
+        target: self,
+        action: #selector(handlePaste)
+      )
+
+      statusLabel.text = "对准电视或电脑端「接收码」二维码自动绑定"
+      statusLabel.textColor = .white
+      statusLabel.font = UIFont.systemFont(ofSize: 14, weight: .medium)
+      statusLabel.textAlignment = .center
+      statusLabel.numberOfLines = 2
+      statusLabel.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+      statusLabel.layer.cornerRadius = 10
+      statusLabel.clipsToBounds = true
+      statusLabel.translatesAutoresizingMaskIntoConstraints = false
+      view.addSubview(statusLabel)
+      NSLayoutConstraint.activate([
+        statusLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 20),
+        statusLabel.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -20),
+        statusLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -28),
+        statusLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
+      ])
+
+      configureCameraIfAuthorized()
+    }
+
+    override func viewDidLayoutSubviews() {
+      super.viewDidLayoutSubviews()
+      previewLayer?.frame = view.bounds
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+      super.viewWillDisappear(animated)
+      stopCapture()
+    }
+
+    private func configureCameraIfAuthorized() {
+      let authStatus = AVCaptureDevice.authorizationStatus(for: .video)
+      switch authStatus {
+      case .authorized:
+        startCaptureSession()
+      case .notDetermined:
+        AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+          DispatchQueue.main.async {
+            guard let self = self else { return }
+            if granted {
+              self.startCaptureSession()
+            } else {
+              self.statusLabel.text = "未开启相机权限，可点击右上角「粘贴链接」"
+            }
+          }
+        }
+      default:
+        statusLabel.text = "未开启相机权限，可点击右上角「粘贴链接」"
+      }
+    }
+
+    private func startCaptureSession() {
+      guard let device = AVCaptureDevice.default(for: .video),
+            let input = try? AVCaptureDeviceInput(device: device),
+            captureSession.canAddInput(input) else {
+        statusLabel.text = "当前设备相机不可用，可点击右上角「粘贴链接」"
+        return
+      }
+      captureSession.addInput(input)
+      let output = AVCaptureMetadataOutput()
+      if captureSession.canAddOutput(output) {
+        captureSession.addOutput(output)
+        output.setMetadataObjectsDelegate(self, queue: DispatchQueue.main)
+        if output.availableMetadataObjectTypes.contains(.qr) {
+          output.metadataObjectTypes = [.qr]
+        }
+      }
+      let preview = AVCaptureVideoPreviewLayer(session: captureSession)
+      preview.videoGravity = .resizeAspectFill
+      preview.frame = view.bounds
+      view.layer.insertSublayer(preview, at: 0)
+      previewLayer = preview
+      DispatchQueue.global(qos: .userInitiated).async { [captureSession] in
+        if !captureSession.isRunning {
+          captureSession.startRunning()
+        }
+      }
+    }
+
+    private func stopCapture() {
+      let session = captureSession
+      DispatchQueue.global(qos: .userInitiated).async {
+        if session.isRunning {
+          session.stopRunning()
+        }
+      }
+    }
+
+    func metadataOutput(
+      _ output: AVCaptureMetadataOutput,
+      didOutput metadataObjects: [AVMetadataObject],
+      from connection: AVCaptureConnection
+    ) {
+      guard !finished,
+            let obj = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
+            let raw = obj.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !raw.isEmpty else {
+        return
+      }
+      finish(with: raw)
+    }
+
+    func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+      if !finished {
+        finished = true
+        stopCapture()
+        completion(nil)
+      }
+    }
+
+    @objc private func handleCancel() {
+      finish(with: nil)
+    }
+
+    @objc private func handlePaste() {
+      let pasted = (UIPasteboard.general.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      if pasted.isEmpty {
+        statusLabel.text = "剪贴板暂无内容"
+        return
+      }
+      finish(with: pasted)
+    }
+
+    private func finish(with value: String?) {
+      guard !finished else { return }
+      finished = true
+      stopCapture()
+      dismiss(animated: true) { [completion] in
+        completion(value)
+      }
+    }
   }
 }'''
 
@@ -4289,6 +4479,7 @@ def main() -> None:
                 # and free window sizing on iPadOS / iOS 27.1+.
                 'UIRequiresFullScreen': False,
                 'NSLocalNetworkUsageDescription': '用于发现局域网投屏电视（DLNA/AirPlay）及连接局域网 Emby 服务器与片源。',
+                'NSCameraUsageDescription': '用于扫描电视或电脑端二维码，快速绑定 WebDAV 与局域网同步配置。',
                 'NSBonjourServices': [
                     '_marcomovie-cast._tcp',
                     '_airplay._tcp',

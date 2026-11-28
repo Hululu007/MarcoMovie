@@ -441,6 +441,30 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                 '局域网设备已完成双向同步（历史 $historyCount · 收藏 $favoriteCount$subPart）';
           });
         },
+        onWebdavBound: (url) {
+          if (!mounted) return;
+          setState(() {
+            _urlCtrl.text = widget.storage.webdavUrl;
+            _userCtrl.text = widget.storage.webdavUser;
+            _passCtrl.text = widget.storage.webdavPass;
+            _autoSync = widget.storage.webdavAuto;
+            _syncSubs = widget.storage.webdavSyncSubs;
+            _feedbackIsError = false;
+            _feedbackMessage = '已通过扫码自动绑定 WebDAV：$url';
+          });
+          widget.onSynced?.call(subscriptionsChanged: false);
+          if (widget.storage.webdavAuto) {
+            unawaited(
+              widget.storage.syncWithWebdav().then(
+                (r) {
+                  if (!mounted) return;
+                  widget.onSynced?.call(subscriptionsChanged: r.subscriptionsChanged);
+                },
+                onError: (_) {},
+              ),
+            );
+          }
+        },
       );
       if (!mounted) {
         await server.close();
@@ -460,6 +484,42 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
     }
   }
 
+  Future<void> _handleScanLanQr() async {
+    if (_syncingLan) return;
+    String? scanned;
+    try {
+      if (OhosRuntime.isOhos) {
+        scanned = await OhosRuntime.scanQrCode();
+      } else if (defaultTargetPlatform == TargetPlatform.iOS) {
+        scanned = await const MethodChannel('marco_movie/qr_scanner')
+            .invokeMethod<String>('scanQrCode');
+      }
+    } on MissingPluginException {
+      scanned = null;
+    } on PlatformException {
+      scanned = null;
+    } catch (_) {
+      scanned = null;
+    }
+    final trimmed = (scanned ?? '').trim();
+    if (trimmed.isNotEmpty) {
+      if (!mounted) return;
+      setState(() => _lanPeerCtrl.text = trimmed);
+      await _handleLanPeerSync();
+      return;
+    }
+    final clip = await Clipboard.getData(Clipboard.kTextPlain);
+    final clipText = (clip?.text ?? '').trim();
+    if (clipText.contains('marco-bind=v1') || clipText.contains('/configure/')) {
+      if (!mounted) return;
+      setState(() => _lanPeerCtrl.text = clipText);
+      _notifyNotice('已读取剪贴板同步地址', '检测到剪贴板中的同步/绑定地址，已自动填入下方输入框。');
+      return;
+    }
+    if (!mounted) return;
+    _notifyNotice('未识别到二维码', '请使用相机扫码，或先复制对方同步链接后再试。');
+  }
+
   Future<void> _handleLanPeerSync() async {
     if (_syncingLan) return;
     final peerInput = _lanPeerCtrl.text.trim();
@@ -472,12 +532,27 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
       _feedbackMessage = null;
     });
     try {
-      final res = await widget.storage.syncWithLanPeer(peerInput);
+      final res = await widget.storage.bindOrSyncWithLanQr(peerInput);
+      if (res.boundWebdav && mounted) {
+        setState(() {
+          _urlCtrl.text = widget.storage.webdavUrl;
+          _userCtrl.text = widget.storage.webdavUser;
+          _passCtrl.text = widget.storage.webdavPass;
+          _autoSync = widget.storage.webdavAuto;
+          _syncSubs = widget.storage.webdavSyncSubs;
+        });
+      }
       widget.onSynced?.call(subscriptionsChanged: res.subscriptionsChanged);
       final subPart = _syncSubs ? ' · 订阅 ${res.subscriptionCount} 个' : '';
+      final prefix = switch (res.bindStatus) {
+        'pushed' => '已将本机 WebDAV 绑定至对方设备，并',
+        'pulled' => '已导入绑定对方 WebDAV 配置，并',
+        'unconfigured' => '对方尚未配置 WebDAV，已',
+        _ => '已',
+      };
       _notifyNotice(
         '局域网同步完成',
-        '已双向合并观看历史 ${res.historyCount} 条 · 收藏 ${res.favoriteCount} 部$subPart。',
+        '$prefix双向合并观看历史 ${res.historyCount} 条 · 收藏 ${res.favoriteCount} 部$subPart。',
       );
     } catch (e) {
       final msg = e is FormatException ? e.message : e.toString();
@@ -584,6 +659,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
         ? _lanHosts[_selectedLanHostIndex.clamp(0, _lanHosts.length - 1)]
         : '127.0.0.1';
     final receiverUrl = activeServer?.addressForHost(currentHost) ?? '';
+    final receiverQrData = activeServer?.bindQrUrlForHost(currentHost) ?? '';
 
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -953,7 +1029,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(16),
                       ),
-                      child: LocalQrCode(data: receiverUrl),
+                      child: LocalQrCode(data: receiverQrData),
                     ),
                     const SizedBox(height: 12),
                     Text(
@@ -1028,6 +1104,16 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                     ),
                   ],
                 ),
+              ),
+            if (defaultTargetPlatform == TargetPlatform.iOS ||
+                (OhosRuntime.isOhos && !OhosRuntime.isSmartScreenHardware))
+              IosSettingsRow(
+                key: const ValueKey('sync-lan-scan-qr'),
+                icon: CupertinoIcons.camera_viewfinder,
+                iconColor: AppleColors.systemBlue,
+                title: '扫一扫绑定电视 / 电脑 WebDAV',
+                subtitle: '扫描对方局域网二维码，一键互通 WebDAV 与观看进度',
+                onTap: _syncingLan ? null : _handleScanLanQr,
               ),
             _buildFieldRow(
               label: '连接局域网其他设备地址',

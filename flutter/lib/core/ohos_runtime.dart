@@ -178,6 +178,19 @@ class OhosRuntime {
     };
   }
 
+  static Future<String?> scanQrCode() async {
+    if (!isOhos) return null;
+    try {
+      final res = await systemChannel.invokeMethod<String>('scanQrCode');
+      final trimmed = (res ?? '').trim();
+      return trimmed.isEmpty ? null : trimmed;
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    }
+  }
+
   static Future<OhosPickedDocument?> pickDocumentFile({
     required OhosDocumentPurpose purpose,
     required int maxBytes,

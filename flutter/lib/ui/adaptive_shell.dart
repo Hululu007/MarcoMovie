@@ -1467,6 +1467,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     if (!kIsWeb &&
         defaultTargetPlatform == TargetPlatform.iOS &&
         !OhosRuntime.isOhos) {
+      AiLabPasscodeStore.instance.addListener(_onWindowsAiLabStateChanged);
+      AiService.instance.addListener(_onWindowsAiLabStateChanged);
+      unawaited(AiLabPasscodeStore.instance.ensureLoaded());
+      unawaited(AiService.instance.ensureLoaded());
       unawaited(
         DiskBlockCache.shared.setCapacityMb(
           widget.storage.mediaDiskCacheLimitMb,
@@ -14729,6 +14733,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 ],
           onOpen: () => _trackSecondaryRoute<void>(
             () async {
+              await AiService.instance.ensureLoaded();
+              if (!mounted) return;
               if (!AiService.instance.isLabUnlocked) {
                 final unlocked = await showIosAiLabPasscodeSheet(
                   context,
@@ -17167,6 +17173,33 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
+                          if (sub.format == 'Emby' || sub.id.startsWith('emby_'))
+                            CupertinoButton(
+                              key: ValueKey('edit-emby-sub-${sub.id}'),
+                              padding: const EdgeInsets.only(right: 4),
+                              minimumSize: const Size(28, 28),
+                              onPressed: () async {
+                                final saved = await showEmbyLibraryFormPage(
+                                  context: ctx,
+                                  storage: widget.storage,
+                                  editingSubscription: sub,
+                                  initialGroup: sub.group,
+                                  initialIsPrivate: sub.isEffectivelyPrivate,
+                                  backLabel: '订阅管理',
+                                  onSaved: () {
+                                    if (mounted) _reloadSavedConfig();
+                                  },
+                                );
+                                if (saved && ctx.mounted) {
+                                  setSheetState(() {});
+                                }
+                              },
+                              child: const Icon(
+                                CupertinoIcons.pencil,
+                                color: AppleColors.systemGreen,
+                                size: 18,
+                              ),
+                            ),
                           CupertinoSwitch(
                             value: sub.enabled,
                             activeTrackColor: AppleColors.systemGreen,

@@ -677,6 +677,7 @@ class AiLabPasscodeStore extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(prefsPasscodeKey, result.canonicalToken);
+      await prefs.setString(altPrefsPasscodeKey, result.canonicalToken);
     } catch (_) {}
     notifyListeners();
     return result;

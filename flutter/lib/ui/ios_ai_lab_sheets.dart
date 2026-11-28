@@ -8,9 +8,12 @@ import 'package:flutter/material.dart' show Colors, SelectableText;
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../core/ai_danmu_matcher.dart';
 import '../core/ai_lab_features.dart';
 import '../core/ai_lab_gate.dart';
 import '../core/ai_service.dart';
+import '../core/danmu/danmu_prefs.dart';
+import '../core/danmu/provider.dart';
 import '../core/episode_scraper.dart';
 import '../core/models.dart';
 import 'apple_theme.dart';
@@ -2223,4 +2226,546 @@ Widget _buildHubActionTile({
       ),
     ),
   );
+}
+
+/// Player AI Sheet: Online Danmaku Search, Auto-Match & Timeline Offset Alignment.
+Future<void> showIosAiDanmuMatchSheet(
+  BuildContext context, {
+  required String title,
+  required String episodeName,
+  required int episodeNumber,
+  String year = '',
+  int durationSec = 0,
+  required DanmuSettings currentDanmuSettings,
+  required int initialOffsetMs,
+  List<({int timeMs, String text})> sampleSubtitles = const [],
+  required void Function(AiOnlineDanmuCandidate candidate, List<DanmuItem> items)
+      onApplyDanmu,
+  required ValueChanged<int> onUpdateOffsetMs,
+  AiDanmuMatcher? matcherOverride,
+}) async {
+  await showIos27LiquidSheet<void>(
+    context: context,
+    title: 'AI 全网搜弹幕',
+    maxWidth: 500,
+    builder: (ctx) => _IosAiDanmuMatchBody(
+      title: title,
+      episodeName: episodeName,
+      episodeNumber: episodeNumber,
+      year: year,
+      durationSec: durationSec,
+      currentDanmuSettings: currentDanmuSettings,
+      initialOffsetMs: initialOffsetMs,
+      sampleSubtitles: sampleSubtitles,
+      onApplyDanmu: onApplyDanmu,
+      onUpdateOffsetMs: onUpdateOffsetMs,
+      matcherOverride: matcherOverride,
+    ),
+  );
+}
+
+class _IosAiDanmuMatchBody extends StatefulWidget {
+  final String title;
+  final String episodeName;
+  final int episodeNumber;
+  final String year;
+  final int durationSec;
+  final DanmuSettings currentDanmuSettings;
+  final int initialOffsetMs;
+  final List<({int timeMs, String text})> sampleSubtitles;
+  final void Function(AiOnlineDanmuCandidate candidate, List<DanmuItem> items)
+      onApplyDanmu;
+  final ValueChanged<int> onUpdateOffsetMs;
+  final AiDanmuMatcher? matcherOverride;
+
+  const _IosAiDanmuMatchBody({
+    required this.title,
+    required this.episodeName,
+    required this.episodeNumber,
+    required this.year,
+    required this.durationSec,
+    required this.currentDanmuSettings,
+    required this.initialOffsetMs,
+    required this.sampleSubtitles,
+    required this.onApplyDanmu,
+    required this.onUpdateOffsetMs,
+    this.matcherOverride,
+  });
+
+  @override
+  State<_IosAiDanmuMatchBody> createState() => _IosAiDanmuMatchBodyState();
+}
+
+class _IosAiDanmuMatchBodyState extends State<_IosAiDanmuMatchBody> {
+  late final AiDanmuMatcher _matcher;
+  late final bool _ownsMatcher;
+  late final TextEditingController _keywordCtrl;
+  late final TextEditingController _epCtrl;
+
+  bool _searching = false;
+  bool _aligningOffset = false;
+  String? _statusMessage;
+  bool _statusIsError = false;
+  String? _offsetReason;
+  late int _offsetMs;
+  List<AiOnlineDanmuCandidate> _candidates = const <AiOnlineDanmuCandidate>[];
+  AiOnlineDanmuCandidate? _selected;
+  List<DanmuItem> _loadedItems = const <DanmuItem>[];
+  int _opGen = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _ownsMatcher = widget.matcherOverride == null;
+    _matcher = widget.matcherOverride ?? AiDanmuMatcher();
+    _offsetMs = widget.initialOffsetMs.clamp(-30000, 30000);
+    _keywordCtrl = TextEditingController(text: widget.title);
+    _epCtrl = TextEditingController(
+      text: widget.episodeNumber > 0 ? '${widget.episodeNumber}' : '1',
+    );
+    _searching = true;
+    _statusMessage = '正在提炼片名并检索全网弹幕源…';
+    _statusIsError = false;
+    unawaited(_runSearch(autoUsePlanKeyword: true, fromInitState: true));
+  }
+
+  @override
+  void dispose() {
+    _opGen++;
+    _keywordCtrl.dispose();
+    _epCtrl.dispose();
+    if (_ownsMatcher) {
+      _matcher.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _runSearch({
+    required bool autoUsePlanKeyword,
+    bool fromInitState = false,
+  }) async {
+    final myGen = ++_opGen;
+    if (!fromInitState && mounted) {
+      setState(() {
+        _searching = true;
+        _statusMessage = '正在提炼片名并检索全网弹幕源…';
+        _statusIsError = false;
+      });
+    }
+    final manualKw = autoUsePlanKeyword ? '' : _keywordCtrl.text.trim();
+    final manualEp = int.tryParse(_epCtrl.text.trim());
+    try {
+      final outcome = await _matcher.autoMatchAndLoad(
+        rawTitle: widget.title,
+        rawEpisodeName: widget.episodeName,
+        fallbackEpisodeIndex: widget.episodeNumber,
+        year: widget.year,
+        durationSec: widget.durationSec,
+        manualKeywordOverride: manualKw,
+        manualEpisodeOverride: autoUsePlanKeyword ? null : manualEp,
+        danmuSettings: widget.currentDanmuSettings,
+      );
+      if (!mounted || myGen != _opGen) return;
+      if (outcome.plan.canonicalTitle.isNotEmpty &&
+          autoUsePlanKeyword &&
+          _keywordCtrl.text.trim() == widget.title.trim()) {
+        _keywordCtrl.text = outcome.plan.canonicalTitle;
+      }
+      if (outcome.plan.episodeNumber > 0 && autoUsePlanKeyword) {
+        _epCtrl.text = '${outcome.plan.episodeNumber}';
+      }
+      setState(() {
+        _searching = false;
+        _candidates = outcome.candidates;
+        _selected = outcome.selected;
+        _loadedItems = outcome.items;
+        _statusMessage = outcome.messageZh;
+        _statusIsError = outcome.items.isEmpty && outcome.candidates.isEmpty;
+      });
+      if (outcome.selected != null && outcome.items.isNotEmpty) {
+        widget.onApplyDanmu(outcome.selected!, outcome.items);
+      }
+    } catch (e) {
+      if (!mounted || myGen != _opGen) return;
+      setState(() {
+        _searching = false;
+        _statusMessage = '匹配失败：$e';
+        _statusIsError = true;
+      });
+    }
+  }
+
+  Future<void> _selectCandidate(AiOnlineDanmuCandidate cand) async {
+    final myGen = ++_opGen;
+    setState(() {
+      _searching = true;
+      _statusMessage = '正在拉取 ${cand.sourceLabel} 弹幕…';
+      _statusIsError = false;
+    });
+    try {
+      final items = await _matcher.fetchCandidateDanmu(
+        cand,
+        danmuSettings: widget.currentDanmuSettings,
+      );
+      if (!mounted || myGen != _opGen) return;
+      if (items.isEmpty) {
+        setState(() {
+          _searching = false;
+          _selected = cand;
+          _loadedItems = const <DanmuItem>[];
+          _statusMessage = '该候选暂无可用弹幕，请换一条试试';
+          _statusIsError = true;
+        });
+        return;
+      }
+      setState(() {
+        _searching = false;
+        _selected = cand;
+        _loadedItems = items;
+        _statusMessage =
+            '已切换并加载 ${items.length} 条弹幕 · ${cand.sourceLabel}（${cand.workTitle}）';
+        _statusIsError = false;
+      });
+      widget.onApplyDanmu(cand, items);
+    } catch (e) {
+      if (!mounted || myGen != _opGen) return;
+      setState(() {
+        _searching = false;
+        _statusMessage = '拉取弹幕失败：$e';
+        _statusIsError = true;
+      });
+    }
+  }
+
+  void _applyOffsetMs(int nextOffsetMs) {
+    final clamped = nextOffsetMs.clamp(-30000, 30000);
+    setState(() {
+      _offsetMs = clamped;
+    });
+    widget.onUpdateOffsetMs(clamped);
+  }
+
+  Future<void> _runAiTimelineOffset() async {
+    if (_aligningOffset || _loadedItems.isEmpty) return;
+    setState(() {
+      _aligningOffset = true;
+      _offsetReason = '正在分析时长差与弹幕/台词时间戳…';
+    });
+    try {
+      final res = await _matcher.suggestTimelineOffset(
+        title: _selected?.workTitle ?? widget.title,
+        episodeLabel: _selected?.episodeTitle ?? widget.episodeName,
+        videoDurationSec: widget.durationSec,
+        candidateDurationSec: _selected?.durationSec ?? 0,
+        sampleSubtitles: widget.sampleSubtitles,
+        danmuItems: _loadedItems,
+      );
+      if (!mounted) return;
+      setState(() {
+        _aligningOffset = false;
+        _offsetReason = res.reasonZh;
+      });
+      _applyOffsetMs(res.offsetMs);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _aligningOffset = false;
+        _offsetReason = '时间轴校对失败：$e';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = ApplePalette.of(context);
+    final cardBg =
+        p.isDark ? const Color(0xFF26262B) : const Color(0xFFF3F4F8);
+    final fieldBg =
+        p.isDark ? const Color(0xFF1C1C20) : const Color(0xFFFFFFFF);
+    final offsetSecStr = _offsetMs == 0
+        ? '0.0s'
+        : '${_offsetMs > 0 ? "+" : ""}${(_offsetMs / 1000).toStringAsFixed(1)}s';
+
+    return Column(
+      key: const ValueKey('ios-ai-danmu-match-sheet'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: cardBg,
+            borderRadius: BorderRadius.circular(13),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    flex: 3,
+                    child: CupertinoTextField(
+                      key: const ValueKey('ios-ai-danmu-keyword-field'),
+                      controller: _keywordCtrl,
+                      placeholder: '输入片名关键词',
+                      style: TextStyle(color: p.labelPrimary, fontSize: 13.5),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: fieldBg,
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                      onSubmitted: (_) => unawaited(_runSearch(autoUsePlanKeyword: false)),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    flex: 1,
+                    child: CupertinoTextField(
+                      key: const ValueKey('ios-ai-danmu-ep-field'),
+                      controller: _epCtrl,
+                      placeholder: '集号',
+                      keyboardType: TextInputType.number,
+                      style: TextStyle(color: p.labelPrimary, fontSize: 13.5),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: fieldBg,
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  CupertinoButton(
+                    key: const ValueKey('ios-ai-danmu-search-btn'),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    minimumSize: const Size(48, 34),
+                    color: p.systemBlue,
+                    borderRadius: BorderRadius.circular(9),
+                    onPressed: _searching
+                        ? null
+                        : () => unawaited(_runSearch(autoUsePlanKeyword: false)),
+                    child: const Text(
+                      '搜索',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              if (_statusMessage != null) ...[
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    if (_searching) ...[
+                      const CupertinoActivityIndicator(radius: 8),
+                      const SizedBox(width: 8),
+                    ],
+                    Expanded(
+                      child: Text(
+                        _statusMessage!,
+                        style: TextStyle(
+                          color: _statusIsError
+                              ? AppleColors.systemOrange
+                              : p.labelPrimary,
+                          fontSize: 12.5,
+                          height: 1.35,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: cardBg,
+            borderRadius: BorderRadius.circular(13),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '时间轴微调：$offsetSecStr',
+                      style: TextStyle(
+                        color: p.labelPrimary,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  CupertinoButton(
+                    key: const ValueKey('ios-ai-danmu-ai-offset-btn'),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 5,
+                    ),
+                    minimumSize: const Size(40, 28),
+                    color: AppleColors.systemIndigo.withValues(alpha: 0.16),
+                    borderRadius: BorderRadius.circular(8),
+                    onPressed: (_aligningOffset || _loadedItems.isEmpty)
+                        ? null
+                        : _runAiTimelineOffset,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (_aligningOffset) ...[
+                          const CupertinoActivityIndicator(radius: 7),
+                          const SizedBox(width: 5),
+                        ] else ...[
+                          const Icon(
+                            CupertinoIcons.sparkles,
+                            size: 13,
+                            color: AppleColors.systemIndigo,
+                          ),
+                          const SizedBox(width: 4),
+                        ],
+                        const Text(
+                          'AI 校对时间轴',
+                          style: TextStyle(
+                            color: AppleColors.systemIndigo,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final step in const <(String, int, bool)>[
+                    ('-2s', -2000, false),
+                    ('-0.5s', -500, false),
+                    ('归零', 0, true),
+                    ('+0.5s', 500, false),
+                    ('+2s', 2000, false),
+                  ])
+                    CupertinoButton(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 5,
+                      ),
+                      minimumSize: const Size(42, 28),
+                      color: p.isDark
+                          ? const Color(0xFF34343B)
+                          : const Color(0xFFE5E6EC),
+                      borderRadius: BorderRadius.circular(8),
+                      onPressed: () =>
+                          _applyOffsetMs(step.$3 ? 0 : _offsetMs + step.$2),
+                      child: Text(
+                        step.$1,
+                        style: TextStyle(
+                          color: p.labelPrimary,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              if (_offsetReason != null && _offsetReason!.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(
+                  _offsetReason!,
+                  style: TextStyle(
+                    color: p.labelSecondary,
+                    fontSize: 12,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        if (_candidates.isNotEmpty) ...[
+          const SizedBox(height: 14),
+          Text(
+            '匹配候选（点击切换弹幕池）',
+            style: TextStyle(
+              color: p.labelSecondary,
+              fontSize: 12.2,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 8),
+          for (final c in _candidates.take(12))
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: GestureDetector(
+                key: ValueKey('ios-ai-danmu-cand-${c.id}'),
+                behavior: HitTestBehavior.opaque,
+                onTap: _searching ? null : () => unawaited(_selectCandidate(c)),
+                child: Container(
+                  padding: const EdgeInsets.all(11),
+                  decoration: BoxDecoration(
+                    color: cardBg,
+                    borderRadius: BorderRadius.circular(12),
+                    border: _selected?.id == c.id
+                        ? Border.all(color: p.systemBlue, width: 1.2)
+                        : null,
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '${c.workTitle} · ${c.episodeTitle}',
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: p.labelPrimary,
+                                fontSize: 13.2,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              '${c.sourceLabel} · 匹配度 ${(c.confidence * 100).round()}%${c.durationSec > 0 ? " · ${c.durationSec ~/ 60}分钟" : ""}',
+                              style: TextStyle(
+                                color: p.labelSecondary,
+                                fontSize: 11.8,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (_selected?.id == c.id)
+                        Icon(
+                          CupertinoIcons.checkmark_circle_fill,
+                          color: p.systemBlue,
+                          size: 18,
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ],
+    );
+  }
 }

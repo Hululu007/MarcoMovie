@@ -1966,8 +1966,8 @@ class DeploymentChecks(unittest.TestCase):
         repo_root = flutter_dir.parent
         versions = json.loads((flutter_dir / 'edition-versions.json').read_text(encoding='utf-8'))
         ios_ver = versions['ios']
-        self.assertEqual(ios_ver['versionName'], '0.7.11')
-        self.assertEqual(ios_ver['buildNumber'], 104)
+        self.assertEqual(ios_ver['versionName'], '0.7.12')
+        self.assertEqual(ios_ver['buildNumber'], 105)
 
         # validate_app accepts matching CFBundleShortVersionString + CFBundleVersion
         # and rejects any mismatch in either version or build number.
@@ -1976,17 +1976,17 @@ class DeploymentChecks(unittest.TestCase):
             plistlib.dumps(
                 {
                     'MinimumOSVersion': '14.0',
-                    'CFBundleShortVersionString': '0.7.11',
-                    'CFBundleVersion': '104',
+                    'CFBundleShortVersionString': '0.7.12',
+                    'CFBundleVersion': '105',
                 }
             )
         )
-        validate_app(self.app, max_min_ios='14.0', expected_version='0.7.11', expected_build='104')
+        validate_app(self.app, max_min_ios='14.0', expected_version='0.7.12', expected_build='105')
 
         with self.assertRaises(ValueError):
-            validate_app(self.app, max_min_ios='14.0', expected_version='0.7.10', expected_build='104')
+            validate_app(self.app, max_min_ios='14.0', expected_version='0.7.11', expected_build='105')
         with self.assertRaises(ValueError):
-            validate_app(self.app, max_min_ios='14.0', expected_version='0.7.11', expected_build='103')
+            validate_app(self.app, max_min_ios='14.0', expected_version='0.7.12', expected_build='104')
 
         # Both standard iOS and compat iOS14 workflow jobs must pass
         # --expected-version and --expected-build to patch_ios_ipa.py.
