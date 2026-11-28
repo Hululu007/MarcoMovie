@@ -79,10 +79,7 @@ public final class EmbyLibrary {
     public EmbyLibrary(JSONObject session) throws Exception {
         account = accountKey(session);
         String rawBase = session.getString("base");
-        base =
-                rawBase.toLowerCase(Locale.US).endsWith("/emby")
-                        ? normalize(rawBase)
-                        : normalizeRoot(rawBase);
+        base = session.optBoolean("bareRoot", false) ? normalizeRoot(rawBase) : normalize(rawBase);
         user = segment(session.getString("user"));
         token = session.getString("token");
         device = session.getString("device");
@@ -391,6 +388,7 @@ public final class EmbyLibrary {
         String userId = segment(response.getJSONObject("User").getString("Id"));
         return new JSONObject()
                 .put("base", activeBase)
+                .put("bareRoot", !activeBase.toLowerCase(Locale.US).endsWith("/emby"))
                 .put("token", token)
                 .put("device", device)
                 .put("user", userId);
