@@ -20,11 +20,22 @@ QUICKJS_SRC_DIR = REPO_ROOT / "flutter" / "packages" / "quickjs_engine" / "nativ
 CQUICKJS_DST_DIR = TVOS_DIR / "Sources" / "CQuickJS"
 CQUICKJS_INCLUDE_DIR = CQUICKJS_DST_DIR / "include"
 
-ANDROID_JS_HOST_DIR = REPO_ROOT / "android" / "src" / "main" / "assets" / "js-host"
-FLUTTER_JS_HOST_DIR = REPO_ROOT / "flutter" / "assets" / "js-host"
+SHARED_JS_HOST_DIR = REPO_ROOT / "shared" / "script-host" / "js-host"
 SHARED_CATPAW_DIR = REPO_ROOT / "shared" / "catpaw"
 TVOS_JS_HOST_DST_DIR = TVOS_DIR / "Sources" / "MarcoTVCore" / "Resources" / "js-host"
 TVOS_CATPAW_DST_DIR = TVOS_DIR / "Sources" / "MarcoTVCore" / "Resources" / "catpaw"
+
+REQUIRED_SHARED_JS_HOST_FILES = (
+    "crypto-js.js",
+    "catvod.mjs",
+    "module-interop.js",
+    "bootstrap.js",
+    "crypto.LICENSE",
+)
+
+REQUIRED_CATPAW_JS_HOST_FILES = (
+    "drpy-core.js",
+)
 
 # Node-only worker scripts are not needed on tvOS (QuickJS-NG executes DRPY2 & Guard adapters in-process,
 # and Apple Foundation handles GBK/GB18030/Big5 natively via CFStringConvertEncodingToNSStringEncoding).
@@ -36,7 +47,10 @@ CATPAW_TVOS_SKIP_FILES = {
 }
 
 APP_ICON_512 = REPO_ROOT / "docs" / "images" / "app-icon-512.png"
-LOGO_MARK_PNG = REPO_ROOT / "android" / "src" / "main" / "res" / "drawable-nodpi" / "logo_mark.png"
+LOGO_MARK_CANDIDATES = (
+    REPO_ROOT / "android-tv" / "src" / "main" / "res" / "drawable-nodpi" / "logo_mark.png",
+    REPO_ROOT / "android-mobile" / "src" / "main" / "res" / "drawable-nodpi" / "logo_mark.png",
+)
 
 RUNNER_DIR = TVOS_DIR / "RunnerProject"
 XCODEPROJ_DIR = RUNNER_DIR / "MarcoMovieTV.xcodeproj"
@@ -323,43 +337,91 @@ def sync_quickjs_sources() -> list[Path]:
     return copied
 
 
-def sync_js_host_assets() -> list[Path]:
-    TVOS_JS_HOST_DST_DIR.mkdir(parents=True, exist_ok=True)
-    js_src_base = FLUTTER_JS_HOST_DIR if (FLUTTER_JS_HOST_DIR / "crypto-js.js").exists() else ANDROID_JS_HOST_DIR
-
-    copied: list[Path] = []
-    for name in ("crypto-js.js", "catvod.mjs", "module-interop.js", "bootstrap.js", "crypto.LICENSE"):
-        src = js_src_base / name
-        if not src.exists():
-            src = ANDROID_JS_HOST_DIR / name
-        if src.exists():
-            dst = TVOS_JS_HOST_DST_DIR / name
-            shutil.copy2(src, dst)
-            copied.append(dst)
-
-    drpy_core = SHARED_CATPAW_DIR / "drpy-core.js"
-    if drpy_core.exists():
-        dst = TVOS_JS_HOST_DST_DIR / "drpy-core.js"
-        shutil.copy2(drpy_core, dst)
-        copied.append(dst)
-
-    return copied
-
-
-def sync_catpaw_assets() -> list[Path]:
-    """Sync SHA-256 verified DRPY2 & Guard extractor/adapter assets from shared/catpaw/."""
-    manifest_path = SHARED_CATPAW_DIR / "drpy-assets.json"
-    if not manifest_path.exists():
+def _load_catpaw_manifest(shared_catpaw_dir: Path = SHARED_CATPAW_DIR) -> tuple[Path, list[dict]]:
+    manifest_path = shared_catpaw_dir / "drpy-assets.json"
+    if not manifest_path.is_file():
         raise FileNotFoundError(f"CatPaw DRPY asset manifest missing: {manifest_path}")
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     files = manifest.get("files")
     if not isinstance(files, list) or not files:
-        raise ValueError("Invalid drpy-assets.json manifest")
+        raise ValueError(f"Invalid drpy-assets.json manifest: {manifest_path}")
+    return manifest_path, files
 
-    TVOS_CATPAW_DST_DIR.mkdir(parents=True, exist_ok=True)
+
+def _read_verified_catpaw_asset(entry: dict, shared_catpaw_dir: Path = SHARED_CATPAW_DIR) -> bytes:
+    name = entry["name"]
+    src = shared_catpaw_dir / name
+    if not src.is_file():
+        raise FileNotFoundError(f"Missing CatPaw asset '{name}': {src}")
+    raw = src.read_bytes()
+    if len(raw) != entry["bytes"] or hashlib.sha256(raw).hexdigest() != entry["sha256"]:
+        raise ValueError(f"SHA-256 verification failed for CatPaw asset: {name}")
+    return raw
+
+
+def _clear_directory(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def sync_js_host_assets(
+    shared_js_host_dir: Path = SHARED_JS_HOST_DIR,
+    shared_catpaw_dir: Path = SHARED_CATPAW_DIR,
+    dst_dir: Path = TVOS_JS_HOST_DST_DIR,
+) -> list[Path]:
+    """Sync required JS host runtime assets from tracked shared/script-host/js-host/ and shared/catpaw/."""
+    if not shared_js_host_dir.is_dir():
+        raise FileNotFoundError(f"Shared js-host source directory missing: {shared_js_host_dir}")
+
+    _, catpaw_entries = _load_catpaw_manifest(shared_catpaw_dir)
+    catpaw_by_name = {entry["name"]: entry for entry in catpaw_entries}
+
+    missing: list[str] = []
+    for name in REQUIRED_SHARED_JS_HOST_FILES:
+        src = shared_js_host_dir / name
+        if not src.is_file():
+            missing.append(f"{name} ({src})")
+    for name in REQUIRED_CATPAW_JS_HOST_FILES:
+        src = shared_catpaw_dir / name
+        if not src.is_file():
+            missing.append(f"{name} ({src})")
+        elif name not in catpaw_by_name:
+            missing.append(f"{name} (missing entry in drpy-assets.json)")
+
+    if missing:
+        raise FileNotFoundError(
+            "Missing required tvOS js-host asset(s): " + ", ".join(missing)
+        )
+
+    _clear_directory(dst_dir)
     copied: list[Path] = []
-    dst_manifest = TVOS_CATPAW_DST_DIR / "drpy-assets.json"
+    for name in REQUIRED_SHARED_JS_HOST_FILES:
+        src = shared_js_host_dir / name
+        dst = dst_dir / name
+        shutil.copy2(src, dst)
+        copied.append(dst)
+
+    for name in REQUIRED_CATPAW_JS_HOST_FILES:
+        raw = _read_verified_catpaw_asset(catpaw_by_name[name], shared_catpaw_dir)
+        dst = dst_dir / name
+        dst.write_bytes(raw)
+        copied.append(dst)
+
+    return copied
+
+
+def sync_catpaw_assets(
+    shared_catpaw_dir: Path = SHARED_CATPAW_DIR,
+    dst_dir: Path = TVOS_CATPAW_DST_DIR,
+) -> list[Path]:
+    """Sync SHA-256 verified DRPY2 & Guard extractor/adapter assets from shared/catpaw/."""
+    manifest_path, files = _load_catpaw_manifest(shared_catpaw_dir)
+
+    _clear_directory(dst_dir)
+    copied: list[Path] = []
+    dst_manifest = dst_dir / "drpy-assets.json"
     shutil.copy2(manifest_path, dst_manifest)
     copied.append(dst_manifest)
 
@@ -367,17 +429,21 @@ def sync_catpaw_assets() -> list[Path]:
         name = entry["name"]
         if name in CATPAW_TVOS_SKIP_FILES:
             continue
-        src = SHARED_CATPAW_DIR / name
-        if not src.exists():
-            raise FileNotFoundError(f"Missing CatPaw asset: {src}")
-        raw = src.read_bytes()
-        if len(raw) != entry["bytes"] or hashlib.sha256(raw).hexdigest() != entry["sha256"]:
-            raise ValueError(f"SHA-256 verification failed for CatPaw asset: {name}")
-        dst = TVOS_CATPAW_DST_DIR / name
+        raw = _read_verified_catpaw_asset(entry, shared_catpaw_dir)
+        dst = dst_dir / name
         dst.write_bytes(raw)
         copied.append(dst)
 
     return copied
+
+
+def resolve_logo_mark_png(candidates: tuple[Path, ...] = LOGO_MARK_CANDIDATES) -> Path:
+    """Resolve the tracked transparent brand mark asset without referencing deleted directories."""
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    searched = ", ".join(str(p) for p in candidates)
+    raise FileNotFoundError(f"Missing confirmed transparent brand mark asset (logo_mark.png); searched: {searched}")
 
 
 # ==============================================================================
@@ -391,11 +457,12 @@ def _write_json(path: Path, obj: dict) -> None:
 
 
 def generate_tvos_xcassets() -> None:
+    if not APP_ICON_512.is_file():
+        raise FileNotFoundError(f"Missing confirmed opaque app icon asset: {APP_ICON_512}")
+    logo_mark_path = resolve_logo_mark_png()
+
     _, _, opaque_rows = decode_png_rgba(APP_ICON_512)
-    if LOGO_MARK_PNG.exists():
-        _, _, front_rows = decode_png_rgba(LOGO_MARK_PNG)
-    else:
-        front_rows = opaque_rows
+    _, _, front_rows = decode_png_rgba(logo_mark_path)
 
     _write_json(ASSETS_DIR / "Contents.json", {"info": {"author": "xcode", "version": 1}})
 
@@ -557,6 +624,10 @@ def generate_xcodeproj() -> Path:
     c_sources = sorted((TVOS_DIR / "Sources" / "CQuickJS").glob("*.c"))
     core_swift_sources = sorted((TVOS_DIR / "Sources" / "MarcoTVCore").rglob("*.swift"))
     app_swift_sources = sorted((TVOS_DIR / "Sources" / "MarcoMovieTV").rglob("*.swift"))
+    test_swift_sources = sorted((TVOS_DIR / "Tests" / "MarcoTVCoreTests").rglob("*.swift"))
+    sim_tests_dir = TVOS_DIR / "Tests" / "MarcoMovieTVSimulatorTests"
+    if sim_tests_dir.is_dir():
+        test_swift_sources.extend(sorted(sim_tests_dir.rglob("*.swift")))
 
     objects: dict[str, dict] = {}
 
@@ -633,6 +704,27 @@ def generate_xcodeproj() -> Path:
         app_file_refs.append(fref)
         app_build_files.append(bfile)
 
+    test_build_files: list[str] = []
+    test_file_refs: list[str] = []
+    for s_path in test_swift_sources:
+        rpath = rel_to_runner(s_path)
+        fref = put(
+            _pbx_id(f"fref:{rpath}"),
+            {
+                "isa": "PBXFileReference",
+                "lastKnownFileType": "sourcecode.swift",
+                "name": s_path.name,
+                "path": rpath,
+                "sourceTree": "<group>",
+            },
+        )
+        bfile = put(
+            _pbx_id(f"bfile:tests:{rpath}"),
+            {"isa": "PBXBuildFile", "fileRef": fref},
+        )
+        test_file_refs.append(fref)
+        test_build_files.append(bfile)
+
     # Resource & product file references
     assets_fref = put(
         _pbx_id("fref:Assets.xcassets"),
@@ -703,6 +795,16 @@ def generate_xcodeproj() -> Path:
             "sourceTree": "BUILT_PRODUCTS_DIR",
         },
     )
+    tests_prod_ref = put(
+        _pbx_id("prod:MarcoMovieTVTests.xctest"),
+        {
+            "isa": "PBXFileReference",
+            "explicitFileType": "wrapper.cfbundle",
+            "includeInIndex": "0",
+            "path": "MarcoMovieTVTests.xctest",
+            "sourceTree": "BUILT_PRODUCTS_DIR",
+        },
+    )
 
     assets_bfile = put(_pbx_id("bfile:Assets.xcassets"), {"isa": "PBXBuildFile", "fileRef": assets_fref})
     jshost_bfile = put(_pbx_id("bfile:js-host"), {"isa": "PBXBuildFile", "fileRef": jshost_fref})
@@ -732,11 +834,15 @@ def generate_xcodeproj() -> Path:
             "sourceTree": "<group>",
         },
     )
+    tests_group = put(
+        _pbx_id("grp:MarcoMovieTVTests"),
+        {"isa": "PBXGroup", "children": test_file_refs, "name": "MarcoMovieTVTests", "sourceTree": "<group>"},
+    )
     products_group = put(
         _pbx_id("grp:Products"),
         {
             "isa": "PBXGroup",
-            "children": [cquickjs_prod_ref, core_prod_ref, app_prod_ref],
+            "children": [cquickjs_prod_ref, core_prod_ref, app_prod_ref, tests_prod_ref],
             "name": "Products",
             "sourceTree": "<group>",
         },
@@ -745,7 +851,7 @@ def generate_xcodeproj() -> Path:
         _pbx_id("grp:Main"),
         {
             "isa": "PBXGroup",
-            "children": [cquickjs_group, core_group, app_group, products_group],
+            "children": [cquickjs_group, core_group, app_group, tests_group, products_group],
             "sourceTree": "<group>",
         },
     )
@@ -793,6 +899,33 @@ def generate_xcodeproj() -> Path:
             "isa": "PBXResourcesBuildPhase",
             "buildActionMask": "2147483647",
             "files": [assets_bfile, jshost_bfile, catpaw_bfile],
+            "runOnlyForDeploymentPostprocessing": "0",
+        },
+    )
+    tests_sources_phase = put(
+        _pbx_id("phase:sources:MarcoMovieTVTests"),
+        {
+            "isa": "PBXSourcesBuildPhase",
+            "buildActionMask": "2147483647",
+            "files": test_build_files,
+            "runOnlyForDeploymentPostprocessing": "0",
+        },
+    )
+    tests_frameworks_phase = put(
+        _pbx_id("phase:frameworks:MarcoMovieTVTests"),
+        {
+            "isa": "PBXFrameworksBuildPhase",
+            "buildActionMask": "2147483647",
+            "files": [],
+            "runOnlyForDeploymentPostprocessing": "0",
+        },
+    )
+    tests_resources_phase = put(
+        _pbx_id("phase:resources:MarcoMovieTVTests"),
+        {
+            "isa": "PBXResourcesBuildPhase",
+            "buildActionMask": "2147483647",
+            "files": [],
             "runOnlyForDeploymentPostprocessing": "0",
         },
     )
@@ -885,7 +1018,11 @@ def generate_xcodeproj() -> Path:
         "HEADER_SEARCH_PATHS": ["$(SRCROOT)/../Sources/CQuickJS/include"],
         "SWIFT_INCLUDE_PATHS": ["$(SRCROOT)/../Sources/CQuickJS/include"],
     }
-    core_cfg_list = make_config_list("MarcoTVCore", core_common, core_common)
+    core_cfg_list = make_config_list(
+        "MarcoTVCore",
+        {**core_common, "ENABLE_TESTABILITY": "YES"},
+        core_common,
+    )
 
     app_common = {
         "ASSETCATALOG_COMPILER_APPICON_NAME": "App Icon & Top Shelf Image",
@@ -899,13 +1036,34 @@ def generate_xcodeproj() -> Path:
         "PRODUCT_NAME": "MarcoMovieTV",
         "SWIFT_INCLUDE_PATHS": ["$(BUILT_PRODUCTS_DIR)", "$(SRCROOT)/../Sources/CQuickJS/include"],
     }
-    app_cfg_list = make_config_list("MarcoMovieTV", app_common, app_common)
+    app_debug = {
+        **app_common,
+        "DEAD_CODE_STRIPPING": "NO",
+        "DEFINES_MODULE": "YES",
+        "ENABLE_TESTABILITY": "YES",
+        "OTHER_LDFLAGS": ["$(inherited)", "-force_load", "$(BUILT_PRODUCTS_DIR)/libMarcoTVCore.a"],
+    }
+    app_cfg_list = make_config_list("MarcoMovieTV", app_debug, app_common)
+
+    tests_common = {
+        "BUNDLE_LOADER": "$(TEST_HOST)",
+        "CODE_SIGN_STYLE": "Manual",
+        "GENERATE_INFOPLIST_FILE": "YES",
+        "HEADER_SEARCH_PATHS": ["$(SRCROOT)/../Sources/CQuickJS/include"],
+        "LD_RUNPATH_SEARCH_PATHS": ["$(inherited)", "@executable_path/Frameworks", "@loader_path/Frameworks"],
+        "PRODUCT_BUNDLE_IDENTIFIER": f"{BUNDLE_IDENTIFIER}.tests",
+        "PRODUCT_NAME": "MarcoMovieTVTests",
+        "SWIFT_INCLUDE_PATHS": ["$(BUILT_PRODUCTS_DIR)", "$(SRCROOT)/../Sources/CQuickJS/include"],
+        "TEST_HOST": "$(BUILT_PRODUCTS_DIR)/MarcoMovieTV.app/MarcoMovieTV",
+    }
+    tests_cfg_list = make_config_list("MarcoMovieTVTests", tests_common, tests_common)
 
     # Targets & dependencies
     project_id = _pbx_id("project:MarcoMovieTV")
     cquickjs_target_id = _pbx_id("target:CQuickJS")
     core_target_id = _pbx_id("target:MarcoTVCore")
     app_target_id = _pbx_id("target:MarcoMovieTV")
+    tests_target_id = _pbx_id("target:MarcoMovieTVTests")
 
     put(
         cquickjs_target_id,
@@ -996,11 +1154,46 @@ def generate_xcodeproj() -> Path:
         },
     )
 
+    proxy_tests_to_app = put(
+        _pbx_id("proxy:tests->app"),
+        {
+            "isa": "PBXContainerItemProxy",
+            "containerPortal": project_id,
+            "proxyType": "1",
+            "remoteGlobalIDString": app_target_id,
+            "remoteInfo": "MarcoMovieTV",
+        },
+    )
+    dep_tests_to_app = put(
+        _pbx_id("dep:tests->app"),
+        {"isa": "PBXTargetDependency", "target": app_target_id, "targetProxy": proxy_tests_to_app},
+    )
+    put(
+        tests_target_id,
+        {
+            "isa": "PBXNativeTarget",
+            "buildConfigurationList": tests_cfg_list,
+            "buildPhases": [tests_sources_phase, tests_frameworks_phase, tests_resources_phase],
+            "buildRules": [],
+            "dependencies": [dep_tests_to_app],
+            "name": "MarcoMovieTVTests",
+            "productName": "MarcoMovieTVTests",
+            "productReference": tests_prod_ref,
+            "productType": "com.apple.product-type.bundle.unit-test",
+        },
+    )
+
     put(
         project_id,
         {
             "isa": "PBXProject",
-            "attributes": {"LastSwiftUpdateCheck": "1500", "LastUpgradeCheck": "1500"},
+            "attributes": {
+                "LastSwiftUpdateCheck": "1500",
+                "LastUpgradeCheck": "1500",
+                "TargetAttributes": {
+                    tests_target_id: {"TestTargetID": app_target_id},
+                },
+            },
             "buildConfigurationList": proj_cfg_list,
             "compatibilityVersion": "Xcode 14.0",
             "developmentRegion": "zh_CN",
@@ -1010,7 +1203,7 @@ def generate_xcodeproj() -> Path:
             "productRefGroup": products_group,
             "projectDirPath": "",
             "projectRoot": "",
-            "targets": [cquickjs_target_id, core_target_id, app_target_id],
+            "targets": [cquickjs_target_id, core_target_id, app_target_id, tests_target_id],
         },
     )
 
@@ -1037,8 +1230,18 @@ def generate_xcodeproj() -> Path:
          <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES">
             <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{app_target_id}" BuildableName="MarcoMovieTV.app" BlueprintName="MarcoMovieTV" ReferencedContainer="container:MarcoMovieTV.xcodeproj"/>
          </BuildActionEntry>
+         <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{tests_target_id}" BuildableName="MarcoMovieTVTests.xctest" BlueprintName="MarcoMovieTVTests" ReferencedContainer="container:MarcoMovieTV.xcodeproj"/>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
+   <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
+      <Testables>
+         <TestableReference skipped="NO">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{tests_target_id}" BuildableName="MarcoMovieTVTests.xctest" BlueprintName="MarcoMovieTVTests" ReferencedContainer="container:MarcoMovieTV.xcodeproj"/>
+         </TestableReference>
+      </Testables>
+   </TestAction>
    <LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugDocumentVersioning="YES" allowLocationSimulation="YES">
       <BuildableProductRunnable runnableDebuggingMode="0">
          <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{app_target_id}" BuildableName="MarcoMovieTV.app" BlueprintName="MarcoMovieTV" ReferencedContainer="container:MarcoMovieTV.xcodeproj"/>

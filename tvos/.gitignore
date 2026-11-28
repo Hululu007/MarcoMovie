@@ -3,6 +3,7 @@
 .swiftpm/
 DerivedData/
 RunnerProject/
+sim-evidence/
 __pycache__/
 *.pyc
 

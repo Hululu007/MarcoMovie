@@ -3,6 +3,9 @@
 import Foundation
 import Network
 import XCTest
+#if canImport(Darwin)
+import Darwin
+#endif
 @testable import MarcoTVCore
 
 // MARK: - Deterministic URLProtocol Stub for Netdisk & Redirect Tests
@@ -722,13 +725,43 @@ final class NetdiskAndRangeProxyTests: XCTestCase {
         XCTAssertEqual(decodedLegacy.netdiskQuality, "auto")
         XCTAssertEqual(decodedLegacy.playerKernel, "range_proxy")
 
-        // Verify LAN POST /api/netdisk push updates Keychain
+        // Verify LAN pairing-session bound POST /configure/<token>/netdisk push updates Keychain
+        // and rejects unauthenticated /api/netdisk, invalid tokens, and expired sessions.
         let lanServer = LanConfigServer(storage: storage)
         let lanPort = try await lanServer.start(loopbackOnly: true)
         defer { lanServer.stop() }
 
-        let apiNetdiskUrl = URL(string: "http://127.0.0.1:\(lanPort)/api/netdisk")!
-        var pushReq = URLRequest(url: apiNetdiskUrl)
+        let consoleHtmlUrl = URL(string: lanServer.configureUrl(forHost: "127.0.0.1"))!
+        let (consoleHtmlData, consoleHtmlResp) = try await URLSession.shared.data(from: consoleHtmlUrl)
+        XCTAssertEqual((consoleHtmlResp as? HTTPURLResponse)?.statusCode, 200)
+        let consoleHtml = String(decoding: consoleHtmlData, as: UTF8.self)
+        XCTAssertTrue(consoleHtml.contains("'/netdisk'"))
+        XCTAssertFalse(consoleHtml.contains("'/api/netdisk'"))
+
+        // 1) Legacy unauthenticated /api/netdisk must be rejected with 404
+        var unauthReq = URLRequest(url: URL(string: "http://127.0.0.1:\(lanPort)/api/netdisk")!)
+        unauthReq.httpMethod = "POST"
+        unauthReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        unauthReq.httpBody = try JSONSerialization.data(withJSONObject: [
+            "drive": "quark",
+            "credential": "__pus=SHOULD_NEVER_WRITE_UNAUTH; __puus=NOPE",
+        ])
+        let (_, unauthResp) = try await URLSession.shared.data(for: unauthReq)
+        XCTAssertEqual((unauthResp as? HTTPURLResponse)?.statusCode, 404)
+        XCTAssertEqual(storage.netdiskCredential(for: "quark"), qkSecret)
+
+        // 2) Wrong session token must be rejected with 404
+        var wrongTokenReq = URLRequest(url: URL(string: "http://127.0.0.1:\(lanPort)/configure/0000000000000000/netdisk")!)
+        wrongTokenReq.httpMethod = "POST"
+        wrongTokenReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        wrongTokenReq.httpBody = unauthReq.httpBody
+        let (_, wrongTokenResp) = try await URLSession.shared.data(for: wrongTokenReq)
+        XCTAssertEqual((wrongTokenResp as? HTTPURLResponse)?.statusCode, 404)
+        XCTAssertEqual(storage.netdiskCredential(for: "quark"), qkSecret)
+
+        // 3) Valid active pairing session succeeds and persists synthetic credential
+        let sessionNetdiskUrl = URL(string: lanServer.netdiskUrl(forHost: "127.0.0.1"))!
+        var pushReq = URLRequest(url: sessionNetdiskUrl)
         pushReq.httpMethod = "POST"
         pushReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let pushedCookie = "__pus=LAN_PUSHED_QUARK_TOKEN_7788; __puus=LAN_PUSHED_PUUS_7799"
@@ -742,10 +775,660 @@ final class NetdiskAndRangeProxyTests: XCTestCase {
         XCTAssertEqual(pushObj?["ok"] as? Bool, true)
         XCTAssertEqual(storage.netdiskCredential(for: "quark"), pushedCookie)
 
+        // 4) Expired pairing session rejects credential push with 410 Gone
+        let expiredServer = LanConfigServer(storage: storage, ttlSeconds: -1)
+        _ = try await expiredServer.start(loopbackOnly: true)
+        defer { expiredServer.stop() }
+        var expiredReq = URLRequest(url: URL(string: expiredServer.netdiskUrl(forHost: "127.0.0.1"))!)
+        expiredReq.httpMethod = "POST"
+        expiredReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        expiredReq.httpBody = try JSONSerialization.data(withJSONObject: [
+            "drive": "quark",
+            "credential": "__pus=EXPIRED_SESSION_REJECTED; __puus=NOPE",
+        ])
+        let (_, expiredResp) = try await URLSession.shared.data(for: expiredReq)
+        XCTAssertEqual((expiredResp as? HTTPURLResponse)?.statusCode, 410)
+        XCTAssertEqual(storage.netdiskCredential(for: "quark"), pushedCookie)
+
         // Verify resetAllData wipes all Netdisk Keychain credentials
         try storage.resetAllData()
         XCTAssertTrue(storage.loggedInNetdiskDrives().isEmpty)
         XCTAssertFalse(storage.isNetdiskLoggedIn("quark"))
         XCTAssertFalse(storage.isNetdiskLoggedIn("ali"))
+    }
+
+    // MARK: - 5. Ali Refresh Credential Isolation & HLS Sub-Playlist / Segment / Redirect Isolation
+
+    func testAliRefreshTokenIsolationAndHlsProxyPerTargetMinimalHeaders() async throws {
+        let syntheticRefresh = "SYNTH_ALI_REFRESH_998877665544332211"
+        let syntheticAccess = "SYNTH_ALI_ACCESS_TOKEN_SHORT_LIVED"
+
+        // 1) buildPolicy must never embed Ali refresh token into media headers
+        let directPolicy = try XCTUnwrap(
+            NetdiskShareResolver.buildPolicy(driveKey: "ali", credential: "ali_token=\(syntheticRefresh)")
+        )
+        let sameDomainDirectHeaders = directPolicy.headers(for: URL(string: "https://www.alipan.com/media/movie.mp4")!)
+        let crossDomainDirectHeaders = directPolicy.headers(for: URL(string: "https://cdn.example/media/movie.mp4")!)
+        for hdrMap in [sameDomainDirectHeaders, crossDomainDirectHeaders] {
+            XCTAssertNil(hdrMap["X-Ali-Refresh-Token"])
+            XCTAssertFalse(hdrMap.values.contains(where: { $0.contains(syntheticRefresh) }))
+        }
+        XCTAssertNil(crossDomainDirectHeaders["Origin"])
+        XCTAssertNil(crossDomainDirectHeaders["Referer"])
+        XCTAssertNil(crossDomainDirectHeaders["Authorization"])
+        XCTAssertNil(crossDomainDirectHeaders["Cookie"])
+
+        // 2) End-to-end Ali share resolution -> HLS proxy -> same-domain vs cross-domain sub-playlist, segment, key & redirect
+        struct CapturedUpstreamCall {
+            let url: String
+            let headers: [String: String]
+        }
+        let apiCallsBox = LockedTestBox<[String]>([])
+        let proxyCallsBox = LockedTestBox<[CapturedUpstreamCall]>([])
+
+        StubNetdiskURLProtocol.install { req in
+            let url = req.url!
+            let path = url.path
+            apiCallsBox.withLock { $0.append(url.absoluteString) }
+            if path == "/v2/account/token" {
+                let json = #"{"access_token":"\#(syntheticAccess)"}"#
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(json.utf8))
+            }
+            if path == "/v2/share_link/get_share_token" {
+                let json = #"{"share_token":"share_tok_demo"}"#
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(json.utf8))
+            }
+            if path == "/adrive/v3/file/list_by_share" {
+                let json = #"{"items":[{"file_id":"f_ali_1","name":"Demo.2160p.4K.mkv","category":"video"}]}"#
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(json.utf8))
+            }
+            if path == "/v2/file/get_share_link_video_preview_play_info" {
+                let json = #"{"video_preview_play_info":{"live_transcoding_task_list":[{"template_id":"UHD","url":"https://www.alipan.com/hls/master.m3u8"}]}}"#
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(json.utf8))
+            }
+            return (HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data())
+        }
+
+        let headerProxy = LocalHeaderProxyServer { url, _, headers in
+            proxyCallsBox.withLock { $0.append(CapturedUpstreamCall(url: url.absoluteString, headers: headers)) }
+            switch url.absoluteString {
+            case "https://www.alipan.com/hls/master.m3u8":
+                let manifest = """
+                #EXTM3U
+                #EXT-X-STREAM-INF:BANDWIDTH=8000000
+                https://www.alipan.com/hls/same_variant.m3u8
+                #EXT-X-STREAM-INF:BANDWIDTH=4000000
+                https://cdn.example/hls/cross_variant.m3u8
+                """
+                return ProxyUpstreamResponse(statusCode: 200, headers: ["Content-Type": "application/vnd.apple.mpegurl"], body: Data(manifest.utf8))
+            case "https://www.alipan.com/hls/same_variant.m3u8":
+                let sub = """
+                #EXTM3U
+                #EXT-X-KEY:METHOD=AES-128,URI="https://www.alipan.com/hls/same.key"
+                https://www.alipan.com/hls/redirect_seg.ts
+                """
+                return ProxyUpstreamResponse(statusCode: 200, headers: ["Content-Type": "application/vnd.apple.mpegurl"], body: Data(sub.utf8))
+            case "https://cdn.example/hls/cross_variant.m3u8":
+                let sub = """
+                #EXTM3U
+                #EXT-X-KEY:METHOD=AES-128,URI="https://cdn.example/hls/cross.key"
+                https://cdn.example/hls/cross_seg.ts
+                """
+                return ProxyUpstreamResponse(statusCode: 200, headers: ["Content-Type": "application/vnd.apple.mpegurl"], body: Data(sub.utf8))
+            case "https://www.alipan.com/hls/redirect_seg.ts":
+                return ProxyUpstreamResponse(statusCode: 302, headers: ["Location": "https://cdn.example/hls/redirected_final.ts"], body: Data())
+            default:
+                return ProxyUpstreamResponse(statusCode: 200, headers: ["Content-Type": "application/octet-stream"], body: Data([0x47, 0x40]))
+            }
+        }
+        defer { headerProxy.stop() }
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MarcoAliIsolation_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let storage = TvStorageManager(cachesDirectory: tempDir, keychain: InMemoryKeychainStore())
+        try storage.setNetdiskCredential(syntheticRefresh, for: "ali")
+
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [StubNetdiskURLProtocol.self]
+        let resolver = NetdiskShareResolver(session: URLSession(configuration: cfg))
+
+        let resolved = try await resolver.resolvePlayback(
+            rawUrl: "https://www.alipan.com/s/shareDemo123",
+            lineName: "阿狸4K",
+            qualityPreference: "4k_hdr",
+            playerKernel: "range_proxy",
+            storage: storage,
+            rangeProxy: nil,
+            headerProxy: headerProxy
+        )
+        XCTAssertTrue(resolved.isProxied)
+
+        // Fetch rewritten master playlist and follow every rewritten sub-playlist, key, segment & redirect
+        let (masterData, _) = try await URLSession.shared.data(from: resolved.playableUrl)
+        let masterText = String(decoding: masterData, as: UTF8.self)
+        let variantUrls = masterText
+            .components(separatedBy: .newlines)
+            .filter { $0.hasPrefix("http://127.0.0.1:") }
+            .compactMap(URL.init(string:))
+        XCTAssertEqual(variantUrls.count, 2)
+
+        for vUrl in variantUrls {
+            let (subData, _) = try await URLSession.shared.data(from: vUrl)
+            let subText = String(decoding: subData, as: UTF8.self)
+            for line in subText.components(separatedBy: .newlines) {
+                if let range = line.range(of: #"URI="([^"]+)""#, options: .regularExpression) {
+                    let quoted = String(line[range])
+                    let inner = quoted.replacingOccurrences(of: "URI=\"", with: "").replacingOccurrences(of: "\"", with: "")
+                    if let keyUrl = URL(string: inner) {
+                        _ = try await URLSession.shared.data(from: keyUrl)
+                    }
+                } else if line.hasPrefix("http://127.0.0.1:"), let segUrl = URL(string: line) {
+                    _ = try await URLSession.shared.data(from: segUrl)
+                }
+            }
+        }
+
+        let captured = proxyCallsBox.withLock { $0 }
+        func callFor(_ urlStr: String) throws -> CapturedUpstreamCall {
+            try XCTUnwrap(captured.first(where: { $0.url == urlStr }), "Expected request to \(urlStr)")
+        }
+
+        // Refresh token NEVER appears on ANY media/HLS/redirect request
+        for call in captured {
+            XCTAssertNil(call.headers["X-Ali-Refresh-Token"], "Refresh token header leaked to \(call.url)")
+            XCTAssertFalse(call.headers.values.contains(where: { $0.contains(syntheticRefresh) }), "Refresh token value leaked to \(call.url)")
+        }
+
+        // Same-domain trusted requests carry short-lived Bearer access token
+        XCTAssertEqual(try callFor("https://www.alipan.com/hls/master.m3u8").headers["Authorization"], "Bearer \(syntheticAccess)")
+        XCTAssertEqual(try callFor("https://www.alipan.com/hls/same_variant.m3u8").headers["Authorization"], "Bearer \(syntheticAccess)")
+        XCTAssertEqual(try callFor("https://www.alipan.com/hls/same.key").headers["Authorization"], "Bearer \(syntheticAccess)")
+        XCTAssertEqual(try callFor("https://www.alipan.com/hls/redirect_seg.ts").headers["Authorization"], "Bearer \(syntheticAccess)")
+
+        // Cross-domain sub-playlist, key, segment, and 302 redirect destination strip ALL credentials & Origin/Referer
+        for crossUrl in [
+            "https://cdn.example/hls/cross_variant.m3u8",
+            "https://cdn.example/hls/cross.key",
+            "https://cdn.example/hls/cross_seg.ts",
+            "https://cdn.example/hls/redirected_final.ts",
+        ] {
+            let hdrs = try callFor(crossUrl).headers
+            XCTAssertNil(hdrs["Authorization"], "Authorization leaked cross-domain to \(crossUrl)")
+            XCTAssertNil(hdrs["Cookie"], "Cookie leaked cross-domain to \(crossUrl)")
+            XCTAssertNil(hdrs["Origin"], "Origin leaked cross-domain to \(crossUrl)")
+            XCTAssertNil(hdrs["Referer"], "Referer leaked cross-domain to \(crossUrl)")
+            XCTAssertEqual(hdrs["Accept-Encoding"], "identity")
+            XCTAssertNotNil(hdrs["User-Agent"])
+        }
+    }
+
+    // MARK: - 6. Large-File HTTP 200 (Range-Ignoring) Bounded Streaming, Seeking, Exit & Peak RSS
+
+    func testLargeFileRangeIgnoring200BoundedStreamingSeekExitAndPeakMemory() async throws {
+        let virtualFileSize: Int64 = 64 * 1024 * 1024 // 64 MiB virtual file (never allocated in full)
+        let upstream = LoopbackLargeNonRangeUpstreamServer(virtualSize: virtualFileSize)
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+
+        let proxy = NetdiskRangeProxyServer(
+            workers: 4,
+            chunkSize: 65_536,
+            memoryLimit: 4 * 65_536,
+            maxNonRangeSkipBytes: 4 * 1024 * 1024
+        )
+        defer { proxy.stop() }
+
+        let mediaUrl = URL(string: "http://127.0.0.1:\(upstreamPort)/large_64mb_movie.mp4")!
+        let policy = NetdiskHeaderPolicy(
+            originUrl: mediaUrl,
+            baseHeaders: [
+                "Cookie": "__pus=trusted_large_200_cookie",
+                "Authorization": "Bearer trusted_large_200_token",
+            ],
+            cookieDomains: [],
+            allowInsecureLoopbackCredentials: true
+        )
+        let (_, proxyUrl) = try await proxy.registerStream(
+            url: mediaUrl,
+            policy: policy,
+            contentTypeHint: "video/mp4"
+        )
+
+        let rssBefore = Self.currentResidentMemoryBytes()
+        var rssPeak = rssBefore
+
+        // 1) First play: request initial 256 KiB slice against Range-ignoring 64 MiB HTTP 200 upstream
+        var firstReq = URLRequest(url: proxyUrl)
+        firstReq.setValue("bytes=0-262143", forHTTPHeaderField: "Range")
+        let (firstData, firstResp) = try await URLSession.shared.data(for: firstReq)
+        let firstHttp = try XCTUnwrap(firstResp as? HTTPURLResponse)
+        XCTAssertEqual(firstHttp.statusCode, 206)
+        XCTAssertEqual(firstHttp.value(forHTTPHeaderField: "Accept-Ranges"), "none")
+        XCTAssertEqual(firstHttp.value(forHTTPHeaderField: "Content-Range"), "bytes 0-262143/\(virtualFileSize)")
+        XCTAssertEqual(firstData.count, 262_144)
+        XCTAssertEqual(firstData, LoopbackLargeNonRangeUpstreamServer.expectedBytes(offset: 0, length: 262_144))
+
+        rssPeak = max(rssPeak, Self.currentResidentMemoryBytes())
+        let metricsAfterFirst = await proxy.metrics()
+        XCTAssertLessThanOrEqual(metricsAfterFirst.peakBufferedBytes, proxy.memoryLimit)
+        XCTAssertLessThan(metricsAfterFirst.upstreamBytesRead, 4 * 1024 * 1024, "First play must abort upstream early instead of buffering 64 MiB")
+
+        let initialServerStats = upstream.snapshotStats()
+        XCTAssertTrue(initialServerStats.recordedCookies.contains("__pus=trusted_large_200_cookie"))
+
+        // 2) Continuous seeking across offsets (1 MiB, then 2 MiB) + overlapping seek preemption
+        for seekOffset in [Int64(1_048_576), Int64(2_097_152)] {
+            var seekReq = URLRequest(url: proxyUrl)
+            seekReq.setValue("bytes=\(seekOffset)-\(seekOffset + 65_535)", forHTTPHeaderField: "Range")
+            let (seekData, seekResp) = try await URLSession.shared.data(for: seekReq)
+            let seekHttp = try XCTUnwrap(seekResp as? HTTPURLResponse)
+            XCTAssertEqual(seekHttp.statusCode, 206)
+            XCTAssertEqual(seekData.count, 65_536)
+            XCTAssertEqual(seekData, LoopbackLargeNonRangeUpstreamServer.expectedBytes(offset: seekOffset, length: 65_536))
+            rssPeak = max(rssPeak, Self.currentResidentMemoryBytes())
+        }
+
+        // Overlapping slow stream preempted by a new seek request
+        upstream.setChunkDelayMs(15)
+        let slowSession = URLSession(configuration: .ephemeral)
+        defer { slowSession.invalidateAndCancel() }
+        let slowStreamTask = Task<Int, Never> {
+            do {
+                let (bytes, _) = try await slowSession.bytes(for: URLRequest(url: proxyUrl))
+                var count = 0
+                for try await _ in bytes {
+                    count += 1
+                    if count >= 4 * 1024 * 1024 { break }
+                }
+                return count
+            } catch {
+                return 0
+            }
+        }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        upstream.setChunkDelayMs(0)
+        var preemptSeekReq = URLRequest(url: proxyUrl)
+        preemptSeekReq.setValue("bytes=524288-589823", forHTTPHeaderField: "Range")
+        let (preemptData, preemptResp) = try await URLSession.shared.data(for: preemptSeekReq)
+        let preemptHttp = try XCTUnwrap(preemptResp as? HTTPURLResponse)
+        XCTAssertEqual(preemptHttp.statusCode, 206)
+        XCTAssertEqual(preemptData, LoopbackLargeNonRangeUpstreamServer.expectedBytes(offset: 524_288, length: 65_536))
+        slowStreamTask.cancel()
+        _ = await slowStreamTask.value
+        let metricsAfterPreempt = await proxy.metrics()
+        XCTAssertGreaterThanOrEqual(metricsAfterPreempt.preemptedWindowCount, 1)
+        rssPeak = max(rssPeak, Self.currentResidentMemoryBytes())
+
+        // 3) Exit / revoke mid-stream on unbounded 64 MiB HTTP 200 GET
+        upstream.setChunkDelayMs(4)
+        let exitSession = URLSession(configuration: .ephemeral)
+        defer { exitSession.invalidateAndCancel() }
+        let (exitBytes, exitResp) = try await exitSession.bytes(for: URLRequest(url: proxyUrl))
+        XCTAssertEqual((exitResp as? HTTPURLResponse)?.statusCode, 200)
+        var readOnExit = 0
+        var exitIterator = exitBytes.makeAsyncIterator()
+        while readOnExit < 131_072, let _ = try await exitIterator.next() {
+            readOnExit += 1
+        }
+        XCTAssertEqual(readOnExit, 131_072)
+
+        // Simulate player exit: cancel client socket and revoke proxy stream
+        exitBytes.task.cancel()
+        await proxy.revokeAll()
+        try await Task.sleep(nanoseconds: 120_000_000)
+        rssPeak = max(rssPeak, Self.currentResidentMemoryBytes())
+
+        let finalMetrics = await proxy.metrics()
+        let finalServerStats = upstream.snapshotStats()
+
+        let rssBeforeMB = Double(rssBefore) / 1_048_576.0
+        let rssPeakMB = Double(rssPeak) / 1_048_576.0
+        let rssDeltaMB = Double(Int64(rssPeak) - Int64(rssBefore)) / 1_048_576.0
+        print(
+            String(
+                format: "[Item6-Metrics] virtualFileMB=64.0 rssBeforeMB=%.2f rssPeakMB=%.2f rssDeltaMB=%.2f proxyPeakBufferedBytes=%d currentBufferedBytes=%d upstreamBytesRead=%lld serverBytesWritten=%lld cancelledUpstreamRequests=%d preemptedWindows=%d serverAbortedConns=%d",
+                rssBeforeMB,
+                rssPeakMB,
+                rssDeltaMB,
+                finalMetrics.peakBufferedBytes,
+                finalMetrics.currentBufferedBytes,
+                finalMetrics.upstreamBytesRead,
+                finalServerStats.totalBytesWritten,
+                finalMetrics.cancelledUpstreamRequests,
+                finalMetrics.preemptedWindowCount,
+                finalServerStats.abortedConnections
+            )
+        )
+
+        XCTAssertEqual(finalMetrics.currentBufferedBytes, 0, "All buffered memory reservations must be released after exit")
+        XCTAssertLessThanOrEqual(finalMetrics.peakBufferedBytes, proxy.memoryLimit)
+        XCTAssertGreaterThanOrEqual(finalMetrics.preemptedWindowCount, 1)
+        XCTAssertGreaterThanOrEqual(finalMetrics.cancelledUpstreamRequests, 2)
+        XCTAssertGreaterThanOrEqual(finalServerStats.abortedConnections, 1)
+        XCTAssertLessThan(finalMetrics.upstreamBytesRead, 16 * 1024 * 1024, "Total upstream bytes read across all scenarios must remain well below 64 MiB")
+        XCTAssertLessThan(finalServerStats.totalBytesWritten, 24 * 1024 * 1024, "Upstream server must stop sending promptly when proxy cancels")
+        XCTAssertLessThan(Int64(rssPeak) - Int64(rssBefore), 48 * 1024 * 1024, "Process RSS must never absorb the 64 MiB virtual media file")
+
+        // 4) Cross-origin 302 redirect on Range-ignoring 200 upstream preserves auth on origin hop and strips on target hop
+        let cdnTarget = LoopbackLargeNonRangeUpstreamServer(virtualSize: 2 * 1024 * 1024)
+        let cdnPort = try await cdnTarget.start()
+        defer { cdnTarget.stop() }
+        let redirectTargetUrl = "http://127.0.0.1:\(cdnPort)/cdn_non_range.mp4"
+        upstream.setRedirectLocation(redirectTargetUrl)
+        upstream.setChunkDelayMs(0)
+
+        let originRedirectUrl = URL(string: "http://127.0.0.1:\(upstreamPort)/redirect_movie.mp4")!
+        let redirectPolicy = NetdiskHeaderPolicy(
+            originUrl: originRedirectUrl,
+            baseHeaders: [
+                "Cookie": "__pus=origin_only_secret",
+                "Authorization": "Bearer origin_only_bearer",
+            ],
+            cookieDomains: [],
+            allowInsecureLoopbackCredentials: true
+        )
+        let (_, redirectProxyUrl) = try await proxy.registerStream(
+            url: originRedirectUrl,
+            policy: redirectPolicy,
+            contentTypeHint: "video/mp4"
+        )
+        var redirReq = URLRequest(url: redirectProxyUrl)
+        redirReq.setValue("bytes=0-65535", forHTTPHeaderField: "Range")
+        let (redirData, redirResp) = try await URLSession.shared.data(for: redirReq)
+        XCTAssertEqual((redirResp as? HTTPURLResponse)?.statusCode, 206)
+        XCTAssertEqual(redirData, LoopbackLargeNonRangeUpstreamServer.expectedBytes(offset: 0, length: 65_536))
+
+        let originStatsAfterRedir = upstream.snapshotStats()
+        let cdnStatsAfterRedir = cdnTarget.snapshotStats()
+        XCTAssertTrue(originStatsAfterRedir.recordedCookies.contains("__pus=origin_only_secret"))
+        XCTAssertTrue(cdnStatsAfterRedir.recordedCookies.isEmpty, "Cross-origin redirect hop must NOT receive Cookie")
+        XCTAssertTrue(cdnStatsAfterRedir.recordedAuthorizations.isEmpty, "Cross-origin redirect hop must NOT receive Authorization")
+    }
+
+    private static func currentResidentMemoryBytes() -> UInt64 {
+        #if canImport(Darwin)
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<natural_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), intPtr, &count)
+            }
+        }
+        return kr == KERN_SUCCESS ? UInt64(info.resident_size) : 0
+        #else
+        return 0
+        #endif
+    }
+}
+
+// MARK: - Controlled Virtual Large-File HTTP 200 (Range-Ignoring) Upstream Server
+
+private final class LoopbackLargeNonRangeUpstreamServer: @unchecked Sendable {
+    struct Stats {
+        let requestCount: Int
+        let totalBytesWritten: Int64
+        let abortedConnections: Int
+        let recordedCookies: [String]
+        let recordedAuthorizations: [String]
+    }
+
+    let virtualSize: Int64
+    private let streamBlockSize: Int
+    private let queue = DispatchQueue(label: "com.pilipala.marcoMovie.tests.large200", attributes: .concurrent)
+    private let lock = NSLock()
+    private var listener: NWListener?
+    private(set) var port: UInt16 = 0
+
+    private var requestCount: Int = 0
+    private var totalBytesWritten: Int64 = 0
+    private var abortedConnections: Int = 0
+    private var recordedCookies: [String] = []
+    private var recordedAuthorizations: [String] = []
+    private var chunkDelayMs: Int = 0
+    private var redirectLocation: String?
+
+    init(virtualSize: Int64, streamBlockSize: Int = 65_536) {
+        self.virtualSize = virtualSize
+        self.streamBlockSize = streamBlockSize
+    }
+
+    deinit {
+        stop()
+    }
+
+    static func expectedBytes(offset: Int64, length: Int) -> Data {
+        var bytes = [UInt8](repeating: 0, count: length)
+        for idx in 0..<length {
+            let pos = offset + Int64(idx)
+            bytes[idx] = UInt8((pos &* 131 &+ 17) & 0xFF)
+        }
+        return Data(bytes)
+    }
+
+    func setChunkDelayMs(_ ms: Int) {
+        lock.lock()
+        chunkDelayMs = max(0, ms)
+        lock.unlock()
+    }
+
+    func setRedirectLocation(_ location: String?) {
+        lock.lock()
+        redirectLocation = location
+        lock.unlock()
+    }
+
+    func snapshotStats() -> Stats {
+        lock.lock()
+        defer { lock.unlock() }
+        return Stats(
+            requestCount: requestCount,
+            totalBytesWritten: totalBytesWritten,
+            abortedConnections: abortedConnections,
+            recordedCookies: recordedCookies,
+            recordedAuthorizations: recordedAuthorizations
+        )
+    }
+
+    func start() async throws -> UInt16 {
+        let params = NWParameters.tcp
+        params.allowLocalEndpointReuse = true
+        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: .any)
+        let nwListener = try NWListener(using: params)
+        nwListener.newConnectionHandler = { [weak self] conn in
+            self?.handle(conn)
+        }
+
+        let boundPort: UInt16 = try await withCheckedThrowingContinuation { continuation in
+            let doneBox = LockedTestBox(false)
+            nwListener.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    let shouldResume = doneBox.withLock { done -> Bool in
+                        guard !done else { return false }
+                        done = true
+                        return true
+                    }
+                    if shouldResume {
+                        continuation.resume(returning: nwListener.port?.rawValue ?? 0)
+                    }
+                case .failed(let err):
+                    let shouldResume = doneBox.withLock { done -> Bool in
+                        guard !done else { return false }
+                        done = true
+                        return true
+                    }
+                    if shouldResume {
+                        continuation.resume(throwing: err)
+                    }
+                default:
+                    break
+                }
+            }
+            nwListener.start(queue: self.queue)
+        }
+
+        setBoundListener(nwListener, port: boundPort)
+        return boundPort
+    }
+
+    private func setBoundListener(_ nwListener: NWListener, port boundPort: UInt16) {
+        lock.lock()
+        self.listener = nwListener
+        self.port = boundPort
+        lock.unlock()
+    }
+
+    func stop() {
+        lock.lock()
+        let active = listener
+        listener = nil
+        port = 0
+        lock.unlock()
+        active?.cancel()
+    }
+
+    private func handle(_ conn: NWConnection) {
+        conn.start(queue: queue)
+        readRequest(conn: conn, acc: Data())
+    }
+
+    private func readRequest(conn: NWConnection, acc: Data) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] chunk, _, isComplete, err in
+            guard let self = self, err == nil else {
+                conn.cancel()
+                return
+            }
+            var buf = acc
+            if let chunk = chunk { buf.append(chunk) }
+            if let sep = buf.range(of: Data([0x0D, 0x0A, 0x0D, 0x0A])) {
+                let hdr = String(decoding: buf.subdata(in: 0..<sep.lowerBound), as: UTF8.self)
+                self.respond(headerText: hdr, conn: conn)
+            } else if isComplete {
+                conn.cancel()
+            } else {
+                self.readRequest(conn: conn, acc: buf)
+            }
+        }
+    }
+
+    private func respond(headerText: String, conn: NWConnection) {
+        let lines = headerText.components(separatedBy: "\r\n")
+        let reqParts = (lines.first ?? "").split(separator: " ").map(String.init)
+        let method = reqParts.first?.uppercased() ?? "GET"
+        let path = reqParts.count > 1 ? reqParts[1] : "/"
+
+        var headers: [String: String] = [:]
+        for line in lines.dropFirst() {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let k = String(line[..<colon]).trimmingCharacters(in: .whitespaces).lowercased()
+            let v = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            headers[k] = v
+        }
+
+        let redirTarget: String? = {
+            lock.lock()
+            defer { lock.unlock() }
+            requestCount += 1
+            if let c = headers["cookie"], !c.isEmpty { recordedCookies.append(c) }
+            if let a = headers["authorization"], !a.isEmpty { recordedAuthorizations.append(a) }
+            return path.contains("redirect") ? redirectLocation : nil
+        }()
+
+        if let location = redirTarget {
+            let hdr = [
+                "HTTP/1.1 302 Found",
+                "Location: \(location)",
+                "Content-Length: 0",
+                "Connection: close",
+                "",
+                "",
+            ].joined(separator: "\r\n")
+            conn.send(content: Data(hdr.utf8), isComplete: true, completion: .contentProcessed { _ in
+                conn.cancel()
+            })
+            return
+        }
+
+        // Deliberately IGNORE any `Range` header and respond with HTTP 200 OK for the entire virtual file.
+        let hdr = [
+            "HTTP/1.1 200 OK",
+            "Content-Type: video/mp4",
+            "Content-Length: \(virtualSize)",
+            "Connection: close",
+            "",
+            "",
+        ].joined(separator: "\r\n")
+
+        if method == "HEAD" {
+            conn.send(content: Data(hdr.utf8), isComplete: true, completion: .contentProcessed { _ in
+                conn.cancel()
+            })
+            return
+        }
+
+        conn.send(content: Data(hdr.utf8), completion: .contentProcessed { [weak self] err in
+            guard let self = self else {
+                conn.cancel()
+                return
+            }
+            if err != nil {
+                self.recordAbort()
+                conn.cancel()
+                return
+            }
+            self.sendNextBlock(conn: conn, offset: 0)
+        })
+    }
+
+    private func sendNextBlock(conn: NWConnection, offset: Int64) {
+        guard offset < virtualSize else {
+            conn.send(content: nil, isComplete: true, completion: .contentProcessed { _ in
+                conn.cancel()
+            })
+            return
+        }
+        let len = Int(min(Int64(streamBlockSize), virtualSize - offset))
+        let block = Self.expectedBytes(offset: offset, length: len)
+        let delayMs: Int = {
+            lock.lock()
+            defer { lock.unlock() }
+            return chunkDelayMs
+        }()
+
+        let dispatchSend = { [weak self] in
+            guard let self = self else {
+                conn.cancel()
+                return
+            }
+            conn.send(content: block, completion: .contentProcessed { [weak self] err in
+                guard let self = self else {
+                    conn.cancel()
+                    return
+                }
+                if err != nil {
+                    self.recordAbort()
+                    conn.cancel()
+                    return
+                }
+                self.lock.lock()
+                self.totalBytesWritten += Int64(len)
+                self.lock.unlock()
+                self.sendNextBlock(conn: conn, offset: offset + Int64(len))
+            })
+        }
+
+        if delayMs > 0 {
+            queue.asyncAfter(deadline: .now() + .milliseconds(delayMs), execute: dispatchSend)
+        } else {
+            dispatchSend()
+        }
+    }
+
+    private func recordAbort() {
+        lock.lock()
+        abortedConnections += 1
+        lock.unlock()
     }
 }

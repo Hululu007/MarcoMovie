@@ -61,6 +61,7 @@ public struct SyncMergeSummary: Equatable, Sendable {
     public var changed: Bool
     public var subscriptionsChanged: Bool
     public var payloadJson: String
+    public var hasPendingLocalChanges: Bool
 
     public init(
         historyCount: Int,
@@ -68,7 +69,8 @@ public struct SyncMergeSummary: Equatable, Sendable {
         subscriptionCount: Int,
         changed: Bool,
         subscriptionsChanged: Bool,
-        payloadJson: String
+        payloadJson: String,
+        hasPendingLocalChanges: Bool = false
     ) {
         self.historyCount = historyCount
         self.favoriteCount = favoriteCount
@@ -76,13 +78,15 @@ public struct SyncMergeSummary: Equatable, Sendable {
         self.changed = changed
         self.subscriptionsChanged = subscriptionsChanged
         self.payloadJson = payloadJson
+        self.hasPendingLocalChanges = hasPendingLocalChanges
     }
 }
 
 /// WebDAV Cloud Sync v2 engine compatible with Android, iOS, macOS, and Windows:
 /// - Exact `resolveWebdavFileUrl` normalization (including `jianguoyun.com` -> `/dav/MarcoMovie/marco-movie-sync.json`)
 /// - Recursive `MKCOL` collection creation on `404` / `409`
-/// - Optimistic `ETag` (`If-Match` / `If-None-Match: *`) concurrency with `412` retry
+/// - Optimistic `ETag` (`If-Match` / `If-None-Match: *`) concurrency with `412` retry and safe fail-closed first creation
+/// - Cross-device subscription ID remapping + private record isolation & remote scrubbing
 /// - Per-item timestamp + tombstone 3-way merge (`hist:`, `fav:`, `add:`, `sub:`)
 public final class WebDavSyncService: @unchecked Sendable {
     public static let syncSchema = "marco-movie-sync"
@@ -92,8 +96,6 @@ public final class WebDavSyncService: @unchecked Sendable {
 
     private let storage: TvStorageManager
     private let transport: WebDavTransportProtocol
-    private let lock = NSLock()
-    private var noConditionalWriteHosts = Set<String>()
 
     public init(
         storage: TvStorageManager,
@@ -101,18 +103,6 @@ public final class WebDavSyncService: @unchecked Sendable {
     ) {
         self.storage = storage
         self.transport = transport
-    }
-
-    private func isConditionalWriteDisabled(for hostKey: String) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return noConditionalWriteHosts.contains(hostKey)
-    }
-
-    private func disableConditionalWrite(for hostKey: String) {
-        lock.lock()
-        noConditionalWriteHosts.insert(hostKey)
-        lock.unlock()
     }
 
     // MARK: - Canonical URL & Identity Rules
@@ -170,8 +160,31 @@ public final class WebDavSyncService: @unchecked Sendable {
         let effectiveHttp = isHttp(warehouseUrl)
             ? warehouseUrl.trimmingCharacters(in: .whitespacesAndNewlines)
             : (isHttp(url) ? url.trimmingCharacters(in: .whitespacesAndNewlines) : "")
-        let input = !effectiveHttp.isEmpty ? "url:\(effectiveHttp)" : "local:\(rawContent)"
-        return SHA256.hash(data: Data(input.utf8)).map { String(format: "%02x", $0) }.joined()
+        if !effectiveHttp.isEmpty {
+            return SHA256.hash(data: Data("url:\(effectiveHttp)".utf8)).map { String(format: "%02x", $0) }.joined()
+        }
+        // For URL-less pasted subscription text, derive syncKey from its public-sanitized form so local
+        // mixed content (public + private children) and its sanitized remote copy share the exact same identity.
+        let sanitized = CmsParser.sanitizePublicRawConfig(rawContent)
+        let normalizedLocal = sanitized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? rawContent
+            : sanitized
+        return SHA256.hash(data: Data("local:\(normalizedLocal)".utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Deterministic wire subscription ID (`sub_<12-hex-sha256>`) shared across fresh installs
+    /// and legacy upgraded/backup-restored devices independent of subscription body or remote `subscriptions`.
+    public static func canonicalWireSubscriptionId(
+        url: String,
+        rawContent: String,
+        warehouseUrl: String = ""
+    ) -> String? {
+        let hasIdentity = !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !warehouseUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard hasIdentity else { return nil }
+        let sk = canonicalSubscriptionSyncKey(url: url, rawContent: rawContent, warehouseUrl: warehouseUrl)
+        return "sub_\(sk.prefix(12))"
     }
 
     public static func baseCollectionDepth(rawBaseUrl: String, fileURL: URL) -> Int {
@@ -221,6 +234,132 @@ public final class WebDavSyncService: @unchecked Sendable {
         return 0
     }
 
+    private struct ComputedSyncMerge {
+        let summary: SyncMergeSummary
+        let localSubscriptions: [SubscriptionEntry]
+        let localWatchHistory: [WatchHistoryItem]
+        let localFavorites: [FavoriteItem]
+        let localTombstones: [String: Int64]
+    }
+
+    private static func isHistoryTombstone(_ key: String) -> Bool {
+        key.hasPrefix("hist:") || key.hasPrefix("fav:") || key.hasPrefix("add:")
+    }
+
+    private static func isSubscriptionTombstone(_ key: String) -> Bool {
+        key.hasPrefix("sub:")
+    }
+
+    private static func siteKeyFromHistoryTombstone(_ tombKey: String) -> String? {
+        let body: Substring
+        if tombKey.hasPrefix("hist:") {
+            body = tombKey.dropFirst(5)
+        } else if tombKey.hasPrefix("fav:") {
+            body = tombKey.dropFirst(4)
+        } else if tombKey.hasPrefix("add:") {
+            body = tombKey.dropFirst(4)
+        } else {
+            return nil
+        }
+        guard let nl = body.firstIndex(of: "\n") else { return nil }
+        return String(body[..<nl])
+    }
+
+    private static func rewriteSiteKey(_ siteKey: String, using idMap: [String: String]) -> String {
+        guard !idMap.isEmpty else { return siteKey }
+        if let parsed = CmsSite.parseScopedKey(siteKey),
+           let mappedSub = idMap[parsed.subscriptionId],
+           mappedSub != parsed.subscriptionId
+        {
+            return CmsSite.canonicalScopedKey(rawKey: parsed.rawKey, subscriptionId: mappedSub)
+        }
+        for (oldSubId, newSubId) in idMap where !oldSubId.isEmpty && oldSubId != newSubId {
+            let suffix = "_\(oldSubId)"
+            if siteKey.hasSuffix(suffix) && siteKey.count > suffix.count {
+                let rawPrefix = String(siteKey.dropLast(suffix.count))
+                return "\(rawPrefix)_\(newSubId)"
+            }
+        }
+        return siteKey
+    }
+
+    private static func rewriteHistoryTombstoneKey(_ tombKey: String, using idMap: [String: String]) -> String {
+        guard !idMap.isEmpty else { return tombKey }
+        let prefix: String
+        if tombKey.hasPrefix("hist:") {
+            prefix = "hist:"
+        } else if tombKey.hasPrefix("fav:") {
+            prefix = "fav:"
+        } else if tombKey.hasPrefix("add:") {
+            prefix = "add:"
+        } else {
+            return tombKey
+        }
+        let body = String(tombKey.dropFirst(prefix.count))
+        guard let nl = body.firstIndex(of: "\n") else { return tombKey }
+        let sitePart = String(body[..<nl])
+        let vidPart = String(body[body.index(after: nl)...])
+        let mappedSite = rewriteSiteKey(sitePart, using: idMap)
+        return "\(prefix)\(mappedSite)\n\(vidPart)"
+    }
+
+    private static func buildPrivacyConfig(
+        from snapshot: TvStorageManager.SyncStorageSnapshot,
+        extraPrivateSubIds: Set<String> = [],
+        extraPrivateSiteKeys: Set<String> = []
+    ) -> CmsConfig {
+        TvStorageManager.buildOwnershipConfig(
+            from: snapshot.subscriptions,
+            knownPrivateSubscriptionIds: snapshot.knownPrivateSubscriptionIds.union(extraPrivateSubIds),
+            knownPrivateSiteKeys: snapshot.knownPrivateSiteKeys.union(extraPrivateSiteKeys),
+            ambiguousLegacyRawKeys: snapshot.ambiguousLegacyRawKeys
+        )
+    }
+
+    private static func serializePublicSubscriptions(_ entries: [SubscriptionEntry]) -> [[String: Any]] {
+        let pubSubs = entries
+            .compactMap { $0.sanitizedForPublicExport() }
+            .filter { !$0.rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        var subsPayload: [[String: Any]] = []
+        var seenKeys = Set<String>()
+        for s in pubSubs {
+            let sk = Self.canonicalSubscriptionSyncKey(
+                url: s.url,
+                rawContent: s.rawContent,
+                warehouseUrl: s.warehouseUrl
+            )
+            guard seenKeys.insert(sk).inserted else { continue }
+            var dict = s.toDictionary()
+            dict["syncKey"] = sk
+            dict["isPrivate"] = false
+            if s.updatedAt <= 0 { dict["updatedAt"] = Int64(1) }
+            subsPayload.append(dict)
+        }
+        return subsPayload
+    }
+
+    private static func encodeSyncPayloadObject(
+        nowMs: Int64,
+        watchHistory: [[String: Any]],
+        favorites: [[String: Any]],
+        tombstones: [String: Int64],
+        subscriptions: [[String: Any]]?
+    ) throws -> String {
+        var root: [String: Any] = [
+            "schema": Self.syncSchema,
+            "version": Self.syncVersion,
+            "updated": nowMs,
+            "watch_history": watchHistory,
+            "favorites": favorites,
+            "tombstones": tombstones,
+        ]
+        if let subs = subscriptions {
+            root["subscriptions"] = subs
+        }
+        let data = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+        return String(decoding: data, as: UTF8.self)
+    }
+
     // MARK: - Sync Payload Export & 3-Way Timestamp Merge
 
     public func exportSyncPayload(
@@ -228,50 +367,88 @@ public final class WebDavSyncService: @unchecked Sendable {
         syncSubscriptions: Bool = true,
         syncHistory: Bool = true
     ) throws -> String {
-        let hist = syncHistory ? storage.watchHistory().map { $0.toDictionary() } : []
-        let localFavs = syncHistory ? storage.favorites() : []
-        let favs = localFavs.map { $0.toDictionary() }
+        try exportSyncPayload(
+            from: storage.captureSyncSnapshot(),
+            nowMs: nowMs,
+            syncSubscriptions: syncSubscriptions,
+            syncHistory: syncHistory
+        )
+    }
 
-        var tombs = storage.tombstones()
+    private func exportSyncPayload(
+        from snapshot: TvStorageManager.SyncStorageSnapshot,
+        nowMs: Int64,
+        syncSubscriptions: Bool,
+        syncHistory: Bool
+    ) throws -> String {
+        let privacyConfig = Self.buildPrivacyConfig(from: snapshot)
+        var localIdToOutboundId: [String: String] = [:]
+        for s in snapshot.subscriptions where !s.isEffectivelyPrivate && !s.id.isEmpty {
+            if let wireId = Self.canonicalWireSubscriptionId(
+                url: s.url,
+                rawContent: s.rawContent,
+                warehouseUrl: s.warehouseUrl
+            ), wireId != s.id {
+                localIdToOutboundId[s.id] = wireId
+            }
+        }
+
+        let publicHist = syncHistory
+            ? snapshot.watchHistory.filter { !privacyConfig.isPrivateSiteKey($0.site) }
+            : []
+        let publicFavs = syncHistory
+            ? snapshot.favorites.filter { !privacyConfig.isPrivateSiteKey($0.site) }
+            : []
+        let hist = publicHist.map { item -> [String: Any] in
+            var out = item
+            out.site = Self.rewriteSiteKey(item.site, using: localIdToOutboundId)
+            return out.toDictionary()
+        }
+        let favs = publicFavs.map { fav -> [String: Any] in
+            var out = fav
+            out.site = Self.rewriteSiteKey(fav.site, using: localIdToOutboundId)
+            return out.toDictionary()
+        }
+
+        let rawTombs = snapshot.tombstones
+        var tombs: [String: Int64] = [:]
+        for (k, v) in rawTombs {
+            if Self.isHistoryTombstone(k) {
+                if syncHistory {
+                    if let siteKey = Self.siteKeyFromHistoryTombstone(k),
+                       privacyConfig.isPrivateSiteKey(siteKey)
+                    {
+                        continue
+                    }
+                    let outKey = Self.rewriteHistoryTombstoneKey(k, using: localIdToOutboundId)
+                    tombs[outKey] = max(v, tombs[outKey] ?? 0)
+                }
+            } else if Self.isSubscriptionTombstone(k) {
+                if syncSubscriptions { tombs[k] = v }
+            } else {
+                tombs[k] = v
+            }
+        }
         if syncHistory {
-            for f in localFavs where f.updated > 0 {
-                let addKey = "add:\(f.key)"
+            for f in publicFavs where f.updated > 0 {
+                let mappedSite = Self.rewriteSiteKey(f.site, using: localIdToOutboundId)
+                let addKey = "add:\(mappedSite)\n\(f.id)"
                 let prev = tombs[addKey] ?? 0
                 if f.updated > prev { tombs[addKey] = f.updated }
             }
         }
 
-        var root: [String: Any] = [
-            "schema": Self.syncSchema,
-            "version": Self.syncVersion,
-            "updated": nowMs,
-            "watch_history": hist,
-            "favorites": favs,
-            "tombstones": tombs,
-        ]
+        let subsPayload: [[String: Any]]? = syncSubscriptions
+            ? Self.serializePublicSubscriptions(snapshot.subscriptions)
+            : nil
 
-        if syncSubscriptions {
-            let pubSubs = storage.subscriptions().filter { !$0.isEffectivelyPrivate && !$0.rawContent.isEmpty }
-            var subsPayload: [[String: Any]] = []
-            var seenKeys = Set<String>()
-            for s in pubSubs {
-                let sk = Self.canonicalSubscriptionSyncKey(
-                    url: s.url,
-                    rawContent: s.rawContent,
-                    warehouseUrl: s.warehouseUrl
-                )
-                guard seenKeys.insert(sk).inserted else { continue }
-                var dict = s.toDictionary()
-                dict["syncKey"] = sk
-                dict["isPrivate"] = false
-                if s.updatedAt <= 0 { dict["updatedAt"] = Int64(1) }
-                subsPayload.append(dict)
-            }
-            root["subscriptions"] = subsPayload
-        }
-
-        let data = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
-        return String(decoding: data, as: UTF8.self)
+        return try Self.encodeSyncPayloadObject(
+            nowMs: nowMs,
+            watchHistory: hist,
+            favorites: favs,
+            tombstones: tombs,
+            subscriptions: subsPayload
+        )
     }
 
     public func mergeSyncPayload(
@@ -280,33 +457,77 @@ public final class WebDavSyncService: @unchecked Sendable {
         syncSubscriptions: Bool = true,
         syncHistory: Bool = true
     ) throws -> SyncMergeSummary {
-        let localSubsAll = storage.subscriptions()
-        let localHist = storage.watchHistory()
-        let localFavs = storage.favorites()
-        var localTombs = storage.tombstones()
-
-        for f in localFavs where f.updated > 0 {
-            let addKey = "add:\(f.key)"
-            if f.updated > (localTombs[addKey] ?? 0) {
-                localTombs[addKey] = f.updated
-            }
+        if !syncSubscriptions && !syncHistory {
+            return try computeMergedSyncState(
+                snapshot: storage.captureSyncSnapshot(),
+                remotePayloadRaw: remotePayloadRaw,
+                nowMs: nowMs,
+                syncSubscriptions: false,
+                syncHistory: false
+            ).summary
         }
+        return try storage.commitSyncTransform { liveSnapshot in
+            let computed = try self.computeMergedSyncState(
+                snapshot: liveSnapshot,
+                remotePayloadRaw: remotePayloadRaw,
+                nowMs: nowMs,
+                syncSubscriptions: syncSubscriptions,
+                syncHistory: syncHistory
+            )
+            return (
+                subscriptions: computed.localSubscriptions,
+                watchHistory: computed.localWatchHistory,
+                favorites: computed.localFavorites,
+                tombstones: computed.localTombstones,
+                result: computed.summary
+            )
+        }
+    }
+
+    private func computeMergedSyncState(
+        snapshot: TvStorageManager.SyncStorageSnapshot,
+        remotePayloadRaw: String?,
+        nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000),
+        syncSubscriptions: Bool = true,
+        syncHistory: Bool = true
+    ) throws -> ComputedSyncMerge {
+        let localSubsAll = snapshot.subscriptions
+        let localHist = snapshot.watchHistory
+        let localFavs = snapshot.favorites
+        let localTombsRaw = snapshot.tombstones
 
         guard let remoteRaw = remotePayloadRaw?.trimmingCharacters(in: .whitespacesAndNewlines),
               !remoteRaw.isEmpty
         else {
             let payload = try exportSyncPayload(
+                from: snapshot,
                 nowMs: nowMs,
                 syncSubscriptions: syncSubscriptions,
                 syncHistory: syncHistory
             )
-            return SyncMergeSummary(
+            var nextLocalTombs = localTombsRaw
+            if syncHistory {
+                for f in localFavs where f.updated > 0 {
+                    let addKey = "add:\(f.key)"
+                    if f.updated > (nextLocalTombs[addKey] ?? 0) {
+                        nextLocalTombs[addKey] = f.updated
+                    }
+                }
+            }
+            let summary = SyncMergeSummary(
                 historyCount: localHist.count,
                 favoriteCount: localFavs.count,
                 subscriptionCount: localSubsAll.filter { !$0.isEffectivelyPrivate }.count,
                 changed: false,
                 subscriptionsChanged: false,
                 payloadJson: payload
+            )
+            return ComputedSyncMerge(
+                summary: summary,
+                localSubscriptions: localSubsAll,
+                localWatchHistory: localHist,
+                localFavorites: localFavs,
+                localTombstones: nextLocalTombs
             )
         }
 
@@ -322,14 +543,18 @@ public final class WebDavSyncService: @unchecked Sendable {
         let schema = (decoded["schema"] as? String) ?? ""
         let format = (decoded["format"] as? String) ?? ""
         var remoteHist: [WatchHistoryItem] = []
+        var remoteHistRaw: [[String: Any]] = []
         var remoteFavs: [FavoriteItem] = []
-        var remoteTombs: [String: Int64] = [:]
-        var remoteSubsRaw: [[String: Any]] = []
+        var remoteFavsRaw: [[String: Any]] = []
+        var remoteTombsRaw: [String: Int64] = [:]
+        var remoteFavAddTombs: [String: Int64] = [:]
+        var remoteSubsRaw: [[String: Any]]? = nil
 
         if schema == Self.syncSchema {
             if let rh = (decoded["watch_history"] ?? decoded["history"] ?? decoded["watchHistory"]) as? [Any] {
                 for item in rh {
                     guard let map = item as? [String: Any] else { continue }
+                    remoteHistRaw.append(map)
                     let entry = WatchHistoryItem.fromDictionary(map)
                     if !entry.site.isEmpty && !entry.id.isEmpty {
                         remoteHist.append(entry)
@@ -339,13 +564,14 @@ public final class WebDavSyncService: @unchecked Sendable {
             if let rf = decoded["favorites"] as? [Any] {
                 for item in rf {
                     guard let map = item as? [String: Any] else { continue }
+                    remoteFavsRaw.append(map)
                     let fav = FavoriteItem.fromDictionary(map)
                     if !fav.site.isEmpty && !fav.id.isEmpty {
                         remoteFavs.append(fav)
                         if fav.updated > 0 {
                             let addKey = "add:\(fav.key)"
-                            if fav.updated > (remoteTombs[addKey] ?? 0) {
-                                remoteTombs[addKey] = fav.updated
+                            if fav.updated > (remoteFavAddTombs[addKey] ?? 0) {
+                                remoteFavAddTombs[addKey] = fav.updated
                             }
                         }
                     }
@@ -357,51 +583,153 @@ public final class WebDavSyncService: @unchecked Sendable {
             if let rt = decoded["tombstones"] as? [String: Any] {
                 for (k, v) in rt {
                     if let num = v as? NSNumber, num.int64Value > 0, !k.isEmpty {
-                        remoteTombs[k] = num.int64Value
+                        remoteTombsRaw[k] = num.int64Value
                     }
                 }
             }
         } else if format == BackupPayload.backupFormat || schema == BackupPayload.backupSchema {
             let backup = try BackupCodec.decodeBackupJson(remoteRaw)
             remoteHist = backup.watchHistory
+            remoteHistRaw = backup.watchHistory.map { $0.toDictionary() }
             remoteFavs = backup.favorites
+            remoteFavsRaw = backup.favorites.map { $0.toDictionary() }
+            for fav in remoteFavs where fav.updated > 0 {
+                let addKey = "add:\(fav.key)"
+                if fav.updated > (remoteFavAddTombs[addKey] ?? 0) {
+                    remoteFavAddTombs[addKey] = fav.updated
+                }
+            }
             remoteSubsRaw = backup.subscriptions.map { $0.toDictionary() }
         } else {
             throw MarcoError.invalidFormat("远端同步文件格式不受支持")
         }
 
-        // 1. Merge tombstones (LWW per tombstone key, reconcile add:<k> vs fav:<k>)
-        var mergedTombs = localTombs
-        for (k, ts) in remoteTombs where ts > (mergedTombs[k] ?? 0) {
-            mergedTombs[k] = ts
+        // Partition tombstones strictly by category so disabled sync switches NEVER modify local
+        // OR remote data/tombstones for the unsubscribed category.
+        var localHistTombs = localTombsRaw.filter { Self.isHistoryTombstone($0.key) }
+        var localSubTombs = localTombsRaw.filter { Self.isSubscriptionTombstone($0.key) }
+        let localOtherTombs = localTombsRaw.filter { !Self.isHistoryTombstone($0.key) && !Self.isSubscriptionTombstone($0.key) }
+
+        let remoteHistTombsRaw = remoteTombsRaw.filter { Self.isHistoryTombstone($0.key) }
+        let remoteSubTombsRaw = remoteTombsRaw.filter { Self.isSubscriptionTombstone($0.key) }
+        let remoteOtherTombsRaw = remoteTombsRaw.filter { !Self.isHistoryTombstone($0.key) && !Self.isSubscriptionTombstone($0.key) }
+
+        // 1. Subscriptions & sub: tombstones + cross-device subscription ID remapping
+        let localPrivate = localSubsAll.filter { $0.isEffectivelyPrivate }
+        let localPublic = localSubsAll.filter { !$0.isEffectivelyPrivate }
+        let localPrivateSubSyncKeys: Set<String> = Set(localPrivate.compactMap { s -> String? in
+            let hasIdentity = !s.rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !s.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !s.warehouseUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            guard hasIdentity else { return nil }
+            return Self.canonicalSubscriptionSyncKey(url: s.url, rawContent: s.rawContent, warehouseUrl: s.warehouseUrl)
+        })
+        var localPublicBySyncKey: [String: SubscriptionEntry] = [:]
+        for s in localPublic {
+            let hasIdentity = !s.rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !s.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !s.warehouseUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            guard hasIdentity else { continue }
+            let sk = Self.canonicalSubscriptionSyncKey(url: s.url, rawContent: s.rawContent, warehouseUrl: s.warehouseUrl)
+            if localPublicBySyncKey[sk] == nil {
+                localPublicBySyncKey[sk] = s
+            }
         }
-        for k in Array(mergedTombs.keys) where k.hasPrefix("fav:") {
-            let rawKey = String(k.dropFirst(4))
-            if let delTs = mergedTombs[k], let addTs = mergedTombs["add:\(rawKey)"] {
-                if addTs > delTs {
-                    mergedTombs.removeValue(forKey: k)
-                } else {
-                    mergedTombs.removeValue(forKey: "add:\(rawKey)")
+
+        // Map remote subscription IDs & canonical wire IDs (`sub_<12-hex-sha256>`) to local
+        // subscription IDs independent of remote `subscriptions` (works even when `syncSubscriptions`
+        // is disabled and remote file starts empty!), and detect previously-public subscriptions
+        // that have since been switched to private locally.
+        var remoteIdToLocalId: [String: String] = [:]
+        var localIdToOutboundId: [String: String] = [:]
+        var localIdToCanonicalWireId: [String: String] = [:]
+        var remoteIdToCanonicalWireId: [String: String] = [:]
+        var scrubPrivateSubIds = Set<String>()
+        var scrubRemoteSubTombs: [String: Int64] = [:]
+
+        for s in localPrivate where !s.id.isEmpty {
+            if let wirePrivId = Self.canonicalWireSubscriptionId(
+                url: s.url,
+                rawContent: s.rawContent,
+                warehouseUrl: s.warehouseUrl
+            ) {
+                localIdToCanonicalWireId[s.id] = wirePrivId
+                scrubPrivateSubIds.insert(wirePrivId)
+            }
+        }
+        // Seed canonical wire ID maps from PRE-MERGE local public subscriptions BEFORE subscription
+        // deletions are applied, so if a subscription is deleted by a peer's `sub:` tombstone in this
+        // batch (e.g. peer switched it to private while both sync switches are on), same-batch `hist:`
+        // and `fav:` scrub tombstones still map cleanly onto this device's old local subscription ID!
+        for s in localPublic where !s.id.isEmpty {
+            if let wireId = Self.canonicalWireSubscriptionId(
+                url: s.url,
+                rawContent: s.rawContent,
+                warehouseUrl: s.warehouseUrl
+            ) {
+                localIdToCanonicalWireId[s.id] = wireId
+                if wireId != s.id {
+                    if remoteIdToLocalId[wireId] == nil {
+                        remoteIdToLocalId[wireId] = s.id
+                    }
+                    localIdToOutboundId[s.id] = wireId
                 }
             }
         }
 
-        // 2. Merge public subscriptions (3-way timestamp + tombstone)
+        for rawMap in (remoteSubsRaw ?? []) {
+            let candidate = SubscriptionEntry.fromDictionary(rawMap)
+            let sk = Self.canonicalSubscriptionSyncKey(
+                url: candidate.url,
+                rawContent: candidate.rawContent,
+                warehouseUrl: candidate.warehouseUrl
+            )
+            let candidateWireId = "sub_\(sk.prefix(12))"
+            if !candidate.id.isEmpty {
+                remoteIdToCanonicalWireId[candidate.id] = candidateWireId
+            }
+            if localPrivateSubSyncKeys.contains(sk)
+                || (!candidate.id.isEmpty && snapshot.knownPrivateSubscriptionIds.contains(candidate.id))
+            {
+                if !candidate.id.isEmpty {
+                    scrubPrivateSubIds.insert(candidate.id)
+                }
+                scrubPrivateSubIds.insert(candidateWireId)
+                scrubRemoteSubTombs["sub:\(sk)"] = max(nowMs, candidate.updatedAt + 1)
+                continue
+            }
+            if let localMatch = localPublicBySyncKey[sk], !candidate.id.isEmpty, candidate.id != localMatch.id {
+                remoteIdToLocalId[candidate.id] = localMatch.id
+            }
+        }
+
         var finalSubscriptions = localSubsAll
         var subscriptionsChanged = false
+        let outboundSubscriptions: [[String: Any]]?
+        var outboundSubTombs: [String: Int64]
+
         if syncSubscriptions {
-            let localPrivate = localSubsAll.filter { $0.isEffectivelyPrivate }
-            let localPublic = localSubsAll.filter { !$0.isEffectivelyPrivate }
+            var mergedSubTombs = localSubTombs
+            for (k, ts) in remoteSubTombsRaw where ts > (mergedSubTombs[k] ?? 0) {
+                mergedSubTombs[k] = ts
+            }
+
             var subOrder: [String] = []
             var subByKey: [String: SubscriptionEntry] = [:]
             var reservedIds = Set(localPrivate.map(\.id))
 
-            for s in localPublic where !s.rawContent.isEmpty {
+            // Retain both hydrated subscriptions and URL-only Keychain-recovered stubs waiting for refresh
+            // (so a failed refresh after Caches eviction never wipes the user's subscription URL).
+            for s in localPublic {
+                let hasIdentity = !s.rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || !s.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || !s.warehouseUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                guard hasIdentity else { continue }
                 let sk = Self.canonicalSubscriptionSyncKey(url: s.url, rawContent: s.rawContent, warehouseUrl: s.warehouseUrl)
-                let delTs = mergedTombs["sub:\(sk)"] ?? 0
+                let delTs = mergedSubTombs["sub:\(sk)"] ?? 0
                 if delTs > 0 {
                     if s.updatedAt > delTs {
-                        mergedTombs.removeValue(forKey: "sub:\(sk)")
+                        mergedSubTombs.removeValue(forKey: "sub:\(sk)")
                     } else {
                         continue
                     }
@@ -411,7 +739,7 @@ public final class WebDavSyncService: @unchecked Sendable {
                 reservedIds.insert(s.id)
             }
 
-            for rawMap in remoteSubsRaw {
+            for rawMap in (remoteSubsRaw ?? []) {
                 let candidate = SubscriptionEntry.fromDictionary(rawMap)
                 guard !candidate.isEffectivelyPrivate,
                       !candidate.rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -424,29 +752,65 @@ public final class WebDavSyncService: @unchecked Sendable {
                     rawContent: candidate.rawContent,
                     warehouseUrl: candidate.warehouseUrl
                 )
+                // If this subscription is now private locally, never re-import it into public space
+                // (and scrub the old public copy from remote via scrubRemoteSubTombs).
+                if localPrivateSubSyncKeys.contains(sk)
+                    || (!candidate.id.isEmpty && snapshot.knownPrivateSubscriptionIds.contains(candidate.id))
+                {
+                    if !candidate.id.isEmpty {
+                        scrubPrivateSubIds.insert(candidate.id)
+                    }
+                    scrubRemoteSubTombs["sub:\(sk)"] = max(nowMs, candidate.updatedAt + 1)
+                    continue
+                }
                 let incomingTs = max(1, candidate.updatedAt)
-                let delTs = mergedTombs["sub:\(sk)"] ?? 0
+                let delTs = mergedSubTombs["sub:\(sk)"] ?? 0
                 if delTs > 0 {
                     if incomingTs > delTs {
-                        mergedTombs.removeValue(forKey: "sub:\(sk)")
+                        mergedSubTombs.removeValue(forKey: "sub:\(sk)")
                     } else {
                         continue
                     }
                 }
 
                 if let existing = subByKey[sk] {
-                    if incomingTs > existing.updatedAt {
+                    if !candidate.id.isEmpty && candidate.id != existing.id {
+                        remoteIdToLocalId[candidate.id] = existing.id
+                    }
+                    let existingIsStub = existing.rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    let existingEffectiveTs = max(1, existing.updatedAt)
+                    if existingIsStub || incomingTs > existingEffectiveTs {
                         var updated = candidate
                         updated.id = existing.id
-                        updated.siteCount = parsed.sites.count
-                        updated.liveCount = parsed.lives.count
-                        updated.updatedAt = incomingTs
+                        if existingIsStub {
+                            if !existing.group.isEmpty { updated.group = existing.group }
+                            updated.enabled = existing.enabled
+                        }
+                        let existingSanitized = CmsParser.sanitizePublicRawConfig(existing.rawContent, defaultGroup: existing.group)
+                        let incomingSanitized = CmsParser.sanitizePublicRawConfig(candidate.rawContent, defaultGroup: candidate.group)
+                        if !existingIsStub && !existingSanitized.isEmpty && existingSanitized == incomingSanitized {
+                            // Keep full local rawContent (including local private child sites) when remote
+                            // only echoes back the sanitized public subset of the exact same config.
+                            updated.rawContent = existing.rawContent
+                            updated.siteCount = existing.siteCount
+                            updated.liveCount = existing.liveCount
+                        } else {
+                            updated.siteCount = parsed.sites.count
+                            updated.liveCount = parsed.lives.count
+                        }
+                        updated.updatedAt = max(existing.updatedAt, incomingTs)
+                        if updated.depots.isEmpty {
+                            updated.depots = !existing.depots.isEmpty ? existing.depots : parsed.depots
+                        }
                         subByKey[sk] = updated
                     }
                 } else {
                     var assignedId = candidate.id
                     if assignedId.isEmpty || reservedIds.contains(assignedId) {
-                        assignedId = "sub_\(sk.prefix(10))"
+                        assignedId = "sub_\(sk.prefix(12))"
+                    }
+                    if !candidate.id.isEmpty && candidate.id != assignedId {
+                        remoteIdToLocalId[candidate.id] = assignedId
                     }
                     reservedIds.insert(assignedId)
                     var inserted = candidate
@@ -463,18 +827,217 @@ public final class WebDavSyncService: @unchecked Sendable {
             let mergedPublic = subOrder.compactMap { subByKey[$0] }
             subscriptionsChanged = mergedPublic != localPublic
             finalSubscriptions = mergedPublic + localPrivate
+            localSubTombs = mergedSubTombs
+            outboundSubscriptions = Self.serializePublicSubscriptions(mergedPublic)
+            outboundSubTombs = mergedSubTombs
+            for (k, ts) in scrubRemoteSubTombs where ts > (outboundSubTombs[k] ?? 0) {
+                outboundSubTombs[k] = ts
+            }
+        } else {
+            // Preserve BOTH local subscriptions/tombstones AND remote subscriptions/tombstones untouched.
+            outboundSubscriptions = remoteSubsRaw
+            outboundSubTombs = remoteSubTombsRaw
         }
 
-        // 3. Merge watch history (LWW per key + tie-break by higher position + tombstone)
+        // Augment canonical wire ID maps with any newly-imported subscriptions in `finalSubscriptions`
+        // while preserving all pre-merge local ID mappings for this batch's history/favorites/tombstones.
+        for s in finalSubscriptions where !s.id.isEmpty {
+            guard let wireId = Self.canonicalWireSubscriptionId(
+                url: s.url,
+                rawContent: s.rawContent,
+                warehouseUrl: s.warehouseUrl
+            ) else {
+                continue
+            }
+            if localIdToCanonicalWireId[s.id] == nil {
+                localIdToCanonicalWireId[s.id] = wireId
+            }
+            if s.isEffectivelyPrivate {
+                scrubPrivateSubIds.insert(wireId)
+            } else if wireId != s.id {
+                if remoteIdToLocalId[wireId] == nil {
+                    remoteIdToLocalId[wireId] = s.id
+                }
+                if localIdToOutboundId[s.id] == nil {
+                    localIdToOutboundId[s.id] = wireId
+                }
+            }
+        }
+
+        var extraPrivateSiteKeys = Set<String>()
+        for privKey in snapshot.knownPrivateSiteKeys {
+            let wireKey = Self.rewriteSiteKey(privKey, using: localIdToCanonicalWireId)
+            if wireKey != privKey {
+                extraPrivateSiteKeys.insert(wireKey)
+            }
+        }
+
+        // Build privacy evaluation config covering current private subs, historically deleted
+        // private subs/site keys, canonical wire IDs, and any remote subscription IDs just transitioned to private.
+        let effectivePrivacyConfig = Self.buildPrivacyConfig(
+            from: snapshot,
+            extraPrivateSubIds: scrubPrivateSubIds,
+            extraPrivateSiteKeys: extraPrivateSiteKeys
+        )
+
+        func canonicalWireSiteKey(_ siteKey: String) -> String {
+            let step1 = Self.rewriteSiteKey(siteKey, using: remoteIdToCanonicalWireId)
+            return Self.rewriteSiteKey(step1, using: localIdToCanonicalWireId)
+        }
+
+        func isTransitionedPrivateSite(_ siteKey: String) -> Bool {
+            if snapshot.transitionedToPrivateSiteKeys.contains(siteKey) {
+                return true
+            }
+            if let parsed = CmsSite.parseScopedKey(siteKey),
+               snapshot.transitionedToPrivateSubIds.contains(parsed.subscriptionId)
+            {
+                return true
+            }
+            for subId in snapshot.transitionedToPrivateSubIds where !subId.isEmpty && siteKey.hasSuffix("_\(subId)") {
+                return true
+            }
+            return false
+        }
+
+        // 2. Watch history, favorites & hist:/fav:/add: tombstones
         var finalHistory = localHist
         var finalFavorites = localFavs
+        let outboundWatchHistory: [[String: Any]]
+        let outboundFavorites: [[String: Any]]
+        var outboundHistTombs: [String: Int64]
+
         if syncHistory {
+            let localPrivateHist = localHist.filter { effectivePrivacyConfig.isPrivateSiteKey($0.site) }
+            let localPublicHist = localHist.filter { !effectivePrivacyConfig.isPrivateSiteKey($0.site) }
+            let localPrivateFavs = localFavs.filter { effectivePrivacyConfig.isPrivateSiteKey($0.site) }
+            let localPublicFavs = localFavs.filter { !effectivePrivacyConfig.isPrivateSiteKey($0.site) }
+
+            var scrubRemoteHistTombs: [String: Int64] = [:]
+            var scrubRemoveAddKeys = Set<String>()
+
+            var remappedRemotePublicHist: [WatchHistoryItem] = []
+            for orig in remoteHist {
+                var remapped = orig
+                remapped.site = Self.rewriteSiteKey(orig.site, using: remoteIdToLocalId)
+                if effectivePrivacyConfig.isPrivateSiteKey(orig.site)
+                    || effectivePrivacyConfig.isPrivateSiteKey(remapped.site)
+                {
+                    let scrubTs = max(nowMs, orig.updated + 1)
+                    scrubRemoteHistTombs["hist:\(orig.key)"] = max(scrubTs, scrubRemoteHistTombs["hist:\(orig.key)"] ?? 0)
+                    let wireSite = canonicalWireSiteKey(remapped.site != orig.site ? remapped.site : orig.site)
+                    let wireTomb = "hist:\(wireSite)\n\(orig.id)"
+                    scrubRemoteHistTombs[wireTomb] = max(scrubTs, scrubRemoteHistTombs[wireTomb] ?? 0)
+                    continue
+                }
+                remappedRemotePublicHist.append(remapped)
+            }
+
+            var remappedRemotePublicFavs: [FavoriteItem] = []
+            for orig in remoteFavs {
+                var remapped = orig
+                remapped.site = Self.rewriteSiteKey(orig.site, using: remoteIdToLocalId)
+                if effectivePrivacyConfig.isPrivateSiteKey(orig.site)
+                    || effectivePrivacyConfig.isPrivateSiteKey(remapped.site)
+                {
+                    let scrubTs = max(nowMs, orig.updated + 1)
+                    scrubRemoteHistTombs["fav:\(orig.key)"] = max(scrubTs, scrubRemoteHistTombs["fav:\(orig.key)"] ?? 0)
+                    scrubRemoveAddKeys.insert("add:\(orig.key)")
+                    let wireSite = canonicalWireSiteKey(remapped.site != orig.site ? remapped.site : orig.site)
+                    let wireTomb = "fav:\(wireSite)\n\(orig.id)"
+                    scrubRemoteHistTombs[wireTomb] = max(scrubTs, scrubRemoteHistTombs[wireTomb] ?? 0)
+                    scrubRemoveAddKeys.insert("add:\(wireSite)\n\(orig.id)")
+                    continue
+                }
+                remappedRemotePublicFavs.append(remapped)
+            }
+
+            // When a previously-public subscription or child site transitioned to private on this device,
+            // emit canonical wire scrub tombstones so peer devices with different legacy IDs recognize the
+            // removal on their next syncs and never re-upload old titles/posters to remote.
+            for item in localPrivateHist where isTransitionedPrivateSite(item.site) {
+                let wireSite = canonicalWireSiteKey(item.site)
+                let scrubTs = max(nowMs, item.updated + 1)
+                let wireTomb = "hist:\(wireSite)\n\(item.id)"
+                scrubRemoteHistTombs[wireTomb] = max(scrubTs, scrubRemoteHistTombs[wireTomb] ?? 0)
+            }
+            for fav in localPrivateFavs where isTransitionedPrivateSite(fav.site) {
+                let wireSite = canonicalWireSiteKey(fav.site)
+                let scrubTs = max(nowMs, fav.updated + 1)
+                let wireTomb = "fav:\(wireSite)\n\(fav.id)"
+                scrubRemoteHistTombs[wireTomb] = max(scrubTs, scrubRemoteHistTombs[wireTomb] ?? 0)
+                scrubRemoveAddKeys.insert("add:\(wireSite)\n\(fav.id)")
+            }
+
+            var mergedHistTombs: [String: Int64] = [:]
+            for (k, v) in localHistTombs {
+                mergedHistTombs[k] = v
+            }
+            for f in localPublicFavs where f.updated > 0 {
+                let addKey = "add:\(f.key)"
+                if f.updated > (mergedHistTombs[addKey] ?? 0) {
+                    mergedHistTombs[addKey] = f.updated
+                }
+            }
+            for (origKey, ts) in remoteHistTombsRaw {
+                let mappedKey = Self.rewriteHistoryTombstoneKey(origKey, using: remoteIdToLocalId)
+                let origIsPrivate = Self.siteKeyFromHistoryTombstone(origKey).map { effectivePrivacyConfig.isPrivateSiteKey($0) } ?? false
+                let mappedIsPrivate = Self.siteKeyFromHistoryTombstone(mappedKey).map { effectivePrivacyConfig.isPrivateSiteKey($0) } ?? false
+                if origIsPrivate || mappedIsPrivate {
+                    if origKey.hasPrefix("add:") {
+                        scrubRemoveAddKeys.insert(origKey)
+                        scrubRemoveAddKeys.insert(Self.rewriteHistoryTombstoneKey(origKey, using: localIdToCanonicalWireId))
+                    } else {
+                        // Preserve existing remote hist:/fav: scrub tombstones for peer devices without
+                        // importing them into this device's local private history/favorite tombstones.
+                        scrubRemoteHistTombs[origKey] = max(ts, scrubRemoteHistTombs[origKey] ?? 0)
+                        let wireKey = Self.rewriteHistoryTombstoneKey(
+                            Self.rewriteHistoryTombstoneKey(origKey, using: remoteIdToCanonicalWireId),
+                            using: localIdToCanonicalWireId
+                        )
+                        scrubRemoteHistTombs[wireKey] = max(ts, scrubRemoteHistTombs[wireKey] ?? 0)
+                    }
+                    continue
+                }
+                if ts > (mergedHistTombs[mappedKey] ?? 0) {
+                    mergedHistTombs[mappedKey] = ts
+                }
+            }
+            for (origKey, ts) in remoteFavAddTombs {
+                let mappedKey = Self.rewriteHistoryTombstoneKey(origKey, using: remoteIdToLocalId)
+                if let origSite = Self.siteKeyFromHistoryTombstone(origKey),
+                   effectivePrivacyConfig.isPrivateSiteKey(origSite)
+                {
+                    scrubRemoveAddKeys.insert(origKey)
+                    continue
+                }
+                if let mappedSite = Self.siteKeyFromHistoryTombstone(mappedKey),
+                   effectivePrivacyConfig.isPrivateSiteKey(mappedSite)
+                {
+                    scrubRemoveAddKeys.insert(mappedKey)
+                    continue
+                }
+                if ts > (mergedHistTombs[mappedKey] ?? 0) {
+                    mergedHistTombs[mappedKey] = ts
+                }
+            }
+            for k in Array(mergedHistTombs.keys) where k.hasPrefix("fav:") {
+                let rawKey = String(k.dropFirst(4))
+                if let delTs = mergedHistTombs[k], let addTs = mergedHistTombs["add:\(rawKey)"] {
+                    if addTs > delTs {
+                        mergedHistTombs.removeValue(forKey: k)
+                    } else {
+                        mergedHistTombs.removeValue(forKey: "add:\(rawKey)")
+                    }
+                }
+            }
+
             var histByKey: [String: WatchHistoryItem] = [:]
-            for e in (localHist + remoteHist) {
-                let delTs = mergedTombs["hist:\(e.key)"] ?? 0
+            for e in (localPublicHist + remappedRemotePublicHist) {
+                let delTs = mergedHistTombs["hist:\(e.key)"] ?? 0
                 if delTs > 0 {
                     if e.updated > delTs {
-                        mergedTombs.removeValue(forKey: "hist:\(e.key)")
+                        mergedHistTombs.removeValue(forKey: "hist:\(e.key)")
                     } else {
                         continue
                     }
@@ -487,7 +1050,7 @@ public final class WebDavSyncService: @unchecked Sendable {
                     histByKey[e.key] = e
                 }
             }
-            finalHistory = Array(
+            let mergedPublicHistory = Array(
                 histByKey.values
                     .sorted { a, b in
                         if a.updated != b.updated { return a.updated > b.updated }
@@ -496,11 +1059,10 @@ public final class WebDavSyncService: @unchecked Sendable {
                     .prefix(CmsParser.maxHistoryEntries)
             )
 
-            // 4. Merge favorites (LWW per key + add/del tombstone arbitration)
             var favByKey: [String: FavoriteItem] = [:]
-            for f in (localFavs + remoteFavs) {
-                let delTs = mergedTombs["fav:\(f.key)"] ?? 0
-                let addTs = mergedTombs["add:\(f.key)"] ?? f.updated
+            for f in (localPublicFavs + remappedRemotePublicFavs) {
+                let delTs = mergedHistTombs["fav:\(f.key)"] ?? 0
+                let addTs = mergedHistTombs["add:\(f.key)"] ?? f.updated
                 if delTs > 0 && delTs >= addTs {
                     continue
                 }
@@ -516,32 +1078,112 @@ public final class WebDavSyncService: @unchecked Sendable {
                     favByKey[f.key] = nextFav
                 }
             }
-            finalFavorites = Array(
+            let mergedPublicFavorites = Array(
                 favByKey.values
                     .sorted { a, b in
-                        let ta = mergedTombs["add:\(a.key)"] ?? a.updated
-                        let tb = mergedTombs["add:\(b.key)"] ?? b.updated
+                        let ta = mergedHistTombs["add:\(a.key)"] ?? a.updated
+                        let tb = mergedHistTombs["add:\(b.key)"] ?? b.updated
                         if ta != tb { return ta > tb }
                         return a.key < b.key
                     }
                     .prefix(CmsParser.maxFavoriteEntries)
             )
+
+            for f in mergedPublicFavorites where f.updated > 0 {
+                let addKey = "add:\(f.key)"
+                if f.updated > (mergedHistTombs[addKey] ?? 0) {
+                    mergedHistTombs[addKey] = f.updated
+                }
+            }
+
+            // Preserve local private breakpoints & favorites untouched alongside merged public records.
+            var combinedHistByKey: [String: WatchHistoryItem] = [:]
+            for item in mergedPublicHistory { combinedHistByKey[item.key] = item }
+            for item in localPrivateHist { combinedHistByKey[item.key] = item }
+            finalHistory = Array(
+                combinedHistByKey.values
+                    .sorted { a, b in
+                        if a.updated != b.updated { return a.updated > b.updated }
+                        return a.key < b.key
+                    }
+                    .prefix(CmsParser.maxHistoryEntries)
+            )
+
+            var combinedFavByKey: [String: FavoriteItem] = [:]
+            for fav in mergedPublicFavorites { combinedFavByKey[fav.key] = fav }
+            for fav in localPrivateFavs { combinedFavByKey[fav.key] = fav }
+            finalFavorites = Array(
+                combinedFavByKey.values
+                    .sorted { a, b in
+                        let ta = mergedHistTombs["add:\(a.key)"] ?? a.updated
+                        let tb = mergedHistTombs["add:\(b.key)"] ?? b.updated
+                        if ta != tb { return ta > tb }
+                        return a.key < b.key
+                    }
+                    .prefix(CmsParser.maxFavoriteEntries)
+            )
+
+            localHistTombs = mergedHistTombs
+
+            // Outbound payload strictly contains ONLY public history, public favorites,
+            // non-private tombstones, plus scrub tombstones for any previously-synced remote items
+            // whose source was switched to private on this device.
+            outboundWatchHistory = mergedPublicHistory.map { item in
+                var out = item
+                out.site = Self.rewriteSiteKey(item.site, using: localIdToOutboundId)
+                return out.toDictionary()
+            }
+            outboundFavorites = mergedPublicFavorites.map { fav in
+                var out = fav
+                out.site = Self.rewriteSiteKey(fav.site, using: localIdToOutboundId)
+                return out.toDictionary()
+            }
+            var filteredOutboundTombs: [String: Int64] = [:]
+            for (k, v) in mergedHistTombs {
+                if let siteKey = Self.siteKeyFromHistoryTombstone(k),
+                   effectivePrivacyConfig.isPrivateSiteKey(siteKey)
+                {
+                    continue
+                }
+                let outKey = Self.rewriteHistoryTombstoneKey(k, using: localIdToOutboundId)
+                filteredOutboundTombs[outKey] = max(v, filteredOutboundTombs[outKey] ?? 0)
+            }
+            for (k, ts) in scrubRemoteHistTombs where ts > (filteredOutboundTombs[k] ?? 0) {
+                filteredOutboundTombs[k] = ts
+            }
+            for remAdd in scrubRemoveAddKeys {
+                filteredOutboundTombs.removeValue(forKey: remAdd)
+            }
+            outboundHistTombs = filteredOutboundTombs
+        } else {
+            // Preserve BOTH local history/favorites/tombstones AND remote history/favorites/tombstones untouched.
+            outboundWatchHistory = remoteHistRaw
+            outboundFavorites = remoteFavsRaw
+            outboundHistTombs = remoteHistTombsRaw
         }
 
-        let changed = subscriptionsChanged || finalHistory != localHist || finalFavorites != localFavs
-        storage.applyMergedSyncState(
-            subscriptions: finalSubscriptions,
-            watchHistory: finalHistory,
-            favorites: finalFavorites,
-            tombstones: mergedTombs
+        var localMergedTombs = localOtherTombs
+        for (k, v) in localHistTombs { localMergedTombs[k] = v }
+        for (k, v) in localSubTombs { localMergedTombs[k] = v }
+
+        var outboundTombs = remoteOtherTombsRaw
+        for (k, v) in outboundHistTombs { outboundTombs[k] = v }
+        for (k, v) in outboundSubTombs { outboundTombs[k] = v }
+
+        let payloadJson = try Self.encodeSyncPayloadObject(
+            nowMs: nowMs,
+            watchHistory: outboundWatchHistory,
+            favorites: outboundFavorites,
+            tombstones: outboundTombs,
+            subscriptions: outboundSubscriptions
         )
 
-        let payloadJson = try exportSyncPayload(
-            nowMs: nowMs,
-            syncSubscriptions: syncSubscriptions,
-            syncHistory: syncHistory
-        )
-        return SyncMergeSummary(
+        let changed = subscriptionsChanged
+            || finalHistory != localHist
+            || finalFavorites != localFavs
+            || localMergedTombs != localTombsRaw
+
+        let summary = SyncMergeSummary(
             historyCount: finalHistory.count,
             favoriteCount: finalFavorites.count,
             subscriptionCount: finalSubscriptions.filter { !$0.isEffectivelyPrivate }.count,
@@ -549,11 +1191,18 @@ public final class WebDavSyncService: @unchecked Sendable {
             subscriptionsChanged: subscriptionsChanged,
             payloadJson: payloadJson
         )
+        return ComputedSyncMerge(
+            summary: summary,
+            localSubscriptions: finalSubscriptions,
+            localWatchHistory: finalHistory,
+            localFavorites: finalFavorites,
+            localTombstones: localMergedTombs
+        )
     }
 
     // MARK: - Full WebDAV GET -> Merge -> MKCOL -> Conditional PUT Cycle
 
-    public func syncNow() async throws -> SyncMergeSummary {
+    public func syncNow(maxConflictRetries: Int = 3) async throws -> SyncMergeSummary {
         var config = storage.loadWebDavConfig()
         let rawBaseUrl = config.url
         let targetUrlStr = try Self.resolveWebdavFileUrl(rawBaseUrl)
@@ -561,10 +1210,8 @@ public final class WebDavSyncService: @unchecked Sendable {
             throw MarcoError.invalidFormat("无效的 WebDAV 目标地址")
         }
 
-        let hostKey = "\(fileURL.scheme?.lowercased() ?? "https")://\(fileURL.host?.lowercased() ?? ""):\(fileURL.port ?? 443)"
-        let maxRetries = 2
+        let boundedRetries = max(0, min(maxConflictRetries, 8))
         var attempt = 0
-        var sawAbsent412 = false
 
         do {
             while true {
@@ -599,26 +1246,37 @@ public final class WebDavSyncService: @unchecked Sendable {
                 }
 
                 let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-                let merged = try mergeSyncPayload(
-                    remoteBody,
+                let preSnapshot = storage.captureSyncSnapshot()
+                let computed = try computeMergedSyncState(
+                    snapshot: preSnapshot,
+                    remotePayloadRaw: remoteBody,
                     nowMs: nowMs,
                     syncSubscriptions: config.syncSubscriptions,
                     syncHistory: config.syncHistory
                 )
-                let payloadBytes = Data(merged.payloadJson.utf8)
-                let skipCond = isConditionalWriteDisabled(for: hostKey)
 
-                var ifMatch: String?
-                var ifNoneMatch: String?
-                if !skipCond {
-                    if fileAbsent {
-                        if !sawAbsent412 { ifNoneMatch = "*" }
-                    } else if let etag = remoteEtag {
-                        ifMatch = etag
-                    }
+                // If both sync toggles are off, preserve both local and remote without issuing a PUT.
+                if !config.syncSubscriptions && !config.syncHistory {
+                    config.lastSyncTimeMs = nowMs
+                    config.lastSyncStatus = "未开启任何同步项，已保留本机与远端数据"
+                    try? storage.saveWebDavConfig(config)
+                    return computed.summary
                 }
 
-                var putResp = try await putWithMkcolRetry(
+                let payloadBytes = Data(computed.summary.payloadJson.utf8)
+
+                // Always use conditional writes whenever the server state supports it:
+                // - `If-None-Match: *` for atomic first-time creation (never downgraded to unsafe unconditional PUT)
+                // - `If-Match: <strong-etag>` whenever GET returned a strong ETag (never disabled per host)
+                var ifMatch: String?
+                var ifNoneMatch: String?
+                if fileAbsent {
+                    ifNoneMatch = "*"
+                } else if let etag = remoteEtag {
+                    ifMatch = etag
+                }
+
+                let putResp = try await putWithMkcolRetry(
                     config: config,
                     rawBaseUrl: rawBaseUrl,
                     fileURL: fileURL,
@@ -627,41 +1285,44 @@ public final class WebDavSyncService: @unchecked Sendable {
                     ifNoneMatch: ifNoneMatch
                 )
 
-                if ifNoneMatch != nil && [400, 405, 406, 417, 428, 500, 501].contains(putResp.statusCode) {
-                    let retry = try await putWithMkcolRetry(
-                        config: config,
-                        rawBaseUrl: rawBaseUrl,
-                        fileURL: fileURL,
-                        payload: payloadBytes,
-                        ifMatch: nil,
-                        ifNoneMatch: nil
-                    )
-                    if (200...299).contains(retry.statusCode) {
-                        disableConditionalWrite(for: hostKey)
+                // On first-time remote file creation (`If-None-Match: *`), NEVER fall back to an
+                // unconditional PUT after a 404 probe (which leaves a TOCTOU overwrite window if
+                // another device creates the file in between!). Only retry when GET confirms the
+                // remote file now exists so we can re-merge and update with `If-Match`.
+                if ifNoneMatch != nil && !(200...299).contains(putResp.statusCode) {
+                    if putResp.statusCode == 412 || putResp.statusCode == 409 {
+                        if attempt < boundedRetries {
+                            attempt += 1
+                            continue
+                        }
+                        throw MarcoError.webdavError("WebDAV 首次创建冲突（HTTP \(putResp.statusCode)），已保留本机与远端数据，请稍后重试")
                     }
-                    putResp = retry
+                    if [400, 405, 406, 417, 428, 500, 501].contains(putResp.statusCode) {
+                        let probeResp = try await transport.send(
+                            method: "GET",
+                            url: fileURL,
+                            headers: buildHeaders(config: config),
+                            body: nil
+                        )
+                        if (200...299).contains(probeResp.statusCode) {
+                            // Another device created the remote file concurrently -> re-read, merge & conditional retry.
+                            if attempt < boundedRetries {
+                                attempt += 1
+                                continue
+                            }
+                            throw MarcoError.webdavError("WebDAV 首次创建已被其他设备抢先完成，已保留本机与远端数据，请稍后重试")
+                        }
+                        throw MarcoError.webdavError("当前 WebDAV 服务端无法保证安全原子创建（If-None-Match 返回 HTTP \(putResp.statusCode)），为避免覆盖其他设备可能同时创建的数据已中止写入，请稍后重试")
+                    }
                 }
 
-                if putResp.statusCode == 412 {
-                    if attempt < maxRetries && !(fileAbsent && sawAbsent412) {
-                        if ifNoneMatch != nil { sawAbsent412 = true }
+                if putResp.statusCode == 412 || (ifMatch != nil && putResp.statusCode == 409) {
+                    if attempt < boundedRetries {
                         attempt += 1
                         continue
                     }
-                    if ifMatch != nil || ifNoneMatch != nil {
-                        let fallback = try await putWithMkcolRetry(
-                            config: config,
-                            rawBaseUrl: rawBaseUrl,
-                            fileURL: fileURL,
-                            payload: payloadBytes,
-                            ifMatch: nil,
-                            ifNoneMatch: nil
-                        )
-                        if (200...299).contains(fallback.statusCode) {
-                            disableConditionalWrite(for: hostKey)
-                        }
-                        putResp = fallback
-                    }
+                    // Exhausted bounded retries: NEVER force-overwrite remote; preserve both ends and report conflict.
+                    throw MarcoError.webdavError("WebDAV 远端持续冲突（HTTP \(putResp.statusCode)），已保留本机与远端数据，请稍后重试")
                 }
 
                 if putResp.statusCode == 401 || putResp.statusCode == 403 {
@@ -671,10 +1332,45 @@ public final class WebDavSyncService: @unchecked Sendable {
                     throw MarcoError.webdavError("WebDAV 写入失败 (HTTP \(putResp.statusCode))")
                 }
 
+                // Atomically re-merge against LIVE local storage under TvStorageManager's lock so any
+                // local mutations made while PUT was in flight (new favorites, playback progress updates,
+                // deleted subscriptions, or edits in sync-disabled categories) are NEVER overwritten.
+                let commitResult: (summary: SyncMergeSummary, needsFollowUpPush: Bool) = try storage.commitSyncTransform { liveSnapshot in
+                    let remerged = try self.computeMergedSyncState(
+                        snapshot: liveSnapshot,
+                        remotePayloadRaw: remoteBody,
+                        nowMs: nowMs,
+                        syncSubscriptions: config.syncSubscriptions,
+                        syncHistory: config.syncHistory
+                    )
+                    let mutatedDuringPut = (liveSnapshot.version != preSnapshot.version)
+                    let outboundDiverged = (remerged.summary.payloadJson != computed.summary.payloadJson)
+                    return (
+                        subscriptions: remerged.localSubscriptions,
+                        watchHistory: remerged.localWatchHistory,
+                        favorites: remerged.localFavorites,
+                        tombstones: remerged.localTombstones,
+                        result: (remerged.summary, mutatedDuringPut && outboundDiverged)
+                    )
+                }
+
+                // If enabled-category local mutations occurred during PUT, perform a bounded follow-up
+                // GET -> merge -> conditional PUT pass so the remote copy also converges immediately.
+                if commitResult.needsFollowUpPush && attempt < boundedRetries {
+                    attempt += 1
+                    continue
+                }
+
+                var finalSummary = commitResult.summary
                 config.lastSyncTimeMs = nowMs
-                config.lastSyncStatus = "同步成功（历史 \(merged.historyCount) · 收藏 \(merged.favoriteCount) · 订阅 \(merged.subscriptionCount)）"
+                if commitResult.needsFollowUpPush {
+                    finalSummary.hasPendingLocalChanges = true
+                    config.lastSyncStatus = "已完成本轮同步，但上传期间又有新改动，仍有改动待同步（历史 \(finalSummary.historyCount) · 收藏 \(finalSummary.favoriteCount) · 订阅 \(finalSummary.subscriptionCount)）"
+                } else {
+                    config.lastSyncStatus = "同步成功（历史 \(finalSummary.historyCount) · 收藏 \(finalSummary.favoriteCount) · 订阅 \(finalSummary.subscriptionCount)）"
+                }
                 try? storage.saveWebDavConfig(config)
-                return merged
+                return finalSummary
             }
         } catch {
             config.lastSyncStatus = "同步失败：\(error.localizedDescription)"

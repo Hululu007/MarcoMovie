@@ -1,0 +1,136 @@
+name: Apple TV (tvOS 16.0+) Clean-Checkout Verify & Candidate Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'feat/appletv-*'
+    paths:
+      - 'tvos/**'
+      - 'flutter/edition-versions.json'
+      - 'README.md'
+      - '.github/workflows/appletv-verify.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-and-build-appletv:
+    name: Clean-Checkout Prepare, Swift Test & tvOS Release IPA
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check public content & README version guardrails
+        run: |
+          python3 scripts/check_public_content.py
+          python3 scripts/sync_readme_versions.py --check
+      - name: Prepare tvOS project from clean checkout
+        run: python3 tvos/prepare_tvos.py
+      - name: Run tvOS workspace & asset integrity unit tests
+        run: python3 -m unittest discover -s tvos -p "test_*.py" -v
+      - name: Run MarcoTVCore Swift regression test suite
+        working-directory: tvos
+        run: swift test --verbose
+      - name: Build Apple TV Release .app and package unsigned .ipa
+        run: |
+          set -euo pipefail
+          VERSION=$(python3 -c "import json; print(json.load(open('flutter/edition-versions.json'))['appletv']['versionName'])")
+          BUILD_NUM=$(python3 -c "import json; print(json.load(open('flutter/edition-versions.json'))['appletv']['buildNumber'])")
+          xcodebuild \
+            -project tvos/RunnerProject/MarcoMovieTV.xcodeproj \
+            -scheme MarcoMovieTV \
+            -sdk appletvos \
+            -configuration Release \
+            -derivedDataPath tvos/DerivedData \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUM" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+          APP_PATH="tvos/DerivedData/Build/Products/Release-appletvos/MarcoMovieTV.app"
+          mkdir -p flutter/dist
+          IPA_NAME="MarcoMovie-$VERSION-appletv-unsigned.ipa"
+          python3 tvos/patch_tvos_ipa.py "$APP_PATH" --ipa "flutter/dist/$IPA_NAME"
+          (cd flutter/dist && shasum -a 256 "$IPA_NAME" > "$IPA_NAME.sha256")
+          python3 scripts/platform_package_names.py --folder flutter/dist --platform appletv --version "$VERSION"
+          cat "flutter/dist/$IPA_NAME.sha256"
+      - name: Audit final .app and .ipa bundle contents
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, plistlib, zipfile
+          from pathlib import Path
+
+          meta = json.loads(Path("flutter/edition-versions.json").read_text(encoding="utf-8"))["appletv"]
+          ver, build = meta["versionName"], str(meta["buildNumber"])
+          app_dir = Path("tvos/DerivedData/Build/Products/Release-appletvos/MarcoMovieTV.app")
+          ipa_path = Path(f"flutter/dist/MarcoMovie-{ver}-appletv-unsigned.ipa")
+
+          app_plist = plistlib.loads((app_dir / "Info.plist").read_bytes())
+          assert app_plist["CFBundleIdentifier"] == "com.pilipala.marcoMovie.tv", app_plist
+          assert app_plist["CFBundleShortVersionString"] == ver, app_plist
+          assert app_plist["CFBundleVersion"] == build, app_plist
+          assert app_plist["UIDeviceFamily"] == [3], app_plist
+          assert app_plist["MinimumOSVersion"] == "16.0", app_plist
+
+          required_jshost = {
+              "crypto-js.js", "catvod.mjs", "module-interop.js",
+              "bootstrap.js", "crypto.LICENSE", "drpy-core.js",
+          }
+          app_jshost = {p.name for p in (app_dir / "js-host").iterdir() if p.is_file()}
+          assert required_jshost.issubset(app_jshost), f"Missing js-host in .app: {required_jshost - app_jshost}"
+          assert (app_dir / "catpaw" / "drpy-assets.json").is_file()
+
+          with zipfile.ZipFile(ipa_path, "r") as zf:
+              names = set(zf.namelist())
+              ipa_plist = plistlib.loads(zf.read("Payload/MarcoMovieTV.app/Info.plist"))
+              assert ipa_plist["CFBundleIdentifier"] == "com.pilipala.marcoMovie.tv"
+              assert ipa_plist["CFBundleShortVersionString"] == ver
+              assert ipa_plist["CFBundleVersion"] == build
+              assert ipa_plist["UIDeviceFamily"] == [3]
+              assert ipa_plist["MinimumOSVersion"] == "16.0"
+              for f in required_jshost:
+                  assert f"Payload/MarcoMovieTV.app/js-host/{f}" in names, f"Missing {f} in .ipa"
+              assert "Payload/MarcoMovieTV.app/catpaw/drpy-assets.json" in names
+
+          digest = hashlib.sha256(ipa_path.read_bytes()).hexdigest()
+          print(f"AUDIT OK: {ipa_path.name} version={ver}({build}) bundleId={ipa_plist['CFBundleIdentifier']} deviceFamily={ipa_plist['UIDeviceFamily']} minOS={ipa_plist['MinimumOSVersion']} jsHostCount={len(app_jshost)} sha256={digest}")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MarcoMovie-AppleTV-IPA
+          path: |
+            flutter/dist/*.ipa
+            flutter/dist/*.sha256
+
+  verify-appletv-simulator:
+    name: Apple TV Simulator (tvOS) Runtime Tests, Cold-Start & Screenshots
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare tvOS project from clean checkout
+        run: python3 tvos/prepare_tvos.py
+      - name: Run real Apple TV Simulator verification, UI tests & screenshot capture
+        run: python3 tvos/run_tvos_simulator_verify.py --output-dir tvos/sim-evidence
+      - name: Upload Apple TV Simulator verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MarcoMovie-AppleTV-Simulator-Evidence
+          if-no-files-found: warn
+          path: |
+            tvos/sim-evidence/simulator-report.json
+            tvos/sim-evidence/xcodebuild-simulator-test.log
+            tvos/sim-evidence/screenshots/*.png

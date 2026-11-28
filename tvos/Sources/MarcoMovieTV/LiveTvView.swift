@@ -9,7 +9,7 @@ public struct LiveTvView: View {
     public init() {}
 
     private var supportedLives: [LiveSource] {
-        appModel.config.supportedLives
+        appModel.config.publicSupportedLives
     }
 
     private var activeGroup: LiveGroup? {

@@ -77,6 +77,10 @@ public final class LanConfigServer: @unchecked Sendable {
         "\(configureUrl(forHost: host))/sync"
     }
 
+    public func netdiskUrl(forHost host: String) -> String {
+        "\(configureUrl(forHost: host))/netdisk"
+    }
+
     public func start(loopbackOnly: Bool = false) async throws -> UInt16 {
         if let p = withLock({ (listener != nil && port > 0) ? port : nil }) {
             return p
@@ -344,7 +348,7 @@ public final class LanConfigServer: @unchecked Sendable {
         let pushPath = "\(tokenPath)/push"
         let syncPath = "\(tokenPath)/sync"
         let netdiskPath = "\(tokenPath)/netdisk"
-        let isNetdiskApi = (rawPath == "/api/netdisk" || rawPath == netdiskPath)
+        let isNetdiskApi = (rawPath == netdiskPath)
         guard rawPath == tokenPath || rawPath == pushPath || rawPath == syncPath || isNetdiskApi else {
             sendText(connection: connection, status: 404, text: "页面不存在")
             return
@@ -502,14 +506,9 @@ public final class LanConfigServer: @unchecked Sendable {
                             url: firstDepot.url,
                             rawContent: depotRaw,
                             warehouseUrl: normalized,
-                            activeDepotName: firstDepot.name
+                            activeDepotName: firstDepot.name,
+                            depots: firstCfg.depots
                         )
-                        // Retain full depot directory on the subscription entry
-                        var subs = self.storage.subscriptions()
-                        if !subs.isEmpty {
-                            subs[0].depots = firstCfg.depots
-                            self.storage.saveSubscriptions(subs)
-                        }
                         let evt = LanConfigAppliedEvent(
                             historyCount: self.storage.watchHistory().count,
                             favoriteCount: self.storage.favorites().count,
@@ -654,8 +653,9 @@ public final class LanConfigServer: @unchecked Sendable {
           <code>\(safeUrl)</code>
         </main>
         <script>
-        const pushEndpoint = location.pathname.replace(/\\/$/, '') + '/push';
-        const netdiskEndpoint = '/api/netdisk';
+        const basePath = location.pathname.replace(/\\/$/, '');
+        const pushEndpoint = basePath + '/push';
+        const netdiskEndpoint = basePath + '/netdisk';
         function showMsg(msg, isErr) {
           const box = document.getElementById('statusBox');
           box.style.display = 'block';
@@ -670,9 +670,11 @@ public final class LanConfigServer: @unchecked Sendable {
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify(body)
             });
-            const data = await r.json();
-            if (data.ok) showMsg(data.message || '推送成功！电视画面已自动刷新。', false);
-            else showMsg(data.error || '推送失败', true);
+            const rawText = await r.text();
+            let data = null;
+            try { data = JSON.parse(rawText); } catch (_) {}
+            if (r.ok && data && data.ok) showMsg(data.message || '推送成功！电视画面已自动刷新。', false);
+            else showMsg((data && data.error) || rawText || ('推送失败 (HTTP ' + r.status + ')'), true);
           } catch (e) {
             showMsg('网络请求失败：' + e, true);
           }
