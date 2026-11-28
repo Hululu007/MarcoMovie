@@ -207,8 +207,8 @@ Source: https://raw.githubusercontent.com/google/gson/gson-parent-2.10.1/LICENSE
    limitations under the License.
 
 
-jsoup 1.18.3
-Source: https://raw.githubusercontent.com/jhy/jsoup/jsoup-1.18.3/LICENSE
+jsoup 1.15.4
+Source: https://raw.githubusercontent.com/jhy/jsoup/jsoup-1.15.4/LICENSE
 
 The MIT License
 

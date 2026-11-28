@@ -592,7 +592,7 @@ public final class CompatChecks {
                                 deps.resolve("okhttp-3.14.9.jar"),
                                 deps.resolve("okio-1.17.2.jar"),
                                 deps.resolve("gson-2.10.1.jar"),
-                                deps.resolve("jsoup-1.18.3.jar"),
+                                deps.resolve("jsoup-1.15.4.jar"),
                                 deps.resolve("jlibtorrent-2.0.12.9.jar"),
                                 deps.resolve("wrapper-java-3.2.3.jar"),
                                 aarClasses);
