@@ -80,11 +80,8 @@ public final class MobileEmbyLibrary {
     public MobileEmbyLibrary(JSONObject session) throws Exception {
         account = accountKey(session);
         String rawBase = session.getString("base");
-        // Respect bare-root servers saved during login fallback while normalizing legacy entries.
-        base =
-                rawBase.toLowerCase(Locale.US).endsWith("/emby")
-                        ? normalize(rawBase)
-                        : normalizeRoot(rawBase);
+        // Respect bare-root servers flagged during login fallback while normalizing legacy entries.
+        base = session.optBoolean("bareRoot", false) ? normalizeRoot(rawBase) : normalize(rawBase);
         user = segment(session.getString("user"));
         token = session.getString("token");
         device = session.getString("device");
@@ -426,6 +423,7 @@ public final class MobileEmbyLibrary {
         }
         return new JSONObject()
                 .put("base", base)
+                .put("bareRoot", !base.toLowerCase(Locale.US).endsWith("/emby"))
                 .put("token", token)
                 .put("device", device)
                 .put("user", userId)

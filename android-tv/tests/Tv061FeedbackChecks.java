@@ -202,10 +202,10 @@ public final class Tv061FeedbackChecks {
                 SubscriptionManager.readMultiSourceMeta(merged1.rawJson).size() == 2,
                 "Merged config embeds _marco_multi_sources metadata for daily updates");
 
-        // 3. Fair cap when total sites > 500
+        // 3. Fair cap when total sites > MAX_MERGED_SITES (2500)
         StringBuilder bigA = new StringBuilder("{\"sites\":[");
         StringBuilder bigB = new StringBuilder("{\"sites\":[");
-        for (int i = 0; i < 320; i++) {
+        for (int i = 0; i < 1500; i++) {
             if (i > 0) {
                 bigA.append(',');
                 bigB.append(',');
@@ -240,8 +240,10 @@ public final class Tv061FeedbackChecks {
             else if ("大源B".equals(s.group)) countB++;
         }
         check(
-                capped.config.sites.size() == 500 && countA == 250 && countB == 250,
-                "Fair site cap splits 500 budget evenly (250/250) instead of failing");
+                capped.config.sites.size() == SubscriptionManager.MAX_MERGED_SITES
+                        && countA == 1250
+                        && countB == 1250,
+                "Fair site cap splits 2500 budget evenly (1250/1250) instead of failing");
     }
 
     private static void testDailySubscriptionAutoUpdate() throws Exception {

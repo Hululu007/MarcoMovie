@@ -1011,7 +1011,7 @@ final class HomeScreen {
 
     private static void commitLoadingSite(MainActivity a, String siteKey) {
         if (a == null || a.prefs == null) return;
-        a.prefs.edit().putString(Prefs.LOADING_SITE, siteKey == null ? "" : siteKey).apply();
+        a.prefs.edit().putString(Prefs.LOADING_SITE, siteKey == null ? "" : siteKey).commit();
     }
 
     void loadHome() {
