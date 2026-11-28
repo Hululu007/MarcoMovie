@@ -703,7 +703,7 @@ final class HomeDock {
         brandText.setTypeface(null, Typeface.BOLD);
         brandText.setSingleLine(true);
         brandText.setIncludeFontPadding(false);
-        brandText.setShadowLayer(a.dp(8), 0, a.dp(2), 0xb8000000);
+        UiCompat.setShadowLayer(brandText, a.dp(8), 0, a.dp(2), 0xb8000000);
         pill.addView(brandText);
         return pill;
     }

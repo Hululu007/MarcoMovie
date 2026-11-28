@@ -138,6 +138,11 @@ public final class LocalProxy implements Closeable {
                             while (!closed)
                                 try {
                                     Socket socket = server.accept();
+                                    try {
+                                        socket.setTcpNoDelay(true);
+                                        socket.setSendBufferSize(256 * 1024);
+                                    } catch (Throwable ignored) {
+                                    }
                                     consecutiveAcceptErrors = 0;
                                     RequestScope scope = new RequestScope();
                                     activeRequests.put(socket, scope);
@@ -241,7 +246,7 @@ public final class LocalProxy implements Closeable {
         return b.toString("UTF-8");
     }
 
-    private static final class BodyPayload {
+    static final class BodyPayload {
         final InputStream stream;
         final byte[] fixedBytes;
 
@@ -251,7 +256,7 @@ public final class LocalProxy implements Closeable {
         }
     }
 
-    private static BodyPayload extractBody(Object raw) throws UnsupportedEncodingException {
+    static BodyPayload extractBody(Object raw) throws UnsupportedEncodingException {
         if (raw instanceof InputStream) {
             return new BodyPayload((InputStream) raw, null);
         }
@@ -281,7 +286,7 @@ public final class LocalProxy implements Closeable {
         return null;
     }
 
-    private static String reasonPhrase(int code) {
+    static String reasonPhrase(int code) {
         switch (code) {
             case 200:
                 return "OK";

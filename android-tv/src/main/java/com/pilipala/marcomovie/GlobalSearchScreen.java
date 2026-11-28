@@ -92,9 +92,13 @@ public final class GlobalSearchScreen implements AutoCloseable {
             busy,
             matched;
     long searchMultiSourceRev;
-    String activeFilter = "", submitted = "", edited = "";
+    String activeFilter = "", activeSearchGroup = "", submitted = "", edited = "";
     TvSearchMatcher.Mode matchMode = TvSearchMatcher.Mode.EXACT;
     String lastLeftFocusTag = "primary";
+    boolean userMovedRightPaneFocus, suppressFilterFocusTrack;
+    Boolean lowRamTvCached;
+    String lastAllCountKey = "";
+    int lastAllCountValue = 0;
     TvSearchImeState imeDraft = new TvSearchImeState();
     Runnable pendingSearch, pendingRender;
     java.util.concurrent.Future<?> expansion;
@@ -131,7 +135,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
     int tvRightChromePx;
     int tvCardChromePx;
     int tvCellOuterMarginPx;
-    Button moreResults, switchFuzzyBtn, retryAllBtn;
+    Button moreResults, switchFuzzyBtn, retryAllBtn, groupScopeBtn;
     LinearLayout tvStateContainer, tvRecentContainer, tvFooterRow;
     TvScrollView tvRecentScroll;
     RecyclerView tvResultRecycler;
@@ -525,6 +529,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
         moreResults = null;
         switchFuzzyBtn = null;
         retryAllBtn = null;
+        groupScopeBtn = null;
         tvResultRecycler = null;
         tvResultLayout = null;
         tvResultAdapter = null;
@@ -862,6 +867,45 @@ public final class GlobalSearchScreen implements AutoCloseable {
         tvHeaderTitle.setEllipsize(TextUtils.TruncateAt.END);
         tvHeaderTitle.setIncludeFontPadding(false);
         rightHeader.addView(tvHeaderTitle, new LinearLayout.LayoutParams(0, -2, 1));
+
+        groupScopeBtn =
+                makeTvActionPill("全部分组 ▾", "search-group-scope", false, this::chooseSearchGroup);
+        groupScopeBtn.setTextSize(11.5f);
+        groupScopeBtn.setMinWidth(a.dp(74));
+        groupScopeBtn.setMinimumWidth(a.dp(74));
+        groupScopeBtn.setPadding(a.dp(11), 0, a.dp(11), 0);
+        groupScopeBtn.setOnKeyListener(
+                (v, keyCode, event) -> {
+                    if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                    if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                        return focusActiveFilterPill();
+                    }
+                    if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+                        return restoreLeftFocus();
+                    }
+                    return false;
+                });
+        groupScopeBtn.setOnFocusChangeListener(
+                (v, focused) -> {
+                    GradientDrawable gbg = (GradientDrawable) groupScopeBtn.getBackground();
+                    if (focused) {
+                        userMovedRightPaneFocus = true;
+                        gbg.setColor(Color.WHITE);
+                        gbg.setStroke(Math.max(2, a.dp(2.5f)), Color.WHITE);
+                        groupScopeBtn.setTextColor(TEXT_ON_LIGHT);
+                    } else {
+                        boolean filteredGroup = !activeSearchGroup.isEmpty();
+                        gbg.setColor(filteredGroup ? BG_FILTER_SELECTED : BG_FILTER);
+                        gbg.setStroke(
+                                Math.max(1, a.dp(1)),
+                                filteredGroup ? BORDER_FILTER_SELECTED : 0x33ffffff);
+                        groupScopeBtn.setTextColor(TEXT_PRIMARY);
+                    }
+                });
+        LinearLayout.LayoutParams groupLp = new LinearLayout.LayoutParams(-2, a.dp(28));
+        groupLp.leftMargin = a.dp(8);
+        rightHeader.addView(groupScopeBtn, groupLp);
+        refreshGroupScopeButton(collectAvailableSearchSites());
 
         tvHeaderMeta = a.text("", 11.5f, TEXT_SECONDARY);
         tvHeaderMeta.setSingleLine(true);
@@ -1641,14 +1685,18 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         }
                     }
                     if (keyCode == KeyEvent.KEYCODE_DPAD_UP
-                            && event.getAction() == KeyEvent.ACTION_DOWN
-                            && b == moreResults
-                            && tvResultRecycler != null
-                            && tvResultRecycler.getVisibility() == View.VISIBLE
-                            && tvResultAdapter != null
-                            && tvResultAdapter.getItemCount() > 0) {
-                        focusCardAt(tvResultAdapter.getItemCount() - 1);
-                        return true;
+                            && event.getAction() == KeyEvent.ACTION_DOWN) {
+                        if (b == moreResults
+                                && tvResultRecycler != null
+                                && tvResultRecycler.getVisibility() == View.VISIBLE
+                                && tvResultAdapter != null
+                                && tvResultAdapter.getItemCount() > 0) {
+                            focusCardAt(tvResultAdapter.getItemCount() - 1);
+                            return true;
+                        }
+                        if (b == switchFuzzyBtn || b == retryAllBtn || b == retrySource) {
+                            return focusActiveFilterPill();
+                        }
                     }
                     return false;
                 });
@@ -1866,8 +1914,37 @@ public final class GlobalSearchScreen implements AutoCloseable {
         Button tab = filterButtons.get(activeFilter);
         if (tab == null) tab = filterButtons.get("");
         if (tab != null && tab.isShown()) {
-            tab.requestFocus();
+            suppressFilterFocusTrack = true;
+            try {
+                tab.requestFocus();
+            } finally {
+                suppressFilterFocusTrack = false;
+            }
         }
+    }
+
+    private boolean focusActiveFilterPill() {
+        if (!current()) return false;
+        Button tab = filterButtons.get(activeFilter);
+        if (tab == null || !tab.isShown()) tab = filterButtons.get("");
+        if (tab != null && tab.isShown()) {
+            tab.requestFocus();
+            scrollFilterPillIntoView(tab);
+            return true;
+        }
+        return false;
+    }
+
+    private void scrollFilterPillIntoView(final Button tab) {
+        if (filterScrollView == null || tab == null) return;
+        filterScrollView.post(
+                () -> {
+                    if (filterScrollView == null || tab.getParent() == null) return;
+                    int scrollW = filterScrollView.getWidth();
+                    if (scrollW <= 0) return;
+                    int targetX = Math.max(0, tab.getLeft() - (scrollW - tab.getWidth()) / 2);
+                    filterScrollView.smoothScrollTo(targetX, 0);
+                });
     }
 
     private void showCollapseReminderBubble() {
@@ -2477,6 +2554,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     private boolean isLowRamTv() {
+        if (lowRamTvCached != null) return lowRamTvCached.booleanValue();
         boolean lowRamFlag = false;
         int memClassMb = 0;
         try {
@@ -2489,7 +2567,10 @@ public final class GlobalSearchScreen implements AutoCloseable {
             }
         } catch (Throwable ignored) {
         }
-        return isLowRamMemoryClass(lowRamFlag, memClassMb, Runtime.getRuntime().maxMemory());
+        boolean result =
+                isLowRamMemoryClass(lowRamFlag, memClassMb, Runtime.getRuntime().maxMemory());
+        lowRamTvCached = result;
+        return result;
     }
 
     void openSystemIme() {
@@ -2979,6 +3060,106 @@ public final class GlobalSearchScreen implements AutoCloseable {
         submit(true);
     }
 
+    static List<String> collectSearchableGroups(List<Cms.Site> sites) {
+        List<String> groups = new ArrayList<>();
+        if (sites == null) return groups;
+        for (Cms.Site site : sites) {
+            if (site == null || !site.searchable) continue;
+            String group = SourcePicker.siteGroup(site);
+            if (!groups.contains(group)) groups.add(group);
+        }
+        return groups;
+    }
+
+    static List<Cms.Site> filterSitesByGroup(List<Cms.Site> sites, String group) {
+        if (sites == null || sites.isEmpty()) return Collections.emptyList();
+        if (group == null || group.trim().isEmpty()) return new ArrayList<>(sites);
+        String target = group.trim();
+        List<Cms.Site> filtered = new ArrayList<>();
+        for (Cms.Site site : sites) {
+            if (site == null) continue;
+            if (target.equals(SourcePicker.siteGroup(site))) filtered.add(site);
+        }
+        return filtered.isEmpty() ? new ArrayList<>(sites) : filtered;
+    }
+
+    private List<Cms.Site> collectAvailableSearchSites() {
+        List<Cms.Site> sources = new ArrayList<>();
+        if (a.config != null) {
+            for (Cms.Site site : SourcePreferences.prioritized(a, a.config.sites)) {
+                if (site.searchable && a.available(site)) sources.add(site);
+            }
+        }
+        final String selected = a.prefs.getString(Prefs.SELECTED_SITE, "");
+        Collections.sort(
+                sources,
+                (x, y) ->
+                        Boolean.compare(
+                                !(SourcePreferences.isPreferred(a, x) || x.key.equals(selected)),
+                                !(SourcePreferences.isPreferred(a, y) || y.key.equals(selected))));
+        return sources;
+    }
+
+    private void refreshGroupScopeButton(List<Cms.Site> allAvailable) {
+        if (groupScopeBtn == null) return;
+        List<String> groups = collectSearchableGroups(allAvailable);
+        if (!activeSearchGroup.isEmpty() && !groups.contains(activeSearchGroup)) {
+            activeSearchGroup = "";
+        }
+        if (groups.size() < 2) {
+            activeSearchGroup = "";
+            groupScopeBtn.setVisibility(View.GONE);
+            return;
+        }
+        groupScopeBtn.setVisibility(View.VISIBLE);
+        groupScopeBtn.setText(
+                activeSearchGroup.isEmpty() ? "全部分组 ▾" : ("分组：" + activeSearchGroup + " ▾"));
+        if (!groupScopeBtn.hasFocus()
+                && groupScopeBtn.getBackground() instanceof GradientDrawable) {
+            GradientDrawable gbg = (GradientDrawable) groupScopeBtn.getBackground();
+            boolean filteredGroup = !activeSearchGroup.isEmpty();
+            gbg.setColor(filteredGroup ? BG_FILTER_SELECTED : BG_FILTER);
+            gbg.setStroke(
+                    Math.max(1, a.dp(1)), filteredGroup ? BORDER_FILTER_SELECTED : 0x33ffffff);
+        }
+    }
+
+    private void chooseSearchGroup() {
+        if (!current()) return;
+        final List<Cms.Site> allAvailable = collectAvailableSearchSites();
+        final List<String> groups = collectSearchableGroups(allAvailable);
+        if (groups.size() < 2) {
+            a.toast("当前只有一个片源分组");
+            return;
+        }
+        String[] labels = new String[groups.size() + 1];
+        labels[0] =
+                (activeSearchGroup.isEmpty() ? "● " : "") + "全部分组（" + allAvailable.size() + " 个站源）";
+        for (int i = 0; i < groups.size(); i++) {
+            String g = groups.get(i);
+            int cnt = 0;
+            for (Cms.Site s : allAvailable) {
+                if (g.equals(SourcePicker.siteGroup(s))) cnt++;
+            }
+            labels[i + 1] = (g.equals(activeSearchGroup) ? "● " : "") + g + "（" + cnt + "）";
+        }
+        new AppDialog.Builder(a)
+                .setTitle("选择搜索分组")
+                .setItems(
+                        labels,
+                        (d, which) -> {
+                            String nextGroup = which <= 0 ? "" : groups.get(which - 1);
+                            if (nextGroup.equals(activeSearchGroup)) return;
+                            activeSearchGroup = nextGroup;
+                            refreshGroupScopeButton(allAvailable);
+                            if (!submitted.isEmpty()) {
+                                submitInternal(false, "", false);
+                            }
+                        })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
     void submit(boolean remember) {
         submitInternal(remember, "", false);
     }
@@ -3042,6 +3223,9 @@ public final class GlobalSearchScreen implements AutoCloseable {
         peakRetainedVideos = 0;
         peakInFlightImages = 0;
         searchSourceArrivals = 0;
+        sourceCount = 0;
+        lastAllCountKey = "";
+        lastAllCountValue = 0;
         if (sourceFilters != null) sourceFilters.removeAllViews();
         shownLimit = 24;
         searchSites.clear();
@@ -3052,16 +3236,9 @@ public final class GlobalSearchScreen implements AutoCloseable {
         sourceScrollOffset.clear();
 
         final int serial = ++searchSerial;
-        List<Cms.Site> sources = new ArrayList<>();
-        if (a.config != null) {
-            for (Cms.Site site : SourcePreferences.prioritized(a, a.config.sites)) {
-                if (site.searchable && a.available(site)) sources.add(site);
-            }
-        }
-        final String selected = a.prefs.getString(Prefs.SELECTED_SITE, "");
-        Collections.sort(
-                sources,
-                (x, y) -> Boolean.compare(!x.key.equals(selected), !y.key.equals(selected)));
+        List<Cms.Site> allAvailable = collectAvailableSearchSites();
+        refreshGroupScopeButton(allAvailable);
+        List<Cms.Site> sources = filterSitesByGroup(allAvailable, activeSearchGroup);
         final int total = sources.size();
         sourceCount = total;
         searchSites.addAll(sources);
@@ -3095,13 +3272,23 @@ public final class GlobalSearchScreen implements AutoCloseable {
             return;
         }
         if (status != null) {
-            status.setText("正在" + requestMode.label + "全部 " + total + " 个来源…");
+            status.setText(
+                    activeSearchGroup.isEmpty()
+                            ? ("正在" + requestMode.label + "全部 " + total + " 个来源…")
+                            : ("正在"
+                                    + requestMode.label
+                                    + "「"
+                                    + activeSearchGroup
+                                    + "」分组 "
+                                    + total
+                                    + " 个来源…"));
         }
         renderResults();
         if (autoCollapseLeft) {
             collapseLeftPanel(true);
             ensureRightPaneFocusAfterCollapse();
         }
+        userMovedRightPaneFocus = false;
 
         if (requestMode == TvSearchMatcher.Mode.EXACT) {
             // EXACT mode never needs phonetic dictionary expansion — launch immediately!
@@ -4072,7 +4259,9 @@ public final class GlobalSearchScreen implements AutoCloseable {
                     renderFilters();
                     renderResults();
                 };
-        a.ui.postDelayed(pendingRender, 90);
+        long coalesceMs =
+                (a.isTvDevice() && (isLowRamTv() || searchSites.size() >= 24)) ? 180L : 90L;
+        a.ui.postDelayed(pendingRender, coalesceMs);
     }
 
     void renderFilters() {
@@ -4164,11 +4353,30 @@ public final class GlobalSearchScreen implements AutoCloseable {
         b.setEllipsize(null);
         b.setGravity(Gravity.CENTER);
         b.setContentDescription(label);
-        b.setOnFocusChangeListener((v, focus) -> styleFilter(b, key, focus));
+        b.setOnFocusChangeListener(
+                (v, focus) -> {
+                    if (focus && !suppressFilterFocusTrack) {
+                        userMovedRightPaneFocus = true;
+                    }
+                    styleFilter(b, key, focus);
+                });
         if (a.isTvDevice()) {
             b.setOnKeyListener(
                     (v, keyCode, event) -> {
                         if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                        if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                                || keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+                                || keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                            userMovedRightPaneFocus = true;
+                        }
+                        if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                            if (groupScopeBtn != null
+                                    && groupScopeBtn.getVisibility() == View.VISIBLE) {
+                                groupScopeBtn.requestFocus();
+                                return true;
+                            }
+                            return true;
+                        }
                         if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
                             focusSelectedResults();
                             return true;
@@ -4422,8 +4630,26 @@ public final class GlobalSearchScreen implements AutoCloseable {
     private List<TvSearchMatcher.RankedHit> collectRankedHitsForFilter(String filterKey) {
         if (submitted.isEmpty() || results.isEmpty()) return Collections.emptyList();
         String preferredSite = a.prefs == null ? "" : a.prefs.getString(Prefs.SELECTED_SITE, "");
-        return TvSearchMatcher.collectAndRank(
-                matchMode, submitted, orderedSourceResults(), filterKey, preferredSite, a.phonetic);
+        List<TvSearchMatcher.RankedHit> hits =
+                TvSearchMatcher.collectAndRank(
+                        matchMode,
+                        submitted,
+                        orderedSourceResults(),
+                        filterKey,
+                        preferredSite,
+                        a.phonetic);
+        if (filterKey == null || filterKey.isEmpty()) {
+            lastAllCountKey =
+                    searchSerial
+                            + "|"
+                            + matchMode.ordinal()
+                            + "|"
+                            + searchSourceArrivals
+                            + "|"
+                            + results.size();
+            lastAllCountValue = hits.size();
+        }
+        return hits;
     }
 
     private List<TvSearchMatcher.RankedHit> collectCurrentRankedHits() {
@@ -4432,6 +4658,14 @@ public final class GlobalSearchScreen implements AutoCloseable {
 
     void updateFilterLabels() {
         int totalVideos = -1;
+        String expectedCountKey =
+                searchSerial
+                        + "|"
+                        + matchMode.ordinal()
+                        + "|"
+                        + searchSourceArrivals
+                        + "|"
+                        + results.size();
         for (Map.Entry<String, Button> entry : filterButtons.entrySet()) {
             Button b = entry.getValue();
             String key = entry.getKey();
@@ -4439,7 +4673,11 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 String suffix;
                 if (key.isEmpty()) {
                     if (totalVideos < 0) {
-                        totalVideos = collectRankedHitsForFilter("").size();
+                        if (expectedCountKey.equals(lastAllCountKey)) {
+                            totalVideos = lastAllCountValue;
+                        } else {
+                            totalVideos = collectRankedHitsForFilter("").size();
+                        }
                     }
                     suffix =
                             finished < sourceCount
@@ -4483,7 +4721,6 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 if (!fullText.equals(renderedFilterLabels.get(key))) {
                     renderedFilterLabels.put(key, fullText);
                     b.setText(fullText);
-                    b.requestLayout();
                 }
             }
             styleFilter(b, key, b.hasFocus());
@@ -4703,7 +4940,15 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 }
             } else if (focusNewResults) {
                 focusNewResults = false;
-                focusCardAt(0);
+                boolean filterFocusedByUser =
+                        userMovedRightPaneFocus
+                                || (sourceFilters != null
+                                        && sourceFilters.findFocus() != null
+                                        && sourceFilters.findFocus() != filterButtons.get(""))
+                                || (groupScopeBtn != null && groupScopeBtn.hasFocus());
+                if (!filterFocusedByUser) {
+                    focusCardAt(0);
+                }
             } else if (hadWallFocus) {
                 // Only re-anchor if focus stayed inside wall and needs exact key preservation.
                 int idx = tvResultAdapter.indexOfTag(currentWallFocusTag);
@@ -5620,11 +5865,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         int groupIdx =
                                 ssl != null ? ssl.getSpanGroupIndex(pos, columns) : (pos / columns);
                         if (keyCode == KeyEvent.KEYCODE_DPAD_UP && groupIdx == 0) {
-                            Button tab = filterButtons.get(activeFilter);
-                            if (tab != null && tab.isShown()) {
-                                tab.requestFocus();
-                                return true;
-                            }
+                            return focusActiveFilterPill();
                         } else if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT && spanIdx == 0) {
                             return restoreLeftFocus();
                         } else if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT

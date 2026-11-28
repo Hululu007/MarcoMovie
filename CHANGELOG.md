@@ -1,3 +1,14 @@
+## 2026-11-28 Android 电视 / 盒子 0.6.7 稳定性、倍速拉流、局域网扫码配置与搜索体验全面修复（Android 电视 / 盒子 0.6.7）
+
+- [Android 电视 / 盒子 0.6.7](docs/releases/android-tv-v0.6.7.md)
+- **修复 Android 6.0 (API 23) 等老机型进详情页/首页偶发 `libRScpp.so` 崩溃**：新增 `UiCompat.setShadowLayer`，在 API 23 及以下自动禁用 `TextView` RenderScript 阴影模糊并将高版本模糊半径钳制在 `25px` 以内。
+- **修复电视播放倍速卡顿与本地代理拉流限速 ~1 MB/s**：升级 `DecoderRenderersFactory` `getCodecOperatingRateV23` 倍速工况率声明、倍速期间自动退出硬解隧道模式与 `MpvPlayer` `framedrop=vo` 音调保护；同步改造 `MediaDiskCache` / `HlsStreamProxy` 为 `OkHttp` 连接池 64 KiB 连续流式直传与异步落盘，`LocalProxy` 启用 `TCP_NODELAY` 与 256 KiB 发送缓冲，消除倍速与大文件代理卡顿。
+- **修复海信 9655 等电视播放 4K/蓝光原盘 `SystemPlayer` `-38` 崩溃与无法回退**：`SystemPlayer` 全链路保护 `MediaPlayer.getTrackInfo` / `getSelectedTrack` / `setPlaybackParams` 等原生异常，蓝光原盘容器（`.iso` / `.bdmv` / `.m2ts`）与系统播放器异常自动无缝回退内置 Media3 解码内核。
+- **修复电视端坚果云 WebDAV 同步报 `HTTP 409 读取失败` 与非 ASCII 路径问题**：支持初始 `GET` 返回 `409` 时先递归创建父目录并重试/视为空库完成首次同步，并统一进行 URL ASCII 百分号归一化编码。
+- **修复蜘蛛「网页配置」手机扫码被拒绝、电视误自开网页与横向 Cookie 输入框无法扫码**：新增仅限时限网盘/配置 `/proxy` 白名单路由的局域网桥接 `TvLanConfigBridge`（保持 `LocalProxy` 严格仅限本机回环），拦截电视自身 `ACTION_VIEW` 与结构化网页配置动作转为本机局域网二维码供手机浏览器打开；补齐横向布局 `EditText`（如 Cookie/授权弹窗）右侧扫码输入按钮。
+- **修复全局搜索焦点乱跳/丢失、低内存电视卡顿无响应与新增按分组搜索**：搜索流式返回期间不再抢夺用户移至顶部来源筛选栏的焦点，优化 `DPAD_UP/DOWN` 焦点归位、`scheduleRender` 防抖、全部计数排序缓存与 `PluginDialogStyler` 预绘制节流；右上角新增「全部分组 / 指定分组」搜索过滤。
+- **优化软件更新下载回退速度与详情页默认偏好源/默认线路**：放大更新下载读写缓冲（128 KiB）与加快首源无进展快速切源；支持按名称变体与网盘家族匹配默认播放线路并支持弹窗切换后即时重绘定位，优选偏好站源在精选直达时排首位。
+
 ## 2026-11-28 Android 手机 / 平板 0.7.7 专项修复：平板去沉浸顶栏遮挡与滚动跳位修复、代理流式拉流提速与剧集高清海报升级（Android 手机 / 平板 0.7.7）
 
 - [Android 手机 / 平板 0.7.7](docs/releases/android-mobile-v0.7.7.md)

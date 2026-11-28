@@ -510,11 +510,11 @@ final class PlayerChrome {
             titleView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 20.5f);
             titleView.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
             titleView.setIncludeFontPadding(false);
-            titleView.setShadowLayer(u * 3f, 0, u * 1.2f, 0xaa000000);
+            UiCompat.setShadowLayer(titleView, u * 3f, 0, u * 1.2f, 0xaa000000);
         } else {
             titleView.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
             titleView.getPaint().setFakeBoldText(true);
-            titleView.setShadowLayer(a.dp(4), 0, a.dp(2), 0xdd000000);
+            UiCompat.setShadowLayer(titleView, a.dp(4), 0, a.dp(2), 0xdd000000);
         }
         titleView.setSingleLine();
         titleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -547,7 +547,7 @@ final class PlayerChrome {
             }
             wallClock.setIncludeFontPadding(false);
             wallClock.setSingleLine();
-            wallClock.setShadowLayer(u * 2.2f, 0, u * .8f, 0x66000000);
+            UiCompat.setShadowLayer(wallClock, u * 2.2f, 0, u * .8f, 0x66000000);
             wallClock.setText(styledWallTime(lastWallClock));
             titleRow.addView(wallClock, new LinearLayout.LayoutParams(-2, -2));
         } else {
@@ -678,7 +678,7 @@ final class PlayerChrome {
                 a.playClock.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 12f);
                 a.playClock.setFontFeatureSettings("tnum");
                 a.playClock.setIncludeFontPadding(false);
-                a.playClock.setShadowLayer(u * 2f, 0, u * 1f, 0x88000000);
+                UiCompat.setShadowLayer(a.playClock, u * 2f, 0, u * 1f, 0x88000000);
             }
             a.playClock.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
             a.playClock.setPadding(a.dp(6), 0, a.dp(12), a.isTvDevice() ? vp(a, 5) : 0);
@@ -688,7 +688,7 @@ final class PlayerChrome {
             if (a.isTvDevice()) {
                 seekHint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 11.5f);
                 seekHint.setIncludeFontPadding(false);
-                seekHint.setShadowLayer(u * 2f, 0, u * 1f, 0x88000000);
+                UiCompat.setShadowLayer(seekHint, u * 2f, 0, u * 1f, 0x88000000);
             }
             seekHint.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
             seekHint.setPadding(a.dp(8), 0, a.dp(6), a.isTvDevice() ? vp(a, 5) : 0);
@@ -1060,7 +1060,7 @@ final class PlayerChrome {
             }
             sleepHudPill.setIncludeFontPadding(false);
             sleepHudPill.setSingleLine();
-            sleepHudPill.setShadowLayer(u * 3.2f, 0, u * 1.0f, 0xc0000000);
+            UiCompat.setShadowLayer(sleepHudPill, u * 3.2f, 0, u * 1.0f, 0xc0000000);
             sleepHudPill.setVisibility(View.GONE);
             LinearLayout.LayoutParams sleepHudLp = new LinearLayout.LayoutParams(-2, -2);
             sleepHudLp.rightMargin = vp(a, 10);
@@ -1079,7 +1079,7 @@ final class PlayerChrome {
             }
             hudProgressView.setIncludeFontPadding(false);
             hudProgressView.setSingleLine();
-            hudProgressView.setShadowLayer(u * 3.2f, 0, u * 1.0f, 0xc0000000);
+            UiCompat.setShadowLayer(hudProgressView, u * 3.2f, 0, u * 1.0f, 0xc0000000);
             String initElapsed =
                     live
                             ? "直播"
@@ -1119,7 +1119,7 @@ final class PlayerChrome {
             }
             persistentClock.setIncludeFontPadding(false);
             persistentClock.setSingleLine();
-            persistentClock.setShadowLayer(u * 3.8f, 0, u * 1.2f, 0xd4000000);
+            UiCompat.setShadowLayer(persistentClock, u * 3.8f, 0, u * 1.2f, 0xd4000000);
             persistentClock.setText(styledWallTime(initialPersistentTime));
             tvTopRightHud.addView(persistentClock, new LinearLayout.LayoutParams(-2, -2));
 

@@ -7,12 +7,11 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.HttpURLConnection;
 import java.net.URI;
-import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -20,6 +19,18 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import okhttp3.Call;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
 import org.json.JSONObject;
 
 /**
@@ -31,6 +42,8 @@ import org.json.JSONObject;
  */
 public final class MediaDiskCache {
     public static final int BLOCK_SIZE = 256 * 1024;
+    private static final int STREAM_CHUNK_SIZE = 64 * 1024;
+    private static final int MAX_PENDING_BLOCKS = 24;
     private static final int MAX_SESSIONS = 64;
     private static volatile MediaDiskCache shared;
 
@@ -244,110 +257,411 @@ public final class MediaDiskCache {
         while (pos <= end) {
             long blockIndex = pos / BLOCK_SIZE;
             int offsetInBlock = (int) (pos % BLOCK_SIZE);
-            byte[] block = getOrFetchBlock(session, entryDir, meta, blockIndex);
-            if (block == null || offsetInBlock >= block.length) {
+            byte[] cached = readCachedBlock(entryDir, blockIndex);
+            if (cached != null) {
+                if (offsetInBlock >= cached.length) break;
+                int available = cached.length - offsetInBlock;
+                int toWrite = (int) Math.min((long) available, (end - pos) + 1L);
+                out.write(cached, offsetInBlock, toWrite);
+                pos += toWrite;
+                if (pos > end) {
+                    out.flush();
+                }
+                continue;
+            }
+            long endBlock = end / (long) BLOCK_SIZE;
+            long lastMissBlock = blockIndex;
+            while (lastMissBlock + 1L <= endBlock
+                    && !hasCachedBlock(entryDir, lastMissBlock + 1L)) {
+                lastMissBlock++;
+            }
+            long advancedTo =
+                    streamContiguousMiss(
+                            session, entryDir, meta, pos, end, blockIndex, lastMissBlock, out);
+            if (advancedTo <= pos) {
                 break;
             }
-            int available = block.length - offsetInBlock;
-            int toWrite = (int) Math.min((long) available, (end - pos) + 1L);
-            out.write(block, offsetInBlock, toWrite);
-            pos += toWrite;
+            pos = advancedTo;
         }
         out.flush();
-        trimIfNeeded();
+        scheduleTrimAsync();
         return false;
+    }
+
+    private final ConcurrentHashMap<String, byte[]> pendingBlocks = new ConcurrentHashMap<>();
+    private final ThreadPoolExecutor diskWriteExecutor =
+            new ThreadPoolExecutor(
+                    1,
+                    1,
+                    30L,
+                    TimeUnit.SECONDS,
+                    new LinkedBlockingQueue<Runnable>(MAX_PENDING_BLOCKS),
+                    r -> {
+                        Thread t = new Thread(r, "marco-tv-cache-writer");
+                        t.setDaemon(true);
+                        return t;
+                    },
+                    new ThreadPoolExecutor.AbortPolicy());
+    private final ExecutorService trimExecutor =
+            Executors.newSingleThreadExecutor(
+                    r -> {
+                        Thread t = new Thread(r, "marco-tv-cache-trim");
+                        t.setDaemon(true);
+                        return t;
+                    });
+    private final AtomicBoolean trimScheduled = new AtomicBoolean(false);
+
+    private void scheduleTrimAsync() {
+        if (trimScheduled.compareAndSet(false, true)) {
+            trimExecutor.execute(
+                    () -> {
+                        try {
+                            trimIfNeeded();
+                        } finally {
+                            trimScheduled.set(false);
+                        }
+                    });
+        }
+    }
+
+    private static String pendingBlockKey(File entryDir, long blockIndex) {
+        return entryDir.getName() + ":" + blockIndex;
+    }
+
+    private boolean hasCachedBlock(File entryDir, long blockIndex) {
+        if (pendingBlocks.containsKey(pendingBlockKey(entryDir, blockIndex))) {
+            return true;
+        }
+        File blockFile = new File(entryDir, "b_" + blockIndex + ".bin");
+        return blockFile.isFile() && blockFile.length() > 0;
+    }
+
+    private byte[] readCachedBlock(File entryDir, long blockIndex) throws IOException {
+        byte[] pending = pendingBlocks.get(pendingBlockKey(entryDir, blockIndex));
+        if (pending != null && pending.length > 0) {
+            return pending;
+        }
+        File blockFile = new File(entryDir, "b_" + blockIndex + ".bin");
+        if (blockFile.isFile() && blockFile.length() > 0) {
+            return readFile(blockFile);
+        }
+        return null;
+    }
+
+    private void enqueueBlockWrite(final File entryDir, final long blockIndex, final byte[] data) {
+        if (maxBytes <= 0 || data == null || data.length == 0) return;
+        final String key = pendingBlockKey(entryDir, blockIndex);
+        if (pendingBlocks.size() >= MAX_PENDING_BLOCKS && !pendingBlocks.containsKey(key)) {
+            return;
+        }
+        pendingBlocks.put(key, data);
+        final File target = new File(entryDir, "b_" + blockIndex + ".bin");
+        try {
+            diskWriteExecutor.execute(
+                    () -> {
+                        try {
+                            writeAtomically(target, data);
+                            touchMeta(entryDir);
+                        } catch (Throwable ignored) {
+                        } finally {
+                            pendingBlocks.remove(key, data);
+                        }
+                    });
+        } catch (Throwable rejected) {
+            pendingBlocks.remove(key, data);
+        }
+    }
+
+    private long streamContiguousMiss(
+            Session session,
+            File entryDir,
+            Meta meta,
+            long startPos,
+            long endPos,
+            long firstMissBlock,
+            long lastMissBlock,
+            OutputStream out)
+            throws IOException {
+        long missStart = firstMissBlock * (long) BLOCK_SIZE;
+        long alignEnd =
+                Math.min(meta.contentLength - 1L, (lastMissBlock + 1L) * (long) BLOCK_SIZE - 1L);
+        if (missStart > alignEnd) return startPos;
+        String rangeSpec =
+                endPos >= meta.contentLength - 1L
+                        ? ("bytes=" + missStart + "-")
+                        : ("bytes=" + missStart + "-" + alignEnd);
+
+        try (UpstreamCall up = openUpstreamCall(session.url, session.headers, rangeSpec)) {
+            int code = up.response.code();
+            if (code == 416) {
+                up.close();
+                return streamMissWithoutRange(
+                        session, entryDir, meta, startPos, endPos, missStart, alignEnd, out);
+            }
+            if (code != 206 && code != 200) {
+                throw new IOException("Upstream block HTTP " + code);
+            }
+            ResponseBody body = up.response.body();
+            if (body == null) throw new IOException("Upstream empty body");
+            if (code == 206) {
+                long[] cr = LocalProxy.parseContentRange(up.response.header("Content-Range"));
+                if (cr != null && cr[0] != missStart) {
+                    throw new IOException(
+                            "Upstream Content-Range mismatch: expected "
+                                    + missStart
+                                    + " got "
+                                    + cr[0]);
+                }
+            } else {
+                if (missStart > 2L * 1024L * 1024L) {
+                    throw new IOException("Upstream ignored Range for offset " + missStart);
+                }
+                skipExact(body.byteStream(), missStart);
+            }
+            return pumpUpstreamAndCacheBlocks(
+                    entryDir,
+                    meta,
+                    body.byteStream(),
+                    missStart,
+                    startPos,
+                    endPos,
+                    lastMissBlock,
+                    alignEnd,
+                    out);
+        }
+    }
+
+    private long streamMissWithoutRange(
+            Session session,
+            File entryDir,
+            Meta meta,
+            long startPos,
+            long endPos,
+            long missStart,
+            long alignEnd,
+            OutputStream out)
+            throws IOException {
+        if (missStart > 2L * 1024L * 1024L) {
+            throw new IOException("Upstream rejected Range for tail offset " + missStart);
+        }
+        try (UpstreamCall retry = openUpstreamCall(session.url, session.headers, null)) {
+            int code = retry.response.code();
+            if (code < 200 || code >= 300) {
+                throw new IOException("Upstream fallback HTTP " + code);
+            }
+            ResponseBody body = retry.response.body();
+            if (body == null) throw new IOException("Upstream fallback empty body");
+            InputStream in = body.byteStream();
+            skipExact(in, missStart);
+            return pumpUpstreamAndCacheBlocks(
+                    entryDir,
+                    meta,
+                    in,
+                    missStart,
+                    startPos,
+                    endPos,
+                    alignEnd / (long) BLOCK_SIZE,
+                    alignEnd,
+                    out);
+        }
+    }
+
+    private long pumpUpstreamAndCacheBlocks(
+            File entryDir,
+            Meta meta,
+            InputStream in,
+            long streamPos,
+            long clientPos,
+            long endPos,
+            long lastMissBlock,
+            long alignEnd,
+            OutputStream out)
+            throws IOException {
+        long curPos = clientPos;
+        long curBlockIdx = streamPos / (long) BLOCK_SIZE;
+        int blockFilled = (int) (streamPos % (long) BLOCK_SIZE);
+        byte[] blockBuf = null;
+        if (maxBytes > 0 && curBlockIdx * (long) BLOCK_SIZE < meta.contentLength) {
+            int targetLen =
+                    (int)
+                            Math.min(
+                                    (long) BLOCK_SIZE,
+                                    meta.contentLength - curBlockIdx * (long) BLOCK_SIZE);
+            if (targetLen > 0) blockBuf = new byte[targetLen];
+        }
+        byte[] ioBuf = new byte[STREAM_CHUNK_SIZE];
+        boolean firstFlushed = false;
+        boolean drainPartialFinalBlock =
+                alignEnd > endPos && (alignEnd - endPos) <= (long) BLOCK_SIZE;
+        while (true) {
+            RequestScope.checkCurrent();
+            int n = in.read(ioBuf);
+            if (n < 0) {
+                if (blockBuf != null && blockFilled > 0 && streamPos >= meta.contentLength) {
+                    enqueueBlockWrite(entryDir, curBlockIdx, Arrays.copyOf(blockBuf, blockFilled));
+                }
+                break;
+            }
+            if (n == 0) continue;
+
+            long chunkStart = streamPos;
+            long chunkEnd = streamPos + (long) n - 1L;
+            if (curPos <= endPos && chunkEnd >= curPos) {
+                int srcOff = (int) Math.max(0L, curPos - chunkStart);
+                long sendEnd = Math.min(endPos, chunkEnd);
+                int sendLen = (int) (sendEnd - curPos + 1L);
+                if (sendLen > 0) {
+                    out.write(ioBuf, srcOff, sendLen);
+                    curPos += sendLen;
+                    if (!firstFlushed) {
+                        out.flush();
+                        firstFlushed = true;
+                    }
+                }
+            }
+
+            if (maxBytes > 0) {
+                int off = 0;
+                while (off < n) {
+                    if (blockBuf == null) {
+                        if (curBlockIdx * (long) BLOCK_SIZE >= meta.contentLength) break;
+                        int targetLen =
+                                (int)
+                                        Math.min(
+                                                (long) BLOCK_SIZE,
+                                                meta.contentLength
+                                                        - curBlockIdx * (long) BLOCK_SIZE);
+                        if (targetLen <= 0) break;
+                        blockBuf = new byte[targetLen];
+                        blockFilled = 0;
+                    }
+                    int copy = Math.min(n - off, blockBuf.length - blockFilled);
+                    System.arraycopy(ioBuf, off, blockBuf, blockFilled, copy);
+                    blockFilled += copy;
+                    off += copy;
+                    if (blockFilled == blockBuf.length) {
+                        enqueueBlockWrite(entryDir, curBlockIdx, blockBuf);
+                        blockBuf = null;
+                        curBlockIdx++;
+                        blockFilled = 0;
+                    }
+                }
+            }
+            streamPos += n;
+
+            if (curPos > endPos) {
+                out.flush();
+                if (!drainPartialFinalBlock
+                        || streamPos > alignEnd
+                        || curBlockIdx > lastMissBlock) {
+                    break;
+                }
+            }
+        }
+        return curPos;
+    }
+
+    private static void skipExact(InputStream in, long bytesToSkip) throws IOException {
+        if (bytesToSkip <= 0L) return;
+        byte[] discard = new byte[16384];
+        long rem = bytesToSkip;
+        while (rem > 0L) {
+            RequestScope.checkCurrent();
+            int n = in.read(discard, 0, (int) Math.min(discard.length, rem));
+            if (n < 0) throw new IOException("Upstream EOF while skipping");
+            rem -= n;
+        }
     }
 
     byte[] getOrFetchBlock(Session session, File entryDir, Meta meta, long blockIndex)
             throws IOException {
-        File blockFile = new File(entryDir, "b_" + blockIndex + ".bin");
-        if (blockFile.isFile() && blockFile.length() > 0) {
-            return readFile(blockFile);
+        byte[] cached = readCachedBlock(entryDir, blockIndex);
+        if (cached != null && cached.length > 0) {
+            return cached;
         }
         long blockStart = blockIndex * (long) BLOCK_SIZE;
         long blockEnd = Math.min(meta.contentLength - 1L, blockStart + BLOCK_SIZE - 1L);
         if (blockStart > blockEnd) return new byte[0];
 
-        HttpURLConnection conn =
-                openUpstream(session.url, session.headers, "bytes=" + blockStart + "-" + blockEnd);
-        try {
-            int code = conn.getResponseCode();
+        try (UpstreamCall up =
+                openUpstreamCall(
+                        session.url, session.headers, "bytes=" + blockStart + "-" + blockEnd)) {
+            int code = up.response.code();
             if (code == 416) {
-                // Retry once without Range for servers that reject bounded partial fetches.
-                RequestScope.detach(conn);
-                conn.disconnect();
+                up.close();
                 return fetchBlockWithoutRange(session, blockStart, blockEnd);
             }
             if (code != 206 && code != 200) {
                 throw new IOException("Upstream block HTTP " + code);
             }
+            ResponseBody body = up.response.body();
+            if (body == null) throw new IOException("Upstream empty body");
             byte[] data;
             if (code == 206) {
-                data = readExactUpTo(conn.getInputStream(), (int) (blockEnd - blockStart + 1L));
+                data = readExactUpTo(body.byteStream(), (int) (blockEnd - blockStart + 1L));
             } else {
+                if (blockStart > 2L * 1024L * 1024L) {
+                    throw new IOException("Upstream ignored Range for offset " + blockStart);
+                }
                 data =
                         readSliceFromFull(
-                                conn.getInputStream(),
-                                blockStart,
-                                (int) (blockEnd - blockStart + 1L));
+                                body.byteStream(), blockStart, (int) (blockEnd - blockStart + 1L));
             }
             if (maxBytes > 0 && data.length > 0) {
-                writeAtomically(blockFile, data);
+                enqueueBlockWrite(entryDir, blockIndex, data);
             }
             return data;
-        } finally {
-            RequestScope.detach(conn);
-            conn.disconnect();
         }
     }
 
     private byte[] fetchBlockWithoutRange(Session session, long blockStart, long blockEnd)
             throws IOException {
-        HttpURLConnection retry = openUpstream(session.url, session.headers, null);
-        try {
-            int code = retry.getResponseCode();
+        if (blockStart > 2L * 1024L * 1024L) {
+            throw new IOException("Upstream rejected Range for tail offset " + blockStart);
+        }
+        try (UpstreamCall retry = openUpstreamCall(session.url, session.headers, null)) {
+            int code = retry.response.code();
             if (code < 200 || code >= 300) {
                 throw new IOException("Upstream fallback HTTP " + code);
             }
+            ResponseBody body = retry.response.body();
+            if (body == null) throw new IOException("Upstream fallback empty body");
             return readSliceFromFull(
-                    retry.getInputStream(), blockStart, (int) (blockEnd - blockStart + 1L));
-        } finally {
-            RequestScope.detach(retry);
-            retry.disconnect();
+                    body.byteStream(), blockStart, (int) (blockEnd - blockStart + 1L));
         }
     }
 
     private Meta probeUpstream(Session session, File entryDir) throws IOException {
-        HttpURLConnection conn =
-                openUpstream(session.url, session.headers, "bytes=0-" + (BLOCK_SIZE - 1));
-        try {
-            int code = conn.getResponseCode();
+        try (UpstreamCall up =
+                openUpstreamCall(session.url, session.headers, "bytes=0-" + (BLOCK_SIZE - 1))) {
+            Response resp = up.response;
+            int code = resp.code();
             Meta meta = new Meta();
-            String ct = conn.getContentType();
+            String ct = resp.header("Content-Type");
             if (ct != null && !ct.trim().isEmpty()) meta.contentType = ct.trim();
+            ResponseBody body = resp.body();
+            InputStream rawIn = body != null ? body.byteStream() : null;
 
-            if (code == 206) {
-                long[] cr = LocalProxy.parseContentRange(conn.getHeaderField("Content-Range"));
+            if (code == 206 && rawIn != null) {
+                long[] cr = LocalProxy.parseContentRange(resp.header("Content-Range"));
                 if (cr != null && cr[2] > 0) {
                     meta.contentLength = cr[2];
                     meta.rangeSupported = true;
                     byte[] firstBlock =
                             readExactUpTo(
-                                    conn.getInputStream(),
-                                    (int) Math.min((long) BLOCK_SIZE, meta.contentLength));
+                                    rawIn, (int) Math.min((long) BLOCK_SIZE, meta.contentLength));
                     if (maxBytes > 0 && firstBlock.length > 0) {
                         writeAtomically(new File(entryDir, "b_0.bin"), firstBlock);
                     }
                     saveMeta(entryDir, meta);
                     return meta;
                 }
-            } else if (code == 200) {
-                long len = parseContentLength(conn);
+            } else if (code == 200 && rawIn != null) {
+                long len = parseOkHttpContentLength(resp);
                 meta.contentLength = len;
-                meta.rangeSupported =
-                        "bytes".equalsIgnoreCase(conn.getHeaderField("Accept-Ranges"));
+                meta.rangeSupported = "bytes".equalsIgnoreCase(resp.header("Accept-Ranges"));
                 if (len > 0 && len <= BLOCK_SIZE) {
-                    byte[] whole = readExactUpTo(conn.getInputStream(), (int) len);
+                    byte[] whole = readExactUpTo(rawIn, (int) len);
                     meta.contentLength = whole.length;
                     meta.rangeSupported = true;
                     if (maxBytes > 0 && whole.length > 0) {
@@ -361,31 +675,27 @@ public final class MediaDiskCache {
                 return meta;
             }
             return meta;
-        } finally {
-            RequestScope.detach(conn);
-            conn.disconnect();
         }
     }
 
     private boolean passthroughStream(
             Session session, String method, String rangeHeader, OutputStream out)
             throws IOException {
-        HttpURLConnection conn = openUpstream(session.url, session.headers, rangeHeader);
+        UpstreamCall up = openUpstreamCall(session.url, session.headers, rangeHeader);
         try {
-            int code = conn.getResponseCode();
+            int code = up.response.code();
             if (code == 416 && rangeHeader != null) {
-                RequestScope.detach(conn);
-                conn.disconnect();
-                conn = openUpstream(session.url, session.headers, null);
-                code = conn.getResponseCode();
+                up.close();
+                up = openUpstreamCall(session.url, session.headers, null);
+                code = up.response.code();
             }
             if (code >= 400) {
                 LocalProxy.simple(out, code, "Upstream HTTP " + code);
                 return false;
             }
-            String ct = conn.getContentType();
-            long len = parseContentLength(conn);
-            String cr = conn.getHeaderField("Content-Range");
+            String ct = up.response.header("Content-Type");
+            long len = parseOkHttpContentLength(up.response);
+            String cr = up.response.header("Content-Range");
             StringBuilder head =
                     new StringBuilder("HTTP/1.1 ")
                             .append(code)
@@ -405,38 +715,113 @@ public final class MediaDiskCache {
                 head.append("Transfer-Encoding: chunked\r\n\r\n");
             }
             out.write(head.toString().getBytes(StandardCharsets.ISO_8859_1));
-            if (!"HEAD".equals(method)) {
-                byte[] buf = new byte[64 * 1024];
+            ResponseBody body = up.response.body();
+            if (!"HEAD".equals(method) && body != null) {
+                byte[] buf = new byte[STREAM_CHUNK_SIZE];
                 int n;
-                try (InputStream in = conn.getInputStream()) {
-                    if (len >= 0) {
-                        long rem = len;
-                        while (rem > 0
-                                && (n = in.read(buf, 0, (int) Math.min(buf.length, rem))) != -1) {
-                            if (n > 0) {
-                                out.write(buf, 0, n);
-                                rem -= n;
-                            }
-                        }
-                    } else {
-                        while ((n = in.read(buf)) != -1) {
-                            if (n == 0) continue;
-                            out.write(
-                                    (Integer.toHexString(n) + "\r\n")
-                                            .getBytes(StandardCharsets.US_ASCII));
+                InputStream in = body.byteStream();
+                if (len >= 0) {
+                    long rem = len;
+                    while (rem > 0
+                            && (n = in.read(buf, 0, (int) Math.min(buf.length, rem))) != -1) {
+                        if (n > 0) {
                             out.write(buf, 0, n);
-                            out.write(new byte[] {13, 10});
+                            rem -= n;
                         }
-                        out.write("0\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
                     }
+                } else {
+                    while ((n = in.read(buf)) != -1) {
+                        if (n == 0) continue;
+                        out.write(
+                                (Integer.toHexString(n) + "\r\n")
+                                        .getBytes(StandardCharsets.US_ASCII));
+                        out.write(buf, 0, n);
+                        out.write(new byte[] {13, 10});
+                    }
+                    out.write("0\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
                 }
             }
             out.flush();
             return false;
         } finally {
-            RequestScope.detach(conn);
-            conn.disconnect();
+            up.close();
         }
+    }
+
+    static final class UpstreamCall implements java.io.Closeable {
+        final Call call;
+        final Response response;
+        final Runnable cancelHook;
+
+        UpstreamCall(Call call, Response response, Runnable cancelHook) {
+            this.call = call;
+            this.response = response;
+            this.cancelHook = cancelHook;
+        }
+
+        @Override
+        public void close() {
+            RequestScope.offCancel(cancelHook);
+            try {
+                response.close();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    static UpstreamCall openUpstreamCall(
+            String url, Map<String, String> headers, String rangeHeader) throws IOException {
+        if (!Cms.isHttp(url)) {
+            throw new IOException("不支持的媒体地址");
+        }
+        RequestScope.checkCurrent();
+        OkHttpClient client = MoviePlayer.mediaHttpClient();
+        Request.Builder rb = new Request.Builder().url(url);
+        boolean hasUa = false;
+        if (headers != null) {
+            for (Map.Entry<String, String> entry : headers.entrySet()) {
+                String k = entry.getKey();
+                String v = entry.getValue();
+                if (k == null
+                        || v == null
+                        || k.equalsIgnoreCase("Host")
+                        || k.equalsIgnoreCase("Range")
+                        || k.equalsIgnoreCase("Accept-Encoding")) {
+                    continue;
+                }
+                if (k.equalsIgnoreCase("User-Agent")) hasUa = true;
+                rb.header(k, v);
+            }
+        }
+        if (!hasUa) {
+            rb.header("User-Agent", "MarcoMovie/0.2.0");
+        }
+        rb.header("Accept-Encoding", "identity");
+        if (rangeHeader != null && !rangeHeader.isEmpty()) {
+            rb.header("Range", rangeHeader);
+        }
+        Call call = client.newCall(rb.build());
+        Runnable cancelHook = call::cancel;
+        RequestScope.onCancel(cancelHook);
+        try {
+            Response resp = call.execute();
+            return new UpstreamCall(call, resp, cancelHook);
+        } catch (IOException err) {
+            RequestScope.offCancel(cancelHook);
+            throw err;
+        }
+    }
+
+    private static long parseOkHttpContentLength(Response resp) {
+        String header = resp.header("Content-Length");
+        if (header != null) {
+            try {
+                return Long.parseLong(header.trim());
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        ResponseBody body = resp.body();
+        return body != null ? body.contentLength() : -1L;
     }
 
     static long[] parseRangeHeader(String rangeHeader, long total) {
@@ -574,42 +959,6 @@ public final class MediaDiskCache {
         if (meta.isFile()) {
             meta.setLastModified(System.currentTimeMillis());
         }
-    }
-
-    private static long parseContentLength(HttpURLConnection conn) {
-        String header = conn.getHeaderField("Content-Length");
-        if (header != null) {
-            try {
-                return Long.parseLong(header.trim());
-            } catch (NumberFormatException ignored) {
-            }
-        }
-        int legacy = conn.getContentLength();
-        return legacy >= 0 ? legacy : -1L;
-    }
-
-    private static HttpURLConnection openUpstream(
-            String url, Map<String, String> headers, String range) throws IOException {
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        RequestScope.attach(conn);
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(25000);
-        conn.setInstanceFollowRedirects(true);
-        boolean hasUa = false;
-        for (Map.Entry<String, String> entry : headers.entrySet()) {
-            String k = entry.getKey();
-            String v = entry.getValue();
-            if (k == null || v == null || k.equalsIgnoreCase("Host")) continue;
-            if (k.equalsIgnoreCase("User-Agent")) hasUa = true;
-            conn.setRequestProperty(k, v);
-        }
-        if (!hasUa) {
-            conn.setRequestProperty("User-Agent", "MarcoMovie/0.2.0");
-        }
-        if (range != null && !range.isEmpty()) {
-            conn.setRequestProperty("Range", range);
-        }
-        return conn;
     }
 
     private static byte[] readExactUpTo(InputStream in, int maxBytes) throws IOException {

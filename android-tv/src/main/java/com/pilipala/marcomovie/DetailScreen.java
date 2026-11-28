@@ -131,7 +131,7 @@ final class DetailScreen {
         title.setGravity(Gravity.CENTER);
         title.setMaxLines(2);
         title.setEllipsize(TextUtils.TruncateAt.END);
-        title.setShadowLayer(a.dp(12), 0, a.dp(3), 0xcc000000);
+        UiCompat.setShadowLayer(title, a.dp(12), 0, a.dp(3), 0xcc000000);
         LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(-2, -2);
         titleLp.gravity = Gravity.CENTER_HORIZONTAL;
         hero.addView(title, titleLp);
@@ -212,7 +212,7 @@ final class DetailScreen {
                         synopsis.setMaxLines(2);
                         synopsis.setEllipsize(TextUtils.TruncateAt.END);
                         synopsis.setMaxWidth(a.dp(760));
-                        synopsis.setShadowLayer(a.dp(6), 0, a.dp(1), 0x88000000);
+                        UiCompat.setShadowLayer(synopsis, a.dp(6), 0, a.dp(1), 0x88000000);
                         synopsisRow.addView(synopsis, new LinearLayout.LayoutParams(-2, -2));
 
                         Button moreBtn =
@@ -830,7 +830,38 @@ final class DetailScreen {
                         "默认线路",
                         "line-preferred",
                         false,
-                        () -> SourcePreferences.chooseLine(a, video));
+                        () ->
+                                SourcePreferences.chooseLine(
+                                        a,
+                                        video,
+                                        () -> {
+                                            int targetIdx = SourcePreferences.lineIndex(a, video);
+                                            renderEpisodes(
+                                                    a, site, video, targetIdx, 0, panel, null);
+                                            View epFile =
+                                                    a.root.findViewWithTag("detail-episode-file");
+                                            if (epFile instanceof TextView
+                                                    && targetIdx < video.lines.size()
+                                                    && !video.lines
+                                                            .get(targetIdx)
+                                                            .episodes
+                                                            .isEmpty()) {
+                                                String cap =
+                                                        TvV17DetailScreen.formatEpisodeFileCaption(
+                                                                video.lines.get(targetIdx),
+                                                                video.lines
+                                                                        .get(targetIdx)
+                                                                        .episodes
+                                                                        .get(0));
+                                                ((TextView) epFile).setText(cap);
+                                                epFile.setVisibility(
+                                                        cap.isEmpty() ? View.GONE : View.VISIBLE);
+                                            }
+                                            View next =
+                                                    panel.findViewWithTag(
+                                                            "detail-line:" + targetIdx);
+                                            if (next != null) next.requestFocus();
+                                        }));
         lineHeader.addView(prefLineBtn);
         panel.addView(lineHeader, new LinearLayout.LayoutParams(-1, -2));
 

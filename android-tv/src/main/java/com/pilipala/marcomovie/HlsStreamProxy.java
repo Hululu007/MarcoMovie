@@ -6,7 +6,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.SequenceInputStream;
-import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -434,15 +433,17 @@ public final class HlsStreamProxy {
 
     private static boolean servePlaylist(
             Session session, String targetUrl, String method, OutputStream out) throws IOException {
-        HttpURLConnection conn = openUpstream(targetUrl, session.headers, null);
-        try {
-            int code = conn.getResponseCode();
-            String finalUrl = conn.getURL() != null ? conn.getURL().toString() : targetUrl;
+        try (MediaDiskCache.UpstreamCall up =
+                MediaDiskCache.openUpstreamCall(targetUrl, session.headers, null)) {
+            int code = up.response.code();
+            String finalUrl = up.response.request().url().toString();
             if (code >= 400) {
                 LocalProxy.simple(out, code, "Upstream playlist HTTP " + code);
                 return false;
             }
-            byte[] rawBytes = readAllBounded(conn.getInputStream(), 8 * 1024 * 1024);
+            okhttp3.ResponseBody body = up.response.body();
+            byte[] rawBytes =
+                    body != null ? readAllBounded(body.byteStream(), 8 * 1024 * 1024) : new byte[0];
             String text = new String(rawBytes, StandardCharsets.UTF_8);
             String rewritten =
                     rewritePlaylist(
@@ -469,9 +470,6 @@ public final class HlsStreamProxy {
             }
             out.flush();
             return false;
-        } finally {
-            RequestScope.detach(conn);
-            conn.disconnect();
         }
     }
 
@@ -484,16 +482,16 @@ public final class HlsStreamProxy {
             OutputStream out)
             throws IOException {
         String range = requestHeaders != null ? requestHeaders.get("range") : null;
-        HttpURLConnection conn = openUpstream(targetUrl, session.headers, range);
-        try {
-            int code = conn.getResponseCode();
+        try (MediaDiskCache.UpstreamCall up =
+                MediaDiskCache.openUpstreamCall(targetUrl, session.headers, range)) {
+            int code = up.response.code();
             if (code >= 400) {
                 LocalProxy.simple(out, code, "Upstream segment HTTP " + code);
                 return false;
             }
-            String contentType = conn.getContentType();
-            long upstreamLength = parseContentLength(conn);
-            String contentRange = conn.getHeaderField("Content-Range");
+            String contentType = up.response.header("Content-Type");
+            long upstreamLength = parseOkHttpContentLength(up.response);
+            String contentRange = up.response.header("Content-Range");
             if ("HEAD".equals(method)) {
                 StringBuilder head =
                         new StringBuilder("HTTP/1.1 ")
@@ -514,7 +512,8 @@ public final class HlsStreamProxy {
                 return false;
             }
 
-            String lowerPath = targetUrl.split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
+            String finalUrl = up.response.request().url().toString();
+            String lowerPath = finalUrl.split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
             boolean skipProbe =
                     raw
                             || range != null
@@ -523,7 +522,9 @@ public final class HlsStreamProxy {
                             || lowerPath.endsWith(".key")
                             || lowerPath.endsWith(".vtt");
 
-            try (InputStream upstream = conn.getInputStream()) {
+            okhttp3.ResponseBody body = up.response.body();
+            try (InputStream upstream =
+                    body != null ? body.byteStream() : new ByteArrayInputStream(new byte[0])) {
                 InputStream bodyStream = upstream;
                 int strippedOffset = 0;
                 if (!skipProbe) {
@@ -587,46 +588,19 @@ public final class HlsStreamProxy {
                 out.flush();
                 return false;
             }
-        } finally {
-            RequestScope.detach(conn);
-            conn.disconnect();
         }
     }
 
-    private static long parseContentLength(HttpURLConnection conn) {
-        String header = conn.getHeaderField("Content-Length");
+    private static long parseOkHttpContentLength(okhttp3.Response resp) {
+        String header = resp.header("Content-Length");
         if (header != null) {
             try {
                 return Long.parseLong(header.trim());
             } catch (NumberFormatException ignored) {
             }
         }
-        int legacy = conn.getContentLength();
-        return legacy >= 0 ? legacy : -1L;
-    }
-
-    private static HttpURLConnection openUpstream(
-            String url, Map<String, String> headers, String range) throws IOException {
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        RequestScope.attach(conn);
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(25000);
-        conn.setInstanceFollowRedirects(true);
-        boolean hasUa = false;
-        for (Map.Entry<String, String> entry : headers.entrySet()) {
-            String k = entry.getKey();
-            String v = entry.getValue();
-            if (k == null || v == null || k.equalsIgnoreCase("Host")) continue;
-            if (k.equalsIgnoreCase("User-Agent")) hasUa = true;
-            conn.setRequestProperty(k, v);
-        }
-        if (!hasUa) {
-            conn.setRequestProperty("User-Agent", "MarcoMovie/0.2.0");
-        }
-        if (range != null && !range.isEmpty()) {
-            conn.setRequestProperty("Range", range);
-        }
-        return conn;
+        okhttp3.ResponseBody body = resp.body();
+        return body != null ? body.contentLength() : -1L;
     }
 
     private static int readFullyUpTo(InputStream in, byte[] dst, int maxBytes) throws IOException {

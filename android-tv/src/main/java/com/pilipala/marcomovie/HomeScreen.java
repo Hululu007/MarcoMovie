@@ -1349,7 +1349,7 @@ final class HomeScreen {
 
         TextView eyebrow = a.text("首页推荐 · 近期热门", 12f, 0xdceef4ff);
         eyebrow.setTypeface(null, Typeface.BOLD);
-        eyebrow.setShadowLayer(a.dp(6), 0, a.dp(1), 0xb0000000);
+        UiCompat.setShadowLayer(eyebrow, a.dp(6), 0, a.dp(1), 0xb0000000);
         info.addView(eyebrow);
         a.gap(info, 5);
 
@@ -1357,7 +1357,7 @@ final class HomeScreen {
         titleTv.setTypeface(null, Typeface.BOLD);
         titleTv.setSingleLine(true);
         titleTv.setEllipsize(TextUtils.TruncateAt.END);
-        titleTv.setShadowLayer(a.dp(12), 0, a.dp(2), 0xc8000000);
+        UiCompat.setShadowLayer(titleTv, a.dp(12), 0, a.dp(2), 0xc8000000);
         info.addView(titleTv, new LinearLayout.LayoutParams(a.dp(540), -2));
         a.gap(info, 7);
 
@@ -1366,7 +1366,7 @@ final class HomeScreen {
         final TextView metaTv = a.text("", 14f, 0xe8ebebf5);
         metaTv.setSingleLine(true);
         metaTv.setEllipsize(TextUtils.TruncateAt.END);
-        metaTv.setShadowLayer(a.dp(6), 0, a.dp(1), 0xaa000000);
+        UiCompat.setShadowLayer(metaTv, a.dp(6), 0, a.dp(1), 0xaa000000);
         metaRow.addView(metaTv);
 
         final TextView scorePill = a.text("", 12f, 0xff101218);
@@ -1384,7 +1384,7 @@ final class HomeScreen {
         descTv.setMaxLines(2);
         descTv.setEllipsize(TextUtils.TruncateAt.END);
         descTv.setLineSpacing(a.dp(3f), 1.08f);
-        descTv.setShadowLayer(a.dp(6), 0, a.dp(1), 0xa8000000);
+        UiCompat.setShadowLayer(descTv, a.dp(6), 0, a.dp(1), 0xa8000000);
         info.addView(descTv, new LinearLayout.LayoutParams(a.dp(520), -2));
         a.gap(info, 18);
 

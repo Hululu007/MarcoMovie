@@ -69,6 +69,7 @@ SOURCE_PATHS = [
 SOURCEPATH_ARG = os.pathsep.join(str(p) for p in SOURCE_PATHS if p.exists())
 TARGET_SOURCES = [
     MAIN_JAVA_ROOT / 'com/pilipala/marcomovie/LocalProxy.java',
+    MAIN_JAVA_ROOT / 'com/pilipala/marcomovie/TvLanConfigBridge.java',
     MAIN_JAVA_ROOT / 'com/pilipala/marcomovie/MediaOptions.java',
     MAIN_JAVA_ROOT / 'com/pilipala/marcomovie/MoviePlayer.java',
     MAIN_JAVA_ROOT / 'com/pilipala/marcomovie/DecoderRenderersFactory.java',

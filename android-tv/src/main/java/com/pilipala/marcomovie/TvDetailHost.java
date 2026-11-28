@@ -40,12 +40,9 @@ final class TvDetailHost {
         if (video == null || video.lines == null || video.lines.isEmpty()) {
             return new int[] {0, 0};
         }
-        for (int i = 0; i < video.lines.size(); i++) {
-            Cms.Line cand = video.lines.get(i);
-            if (cand != null && cand.name != null && cand.name.equals(preferred)) {
-                line = i;
-                break;
-            }
+        int matchedPref = SourcePreferences.matchPreferredLineIndex(video.lines, preferred);
+        if (matchedPref >= 0) {
+            line = matchedPref;
         }
         if (bookmark != null) {
             for (int i = 0; i < video.lines.size(); i++) {
@@ -960,8 +957,10 @@ final class TvDetailHost {
                 sources,
                 (x, y) ->
                         Boolean.compare(
-                                !Objects.equals(x.key, selected),
-                                !Objects.equals(y.key, selected)));
+                                !(SourcePreferences.isPreferred(a, x)
+                                        || Objects.equals(x.key, selected)),
+                                !(SourcePreferences.isPreferred(a, y)
+                                        || Objects.equals(y.key, selected))));
         return sources;
     }
 
@@ -980,8 +979,12 @@ final class TvDetailHost {
 
         final List<Cms.Site> allSources = collectUserSearchableSites(a);
         final String selectedKey = a.prefs.getString(Prefs.SELECTED_SITE, "");
+        final String primaryKey =
+                !allSources.isEmpty() && SourcePreferences.isPreferred(a, allSources.get(0))
+                        ? allSources.get(0).key
+                        : selectedKey;
         final List<Cms.Site> targetSources =
-                selectCuratedSearchSources(allSources, selectedKey, CURATED_MAX_SOURCES);
+                selectCuratedSearchSources(allSources, primaryKey, CURATED_MAX_SOURCES);
 
         final Cms.Site[] activeSite = {TvCuratedHome.curatedSite()};
         final Cms.Video[] activeVideo = {curated};

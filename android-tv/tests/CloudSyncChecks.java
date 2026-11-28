@@ -55,6 +55,7 @@ public final class CloudSyncChecks {
         testUiLatchTimeoutAndErrorPropagation();
         testRound2WebdavRobustness();
         testWebdavBindCryptoAndLanEndpoint();
+        testWebdavInitialGet409AndNonAsciiUrl();
         System.out.println("ALL PASS (" + checks + " checks)");
     }
 
@@ -1930,6 +1931,103 @@ public final class CloudSyncChecks {
                     "GET /bind returns sealed WebDAV configuration");
         } finally {
             server.close();
+        }
+    }
+
+    private static void testWebdavInitialGet409AndNonAsciiUrl() throws Exception {
+        String encoded =
+                CloudSync.toAsciiRequestUrl(
+                        "https://dav.jianguoyun.com/dav/我的 坚果云/marco-movie-sync.json");
+        check(
+                encoded.startsWith("https://dav.jianguoyun.com/dav/")
+                        && encoded.contains("%20")
+                        && !encoded.contains("坚"),
+                "CloudSync.toAsciiRequestUrl encodes non-ASCII path and spaces for HTTP requests");
+
+        final java.util.concurrent.atomic.AtomicBoolean dirCreated =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        final AtomicReference<String> storedPayload = new AtomicReference<>("");
+        final AtomicInteger getCount = new AtomicInteger(0);
+        HttpServer dav409 = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        try {
+            dav409.createContext(
+                    "/dav/",
+                    exchange -> {
+                        String method = exchange.getRequestMethod();
+                        String path = exchange.getRequestURI().getRawPath();
+                        if ("MKCOL".equals(method) && path.startsWith("/dav/MarcoMovie")) {
+                            dirCreated.set(true);
+                            exchange.sendResponseHeaders(201, -1);
+                            exchange.close();
+                            return;
+                        }
+                        if ("GET".equals(method)) {
+                            getCount.incrementAndGet();
+                            if (!dirCreated.get()) {
+                                exchange.sendResponseHeaders(409, 0);
+                                exchange.close();
+                                return;
+                            }
+                            if (storedPayload.get().isEmpty()) {
+                                exchange.sendResponseHeaders(404, -1);
+                                exchange.close();
+                                return;
+                            }
+                            byte[] body = storedPayload.get().getBytes(StandardCharsets.UTF_8);
+                            exchange.sendResponseHeaders(200, body.length);
+                            exchange.getResponseBody().write(body);
+                            exchange.close();
+                            return;
+                        }
+                        if ("PUT".equals(method)) {
+                            if (!dirCreated.get()) {
+                                exchange.sendResponseHeaders(409, -1);
+                                exchange.close();
+                                return;
+                            }
+                            storedPayload.set(
+                                    new String(
+                                            readAll(exchange.getRequestBody()),
+                                            StandardCharsets.UTF_8));
+                            exchange.sendResponseHeaders(201, -1);
+                            exchange.close();
+                            return;
+                        }
+                        exchange.sendResponseHeaders(405, -1);
+                        exchange.close();
+                    });
+            dav409.start();
+            String baseUrl =
+                    "http://127.0.0.1:"
+                            + dav409.getAddress().getPort()
+                            + "/dav/MarcoMovie/marco-movie-sync.json";
+            CloudSync.MergeResult res =
+                    CloudSync.syncWebdav(
+                            baseUrl,
+                            "user@example.com",
+                            "pass123",
+                            remote -> {
+                                check(
+                                        remote == null,
+                                        "Initial GET 409 treats missing remote parent as empty library");
+                                return CloudSync.merge(
+                                        "[]",
+                                        "[]",
+                                        "",
+                                        Collections.emptyList(),
+                                        false,
+                                        remote,
+                                        9000L);
+                            });
+            check(
+                    res != null
+                            && dirCreated.get()
+                            && getCount.get() >= 2
+                            && !storedPayload.get().isEmpty(),
+                    "Jianguoyun initial GET HTTP 409 auto-creates parent collection and uploads initial sync payload");
+        } finally {
+            dav409.stop(0);
+            CloudSync.clearNoConditionalWriteHostsForTest();
         }
     }
 }

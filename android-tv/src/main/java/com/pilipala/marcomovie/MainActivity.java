@@ -540,6 +540,16 @@ public final class MainActivity extends Activity {
 
     @Override
     public void startActivity(Intent intent, Bundle options) {
+        if (isTvDevice()
+                && intent != null
+                && Intent.ACTION_VIEW.equals(intent.getAction())
+                && intent.getData() != null) {
+            String rawUrl = intent.getDataString();
+            if (TvLanConfigBridge.isLocalProxyConfigUrl(rawUrl)) {
+                ui.post(() -> showLanProxyConfigQr(rawUrl, "手机扫码网页配置"));
+                return;
+            }
+        }
         if (intent != null && isManageAllFilesAction(intent.getAction())) {
             try {
                 if (intent.resolveActivity(getPackageManager()) != null) {
@@ -553,6 +563,33 @@ public final class MainActivity extends Activity {
             }
         }
         super.startActivity(intent, options);
+    }
+
+    void showLanProxyConfigQr(final String rawUrl, final String title) {
+        if (!isTvDevice() || rawUrl == null || rawUrl.trim().isEmpty()) return;
+        worker.execute(
+                () -> {
+                    try {
+                        ensureProxy(config);
+                    } catch (Throwable ignored) {
+                    }
+                    final String lanUrl =
+                            TvLanConfigBridge.armAndRewriteUrl(
+                                    getApplication(),
+                                    config,
+                                    CspEngine::proxy,
+                                    ProxyAddress.port,
+                                    rawUrl);
+                    ui.post(
+                            () -> {
+                                if (isFinishing()) return;
+                                if (lanUrl != null && !lanUrl.isEmpty()) {
+                                    TvQrInputHelper.showLanConfigQrDialog(this, title, lanUrl);
+                                } else {
+                                    toast("未检测到局域网 IP，请确认电视已连接 Wi-Fi 或有线网络");
+                                }
+                            });
+                });
     }
 
     @Override
@@ -4248,6 +4285,7 @@ public final class MainActivity extends Activity {
         if (phoneConfig != null) phoneConfig.close();
         stopCastService();
         stopSpiderGateway();
+        TvLanConfigBridge.disarm();
         if (startupIntro != null) startupIntro.cancel();
         if (searchScreen != null) searchScreen.close();
         stopWeb();

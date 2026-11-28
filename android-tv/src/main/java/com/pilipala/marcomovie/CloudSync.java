@@ -1395,30 +1395,44 @@ final class CloudSync {
             String etag = null;
             boolean fileAbsent = false;
 
-            HttpURLConnection getConn = openConnection(fileUrl, "GET", auth, 12000);
-            try {
-                int code = getConn.getResponseCode();
-                if (code >= 200 && code < 300) {
-                    remoteJson = readBody(getConn.getInputStream(), MAX_SYNC_BYTES);
-                    String h = getConn.getHeaderField("ETag");
-                    if (h != null && !h.trim().isEmpty()) {
-                        String trimmedEtag = h.trim();
-                        if (!isWeakEtag(trimmedEtag)) {
-                            etag = trimmedEtag;
+            boolean ensuredParentsBeforeGet = false;
+            for (int getPass = 0; getPass < 2; getPass++) {
+                HttpURLConnection getConn = openConnection(fileUrl, "GET", auth, 12000);
+                try {
+                    int code = getConn.getResponseCode();
+                    if (code >= 200 && code < 300) {
+                        remoteJson = readBody(getConn.getInputStream(), MAX_SYNC_BYTES);
+                        String h = getConn.getHeaderField("ETag");
+                        if (h != null && !h.trim().isEmpty()) {
+                            String trimmedEtag = h.trim();
+                            if (!isWeakEtag(trimmedEtag)) {
+                                etag = trimmedEtag;
+                            }
                         }
+                        break;
+                    } else if (code == 401 || code == 403) {
+                        drainConnectionStreams(getConn);
+                        throw new IOException("WebDAV 认证失败 (HTTP " + code + ")，请检查账号或应用专用密码");
+                    } else if (code == 404) {
+                        drainConnectionStreams(getConn);
+                        fileAbsent = true;
+                        break;
+                    } else if (code == 409) {
+                        drainConnectionStreams(getConn);
+                        if (!ensuredParentsBeforeGet) {
+                            ensuredParentsBeforeGet = true;
+                            ensureParentCollections(rawUrl, fileUrl, auth);
+                            continue;
+                        }
+                        fileAbsent = true;
+                        break;
+                    } else {
+                        drainConnectionStreams(getConn);
+                        throw new IOException("WebDAV 读取失败 (HTTP " + code + ")");
                     }
-                } else if (code == 401 || code == 403) {
-                    drainConnectionStreams(getConn);
-                    throw new IOException("WebDAV 认证失败 (HTTP " + code + ")，请检查账号或应用专用密码");
-                } else if (code == 404) {
-                    drainConnectionStreams(getConn);
-                    fileAbsent = true;
-                } else {
-                    drainConnectionStreams(getConn);
-                    throw new IOException("WebDAV 读取失败 (HTTP " + code + ")");
+                } finally {
+                    getConn.disconnect();
                 }
-            } finally {
-                getConn.disconnect();
             }
 
             MergeResult merged = merger.merge(remoteJson);
@@ -1775,9 +1789,34 @@ final class CloudSync {
         }
     }
 
+    static String toAsciiRequestUrl(String targetUrl) {
+        if (targetUrl == null) return "";
+        String normalized = targetUrl.trim().replace(" ", "%20");
+        try {
+            return URI.create(normalized).toASCIIString();
+        } catch (Exception ignored) {
+            try {
+                URL raw = new URL(normalized);
+                URI rebuilt =
+                        new URI(
+                                raw.getProtocol(),
+                                raw.getUserInfo(),
+                                raw.getHost(),
+                                raw.getPort(),
+                                raw.getPath(),
+                                raw.getQuery(),
+                                raw.getRef());
+                return rebuilt.toASCIIString();
+            } catch (Exception ignored2) {
+                return normalized;
+            }
+        }
+    }
+
     private static HttpURLConnection openConnection(
             String targetUrl, String method, String auth, int timeoutMs) throws IOException {
-        HttpURLConnection conn = (HttpURLConnection) new URL(targetUrl).openConnection();
+        HttpURLConnection conn =
+                (HttpURLConnection) new URL(toAsciiRequestUrl(targetUrl)).openConnection();
         conn.setInstanceFollowRedirects(false);
         conn.setConnectTimeout(timeoutMs);
         conn.setReadTimeout(timeoutMs);

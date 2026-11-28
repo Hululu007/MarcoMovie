@@ -72,6 +72,7 @@ public final class LocalProxyRangeChecks {
         testDisguisedMp3VideoExtractorOrder();
         testClanUriAndApi23TlsSupport();
         testChunkedProxyTransientTruncationRecovery();
+        testTvLanConfigBridgeSecurityAndRouting();
         System.out.println("ALL " + passed + " LocalProxy + ChunkedProxyDataSource checks passed.");
     }
 
@@ -735,5 +736,84 @@ public final class LocalProxyRangeChecks {
             off += n;
         }
         return new HttpReply(status, headers, body);
+    }
+
+    private static void testTvLanConfigBridgeSecurityAndRouting() throws Exception {
+        check(
+                TvLanConfigBridge.isLocalProxyConfigUrl("http://127.0.0.1:9978/proxy?do=settings")
+                        && TvLanConfigBridge.isLocalProxyConfigUrl(
+                                "http://localhost:-1/proxy?do=quark")
+                        && !TvLanConfigBridge.isLocalProxyConfigUrl(
+                                "http://127.0.0.1:9978/proxy?do=js&site=abc")
+                        && !TvLanConfigBridge.isLocalProxyConfigUrl(
+                                "http://127.0.0.1:9978/kcache/file"),
+                "TvLanConfigBridge recognizes spider config /proxy URLs and blocks script/media URLs");
+        String lanUrl =
+                TvLanConfigBridge.rewriteToLanConfigUrl(
+                        "http://127.0.0.1:9978/proxy?do=settings&_mm_token=tok999&tab=quark",
+                        "10.0.2.2",
+                        19978);
+        check(
+                "http://10.0.2.2:19978/proxy?do=settings&tab=quark".equals(lanUrl),
+                "TvLanConfigBridge rewrites loopback config URL to LAN IP without leaking session token");
+
+        final java.util.Map<String, String> lastParams = new LinkedHashMap<>();
+        LocalProxy.SourceResolver resolver =
+                (app, config, params) -> {
+                    synchronized (lastParams) {
+                        lastParams.clear();
+                        lastParams.putAll(params);
+                    }
+                    return new Object[] {
+                        200,
+                        "text/html; charset=utf-8",
+                        "<html><body>Config OK: " + params.get("do") + "</body></html>"
+                    };
+                };
+        try {
+            String boundHost =
+                    TvLanConfigBridge.armOnHost(null, null, resolver, "127.0.0.1", 0, 60_000L);
+            int port = TvLanConfigBridge.boundPortForTest();
+            check(
+                    "127.0.0.1".equals(boundHost) && port > 0,
+                    "TvLanConfigBridge binds dedicated LAN listener when armed");
+
+            java.net.HttpURLConnection okConn =
+                    (java.net.HttpURLConnection)
+                            new java.net.URL("http://127.0.0.1:" + port + "/proxy?do=settings")
+                                    .openConnection();
+            check(
+                    okConn.getResponseCode() == 200,
+                    "TvLanConfigBridge serves GET /proxy?do=settings with 200 OK");
+            okConn.disconnect();
+
+            java.net.HttpURLConnection postConn =
+                    (java.net.HttpURLConnection)
+                            new java.net.URL("http://127.0.0.1:" + port + "/proxy?do=ck")
+                                    .openConnection();
+            postConn.setRequestMethod("POST");
+            postConn.setDoOutput(true);
+            try (OutputStream os = postConn.getOutputStream()) {
+                os.write("cookie=abc%3D123".getBytes(StandardCharsets.UTF_8));
+            }
+            check(
+                    postConn.getResponseCode() == 200 && "abc=123".equals(lastParams.get("cookie")),
+                    "TvLanConfigBridge forwards POST form config fields to spider resolver");
+            postConn.disconnect();
+
+            for (String blocked :
+                    new String[] {"/proxy?do=js&site=abc", "/kcache/item", "/action?do=danmaku"}) {
+                java.net.HttpURLConnection denyConn =
+                        (java.net.HttpURLConnection)
+                                new java.net.URL("http://127.0.0.1:" + port + blocked)
+                                        .openConnection();
+                check(
+                        denyConn.getResponseCode() == 403,
+                        "TvLanConfigBridge rejects blocked route " + blocked + " with HTTP 403");
+                denyConn.disconnect();
+            }
+        } finally {
+            TvLanConfigBridge.disarm();
+        }
     }
 }

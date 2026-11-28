@@ -174,7 +174,7 @@ final class TvV17DetailScreen {
         title.setEllipsize(TextUtils.TruncateAt.END);
         title.setMaxWidth(heroWidthPx - a.dp(54));
         title.setLineSpacing(a.dp(2), 1.05f);
-        title.setShadowLayer(a.dp(14), 0, a.dp(3), 0xb8000000);
+        UiCompat.setShadowLayer(title, a.dp(14), 0, a.dp(3), 0xb8000000);
         titleRow.addView(title, new LinearLayout.LayoutParams(-2, -2));
 
         favorite = a.button("", "detail-favorite", actions::favorite);
@@ -210,7 +210,7 @@ final class TvV17DetailScreen {
         synopsisView.setMaxLines(3);
         synopsisView.setEllipsize(TextUtils.TruncateAt.END);
         synopsisView.setLineSpacing(a.dp(3), 1.18f);
-        synopsisView.setShadowLayer(a.dp(6), 0, a.dp(1), 0x80000000);
+        UiCompat.setShadowLayer(synopsisView, a.dp(6), 0, a.dp(1), 0x80000000);
         synopsisView.setVisibility(initialSynopsis.isEmpty() ? View.GONE : View.VISIBLE);
         LinearLayout.LayoutParams synopsisLp = new LinearLayout.LayoutParams(-1, -2);
         synopsisLp.topMargin = a.dp(14);
@@ -331,7 +331,7 @@ final class TvV17DetailScreen {
         episodeFileView.setMaxLines(2);
         episodeFileView.setEllipsize(TextUtils.TruncateAt.END);
         episodeFileView.setLineSpacing(a.dp(2), 1.12f);
-        episodeFileView.setShadowLayer(a.dp(6), 0, a.dp(1), 0x80000000);
+        UiCompat.setShadowLayer(episodeFileView, a.dp(6), 0, a.dp(1), 0x80000000);
         episodeFileView.setVisibility(
                 episodeFileView.getText().length() > 0 ? View.VISIBLE : View.GONE);
         LinearLayout.LayoutParams fileLp = new LinearLayout.LayoutParams(-1, -2);

@@ -1833,8 +1833,12 @@ final class PlaybackController {
                 });
         a.presentRoot(a.root, false);
         if (!a.isTvDevice()) a.root.requestApplyInsets();
+        final String resolvedMime = MediaOptions.mime(ep.media);
+        final boolean systemContainerUnsupported =
+                MoviePlayer.isSystemPlayerUnsupportedContainer(ep.url, ep.name, resolvedMime);
         final boolean useSystemBackend =
                 !ep.media.optBoolean("_systemErrorFallback")
+                        && !systemContainerUnsupported
                         && (ep.media.optBoolean("_systemFallback")
                                 || a.prefs.getInt(Prefs.PLAYER_ENGINE, 0) == 1);
         final Surface[] activeSurface = new Surface[1];
@@ -1884,6 +1888,7 @@ final class PlaybackController {
                                                                                     "playerType", 0)
                                                                             == 2));
                                     if (!ep.media.optBoolean("_systemErrorFallback")
+                                            && !systemContainerUnsupported
                                             && (ep.media.optBoolean("_systemFallback")
                                                     || engPref == 1)) {
                                         candidate = new SystemPlayer(a);
@@ -2702,6 +2707,31 @@ final class PlaybackController {
                                                                                 500L);
                                                                         return true;
                                                                     }
+                                                                }
+                                                                if (mp instanceof SystemPlayer
+                                                                        && !ep.media.optBoolean(
+                                                                                "_systemErrorFallback")) {
+                                                                    try {
+                                                                        ep.media.put(
+                                                                                "_systemErrorFallback",
+                                                                                true);
+                                                                    } catch (Exception ignored) {
+                                                                    }
+                                                                    a.resumeAt = preservedResumePos;
+                                                                    a.playStatus.setText(
+                                                                            "系统播放器不支持该格式，正在切换内置解码内核…");
+                                                                    a.ui.post(
+                                                                            () -> {
+                                                                                if (ticket
+                                                                                                == a.generation
+                                                                                        && !a
+                                                                                                .isFinishing()) {
+                                                                                    playerPage(
+                                                                                            a, s, v,
+                                                                                            ep);
+                                                                                }
+                                                                            });
+                                                                    return true;
                                                                 }
                                                                 if (mp instanceof MpvPlayer
                                                                         && !ep.media.optBoolean(

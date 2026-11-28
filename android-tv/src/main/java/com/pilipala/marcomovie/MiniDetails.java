@@ -154,7 +154,7 @@ final class MiniDetails {
         title.setGravity(Gravity.LEFT);
         title.setMaxLines(2);
         title.setEllipsize(TextUtils.TruncateAt.END);
-        title.setShadowLayer(a.dp(12), 0, a.dp(3), 0xcc000000);
+        UiCompat.setShadowLayer(title, a.dp(12), 0, a.dp(3), 0xcc000000);
         LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(-2, -2);
         titleLp.gravity = Gravity.LEFT;
         hero.addView(title, titleLp);
@@ -191,7 +191,7 @@ final class MiniDetails {
             synopsis.setMaxLines(2);
             synopsis.setEllipsize(TextUtils.TruncateAt.END);
             synopsis.setMaxWidth(a.dp(760));
-            synopsis.setShadowLayer(a.dp(6), 0, a.dp(1), 0x88000000);
+            UiCompat.setShadowLayer(synopsis, a.dp(6), 0, a.dp(1), 0x88000000);
             synopsisRow.addView(synopsis, new LinearLayout.LayoutParams(-2, -2));
 
             Button moreBtn =
@@ -316,7 +316,7 @@ final class MiniDetails {
             TextView captionView = a.text("当前播放：" + routeCaption, 12.5f, 0xb8ebebf5);
             captionView.setSingleLine(true);
             captionView.setEllipsize(TextUtils.TruncateAt.END);
-            captionView.setShadowLayer(a.dp(6), 0, a.dp(1), 0x80000000);
+            UiCompat.setShadowLayer(captionView, a.dp(6), 0, a.dp(1), 0x80000000);
             LinearLayout.LayoutParams capLp = new LinearLayout.LayoutParams(-1, -2);
             capLp.topMargin = a.dp(10);
             hero.addView(captionView, capLp);

@@ -13,6 +13,7 @@ import android.view.ViewPropertyAnimator;
 import android.view.Window;
 import android.widget.EditText;
 import android.widget.SeekBar;
+import android.widget.TextView;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.Socket;
@@ -100,6 +101,27 @@ final class UiCompat {
             if (view.getElevation() != elevation) {
                 view.setElevation(elevation);
             }
+        }
+    }
+
+    static float safeShadowRadius(int sdkInt, float radius) {
+        if (sdkInt <= 23 || Float.isNaN(radius) || radius <= 0f) {
+            return 0f;
+        }
+        return Math.min(radius, 25f);
+    }
+
+    /**
+     * Guards against API <= 23 RenderScript {@code ScriptIntrinsicBlur} crashes on {@code TextView}
+     * shadow radii and clamps modern hardware-accelerated radii to the 25px RS limit.
+     */
+    static void setShadowLayer(TextView view, float radius, float dx, float dy, int color) {
+        if (view == null) return;
+        float safe = safeShadowRadius(Build.VERSION.SDK_INT, radius);
+        if (safe <= 0f) {
+            view.setShadowLayer(0f, 0f, 0f, 0);
+        } else {
+            view.setShadowLayer(safe, dx, dy, color);
         }
     }
 

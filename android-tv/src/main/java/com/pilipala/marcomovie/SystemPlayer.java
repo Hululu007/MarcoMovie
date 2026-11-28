@@ -625,7 +625,15 @@ public final class SystemPlayer extends MoviePlayer {
 
     @Override
     public int getAudioSessionId() {
-        return onMain(() -> released ? 0 : nativePlayer.getAudioSessionId());
+        return onMain(
+                () -> {
+                    if (released) return 0;
+                    try {
+                        return nativePlayer.getAudioSessionId();
+                    } catch (RuntimeException ignored) {
+                        return 0;
+                    }
+                });
     }
 
     @Override
@@ -696,10 +704,14 @@ public final class SystemPlayer extends MoviePlayer {
                 () -> {
                     check();
                     if (value < .25f || value > 3) throw new IllegalArgumentException("不支持的播放速度");
-                    if (prepared) {
-                        boolean wasPlaying = nativePlayer.isPlaying();
-                        nativePlayer.setPlaybackParams(new PlaybackParams().setSpeed(value));
-                        if (!wasPlaying && nativePlayer.isPlaying()) nativePlayer.pause();
+                    if (prepared && Build.VERSION.SDK_INT >= 23) {
+                        try {
+                            boolean wasPlaying = nativePlayer.isPlaying();
+                            nativePlayer.setPlaybackParams(new PlaybackParams().setSpeed(value));
+                            if (!wasPlaying && nativePlayer.isPlaying()) nativePlayer.pause();
+                        } catch (RuntimeException ignored) {
+                            lastError = "系统播放器不支持当前倍速调节，建议切换 Media3 或 MPV 内核";
+                        }
                     }
                     speed = value;
                     return null;
@@ -716,23 +728,52 @@ public final class SystemPlayer extends MoviePlayer {
         onMain(
                 () -> {
                     check();
-                    nativePlayer.setLooping(repeat);
+                    try {
+                        nativePlayer.setLooping(repeat);
+                    } catch (RuntimeException ignored) {
+                    }
                     return null;
                 });
+    }
+
+    private MediaPlayer.TrackInfo[] safeTrackInfo() {
+        if (!prepared) return new MediaPlayer.TrackInfo[0];
+        try {
+            MediaPlayer.TrackInfo[] info = nativePlayer.getTrackInfo();
+            return info == null ? new MediaPlayer.TrackInfo[0] : info;
+        } catch (RuntimeException ignored) {
+            return new MediaPlayer.TrackInfo[0];
+        }
+    }
+
+    private int safeSelectedTrack(int nativeType) {
+        if (!prepared) return -1;
+        try {
+            return nativePlayer.getSelectedTrack(nativeType);
+        } catch (RuntimeException ignored) {
+            return -1;
+        }
     }
 
     private List<Integer> tracks(int type) {
         List<Integer> matching = new ArrayList<>();
         if (!prepared) return matching;
-        MediaPlayer.TrackInfo[] info = nativePlayer.getTrackInfo();
+        MediaPlayer.TrackInfo[] info = safeTrackInfo();
         for (int i = 0; i < info.length; i++) {
-            int nativeType = info[i].getTrackType();
+            MediaPlayer.TrackInfo track = info[i];
+            if (track == null) continue;
+            int nativeType;
+            try {
+                nativeType = track.getTrackType();
+            } catch (RuntimeException ignored) {
+                continue;
+            }
             if (type == 1 && nativeType == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO)
                 matching.add(i);
             else if (type == 3
                     && (nativeType == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT
                             || nativeType == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE)
-                    && textMime(mime(info[i]))) matching.add(i);
+                    && textMime(mime(track))) matching.add(i);
         }
         return matching;
     }
@@ -760,16 +801,22 @@ public final class SystemPlayer extends MoviePlayer {
                 () -> {
                     check();
                     List<String> labels = new ArrayList<>();
-                    MediaPlayer.TrackInfo[] info =
-                            prepared ? nativePlayer.getTrackInfo() : new MediaPlayer.TrackInfo[0];
+                    MediaPlayer.TrackInfo[] info = safeTrackInfo();
                     for (int index : tracks(type)) {
+                        if (index < 0 || index >= info.length || info[index] == null) continue;
                         MediaPlayer.TrackInfo track = info[index];
-                        String language = track.getLanguage();
+                        String language = null;
+                        int trackType = MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_UNKNOWN;
+                        try {
+                            language = track.getLanguage();
+                            trackType = track.getTrackType();
+                        } catch (RuntimeException ignored) {
+                        }
                         if (language == null || language.equals("und"))
                             language = type == 1 ? "音轨" : "字幕";
                         String label = language + " " + (labels.size() + 1);
                         if (externalTracks.contains(index)) label = "外挂SRT · " + language;
-                        int selected = nativePlayer.getSelectedTrack(track.getTrackType());
+                        int selected = safeSelectedTrack(trackType);
                         labels.add((selected == index ? "✓ " : "") + label);
                     }
                     return labels;
@@ -788,15 +835,23 @@ public final class SystemPlayer extends MoviePlayer {
                                     MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT,
                                     MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE
                                 }) {
-                            int selected = nativePlayer.getSelectedTrack(nativeType);
-                            if (selected >= 0) nativePlayer.deselectTrack(selected);
+                            int selected = safeSelectedTrack(nativeType);
+                            if (selected >= 0) {
+                                try {
+                                    nativePlayer.deselectTrack(selected);
+                                } catch (RuntimeException ignored) {
+                                }
+                            }
                         }
                         caption("");
                         return null;
                     }
                     int chosen = index == -1 ? 0 : index;
                     if (chosen < 0 || chosen >= matching.size()) return null;
-                    nativePlayer.selectTrack(matching.get(chosen));
+                    try {
+                        nativePlayer.selectTrack(matching.get(chosen));
+                    } catch (RuntimeException ignored) {
+                    }
                     return null;
                 });
     }

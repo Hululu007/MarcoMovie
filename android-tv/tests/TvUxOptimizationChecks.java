@@ -58,6 +58,7 @@ public final class TvUxOptimizationChecks {
         testFastTvHomeCoverAndShelfLoading();
         testTvDialogAlignmentAndJujuHistoryRecovery();
         testTv066FourFixes();
+        testTv067RecentIssuesFixes();
         System.out.println("ALL PASS (" + checks + " TV UX optimization checks)");
     }
 
@@ -3588,5 +3589,101 @@ public final class TvUxOptimizationChecks {
                                 .contains("TV_DRAMA_SPEED_SESSION.onEnterDetailPage(")
                         && readJavaSource("SettingsScreen.java").contains("同剧连播保持，返回主页自动重置"),
                 "MainActivity/HomeScreen/DetailScreen/SettingsScreen wire TV session-scoped speed lifecycle");
+    }
+
+    private static void testTv067RecentIssuesFixes() throws Exception {
+        // 1. API 23 TextView shadow safety (#124, #122)
+        check(
+                UiCompat.safeShadowRadius(23, 18f) == 0f
+                        && UiCompat.safeShadowRadius(24, 30f) == 25f
+                        && UiCompat.safeShadowRadius(24, 12f) == 12f
+                        && UiCompat.safeShadowRadius(24, Float.NaN) == 0f,
+                "UiCompat.safeShadowRadius disables TextView shadows on API <= 23 and clamps radius <= 25f");
+        java.nio.file.Path javaDir =
+                java.nio.file.Paths.get("android-tv/src/main/java/com/pilipala/marcomovie");
+        try (java.util.stream.Stream<java.nio.file.Path> files =
+                java.nio.file.Files.list(javaDir)) {
+            java.util.List<java.nio.file.Path> paths =
+                    files.filter(p -> p.toString().endsWith(".java"))
+                            .collect(java.util.stream.Collectors.toList());
+            for (java.nio.file.Path p : paths) {
+                String name = p.getFileName().toString();
+                if ("UiCompat.java".equals(name) || "SubtitleOverlayView.java".equals(name)) {
+                    continue;
+                }
+                String src =
+                        new String(java.nio.file.Files.readAllBytes(p), StandardCharsets.UTF_8);
+                check(
+                        !src.replace("UiCompat.setShadowLayer(", "").contains(".setShadowLayer("),
+                        "No raw TextView.setShadowLayer call in " + name);
+            }
+        }
+
+        // 2. SourcePreferences preferred line family + family token matching (#110)
+        Cms.Episode ep = new Cms.Episode();
+        ep.name = "第1集";
+        ep.url = "https://example.test/1.mkv";
+        Cms.Line emptyLine = new Cms.Line();
+        emptyLine.name = "夸克4K";
+        Cms.Line bdLine = new Cms.Line();
+        bdLine.name = "百度网盘";
+        bdLine.episodes.add(ep);
+        Cms.Line qkVar = new Cms.Line();
+        qkVar.name = "夸克4K#1";
+        qkVar.episodes.add(ep);
+        Cms.Line qkOrig = new Cms.Line();
+        qkOrig.name = "夸克原画";
+        qkOrig.episodes.add(ep);
+        check(
+                SourcePreferences.matchPreferredLineIndex(
+                                Arrays.asList(emptyLine, bdLine, qkVar), "夸克4K")
+                        == 2,
+                "SourcePreferences.matchPreferredLineIndex matches normalized line name variant skipping empty line");
+        check(
+                SourcePreferences.matchPreferredLineIndex(Arrays.asList(bdLine, qkOrig), "夸克4K#2")
+                        == 1,
+                "SourcePreferences.matchPreferredLineIndex falls back to matching netdisk family");
+
+        // 3. Curated search source ordering honors user's preferred spider (#110)
+        Cms.Site spiderPref = new Cms.Site();
+        spiderPref.key = "wex_erxiao";
+        spiderPref.api = "csp_ErXiao";
+        Cms.Site cmsSite = new Cms.Site();
+        cmsSite.key = "feifan";
+        cmsSite.type = 1;
+        cmsSite.api = "https://ff.example/api";
+        List<Cms.Site> picked =
+                TvDetailHost.selectCuratedSearchSources(
+                        Arrays.asList(spiderPref, cmsSite), "wex_erxiao", 4);
+        check(
+                !picked.isEmpty() && "wex_erxiao".equals(picked.get(0).key),
+                "TvDetailHost keeps preferred spider first in curated search");
+
+        // 4. GlobalSearchScreen group filter helpers (#131)
+        Cms.Site g1 = new Cms.Site();
+        g1.key = "s1";
+        g1.group = "4K网盘";
+        g1.searchable = true;
+        Cms.Site g2 = new Cms.Site();
+        g2.key = "s2";
+        g2.group = "备用线路";
+        g2.searchable = true;
+        List<String> groups = GlobalSearchScreen.collectSearchableGroups(Arrays.asList(g1, g2));
+        List<Cms.Site> onlyG2 =
+                GlobalSearchScreen.filterSitesByGroup(Arrays.asList(g1, g2), "备用线路");
+        check(
+                groups.size() == 2 && onlyG2.size() == 1 && "s2".equals(onlyG2.get(0).key),
+                "GlobalSearchScreen group helpers enumerate and isolate selected source group");
+
+        // 5. Source wiring invariants for SystemPlayer/UpdateManager/ANR/QR (#118, #129, #133,
+        // #140)
+        check(
+                readJavaSource("SystemPlayer.java").contains("safeTrackInfo()")
+                        && readJavaSource("PlaybackController.java")
+                                .contains("_systemErrorFallback")
+                        && readJavaSource("PluginDialogStyler.java").contains("lastPassUptimeMs")
+                        && readJavaSource("TvQrInputHelper.java").contains("showLanConfigQrDialog")
+                        && readJavaSource("UpdateManager.java").contains("128 * 1024"),
+                "0.6.7 source invariants present in SystemPlayer, PlaybackController, PluginDialogStyler, TvQrInputHelper, UpdateManager");
     }
 }

@@ -31,6 +31,7 @@ public final class TvPlaybackAndRatingsChecks {
         testHardwareDecoderPrioritization();
         testRatingsExtractionAndStrictVerification();
         testTvHudAndModernControlInvariants();
+        testBluRayContainerDetectionAndSystemFallback();
         System.out.println("ALL PASS (" + checks + " TV playback & ratings checks)");
     }
 
@@ -160,6 +161,13 @@ public final class TvPlaybackAndRatingsChecks {
         check(
                 ordered.size() == 2 && ordered.get(0) == hwVendor && ordered.get(1) == swGoogle,
                 "prioritizeHardwareDecoders places hardware HEVC decoder ahead of c2.android.hevc.decoder");
+        check(
+                Math.abs(DecoderRenderersFactory.resolveTvCodecOperatingRate(1.0f, 60f) - 60f)
+                                < 0.001f
+                        && DecoderRenderersFactory.resolveTvCodecOperatingRate(1.5f, 90f) == -1.0f
+                        && DecoderRenderersFactory.resolveTvCodecOperatingRate(2.0f, 120f) == -1.0f
+                        && DecoderRenderersFactory.resolveTvCodecOperatingRate(0.5f, 30f) == -1.0f,
+                "resolveTvCodecOperatingRate disables dynamic operating rate hints during variable-speed TV playback");
     }
 
     private static void testRatingsExtractionAndStrictVerification() {
@@ -357,5 +365,24 @@ public final class TvPlaybackAndRatingsChecks {
                         && "".equals(PlayerChrome.formatTvHudProgress("", "45:20").toString())
                         && "12:34".equals(PlayerChrome.formatTvHudProgress("12:34", "").toString()),
                 "PlayerChrome.formatTvHudProgress formats elapsed/total cleanly");
+    }
+
+    private static void testBluRayContainerDetectionAndSystemFallback() {
+        check(
+                MoviePlayer.isSystemPlayerUnsupportedContainer(
+                                "http://127.0.0.1:9978/proxy?do=quark&name=movie.iso",
+                                "movie.iso",
+                                "")
+                        && MoviePlayer.isSystemPlayerUnsupportedContainer(
+                                "https://nas.example/Avatar/BDMV/index.bdmv", "第1集", "")
+                        && MoviePlayer.isSystemPlayerUnsupportedContainer(
+                                "https://nas.example/00001.m2ts?token=1", "原盘", "")
+                        && MoviePlayer.isSystemPlayerUnsupportedContainer(
+                                "https://nas.example/stream", "正片", "application/x-iso9660-image"),
+                "MoviePlayer.isSystemPlayerUnsupportedContainer flags .iso/.bdmv/.m2ts Blu-ray containers");
+        check(
+                !MoviePlayer.isSystemPlayerUnsupportedContainer(
+                        "https://cdn.example/video.mkv", "第1集 4K HDR", "video/x-matroska"),
+                "Normal MKV/MP4 containers are not flagged as Blu-ray disc containers");
     }
 }

@@ -796,6 +796,7 @@ final class PluginDialogStyler {
                         .addOnPreDrawListener(
                                 new ViewTreeObserver.OnPreDrawListener() {
                                     private int lastMeasuredH = -1;
+                                    private long lastPassUptimeMs = 0L;
 
                                     @Override
                                     public boolean onPreDraw() {
@@ -809,8 +810,13 @@ final class PluginDialogStyler {
                                                     || decor.getPaddingRight() != 0) {
                                                 decor.setPadding(0, 0, 0, 0);
                                             }
-                                            refreshSpiderButtonStates(a, content);
-                                            recheckAsyncQrImages(a, content, winH);
+                                            long now = android.os.SystemClock.uptimeMillis();
+                                            if (lastPassUptimeMs == 0L
+                                                    || now - lastPassUptimeMs >= 240L) {
+                                                lastPassUptimeMs = now;
+                                                refreshSpiderButtonStates(a, content);
+                                                recheckAsyncQrImages(a, content, winH);
+                                            }
                                             View first = content.getChildAt(0);
                                             int curH = first != null ? first.getHeight() : 0;
                                             if (curH > maxDialogHeight
@@ -2311,7 +2317,7 @@ final class PluginDialogStyler {
         input.setHintTextColor(0x73ebebf5);
         input.setTextSize(14f);
         input.setPadding(a.dp(14), a.dp(11), a.dp(14), a.dp(11));
-        if (a.isTvDevice() && !inHScroll && !inHorizontalRow) {
+        if (a.isTvDevice() && !inHScroll) {
             TvQrInputHelper.attachToExistingPluginEditText(a, input);
         }
     }

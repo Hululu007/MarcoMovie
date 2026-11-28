@@ -885,6 +885,18 @@ final class SourceController {
                     try {
                         CspEngine.syncAllPluginActivities(a);
                         SourceEngine eng = a.engine(site);
+                        if (a.isTvDevice()) {
+                            try {
+                                ensureProxy(a, a.config);
+                                TvLanConfigBridge.arm(
+                                        a.getApplication(),
+                                        a.config,
+                                        CspEngine::proxy,
+                                        ProxyAddress.port,
+                                        TvLanConfigBridge.DEFAULT_ARM_MS);
+                            } catch (Throwable ignored) {
+                            }
+                        }
                         CspEngine.syncAllPluginActivities(a);
                         final String resp = eng.player(flag, id);
                         a.ui.post(
@@ -937,6 +949,18 @@ final class SourceController {
                     try {
                         CspEngine.syncAllPluginActivities(a);
                         SourceEngine eng = a.engine(site);
+                        if (a.isTvDevice()) {
+                            try {
+                                ensureProxy(a, a.config);
+                                TvLanConfigBridge.arm(
+                                        a.getApplication(),
+                                        a.config,
+                                        CspEngine::proxy,
+                                        ProxyAddress.port,
+                                        TvLanConfigBridge.DEFAULT_ARM_MS);
+                            } catch (Throwable ignored) {
+                            }
+                        }
                         CspEngine.syncAllPluginActivities(a);
                         String actResp;
                         boolean detailFallback = false;
@@ -1089,7 +1113,13 @@ final class SourceController {
                 || "menu".equals(type)
                 || "msg".equals(type)
                 || "help".equals(type)
-                || "qrcode".equals(type)) {
+                || "qrcode".equals(type)
+                || "webview".equals(type)
+                || "url".equals(type)) {
+            return true;
+        }
+        String rawUrl = result.optString("url", "").trim();
+        if (!rawUrl.isEmpty() && rawUrl.contains("/proxy")) {
             return true;
         }
         return result.has("actionId")
@@ -1116,9 +1146,30 @@ final class SourceController {
             return true;
         }
 
+        if ("webview".equals(type)
+                || "url".equals(type)
+                || (!"qrcode".equals(type)
+                        && result.optString("imageUrl", "").trim().isEmpty()
+                        && a.isTvDevice()
+                        && TvLanConfigBridge.isLocalProxyConfigUrl(
+                                result.optString("url", "").trim()))) {
+            String targetUrl = result.optString("url", "").trim();
+            if (a.isTvDevice() && TvLanConfigBridge.isLocalProxyConfigUrl(targetUrl)) {
+                a.showLanProxyConfigQr(targetUrl, title);
+                return true;
+            }
+            return false;
+        }
+
         if ("qrcode".equals(type) || !result.optString("imageUrl", "").trim().isEmpty()) {
             String qrImgUrl = result.optString("imageUrl", "").trim();
             String qrText = result.optString("url", result.optString("qrcode", "")).trim();
+            if (a.isTvDevice()
+                    && !qrText.isEmpty()
+                    && TvLanConfigBridge.isLocalProxyConfigUrl(qrText)) {
+                a.showLanProxyConfigQr(qrText, title);
+                return true;
+            }
             if (NetdiskQrBubble.tryShowForStructuredAction(a, title, msg, qrImgUrl, qrText)) {
                 return true;
             }

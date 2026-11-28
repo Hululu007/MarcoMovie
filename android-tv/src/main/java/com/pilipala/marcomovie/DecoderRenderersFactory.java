@@ -545,6 +545,19 @@ final class DecoderRenderersFactory extends DefaultRenderersFactory {
         return hw;
     }
 
+    /**
+     * Avoids sending dynamic {@code KEY_OPERATING_RATE} reconfigurations when playback speed
+     * changes on Android TV SoCs whose OMX/Codec2 hardware decoders stall or stutter at >60fps
+     * operating-rate hints.
+     */
+    static float resolveTvCodecOperatingRate(
+            float targetPlaybackSpeed, float defaultOperatingRate) {
+        if (Math.abs(targetPlaybackSpeed - 1.0f) > 0.01f) {
+            return -1.0f;
+        }
+        return defaultOperatingRate;
+    }
+
     private static void appendUnique(List<MediaCodecInfo> target, List<MediaCodecInfo> additions) {
         if (additions == null) return;
         for (MediaCodecInfo info : additions) {
@@ -785,6 +798,15 @@ final class DecoderRenderersFactory extends DefaultRenderersFactory {
                             }
                         }
                         return config;
+                    }
+
+                    @Override
+                    protected float getCodecOperatingRateV23(
+                            float targetPlaybackSpeed, Format format, Format[] streamFormats) {
+                        float base =
+                                super.getCodecOperatingRateV23(
+                                        targetPlaybackSpeed, format, streamFormats);
+                        return resolveTvCodecOperatingRate(targetPlaybackSpeed, base);
                     }
 
                     @Override

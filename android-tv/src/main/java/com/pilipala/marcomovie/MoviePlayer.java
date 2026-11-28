@@ -1854,6 +1854,31 @@ public class MoviePlayer {
         return firstFrameMs;
     }
 
+    static boolean isSystemPlayerUnsupportedContainer(
+            String url, String episodeName, String declaredMime) {
+        String mime = declaredMime == null ? "" : declaredMime.trim().toLowerCase(Locale.ROOT);
+        if ("application/x-iso9660-image".equals(mime)
+                || mime.contains("iso9660")
+                || mime.contains("bdmv")) {
+            return true;
+        }
+        String path = url == null ? "" : url.trim().toLowerCase(Locale.ROOT);
+        int q = path.indexOf('?');
+        if (q >= 0) path = path.substring(0, q);
+        int h = path.indexOf('#');
+        if (h >= 0) path = path.substring(0, h);
+        String epLower = episodeName == null ? "" : episodeName.trim().toLowerCase(Locale.ROOT);
+        return path.endsWith(".iso")
+                || path.endsWith(".bdmv")
+                || path.endsWith(".m2ts")
+                || path.endsWith(".mpls")
+                || path.contains("/bdmv/")
+                || path.endsWith("/index.bdmv")
+                || epLower.endsWith(".iso")
+                || epLower.endsWith(".m2ts")
+                || epLower.contains("index.bdmv");
+    }
+
     public void setCuesListener(CueListener listener) {
         onMain(
                 () -> {
@@ -2005,10 +2030,31 @@ public class MoviePlayer {
     }
 
     public void setSpeed(float speed) {
+        final float clamped = Math.max(0.25f, Math.min(4.0f, speed));
         onMain(
                 () -> {
                     check();
-                    exo.setPlaybackSpeed(speed);
+                    if (Math.abs(clamped - 1.0f) > 0.01f) {
+                        androidx.media3.common.TrackSelectionParameters curParams =
+                                exo.getTrackSelectionParameters();
+                        if (curParams
+                                        instanceof
+                                        androidx.media3.exoplayer.trackselection
+                                                .DefaultTrackSelector.Parameters
+                                && ((androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+                                                        .Parameters)
+                                                curParams)
+                                        .tunnelingEnabled) {
+                            exo.setTrackSelectionParameters(
+                                    ((androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+                                                            .Parameters)
+                                                    curParams)
+                                            .buildUpon()
+                                            .setTunnelingEnabled(false)
+                                            .build());
+                        }
+                    }
+                    exo.setPlaybackSpeed(clamped);
                     return null;
                 });
     }

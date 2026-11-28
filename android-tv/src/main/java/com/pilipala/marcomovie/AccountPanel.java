@@ -702,6 +702,19 @@ final class AccountPanel {
         if (dialog.getWindow() != null) {
             dialog.getWindow().getDecorView().setTag("app-dialog");
         }
+        a.worker.execute(
+                () -> {
+                    try {
+                        a.ensureProxy(a.config);
+                        TvLanConfigBridge.arm(
+                                a.getApplication(),
+                                a.config,
+                                CspEngine::proxy,
+                                ProxyAddress.port,
+                                TvLanConfigBridge.DEFAULT_ARM_MS);
+                    } catch (Throwable ignored) {
+                    }
+                });
         final java.util.List<Cms.Site> allConfigCenters = findAllConfigCenterSites(a);
         final Cms.Site[] activeSiteRef =
                 new Cms.Site[] {allConfigCenters.isEmpty() ? null : allConfigCenters.get(0)};

@@ -309,6 +309,7 @@ final class UpdateManager {
             for (int source = 0; source < sources.length && !valid; source++) {
                 for (int attempt = 0; attempt < 2 && part.length() < r.size; attempt++) {
                     if (cancel) throw new InterruptedIOException();
+                    long beforeLen = part.length();
                     message =
                             (sources[source].startsWith(UpdatePolicy.MIRROR)
                                             ? "正在从镜像站下载 "
@@ -322,6 +323,12 @@ final class UpdateManager {
                         failure = e;
                         if (cancel) throw new InterruptedIOException();
                         if (e.getMessage() != null && e.getMessage().contains("404")) break;
+                        if (sources.length > 1
+                                && source == 0
+                                && attempt == 0
+                                && part.length() == beforeLen) {
+                            break;
+                        }
                     }
                 }
                 if (part.length() == r.size) {
@@ -366,9 +373,11 @@ final class UpdateManager {
                             r.size);
             long declared = conn.getContentLength();
             if (declared > 0 && declared != r.size - start) throw new IOException("size");
-            try (InputStream in = conn.getInputStream();
-                    OutputStream out = new FileOutputStream(part, start > 0)) {
-                byte[] bytes = new byte[32768];
+            try (InputStream in = new BufferedInputStream(conn.getInputStream(), 128 * 1024);
+                    OutputStream out =
+                            new BufferedOutputStream(
+                                    new FileOutputStream(part, start > 0), 128 * 1024)) {
+                byte[] bytes = new byte[128 * 1024];
                 long total = start;
                 int n, last = -1;
                 while ((n = in.read(bytes)) != -1) {
@@ -383,6 +392,7 @@ final class UpdateManager {
                         changed();
                     }
                 }
+                out.flush();
                 if (total != r.size) throw new IOException("short download");
             }
         } finally {
@@ -465,8 +475,8 @@ final class UpdateManager {
             if (!UpdatePolicy.transferUrl(address)) throw new IOException("untrusted host");
             HttpURLConnection c = (HttpURLConnection) new URL(address).openConnection();
             c.setInstanceFollowRedirects(false);
-            c.setConnectTimeout(12000);
-            c.setReadTimeout(45000);
+            c.setConnectTimeout(8000);
+            c.setReadTimeout(20000);
             if (offset > 0) c.setRequestProperty("Range", "bytes=" + offset + "-");
             c.setRequestProperty("User-Agent", "MarcoMovie-Updater");
             c.setRequestProperty("Accept-Encoding", "identity");

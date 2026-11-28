@@ -764,6 +764,9 @@ public final class MpvPlayer extends MoviePlayer {
                 MPVLib.setOptionString("deinterlace", "auto");
                 MPVLib.setOptionString("hr-seek", "yes");
                 MPVLib.setOptionString("hr-seek-framedrop", "yes");
+                MPVLib.setOptionString("framedrop", "vo");
+                MPVLib.setOptionString("audio-pitch-correction", "yes");
+                MPVLib.setOptionString("af", "scaletempo");
                 MPVLib.setOptionString("sub-auto", "no");
                 MPVLib.setOptionString("sub-ass", "yes");
                 MPVLib.setOptionString("sub-ass-override", "scale");

@@ -654,7 +654,7 @@ final class MobileDetailScreen {
         titleView.setGravity(Gravity.CENTER);
         titleView.setMaxLines(2);
         titleView.setEllipsize(TextUtils.TruncateAt.END);
-        titleView.setShadowLayer(a.dp(14), 0, a.dp(4), 0xb3000000);
+        UiCompat.setShadowLayer(titleView, a.dp(14), 0, a.dp(4), 0xb3000000);
         heroCenterCol.addView(titleView, new LinearLayout.LayoutParams(-1, -2));
 
         final LinearLayout pillsRow = a.row();

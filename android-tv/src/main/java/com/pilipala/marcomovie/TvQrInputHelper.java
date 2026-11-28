@@ -9,6 +9,7 @@ import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.GradientDrawable;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -314,7 +315,8 @@ final class TvQrInputHelper {
 
     /**
      * Attaches the TV QR icon button next to an already-attached plugin {@link EditText} inside a
-     * vertical {@link LinearLayout} without breaking the plugin's own {@link EditText} reference.
+     * vertical or horizontal {@link LinearLayout} without breaking the plugin's own {@link
+     * EditText} reference.
      */
     static void attachToExistingPluginEditText(MainActivity a, EditText input) {
         if (a == null || input == null || !a.isTvDevice()) return;
@@ -323,15 +325,9 @@ final class TvQrInputHelper {
                 input.getParent() instanceof ViewGroup ? (ViewGroup) input.getParent() : null;
         if (!(parent instanceof LinearLayout)) return;
         LinearLayout ll = (LinearLayout) parent;
-        if (ll.getOrientation() != LinearLayout.VERTICAL) return;
         if (TAG_WRAPPED_INPUT.equals(ll.getTag())) return;
         int idx = ll.indexOfChild(input);
         if (idx < 0) return;
-
-        input.setTag(android.R.id.edit, Boolean.TRUE);
-        adaptEditTextForTv(a, input);
-        ViewGroup.LayoutParams oldLp = input.getLayoutParams();
-        ll.removeViewAt(idx);
 
         CharSequence hintSeq = input.getHint();
         String rawLabel =
@@ -344,6 +340,37 @@ final class TvQrInputHelper {
                 variation == android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
                         || variation == android.text.InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD
                         || variation == android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD;
+
+        if (ll.getOrientation() == LinearLayout.HORIZONTAL) {
+            if (ll.findViewWithTag(TAG_QR_BUTTON) != null) return;
+            input.setTag(android.R.id.edit, Boolean.TRUE);
+            adaptEditTextForTv(a, input);
+            ViewGroup.LayoutParams curLp = input.getLayoutParams();
+            if (curLp instanceof LinearLayout.LayoutParams) {
+                LinearLayout.LayoutParams hLp = (LinearLayout.LayoutParams) curLp;
+                if (hLp.width == ViewGroup.LayoutParams.MATCH_PARENT
+                        || (hLp.width < 0 && hLp.weight <= 0f)) {
+                    hLp.width = 0;
+                    hLp.weight = 1f;
+                    input.setLayoutParams(hLp);
+                }
+            }
+            View qrBtn = buildQrIconButton(a, TAG_QR_BUTTON, "扫码输入");
+            qrBtn.setOnClickListener(
+                    v -> showFieldBubble(a, qrBtn, input, label, multiline, password, false, null));
+            LinearLayout.LayoutParams qrLp = new LinearLayout.LayoutParams(a.dp(40), a.dp(40));
+            qrLp.leftMargin = a.dp(6);
+            qrLp.rightMargin = a.dp(6);
+            qrLp.gravity = Gravity.CENTER_VERTICAL;
+            ll.addView(qrBtn, idx + 1, qrLp);
+            return;
+        }
+        if (ll.getOrientation() != LinearLayout.VERTICAL) return;
+
+        input.setTag(android.R.id.edit, Boolean.TRUE);
+        adaptEditTextForTv(a, input);
+        ViewGroup.LayoutParams oldLp = input.getLayoutParams();
+        ll.removeViewAt(idx);
 
         LinearLayout row = a.row();
         row.setTag(TAG_WRAPPED_INPUT);
@@ -368,6 +395,37 @@ final class TvQrInputHelper {
             wrapLp.setMargins(m.leftMargin, m.topMargin, m.rightMargin, m.bottomMargin);
         }
         ll.addView(row, idx, wrapLp);
+    }
+
+    static void showLanConfigQrDialog(MainActivity a, String title, String lanUrl) {
+        if (a == null || a.isFinishing() || lanUrl == null || lanUrl.isEmpty()) return;
+        LinearLayout box = a.vertical();
+        box.setGravity(Gravity.CENTER_HORIZONTAL);
+        TextView tip = a.text("请用同一局域网（Wi-Fi）下的手机浏览器扫码打开网页配置：\n" + lanUrl, 13f, 0xffd0d6e2);
+        tip.setGravity(Gravity.CENTER);
+        tip.setPadding(0, 0, 0, a.dp(12));
+        box.addView(tip);
+
+        int sz = a.dp(a.isTvDevice() ? 172 : 196);
+        ImageView iv = new ImageView(a);
+        iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        GradientDrawable frame = new GradientDrawable();
+        frame.setColor(Color.WHITE);
+        frame.setCornerRadius(a.dp(14));
+        iv.setBackground(frame);
+        iv.setPadding(a.dp(8), a.dp(8), a.dp(8), a.dp(8));
+        try {
+            Bitmap bmp = renderQrBitmap(lanUrl, sz);
+            if (bmp != null) iv.setImageBitmap(bmp);
+        } catch (Exception ignored) {
+        }
+        box.addView(iv, new LinearLayout.LayoutParams(sz, sz));
+
+        new AppDialog.Builder(a)
+                .setTitle(title != null && !title.trim().isEmpty() ? title.trim() : "手机扫码网页配置")
+                .setView(box)
+                .setPositiveButton("关闭", null)
+                .show();
     }
 
     static void adaptEditTextForTv(MainActivity a, EditText input) {
