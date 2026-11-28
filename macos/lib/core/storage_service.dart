@@ -18,9 +18,11 @@ import 'danmu/danmu_source_sync.dart';
 import 'ios_avplayer_controller.dart';
 import 'ios_mpv_profile.dart';
 import 'local_media_proxy.dart';
+import 'macos_video_sync.dart';
 import 'macos_window_bounds.dart';
 import 'mdk_platform_player.dart';
 import 'models.dart';
+import 'next_episode_prebuffer.dart';
 import 'quark_account.dart';
 import 'netdisk_session.dart';
 import 'ohos_runtime.dart';
@@ -91,6 +93,12 @@ class StorageService {
   static const String keyEpisodesDescending = 'episodes_descending';
   static const String keyPlaySpeed = 'play_speed';
   static const String keyAutoNext = 'auto_next';
+  static const String keyNextEpisodePrebufferEnabled =
+      'next_episode_prebuffer_enabled';
+  static const String keyNextEpisodePrebufferTriggerSec =
+      'next_episode_prebuffer_trigger_sec';
+  static const String keyNextEpisodePrebufferMaxMb =
+      'next_episode_prebuffer_max_mb';
   static const String keySkipIntroSec = 'skip_intro_sec';
   static const String keySkipOutroSec = 'skip_outro_sec';
   static const String keyRepeatMode = 'repeat_mode';
@@ -539,7 +547,19 @@ class StorageService {
     final seq = ++_tmpWriteSequence;
     final tmpFileName =
         '$fileName.${DateTime.now().microsecondsSinceEpoch}_$seq.tmp';
-    await _fileStore.writeStringAndFlush(tmpFileName, content);
+    try {
+      await _fileStore.writeStringAndFlush(tmpFileName, content);
+    } on Object {
+      // Interrupted write before atomic swap: remove any truncated .tmp file
+      // so the live target file stays untouched and disk does not accumulate
+      // half-written temp files.
+      try {
+        if (await _fileStore.exists(tmpFileName)) {
+          await _fileStore.deleteFile(tmpFileName);
+        }
+      } on Object catch (_) {}
+      rethrow;
+    }
     Object? lastError;
     StackTrace? lastStack;
     for (var attempt = 0; attempt <= _atomicRenameRetryDelays.length; attempt++) {
@@ -779,6 +799,24 @@ class StorageService {
   double get playSpeed =>
       (_prefs.getDouble(keyPlaySpeed) ?? 1.0).clamp(minPlaySpeed, maxPlaySpeed);
   bool get autoNext => _prefs.getBool(keyAutoNext) ?? true;
+  bool get nextEpisodePrebufferEnabled =>
+      _prefs.getBool(keyNextEpisodePrebufferEnabled) ?? false;
+  int get nextEpisodePrebufferTriggerSec =>
+      NextEpisodePrebufferConfig.normalizeTriggerSeconds(
+        _prefs.getInt(keyNextEpisodePrebufferTriggerSec) ??
+            NextEpisodePrebufferConfig.defaultTriggerSeconds,
+      );
+  int get nextEpisodePrebufferMaxMb =>
+      NextEpisodePrebufferConfig.normalizeMaxMb(
+        _prefs.getInt(keyNextEpisodePrebufferMaxMb) ??
+            NextEpisodePrebufferConfig.defaultMaxMb,
+      );
+  NextEpisodePrebufferConfig get nextEpisodePrebufferConfig =>
+      NextEpisodePrebufferConfig(
+        enabled: nextEpisodePrebufferEnabled,
+        triggerRemainingSeconds: nextEpisodePrebufferTriggerSec,
+        maxPrebufferMb: nextEpisodePrebufferMaxMb,
+      );
   int get skipIntroSec => (_prefs.getInt(keySkipIntroSec) ?? 0).clamp(0, 600);
   int get skipOutroSec => (_prefs.getInt(keySkipOutroSec) ?? 0).clamp(0, 600);
   bool get playerAlwaysShowClock =>
@@ -1571,6 +1609,130 @@ class StorageService {
       } else if (merged.sites.any((s) => s.key == selectedSiteKey)) {
         await _prefs.setString(keySelectedSite, '');
       }
+    }
+    return merged;
+  }
+
+  /// Atomically commits pre-fetched, pre-validated subscription updates.
+  ///
+  /// Validation of every staged entry and JSON round-trip serialization run
+  /// completely BEFORE writing to disk or mutating [SharedPreferences]. If any
+  /// entry is invalid or if the atomic file write/rename is interrupted, the
+  /// previous valid subscriptions and [loadSavedConfig] remain completely
+  /// intact and usable.
+  Future<CmsConfig?> commitStagedSubscriptionUpdates(
+    List<SubscriptionEntry> stagedUpdates,
+  ) => _editSubscriptions(() => _commitStagedSubscriptionUpdates(stagedUpdates));
+
+  Future<CmsConfig?> _commitStagedSubscriptionUpdates(
+    List<SubscriptionEntry> stagedUpdates,
+  ) async {
+    if (stagedUpdates.isEmpty) return loadSavedConfig();
+    final current = getSubscriptions();
+    if (current.isEmpty) {
+      throw StateError('当前无本地订阅可更新');
+    }
+    final byId = <String, int>{
+      for (var i = 0; i < current.length; i++) current[i].id: i,
+    };
+    final next = List<SubscriptionEntry>.of(current);
+    final updatedIds = <String>[];
+    var touchedPublic = false;
+
+    // Stage-validate EVERY candidate before touching disk or prefs.
+    for (final candidate in stagedUpdates) {
+      final idx = byId[candidate.id];
+      if (idx == null) {
+        throw StateError('订阅 ${candidate.id} 不存在或已被删除');
+      }
+      final existing = current[idx];
+      final trimmedRaw = candidate.rawContent.trim();
+      if (trimmedRaw.isEmpty) {
+        throw FormatException('订阅「${existing.name}」校验失败：配置内容为空');
+      }
+      final parsed = CmsParser.parseConfig(
+        trimmedRaw,
+        origin: candidate.url,
+        defaultGroup: existing.group,
+        isPrivate: existing.isEffectivelyPrivate,
+        subscriptionId: existing.id,
+        defaultName: existing.name,
+      );
+      if (parsed.sites.isEmpty &&
+          parsed.lives.isEmpty &&
+          parsed.depots.isEmpty) {
+        throw FormatException(
+          '订阅「${existing.name}」校验失败：未解析出有效片源、直播或子仓库',
+        );
+      }
+      final committed = existing.copyWith(
+        url: candidate.url.trim().isNotEmpty ? candidate.url.trim() : existing.url,
+        warehouseUrl: candidate.warehouseUrl.trim().isNotEmpty
+            ? candidate.warehouseUrl.trim()
+            : existing.warehouseUrl,
+        activeDepotName: candidate.activeDepotName.trim().isNotEmpty
+            ? candidate.activeDepotName.trim()
+            : existing.activeDepotName,
+        depots: candidate.depots.isNotEmpty ? candidate.depots : existing.depots,
+        format: candidate.format.trim().isNotEmpty
+            ? candidate.format.trim()
+            : existing.format,
+        rawContent: trimmedRaw,
+        siteCount: parsed.supportedSites.length,
+        liveCount: parsed.lives.length,
+        updatedAt: candidate.updatedAt > 0
+            ? candidate.updatedAt
+            : DateTime.now().millisecondsSinceEpoch,
+      );
+      next[idx] = committed;
+      updatedIds.add(existing.id);
+      if (!committed.isEffectivelyPrivate) {
+        touchedPublic = true;
+      }
+    }
+
+    // Verify full registry round-trip serialization before touching storage.
+    final serialized = jsonEncode(next.map((s) => s.toJson()).toList());
+    final decoded = jsonDecode(serialized);
+    if (decoded is! List || decoded.length != next.length) {
+      throw const FormatException('暂存订阅序列化校验失败');
+    }
+
+    // Atomic swap: tmp write + flush + atomic rename + prefs mirror (rolls back on failure).
+    await saveSubscriptions(next);
+
+    // Only mutate derived caches & mirrors AFTER atomic commit succeeded.
+    final nowSync = DateTime.now().millisecondsSinceEpoch;
+    final primaryPublic = next.where((s) => !s.isEffectivelyPrivate).toList();
+    if (primaryPublic.isNotEmpty) {
+      final primary = primaryPublic.first;
+      if (primary.rawContent.isNotEmpty) {
+        await _prefs.setString(keyRawConfig, primary.rawContent);
+        await _prefs.setString(keyOrigin, primary.url);
+        await _prefs.setString(keyActiveDepotName, primary.activeDepotName);
+      }
+    }
+    for (final id in updatedIds) {
+      await clearCachedSiteHomes(subscriptionId: id);
+    }
+    _invalidateConfigCache();
+    final merged = loadSavedConfig();
+    await _persistSniffAndAdsCache(merged);
+    if (merged != null &&
+        !merged.availableSites.any((s) => s.key == selectedSiteKey)) {
+      final availPublic = merged.publicAvailableSites;
+      if (availPublic.isNotEmpty) {
+        final preferredDefault = availPublic.firstWhere(
+          (s) => !CspBridge.isBannerNoticeSite(s),
+          orElse: () => availPublic.first,
+        );
+        await _prefs.setString(keySelectedSite, preferredDefault.key);
+      } else if (merged.sites.any((s) => s.key == selectedSiteKey)) {
+        await _prefs.setString(keySelectedSite, '');
+      }
+    }
+    if (touchedPublic && webdavSyncSubs) {
+      scheduleAutoWebdavSync(immediate: true, nowMs: nowSync);
     }
     return merged;
   }
@@ -2464,6 +2626,21 @@ class StorageService {
   Future<void> setAutoNext(bool value) async {
     await _prefs.setBool(keyAutoNext, value);
   }
+  Future<void> setNextEpisodePrebufferEnabled(bool value) async {
+    await _prefs.setBool(keyNextEpisodePrebufferEnabled, value);
+  }
+  Future<void> setNextEpisodePrebufferTriggerSec(int seconds) async {
+    await _prefs.setInt(
+      keyNextEpisodePrebufferTriggerSec,
+      NextEpisodePrebufferConfig.normalizeTriggerSeconds(seconds),
+    );
+  }
+  Future<void> setNextEpisodePrebufferMaxMb(int mb) async {
+    await _prefs.setInt(
+      keyNextEpisodePrebufferMaxMb,
+      NextEpisodePrebufferConfig.normalizeMaxMb(mb),
+    );
+  }
   Future<void> setSkipIntroSec(int seconds) async {
     await _prefs.setInt(keySkipIntroSec, seconds.clamp(0, 600));
   }
@@ -2847,31 +3024,48 @@ class StorageService {
       final n = name.toLowerCase();
       return n.contains('4k') ||
           n.contains('原画') ||
+          n.contains('臻彩') ||
           n.contains('夸父') ||
           n.contains('夸克') ||
+          n.contains('quark') ||
           n.contains('优汐') ||
           n.contains('uc') ||
           n.contains('嘟嘟') ||
           n.contains('百度') ||
+          n.contains('baidu') ||
           n.contains('阿狸') ||
-          n.contains('阿里');
+          n.contains('阿里') ||
+          n.contains('ali');
+    }
+    bool matchesDrive(String lineName, String drive) {
+      final n = lineName.toLowerCase();
+      return switch (drive) {
+        'quark' => n.contains('夸') || n.contains('quark'),
+        'uc' => n.contains('优') || RegExp(r'(^|[^a-z])uc([^a-z]|$)').hasMatch(n),
+        'baidu' => n.contains('百度') || n.contains('baidu') || n.contains('嘟'),
+        'ali' => n.contains('阿') || n.contains('ali'),
+        _ => false,
+      };
     }
     if (pref == '4k_netdisk') {
-      // First check according to driveOrder
+      // Pass 1: prefer logged-in drives in configured driveOrder
       for (final drive in driveOrder) {
-        final alias = switch (drive) {
-          'quark' => '夸',
-          'uc' => '优',
-          'baidu' => '嘟',
-          'ali' => '阿',
-          _ => '',
-        };
-        if (alias.isNotEmpty) {
-          final idx = lines.indexWhere((l) => l.name.contains(alias));
-          if (idx >= 0) return idx;
-        }
+        if (!isNetdiskLoggedIn(drive)) continue;
+        final idx = lines.indexWhere(
+          (l) => l.episodes.isNotEmpty && matchesDrive(l.name, drive),
+        );
+        if (idx >= 0) return idx;
       }
-      final idx = lines.indexWhere((l) => isNetdiskLine(l.name));
+      // Pass 2: any matching drive in configured driveOrder
+      for (final drive in driveOrder) {
+        final idx = lines.indexWhere(
+          (l) => l.episodes.isNotEmpty && matchesDrive(l.name, drive),
+        );
+        if (idx >= 0) return idx;
+      }
+      final idx = lines.indexWhere(
+        (l) => l.episodes.isNotEmpty && isNetdiskLine(l.name),
+      );
       if (idx >= 0) return idx;
     } else if (pref == '1080p_direct') {
       final idx = lines.indexWhere(
@@ -3385,7 +3579,7 @@ class StorageService {
   }
 
   static String _siteHomeSnapshotKey(CmsSite site) =>
-      '${site.subscriptionId}::${site.key}::${site.api}::${site.ext.hashCode}';
+      'v2::${site.subscriptionId}::${site.key}::${site.api}::${site.ext.hashCode}::${site.pluginReference.hashCode}';
 
   ({List<CmsCategory> categories, CmsListing listing})? getCachedSiteHome(
     CmsSite site,
@@ -6137,5 +6331,27 @@ class StorageService {
 
   Future<void> clearMacosWindowBounds() async {
     await _prefs.remove(MacosWindowBounds.prefKey);
+  }
+
+  static const String keyMacosVideoSyncMode = 'macos_video_sync_mode_v1';
+  static const String keyMacosVideoSyncTscale = 'macos_video_sync_tscale_v1';
+
+  MacosVideoSyncMode get macosVideoSyncMode =>
+      MacosVideoSyncMode.fromId(_prefs.getString(keyMacosVideoSyncMode));
+
+  Future<void> setMacosVideoSyncMode(MacosVideoSyncMode mode) async {
+    await _prefs.setString(keyMacosVideoSyncMode, mode.id);
+  }
+
+  MacosVideoSyncTscale get macosVideoSyncTscale =>
+      MacosVideoSyncTscale.fromId(_prefs.getString(keyMacosVideoSyncTscale));
+
+  Future<void> setMacosVideoSyncTscale(MacosVideoSyncTscale tscale) async {
+    await _prefs.setString(keyMacosVideoSyncTscale, tscale.id);
+  }
+
+  Future<void> resetMacosVideoSyncSettings() async {
+    await _prefs.remove(keyMacosVideoSyncMode);
+    await _prefs.remove(keyMacosVideoSyncTscale);
   }
 }

@@ -67,11 +67,24 @@ class CloudMediaLease {
   Completer<void>? _spaceSignal;
   int _reservedBytes = 0;
   int _peakReservedBytes = 0;
+  int _upstreamBytesReceived = 0;
+  final StreamController<int> _upstreamBytesController =
+      StreamController<int>.broadcast();
   bool _closed = false;
   bool _checking = false;
 
   int get bufferedBytes => _reservedBytes;
   int get peakBufferedBytes => _peakReservedBytes;
+  int get upstreamBytesReceived => _upstreamBytesReceived;
+  Stream<int> get upstreamByteChunks => _upstreamBytesController.stream;
+
+  void _recordUpstreamBytes(int bytes) {
+    if (bytes <= 0 || _closed) return;
+    _upstreamBytesReceived += bytes;
+    if (!_upstreamBytesController.isClosed) {
+      _upstreamBytesController.add(bytes);
+    }
+  }
 
   Uri get url =>
       Uri.parse('http://127.0.0.1:${_server.port}/$_capability/media');
@@ -560,6 +573,7 @@ class CloudMediaLease {
             }
             buffer.setRange(offset, offset + part.length, part);
             offset += part.length;
+            _recordUpstreamBytes(part.length);
           },
           onError: finishChunk,
           onDone: finishChunk,
@@ -740,6 +754,7 @@ class CloudMediaLease {
           unawaited(finish());
           return;
         }
+        _recordUpstreamBytes(chunk.length);
         pendingBytes += chunk.length;
         if (pendingBytes >= _flushThresholdBytes) {
           pendingBytes = 0;
@@ -894,6 +909,9 @@ class CloudMediaLease {
       } catch (_) {}
     }
     _client.close();
+    if (!_upstreamBytesController.isClosed) {
+      unawaited(_upstreamBytesController.close());
+    }
     await _server.close(force: true);
   }
 }

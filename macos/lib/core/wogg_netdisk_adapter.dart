@@ -39,13 +39,18 @@ class WoggNetdiskAdapter {
 
   WoggNetdiskAdapter(this.site, this.fetchText, {this.postJson});
 
+  static final RegExp _supportedApiPattern = RegExp(
+    r'^csp_(?:wobg|wanou|zhizhen|mihdr|muou|shandian|xiaomi|erxiao|ouge|tudou|labi|duoduo|huban|huajuan|xiaopan|kuaiying|qingying|woniu|zhinan|yidong|yidong4k|qiwei|leijing|haimian|panta|panhub|yiso|fengye|fengye4k|fengqi4k|kaka|jike)(?:guard)?$',
+    caseSensitive: false,
+  );
+
+  static bool matchesApiName(String api) =>
+      _supportedApiPattern.hasMatch(api.trim());
+
   static bool supports(CmsSite site) {
     if (site.type != 3 || site.ext.trim().isEmpty) return false;
     final api = site.api.trim();
-    if (!RegExp(
-      r'^csp_(?:wobg|zhizhen|mihdr|muou|shandian|xiaomi|erxiao|ouge|tudou|labi|duoduo|huban|huajuan|xiaopan|kuaiying|qingying|woniu|zhinan|yidong|qiwei|leijing|haimian|panta|yiso)(?:guard)?$',
-      caseSensitive: false,
-    ).hasMatch(api)) {
+    if (!matchesApiName(api)) {
       return false;
     }
     return parseDomains(site.ext, siteKey: api).isNotEmpty ||
@@ -466,6 +471,18 @@ class WoggNetdiskAdapter {
       var path = old.path;
       if (page > 1 && RegExp(r'/vod/type/id/\d+\.html$').hasMatch(path)) {
         path = path.replaceFirst('.html', '/page/$page.html');
+      } else if (page > 1) {
+        final vodType = RegExp(r'^/vodtype/(\d+)\.html$', caseSensitive: false)
+            .firstMatch(path);
+        final vodShow = RegExp(r'^/vodshow/(\d+)-+\.html$', caseSensitive: false)
+            .firstMatch(path);
+        final numId = vodType?.group(1) ?? vodShow?.group(1);
+        if (numId != null) {
+          return [
+            base.resolve('/vodshow/$numId--------$page---.html'),
+            base.resolve('/index.php/vod/type/id/$numId/page/$page.html'),
+          ];
+        }
       }
       final target = base.resolve(path).replace(queryParameters: {
         ...old.queryParameters,
@@ -474,10 +491,10 @@ class WoggNetdiskAdapter {
       return [target];
     }
     return [
+      base.resolve('/vodshow/${Uri.encodeComponent(id)}--------$page---.html'),
       base.resolve(
         '/index.php/vod/type/id/${Uri.encodeComponent(id)}/page/$page.html',
       ),
-      base.resolve('/vodshow/${Uri.encodeComponent(id)}--------$page---.html'),
     ];
   }
 
@@ -733,24 +750,77 @@ class WoggNetdiskAdapter {
               (item['type_name'] ?? item['name']) != null)
             CmsCategory(
               id: '${item['type_id'] ?? item['id']}',
-              name: '${item['type_name'] ?? item['name']}',
+              name: '${item['type_name'] ?? item['name']}'.trim(),
             ),
       ];
     }
-    final result = <String, CmsCategory>{};
-    for (final a in html.parse(raw).querySelectorAll('a[href]')) {
-      final target = base.resolve(a.attributes['href']!);
-      if (target.origin == base.origin &&
-          RegExp(r'/(?:vodtype|vodshow|vod/type|vod/show|type|category)[/\-]')
-              .hasMatch(target.path)) {
-        final name = a.text.trim();
-        if (name.isNotEmpty) {
-          result.putIfAbsent(
-            target.toString(),
-            () => CmsCategory(id: target.toString(), name: name),
-          );
-        }
+    final doc = html.parse(raw);
+    final navLinks = doc.querySelectorAll(
+      'nav a[href], header a[href], .nav a[href], .navbar a[href], '
+      '.nav-menu a[href], .stui-header__menu a[href], '
+      '.myui-header__menu a[href], .hl-nav a[href]',
+    );
+    final candidates =
+        navLinks.isNotEmpty ? navLinks : doc.querySelectorAll('a[href]');
+
+    String? pureCategoryId(Uri target) {
+      final path = target.path;
+      final vodType = RegExp(
+        r'/(?:vodtype|vod/type/id|type|category)/(\d+)(?:\.html)?/?$',
+        caseSensitive: false,
+      ).firstMatch(path);
+      if (vodType != null) return vodType.group(1);
+      final vodShow = RegExp(
+        r'/vodshow/(\d+)-+(?:\.html)?$',
+        caseSensitive: false,
+      ).firstMatch(path);
+      if (vodShow != null) return vodShow.group(1);
+      // Skip multi-dimension filter/pagination vodshow links like /vodshow/1-大陆-动作---2---.html
+      if (RegExp(r'/vodshow/', caseSensitive: false).hasMatch(path)) {
+        return null;
       }
+      if (RegExp(r'/page/\d+', caseSensitive: false).hasMatch(path)) {
+        return null;
+      }
+      if (RegExp(r'/(?:vodtype|vod/type|vod/show|type|category)[/\-]',
+              caseSensitive: false)
+          .hasMatch(path)) {
+        return target.toString();
+      }
+      return null;
+    }
+
+    final result = <String, CmsCategory>{};
+    final seenNames = <String>{};
+    void collect(Iterable<Element> anchors) {
+      for (final a in anchors) {
+        final href = (a.attributes['href'] ?? '').trim();
+        if (href.isEmpty || href.startsWith('#') || href.startsWith('javascript:')) {
+          continue;
+        }
+        final Uri target;
+        try {
+          target = base.resolve(href);
+        } catch (_) {
+          continue;
+        }
+        if (target.origin != base.origin) continue;
+        final id = pureCategoryId(target);
+        if (id == null || id.isEmpty) continue;
+        final name = a.text.replaceAll(RegExp(r'\s+'), ' ').trim();
+        if (name.isEmpty ||
+            name.length > 24 ||
+            RegExp(r'^(?:首页|主页|全部|更多|上一页|下一页|尾页|\d+)$').hasMatch(name)) {
+          continue;
+        }
+        if (result.containsKey(id) || !seenNames.add(name)) continue;
+        result[id] = CmsCategory(id: id, name: name);
+      }
+    }
+
+    collect(candidates);
+    if (result.isEmpty && navLinks.isNotEmpty) {
+      collect(doc.querySelectorAll('a[href]'));
     }
     return result.values.toList();
   }
@@ -872,7 +942,7 @@ class WoggNetdiskAdapter {
         poster: poster.isEmpty ? '' : base.resolve(poster).toString(),
         remarks: card
                 .querySelector(
-                  '.module-item-note, .video-serial, .pic-text, .remarks, .hl-lc-1',
+                  '.module-item-text, .module-item-note, .video-serial, .pic-text, .remarks, .hl-lc-1',
                 )
                 ?.text
                 .trim() ??

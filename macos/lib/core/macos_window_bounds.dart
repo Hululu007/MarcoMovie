@@ -520,6 +520,13 @@ class MacosWindowBoundsController with WindowListener {
     if (await _adapter.isFullScreen() || await _adapter.isMinimized()) {
       return false;
     }
+    // On real macOS, windowManager.getBounds() uses top-left Y coordinates while
+    // MacosWindowBounds stores AppKit bottom-left Y coordinates. Never overwrite
+    // persisted AppKit bounds with inverted Y coordinates if the native channel
+    // is unavailable.
+    if (!kIsWeb && Platform.isMacOS) {
+      return false;
+    }
     final rect = await _adapter.getWindowManagerBounds();
     if (rect == null) return false;
     final candidate = MacosWindowBounds(
@@ -536,6 +543,9 @@ class MacosWindowBoundsController with WindowListener {
 
   @override
   void onWindowMoved() => _scheduleCapture();
+
+  @override
+  void onWindowResize() => _scheduleCapture();
 
   @override
   void onWindowResized() => _scheduleCapture();
@@ -583,5 +593,78 @@ class MacosWindowBoundsController with WindowListener {
     if (identical(_shared, this)) {
       _shared = null;
     }
+  }
+}
+
+/// Result of picking a local file via macOS native `NSOpenPanel` with
+/// security-scoped resource access.
+@immutable
+class MacosPickedFile {
+  final String name;
+  final String? path;
+  final Uint8List bytes;
+
+  const MacosPickedFile({
+    required this.name,
+    required this.bytes,
+    this.path,
+  });
+}
+
+/// Native macOS Finder file picker bridge (`marco_movie/macos_window` ->
+/// `pickLocalFile`) that activates the app, opens `NSOpenPanel` cleanly, and
+/// reads user-selected files inside `startAccessingSecurityScopedResource()`.
+class MacosLocalFilePicker {
+  const MacosLocalFilePicker._();
+
+  @visibleForTesting
+  static Future<MacosPickedFile?> Function({String? title, int maxBytes})?
+      debugPickOverride;
+
+  static bool get isAvailable =>
+      debugPickOverride != null || (!kIsWeb && Platform.isMacOS);
+
+  static Future<MacosPickedFile?> pickFile({
+    String? title,
+    int maxBytes = 16 * 1024 * 1024,
+  }) async {
+    final override = debugPickOverride;
+    if (override != null) {
+      return override(title: title, maxBytes: maxBytes);
+    }
+    if (kIsWeb || !Platform.isMacOS) {
+      return null;
+    }
+    final raw = await DefaultMacosWindowPlatformAdapter.channel
+        .invokeMethod<dynamic>(
+      'pickLocalFile',
+      <String, dynamic>{
+        if (title != null && title.isNotEmpty) 'title': title,
+        'maxBytes': maxBytes,
+      },
+    );
+    if (raw == null) return null;
+    if (raw is! Map) {
+      throw const FormatException('无法读取所选本地文件');
+    }
+    final err = raw['error'];
+    if (err is String && err.trim().isNotEmpty) {
+      throw FormatException(err.trim());
+    }
+    final name = (raw['name'] ?? '').toString().trim();
+    final path = raw['path']?.toString();
+    final bytesRaw = raw['bytes'];
+    if (bytesRaw is! Uint8List) {
+      throw const FormatException('无法读取所选文件内容');
+    }
+    if (bytesRaw.length > maxBytes) {
+      final maxMb = (maxBytes / (1024 * 1024)).ceil();
+      throw FormatException('文件超过 $maxMb MB');
+    }
+    return MacosPickedFile(
+      name: name.isEmpty ? 'local.json' : name,
+      path: path,
+      bytes: bytesRaw,
+    );
   }
 }

@@ -68,6 +68,7 @@ class PythonSourceSessions {
   final _sources = <String, _Source>{};
   final _allocated = <_Source>{};
   final _pins = <String, Set<Object>>{};
+  final _evictOnUnpin = <String>{};
   final _random = Random.secure();
   final _changed = StreamController<void>.broadcast(sync: true);
   final _proxy = ScriptProxyServer();
@@ -91,7 +92,12 @@ class PythonSourceSessions {
     pins.add(token);
     return () {
       if (!pins.remove(token)) return;
-      if (pins.isEmpty && identical(_pins[key], pins)) _pins.remove(key);
+      if (pins.isEmpty && identical(_pins[key], pins)) {
+        _pins.remove(key);
+        if (_evictOnUnpin.remove(key)) {
+          _sources[key]?.revoke();
+        }
+      }
       _changed.add(null);
     };
   }
@@ -127,11 +133,27 @@ class PythonSourceSessions {
 
   /// Removal and URL revocation happen before returning. A hung native call
   /// remains allocated; waiting for its disposal must not block a settings page.
-  void retainSessions(Set<String> keys) {
+  ///
+  /// When [preservePinned] is true (e.g. background subscription refresh while
+  /// playback is active), sessions currently pinned by a live player stay alive
+  /// until the last pin releases, then revoke immediately.
+  void retainSessions(Set<String> keys, {bool preservePinned = false}) {
     _generation++;
-    _pins.removeWhere((key, _) => !keys.contains(key));
+    final effectiveKeys = Set<String>.of(keys);
+    _evictOnUnpin.removeWhere(keys.contains);
+    if (preservePinned) {
+      for (final entry in _pins.entries) {
+        if (entry.value.isNotEmpty && !keys.contains(entry.key)) {
+          effectiveKeys.add(entry.key);
+          _evictOnUnpin.add(entry.key);
+        }
+      }
+    } else {
+      _evictOnUnpin.removeWhere((key) => !keys.contains(key));
+    }
+    _pins.removeWhere((key, _) => !effectiveKeys.contains(key));
     for (final source in _sources.values.toList()) {
-      if (!keys.contains(source.key)) source.revoke();
+      if (!effectiveKeys.contains(source.key)) source.revoke();
     }
     _changed.add(null);
   }

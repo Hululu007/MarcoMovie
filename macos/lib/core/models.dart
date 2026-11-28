@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'csp_bridge.dart';
 import 'live_catalog_parser.dart';
 import 'spider_plugin_registry.dart';
+import 'wogg_netdisk_adapter.dart';
 
 class CmsDepot {
   final String name;
@@ -471,6 +472,34 @@ class CmsSite {
     }
     return capabilityReason(capabilityStatus);
   }
+
+  /// Detailed, actionable troubleshooting guidance for unknown or unadapted
+  /// plugins (preserving [unsupportedReason] verbatim for legacy diagnostics).
+  String get actionableUnsupportedHint {
+    final base = unsupportedReason;
+    final status = capabilityStatus;
+    if (status == statusOk) return base;
+    final cleanApi = api.trim();
+    final apiTag = cleanApi.isNotEmpty &&
+            !cleanApi.startsWith('http://') &&
+            !cleanApi.startsWith('https://')
+        ? '（插件标识：$cleanApi）'
+        : '';
+    if (CspBridge.guardAdapterFor(this) != null &&
+        pluginReference.trim().isEmpty) {
+      return '$base$apiTag\n\n处理建议：当前订阅缺少该站点所需的 spider / jar 插件地址，请补全原订阅配置后重新导入，或在「设置 → 蜘蛛扩展与网关」导入适配包 / 连接局域网蜘蛛网关。';
+    }
+    if (WoggNetdiskAdapter.matchesApiName(cleanApi) && ext.trim().isEmpty) {
+      return '$base$apiTag\n\n处理建议：当前网盘站点缺少站点域名配置（ext），请在原订阅中补全，或在「切换片源」中编辑线路补充站点地址。';
+    }
+    if (status == statusAdapterMissing) {
+      return '$base$apiTag\n\n处理建议：可在「设置 → 蜘蛛扩展与网关」导入适配包或连接局域网 Android 蜘蛛网关，也可切换到已适配的 4K 网盘或标准 HTTP 站点。';
+    }
+    if (status == statusNeedsJar) {
+      return '$base$apiTag\n\n处理建议：macOS 无法直接执行安卓 DEX/JAR 插件。可在「设置 → 蜘蛛扩展与网关」导入兼容适配包或连接局域网蜘蛛网关，或切换其他可用站点。';
+    }
+    return '$base$apiTag';
+  }
 }
 
 class SiteOverride {
@@ -884,6 +913,9 @@ class CmsConfig {
             !s.api.toLowerCase().startsWith('csp_sixv') &&
             !(s.api.toLowerCase().startsWith('csp_xpathguard') && s.ext.trim().isEmpty),
       )
+      .toList(growable: false);
+  List<CmsSite> get unadaptedPluginSites => sites
+      .where((s) => !s.supported && !CspBridge.isMyDriveSite(s))
       .toList(growable: false);
   Iterable<CmsSite> get scriptOwners sync* {
     yield* sites;

@@ -190,7 +190,14 @@ class SourcePlayback {
         }
       }
     }
-    await add(raw['url'] ?? raw['urls'],'默认画质',{});
+    final primaryUrl = raw['url'];
+    final altUrls = raw['urls'];
+    if (primaryUrl != null) {
+      await add(primaryUrl, '默认画质', {});
+    }
+    if (altUrls != null && !identical(altUrls, primaryUrl)) {
+      await add(altUrls, '默认画质', {});
+    }
     if (choices.isEmpty) throw const FormatException('来源没有返回可播放的媒体地址');
     return CmsEpisode(
       name: episode.name,
