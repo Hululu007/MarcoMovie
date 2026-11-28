@@ -1,3 +1,10 @@
+## 2026-11-28 Android 手机 / 平板 0.7.7 专项修复：平板去沉浸顶栏遮挡与滚动跳位修复、代理流式拉流提速与剧集高清海报升级（Android 手机 / 平板 0.7.7）
+
+- [Android 手机 / 平板 0.7.7](docs/releases/android-mobile-v0.7.7.md)
+- **修复平板/手机关闭首页沉浸式海报后顶栏悬空遮挡与滚动跳位**：`MobileHomePage` 在关闭沉浸式巨幅海报时使 `floatingTopBar` 随滚动 `1:1` 平滑上移收起并离屏隐藏，同步修复首组精选顶距、焦点拦截与异步刷新后滚动位置恢复。
+- **修复本地代理直链与 HLS 拉流限速 ~1 MB/s**：`MediaDiskCache` 与 `HlsStreamProxy` 改造为复用 `OkHttp` 连接池的单连接 64 KiB 连续流式直传、异步有界缓存落盘、`RequestScope` 即时取消及 `LocalProxy` `TCP_NODELAY` / 256 KiB 发送缓冲，显著提升大体积视频吞吐。
+- **修复剧集详情页部分海报模糊问题**：`MobileDetailScreen` 新增海报分辨率单调门控防止低清缩略图覆盖高清图，`ImageLoader` 扩展腾讯/爱奇艺/芒果 CDN 原图升格与 `.webp` / 豆瓣镜像回退，`SeasonParser` 与 `ImmersivePoster` 增加季名/版本后缀剥离回退及百科竖图兜底。
+
 ## 2026-11-28 全端联合修复与功能升级：Android 手机 0.7.6、Android 电视 0.6.6、iOS 0.7.13、Windows 0.7.6、macOS 0.6.3、Apple TV 0.1.4、HarmonyOS NEXT 0.1.4（多仓搜索无遗漏、折叠屏半折悬停分屏播放、电视端单一确认退出与选集卡规格对齐、「聚剧|四盘」历史直连与背景防菱形纹）
 
 - **Android 手机与电视端修复多仓全局搜索大量线路显示「未完成」问题**：升级手机端 `MobileSearchPage` 与两端 `SearchCoordinator` 双通道阻塞治理调度，HTTP / Emby / Alist 与原生蜘蛛通道隔离运行，原生通道上限提升并按实际可用空闲线程精确派发（不向阻塞队列超额堆积），同时根据 `400+` 多仓来源数自适应拓展搜索全局超时预算（最高 `360s`），彻底解决搜索未完即大批挂为「未完成」的问题。

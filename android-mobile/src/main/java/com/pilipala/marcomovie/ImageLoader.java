@@ -968,12 +968,24 @@ final class ImageLoader {
             String targetUrl,
             boolean detail)
             throws Exception {
-        String[] candidates =
-                detail && !targetUrl.equals(resolvedUrl)
-                        ? new String[] {
-                            targetUrl, upgradePosterUrl(resolvedUrl, false), resolvedUrl
-                        }
-                        : new String[] {targetUrl, resolvedUrl};
+        java.util.List<String> candidateList = new java.util.ArrayList<>(6);
+        candidateList.add(targetUrl);
+        if (detail && targetUrl != null && targetUrl.contains("doubanio.com")) {
+            if (targetUrl.endsWith(".jpg")) {
+                candidateList.add(targetUrl.substring(0, targetUrl.length() - 4) + ".webp");
+            }
+            if (targetUrl.contains("://img3.doubanio.com/")) {
+                candidateList.add(
+                        targetUrl.replace("://img3.doubanio.com/", "://img9.doubanio.com/"));
+                candidateList.add(
+                        targetUrl.replace("://img3.doubanio.com/", "://img1.doubanio.com/"));
+            }
+        }
+        if (detail && !targetUrl.equals(resolvedUrl)) {
+            candidateList.add(upgradePosterUrl(resolvedUrl, false));
+        }
+        candidateList.add(resolvedUrl);
+        String[] candidates = candidateList.toArray(new String[0]);
         Exception lastError = null;
         java.util.HashSet<String> tried = new java.util.HashSet<>();
         boolean hasCustomUa = source.headers.containsKey("User-Agent");
@@ -1121,6 +1133,20 @@ final class ImageLoader {
                 int q = url.indexOf('?');
                 if (q > 0) url = url.substring(0, q);
             } else {
+                // Upgrade common Chinese video CDN poster thumbnails when detail HD is requested.
+                if (url.contains("qpic.cn") || url.contains("gtimg.cn")) {
+                    url =
+                            url.replaceAll(
+                                    "(/vcover_vt_pic/[^?#]+)/(?:180|220|260|332|350|450|496)(\\?.*)?$",
+                                    "$1/0");
+                } else if (url.contains("iqiyipic.com") || url.contains("qiyipic.com")) {
+                    url =
+                            url.replaceAll(
+                                    "_(?:180_236|195_260|220_308|260_360|284_160|320_180)(?=\\.(?:jpg|jpeg|webp|png)(?:[?#].*)?$)",
+                                    "");
+                } else if (url.contains("mgtv.com") || url.contains("hitv.com")) {
+                    url = url.replaceAll("_\\d{2,4}x\\d{2,4}\\.(?:jpg|jpeg|webp|png)$", "");
+                }
                 // Strip unsigned OSS / COS / Qiniu thumbnail resize directives for full-res origin
                 int q = url.indexOf('?');
                 if (q > 0) {

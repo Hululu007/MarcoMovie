@@ -525,6 +525,19 @@ final class MobileHomePage {
     }
 
     /**
+     * Pure-JVM vertical translation for the floating top brand header. Scrolls the header off the
+     * top edge at 1:1 with {@code scrollY} both when the immersive Hero is visible and when it is
+     * turned off, preventing scrolled poster cards from colliding underneath the brand/source
+     * pills.
+     */
+    static float computeFloatingHeaderTranslationY(
+            int scrollY, boolean hasHero, int heroHeightPx, int headerHeightPx) {
+        int clampedScroll = Math.max(0, scrollY);
+        int travel = hasHero ? Math.max(1, heroHeightPx) : Math.max(1, headerHeightPx);
+        return -Math.min(clampedScroll, travel);
+    }
+
+    /**
      * Pure-JVM Rex-style poster atmospheric harmonizer matching iOS {@code
      * _resolveRexHeroAtmosphere}:
      *
@@ -746,6 +759,7 @@ final class MobileHomePage {
                 new FrameLayout.LayoutParams(-1, heroHeightPx + a.dp(192), Gravity.TOP));
 
         final LinearLayout body = a.vertical();
+        body.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
         final int standardTopPad = a.statusBarHeight() + a.dp(56);
         final int bottomPad = a.navigationBarHeight() + a.dp(108);
         body.setPadding(0, standardTopPad, 0, bottomPad);
@@ -935,8 +949,16 @@ final class MobileHomePage {
                 () -> {
                     int scrollY = sv.getScrollY();
                     boolean hasHero = heroVisibleFlag[0];
+                    int headerTravel =
+                            floatingTopBar.getHeight() > 0
+                                    ? floatingTopBar.getHeight()
+                                    : standardTopPad;
+                    float headerTy =
+                            computeFloatingHeaderTranslationY(
+                                    scrollY, hasHero, heroHeightPx, headerTravel);
+                    floatingTopBar.setTranslationY(headerTy);
                     if (hasHero) {
-                        floatingTopBar.setTranslationY(-Math.min(scrollY, heroHeightPx));
+                        floatingTopBar.setVisibility(View.VISIBLE);
                         float veilAlpha =
                                 Math.max(
                                         0f,
@@ -946,7 +968,8 @@ final class MobileHomePage {
                                                         / Math.max(1f, heroHeightPx * 0.24f)));
                         shell.setStatusBarVeilAlpha(veilAlpha);
                     } else {
-                        floatingTopBar.setTranslationY(0f);
+                        floatingTopBar.setVisibility(
+                                Math.abs(headerTy) >= headerTravel ? View.INVISIBLE : View.VISIBLE);
                         shell.setStatusBarVeilAlpha(1f);
                     }
                     boolean overHero = hasHero && scrollY < Math.round(heroHeightPx * 0.44f);
@@ -954,9 +977,9 @@ final class MobileHomePage {
                         return;
                     }
                     lastOverHeroState[0] = overHero;
+                    floatingTopBar.setBackground(null);
                     if (overHero) {
                         a.applyMobileSystemBars(false, true);
-                        floatingTopBar.setBackground(null);
                         applyWordmarkInk(a, brandWordmarkRef[0], true, true);
                         GradientDrawable glassPill = a.bg(0x450E121C, 999);
                         glassPill.setStroke(MobileTheme.hairlinePx(a), 0x33FFFFFF);
@@ -975,14 +998,6 @@ final class MobileHomePage {
                     } else {
                         a.applyMobileSystemBars(false, false);
                         if (!hasHero) {
-                            floatingTopBar.setBackground(
-                                    new GradientDrawable(
-                                            GradientDrawable.Orientation.TOP_BOTTOM,
-                                            new int[] {
-                                                MobileTheme.withAlpha(p.bgCanvas, 0xF5),
-                                                MobileTheme.withAlpha(p.bgCanvas, 0xCC),
-                                                Color.TRANSPARENT
-                                            }));
                             applyWordmarkInk(a, brandWordmarkRef[0], p.isDark, false);
                             GradientDrawable subBg = a.bg(p.bgSubtle, 999);
                             subBg.setStroke(
@@ -1196,14 +1211,16 @@ final class MobileHomePage {
         final Runnable debouncedCuratedRefresh =
                 () -> {
                     if (curatedWrap.getVisibility() == View.VISIBLE) {
+                        final int savedScrollY = sv.getScrollY();
                         boolean curatedIsFirst = historyWrap.getVisibility() != View.VISIBLE;
+                        boolean hasHero = heroHolder.getChildCount() > 0;
                         MobileCuratedSection.renderInto(
                                 a,
                                 curatedWrap,
                                 true,
-                                curatedIsFirst,
+                                hasHero && curatedIsFirst,
                                 MobileHomeSections.visibleCuratedIds(a));
-                        if (heroHolder.getChildCount() > 0 && curatedIsFirst) {
+                        if (hasHero && curatedIsFirst) {
                             Object liveAtmoObj = heroHolder.getTag();
                             if (liveAtmoObj instanceof Integer) {
                                 boolean lightInk =
@@ -1211,6 +1228,14 @@ final class MobileHomePage {
                                 MobileCuratedSection.applyFirstHeaderInk(
                                         curatedWrap, p, true, lightInk);
                             }
+                        }
+                        if (savedScrollY > 0) {
+                            sv.post(
+                                    () -> {
+                                        if (sv.getScrollY() == 0) {
+                                            sv.scrollTo(0, savedScrollY);
+                                        }
+                                    });
                         }
                     }
                 };
@@ -1256,7 +1281,7 @@ final class MobileHomePage {
                     if (showCurated) {
                         MobileCuratedDiscovery.hydrateFromDiskIfNeeded(a);
                         MobileCuratedSection.renderInto(
-                                a, curatedWrap, true, !showHistory, enabledCurated);
+                                a, curatedWrap, true, heroAllowed && !showHistory, enabledCurated);
                         MobileCuratedDiscovery.fetchAllAsync(a, a.generation, refreshCuratedRef[0]);
                     } else {
                         ImageLoader.detachImageViews(curatedWrap);
@@ -2744,6 +2769,7 @@ final class MobileHomePage {
 
         final int standardTopPad = a.statusBarHeight() + a.dp(56);
         final LinearLayout body = a.vertical();
+        body.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
         final int bottomPad = a.navigationBarHeight() + a.dp(108);
         body.setPadding(0, showHero ? 0 : standardTopPad, 0, bottomPad);
         scrollContentHost.addView(body, new FrameLayout.LayoutParams(-1, -2));
@@ -2850,14 +2876,24 @@ final class MobileHomePage {
         final Boolean[] lastOverHeroState = {null};
         final Runnable syncPolarity =
                 () -> {
+                    int scrollY = sv.getScrollY();
+                    int headerTravel =
+                            floatingTopBar.getHeight() > 0
+                                    ? floatingTopBar.getHeight()
+                                    : standardTopPad;
+                    float headerTy =
+                            computeFloatingHeaderTranslationY(
+                                    scrollY, showHero, heroHeightPx, headerTravel);
+                    floatingTopBar.setTranslationY(headerTy);
+                    floatingTopBar.setBackground(null);
                     if (!showHero) {
-                        floatingTopBar.setTranslationY(0f);
+                        floatingTopBar.setVisibility(
+                                Math.abs(headerTy) >= headerTravel ? View.INVISIBLE : View.VISIBLE);
                         shell.setStatusBarVeilAlpha(1f);
                         a.applyMobileSystemBars(false, false);
                         return;
                     }
-                    int scrollY = sv.getScrollY();
-                    floatingTopBar.setTranslationY(-Math.min(scrollY, heroHeightPx));
+                    floatingTopBar.setVisibility(View.VISIBLE);
                     float veilAlpha =
                             Math.max(
                                     0f,
@@ -2880,6 +2916,7 @@ final class MobileHomePage {
 
         final Runnable renderAll =
                 () -> {
+                    final int savedScrollY = sv.getScrollY();
                     boolean curatedIsFirst = historyWrap.getVisibility() != View.VISIBLE;
                     if (!enabledCurated.isEmpty()) {
                         MobileCuratedSection.renderInto(
@@ -2887,6 +2924,14 @@ final class MobileHomePage {
                     }
                     if (!showHero) {
                         MobileCuratedSection.applyFirstHeaderInk(curatedWrap, p, false, false);
+                        if (savedScrollY > 0) {
+                            sv.post(
+                                    () -> {
+                                        if (sv.getScrollY() == 0) {
+                                            sv.scrollTo(0, savedScrollY);
+                                        }
+                                    });
+                        }
                         return;
                     }
                     List<Cms.Video> heroPool = new ArrayList<>();

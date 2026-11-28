@@ -26,6 +26,7 @@ TEST_AUTHORITIES = {
     'android-tv/tests/DrpyChecks.java': {'new:login@127.0.0.1:', 'user:p%2Bss@', 'user:pass@', 'user:p%2Bss@source.test', 'user:pass@source.test'},
     'android-tv/tests/GuardChecks.java': {'user:pass@media.test'},
     'android-mobile/tests/DrpyChecks.java': {'new:login@127.0.0.1:', 'user:p%2Bss@', 'user:pass@', 'user:p%2Bss@source.test', 'user:pass@source.test'},
+    'android-mobile/tests/MobileUiRedesignChecks.java': {'puui.qpic.cn', 'pic1.iqiyipic.com', '1img.hitv.com'},
     'android-mobile/tests/GuardChecks.java': {'user:pass@media.test'},
     'flutter/test/drpy_cancellation_test.dart': {'user:pass@fixture.invalid'},
     'flutter/test/drpy_host_test.dart': {'user:secret@fixture.invalid'},

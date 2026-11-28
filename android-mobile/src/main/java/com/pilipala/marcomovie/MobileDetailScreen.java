@@ -1139,11 +1139,27 @@ final class MobileDetailScreen {
      * MainActivity's artwork loader finishes decoding the poster Bitmap, it feeds
      * {@link PortraitBackdropView}.
      */
+    /**
+     * Resolution-monotone gate for detail posters: prevents a slower low-resolution CMS thumbnail
+     * from overwriting an already-applied HD portrait poster.
+     */
+    static boolean shouldAcceptPosterBitmap(
+            int curW, int curH, int newW, int newH, boolean newIsHd) {
+        if (newW <= 0 || newH <= 0) return false;
+        if (curW <= 0 || curH <= 0) return true;
+        long curArea = (long) curW * (long) curH;
+        long newArea = (long) newW * (long) newH;
+        if (newArea < curArea) return false;
+        return newArea > Math.round(curArea * 1.05) || (newIsHd && newArea >= curArea);
+    }
+
     static final class PosterHookImageView extends ImageView {
         private final PortraitBackdropView target;
         private final Runnable onLoaded;
         final int targetW;
         final int targetH;
+        private int bestW;
+        private int bestH;
 
         PosterHookImageView(MainActivity a, PortraitBackdropView target, Runnable onLoaded) {
             super(a);
@@ -1156,10 +1172,22 @@ final class MobileDetailScreen {
             layout(0, 0, targetW, targetH);
         }
 
-        @Override
-        public void setImageBitmap(Bitmap bm) {
+        void applyPosterBitmap(Bitmap bm, boolean isHd) {
+            if (bm == null || bm.isRecycled()) return;
+            int w = bm.getWidth();
+            int h = bm.getHeight();
+            if (!shouldAcceptPosterBitmap(bestW, bestH, w, h, isHd)) {
+                return;
+            }
+            bestW = w;
+            bestH = h;
             super.setImageBitmap(bm);
             target.setPosterBitmap(bm, onLoaded);
+        }
+
+        @Override
+        public void setImageBitmap(Bitmap bm) {
+            applyPosterBitmap(bm, false);
         }
     }
 
@@ -1311,7 +1339,7 @@ final class MobileDetailScreen {
                 listing.director,
                 listing.poster,
                 hdBmp -> {
-                    posterHook.setImageBitmap(hdBmp);
+                    posterHook.applyPosterBitmap(hdBmp, true);
                     refreshEpisodeStillBitmaps(a.root, hdBmp);
                 });
 
@@ -1628,7 +1656,7 @@ final class MobileDetailScreen {
                             v.director,
                             v.poster,
                             hdBmp -> {
-                                posterHook.setImageBitmap(hdBmp);
+                                posterHook.applyPosterBitmap(hdBmp, true);
                                 refreshEpisodeStillBitmaps(a.root, hdBmp);
                             });
                     for (java.util.Iterator<Cms.Line> it = v.lines.iterator(); it.hasNext(); ) {

@@ -6,7 +6,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.SequenceInputStream;
-import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -563,27 +562,25 @@ public final class HlsStreamProxy {
 
     private static boolean servePlaylist(
             Session session, String targetUrl, String method, OutputStream out) throws IOException {
-        Cms.MediaConnection mc;
+        MediaDiskCache.UpstreamCall up;
         try {
-            mc = Cms.openMediaConnection(targetUrl, session.headers, null, 15000, 25000);
+            up = openPooledCall(targetUrl, session.headers, null, true);
         } catch (IOException err) {
             AppLog.w("HlsStreamProxy", "playlist upstream failed", err);
             throw err;
         }
-        try {
-            int code = mc.statusCode;
-            String finalUrl = mc.finalUrl;
+        try (MediaDiskCache.UpstreamCall ignored = up) {
+            int code = up.response.code();
+            String finalUrl = up.response.request().url().toString();
             if (code >= 400) {
                 AppLog.w("HlsStreamProxy", "playlist upstream HTTP " + code, null);
                 LocalProxy.simple(out, code, "Upstream playlist HTTP " + code);
                 return false;
             }
-            InputStream rawIn = mc.conn.getInputStream();
-            if ("gzip".equalsIgnoreCase(mc.conn.getContentEncoding())) {
-                rawIn = new GZIPInputStream(rawIn);
-            }
+            okhttp3.ResponseBody body = up.response.body();
             byte[] rawBytes;
-            try (InputStream in = rawIn) {
+            try (InputStream in =
+                    body != null ? body.byteStream() : new ByteArrayInputStream(new byte[0])) {
                 rawBytes = Cms.gunzipIfNeeded(readAllBounded(in, 8 * 1024 * 1024));
             }
             String text = new String(rawBytes, StandardCharsets.UTF_8);
@@ -593,9 +590,6 @@ public final class HlsStreamProxy {
                 return false;
             }
             return writeRewrittenPlaylist(session, text, finalUrl, method, out);
-        } finally {
-            RequestScope.detach(mc.conn);
-            mc.conn.disconnect();
         }
     }
 
@@ -658,23 +652,23 @@ public final class HlsStreamProxy {
             OutputStream out)
             throws IOException {
         String range = requestHeaders != null ? requestHeaders.get("range") : null;
-        Cms.MediaConnection mc;
+        MediaDiskCache.UpstreamCall up;
         try {
-            mc = Cms.openMediaConnection(targetUrl, session.headers, range, 15000, 25000);
+            up = openPooledCall(targetUrl, session.headers, range, false);
         } catch (IOException err) {
             AppLog.w("HlsStreamProxy", "segment upstream failed", err);
             throw err;
         }
-        try {
-            int code = mc.statusCode;
+        try (MediaDiskCache.UpstreamCall ignored = up) {
+            int code = up.response.code();
             if (code >= 400) {
                 AppLog.w("HlsStreamProxy", "segment upstream HTTP " + code, null);
                 LocalProxy.simple(out, code, "Upstream segment HTTP " + code);
                 return false;
             }
-            String contentType = mc.conn.getContentType();
-            long upstreamLength = parseContentLength(mc.conn);
-            String contentRange = mc.conn.getHeaderField("Content-Range");
+            String contentType = up.response.header("Content-Type");
+            long upstreamLength = parseOkHttpContentLength(up.response);
+            String contentRange = up.response.header("Content-Range");
             if ("HEAD".equals(method)) {
                 StringBuilder head =
                         new StringBuilder("HTTP/1.1 ")
@@ -695,7 +689,8 @@ public final class HlsStreamProxy {
                 return false;
             }
 
-            String lowerPath = mc.finalUrl.split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
+            String finalUrl = up.response.request().url().toString();
+            String lowerPath = finalUrl.split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
             boolean skipProbe =
                     raw
                             || range != null
@@ -704,7 +699,9 @@ public final class HlsStreamProxy {
                             || lowerPath.endsWith(".key")
                             || lowerPath.endsWith(".vtt");
 
-            try (InputStream upstream = mc.conn.getInputStream()) {
+            okhttp3.ResponseBody body = up.response.body();
+            try (InputStream upstream =
+                    body != null ? body.byteStream() : new ByteArrayInputStream(new byte[0])) {
                 InputStream bodyStream = upstream;
                 byte[] probe = null;
                 int filled = 0;
@@ -766,22 +763,60 @@ public final class HlsStreamProxy {
                 out.flush();
                 return false;
             }
-        } finally {
-            RequestScope.detach(mc.conn);
-            mc.conn.disconnect();
         }
     }
 
-    private static long parseContentLength(HttpURLConnection conn) {
-        String header = conn.getHeaderField("Content-Length");
+    private static MediaDiskCache.UpstreamCall openPooledCall(
+            String targetUrl, Map<String, String> headers, String range, boolean allowGzip)
+            throws IOException {
+        if (!allowGzip) {
+            return MediaDiskCache.openUpstreamCall(targetUrl, headers, range);
+        }
+        String normalized = ProxyAddress.normalizeMediaHttpUrl(targetUrl);
+        if (!Cms.isHttp(normalized)) {
+            throw new IOException("不支持的媒体地址");
+        }
+        RequestScope.checkCurrent();
+        okhttp3.OkHttpClient client = MoviePlayer.mediaHttpClient();
+        okhttp3.Request.Builder rb = new okhttp3.Request.Builder().url(normalized);
+        boolean hasUa = false;
+        if (headers != null) {
+            for (Map.Entry<String, String> e : headers.entrySet()) {
+                String k = e.getKey();
+                String v = e.getValue();
+                if (k == null || v == null || k.equalsIgnoreCase("Host")) continue;
+                if (k.equalsIgnoreCase("User-Agent")) hasUa = true;
+                rb.header(k, v);
+            }
+        }
+        if (!hasUa) {
+            rb.header("User-Agent", Cms.USER_AGENT);
+        }
+        if (range != null && !range.isEmpty()) {
+            rb.header("Range", range);
+        }
+        okhttp3.Call call = client.newCall(rb.build());
+        Runnable cancelHook = call::cancel;
+        RequestScope.onCancel(cancelHook);
+        try {
+            okhttp3.Response resp = call.execute();
+            return new MediaDiskCache.UpstreamCall(call, resp, cancelHook);
+        } catch (IOException err) {
+            RequestScope.offCancel(cancelHook);
+            throw err;
+        }
+    }
+
+    private static long parseOkHttpContentLength(okhttp3.Response resp) {
+        String header = resp.header("Content-Length");
         if (header != null) {
             try {
                 return Long.parseLong(header.trim());
             } catch (NumberFormatException ignored) {
             }
         }
-        int legacy = conn.getContentLength();
-        return legacy >= 0 ? legacy : -1L;
+        okhttp3.ResponseBody body = resp.body();
+        return body != null ? body.contentLength() : -1L;
     }
 
     private static int readFullyUpTo(InputStream in, byte[] dst, int maxBytes) throws IOException {

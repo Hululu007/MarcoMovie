@@ -2806,5 +2806,50 @@ public final class MobileUiRedesignChecks {
                 !java.util.Arrays.asList(Prefs.KEYS).contains(Prefs.FOLDABLE_TABLETOP_SPLIT_HUD)
                         && !MobileSettingsIndex.search("折叠", false, false).isEmpty(),
                 "Pillar 12: FOLDABLE_TABLETOP_SPLIT_HUD stays outside Prefs.KEYS and is searchable");
+
+        // Regression checks for tablet no-hero header scroll translation & TV-series HD poster
+        // guards
+        check(
+                MobileHomePage.computeFloatingHeaderTranslationY(0, false, 900, 120) == 0f
+                        && MobileHomePage.computeFloatingHeaderTranslationY(60, false, 900, 120)
+                                == -60f
+                        && MobileHomePage.computeFloatingHeaderTranslationY(240, false, 900, 120)
+                                == -120f
+                        && MobileHomePage.computeFloatingHeaderTranslationY(240, true, 900, 120)
+                                == -240f,
+                "Tablet home without immersive Hero scrolls floating header off-screen cleanly with scrollY");
+        check(
+                MobileDetailScreen.shouldAcceptPosterBitmap(0, 0, 240, 360, false)
+                        && MobileDetailScreen.shouldAcceptPosterBitmap(240, 360, 720, 1080, true)
+                        && !MobileDetailScreen.shouldAcceptPosterBitmap(720, 1080, 240, 360, false)
+                        && !MobileDetailScreen.shouldAcceptPosterBitmap(720, 1080, 720, 1080, false)
+                        && MobileDetailScreen.shouldAcceptPosterBitmap(720, 1080, 720, 1080, true),
+                "MobileDetailScreen.shouldAcceptPosterBitmap blocks low-res overwrite of HD posters");
+        check(
+                "庆余年".equals(SeasonParser.stripSeriesEditionSuffix("庆余年 第二季"))
+                        && "繁花".equals(SeasonParser.stripSeriesEditionSuffix("繁花 沪语版"))
+                        && "庆余年".equals(SeasonParser.stripSeriesEditionSuffix("庆余年（未删减版）"))
+                        && readUtf8(
+                                        root,
+                                        "android-mobile/src/main/java/com/pilipala/marcomovie/ImmersivePoster.java")
+                                .contains("stripSeriesEditionSuffix("),
+                "SeasonParser.stripSeriesEditionSuffix + ImmersivePoster normalizes TV series season/edition suffixes");
+        check(
+                "https://puui.qpic.cn/vcover_vt_pic/0/abc123/0"
+                                .equals(
+                                        ImageLoader.upgradePosterUrl(
+                                                "https://puui.qpic.cn/vcover_vt_pic/0/abc123/332",
+                                                true))
+                        && "https://pic1.iqiyipic.com/image/a.jpg"
+                                .equals(
+                                        ImageLoader.upgradePosterUrl(
+                                                "https://pic1.iqiyipic.com/image/a_260_360.jpg",
+                                                true))
+                        && "https://1img.hitv.com/poster/a.jpg"
+                                .equals(
+                                        ImageLoader.upgradePosterUrl(
+                                                "https://1img.hitv.com/poster/a.jpg_220x308.jpg",
+                                                true)),
+                "ImageLoader.upgradePosterUrl promotes Tencent/iQIYI/MangoTV CDN detail posters to full resolution");
     }
 }

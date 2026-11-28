@@ -104,6 +104,11 @@ public final class LocalProxy implements Closeable {
                             while (!closed)
                                 try {
                                     Socket socket = server.accept();
+                                    try {
+                                        socket.setTcpNoDelay(true);
+                                        socket.setSendBufferSize(256 * 1024);
+                                    } catch (Throwable ignored) {
+                                    }
                                     consecutiveAcceptErrors = 0;
                                     RequestScope scope = new RequestScope();
                                     activeRequests.put(socket, scope);

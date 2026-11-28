@@ -405,6 +405,82 @@ public final class HighQualityUpgradeChecks {
             cache.setMaxBytes(1024L);
             cache.trimIfNeeded();
             check(cache.totalCachedBytes() <= 1024L, "LRU trim enforces cache size cap");
+
+            // Continuous multi-block streaming regression: a 4 MiB uncached read must NOT serialize
+            // 16 separate 256 KiB Range requests (~1 MB/s bottleneck); probe + 1 continuous stream
+            // (<= 2 upstream requests) must deliver exact bytes.
+            force416.set(0);
+            int largeLen = 4 * 1024 * 1024;
+            byte[] largePayload = new byte[largeLen];
+            for (int i = 0; i < largeLen; i++) largePayload[i] = (byte) ((i * 17 + 3) & 0xFF);
+            AtomicInteger largeUpstreamHits = new AtomicInteger(0);
+            HttpServer largeUpstream =
+                    HttpServer.create(
+                            new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0), 0);
+            int largePort = largeUpstream.getAddress().getPort();
+            largeUpstream.createContext(
+                    "/big.mp4",
+                    ex -> {
+                        largeUpstreamHits.incrementAndGet();
+                        String range = ex.getRequestHeaders().getFirst("Range");
+                        if (range != null && range.startsWith("bytes=")) {
+                            long[] r = MediaDiskCache.parseRangeHeader(range, largeLen);
+                            int s = (int) r[0];
+                            int e = (int) r[1];
+                            int len = e - s + 1;
+                            ex.getResponseHeaders().add("Content-Type", "video/mp4");
+                            ex.getResponseHeaders().add("Accept-Ranges", "bytes");
+                            ex.getResponseHeaders()
+                                    .add("Content-Range", "bytes " + s + "-" + e + "/" + largeLen);
+                            ex.sendResponseHeaders(206, len);
+                            try (OutputStream os = ex.getResponseBody()) {
+                                os.write(largePayload, s, len);
+                            }
+                        } else {
+                            ex.getResponseHeaders().add("Content-Type", "video/mp4");
+                            ex.sendResponseHeaders(200, largeLen);
+                            try (OutputStream os = ex.getResponseBody()) {
+                                os.write(largePayload);
+                            }
+                        }
+                    });
+            largeUpstream.start();
+            File largeRoot = Files.createTempDirectory("mm-disk-cache-4mb-test").toFile();
+            try {
+                MediaDiskCache streamCache = new MediaDiskCache(largeRoot, 16L * 1024 * 1024);
+                MediaDiskCache.Session bigSession =
+                        new MediaDiskCache.Session(
+                                "s4m",
+                                "http://127.0.0.1:" + largePort + "/big.mp4",
+                                Collections.emptyMap(),
+                                "entry4m");
+                ByteArrayOutputStream bigResp = new ByteArrayOutputStream(largeLen + 512);
+                streamCache.serveSession(bigSession, "GET", "bytes=0-", bigResp);
+                byte[] bigRaw = bigResp.toByteArray();
+                int bigBodyOff = findHttpBodyOffset(bigRaw);
+                check(
+                        bigRaw.length - bigBodyOff == largeLen,
+                        "4 MiB continuous MediaDiskCache stream returns exact payload length");
+                for (int i = 0; i < largeLen; i += 4093) {
+                    if (bigRaw[bigBodyOff + i] != largePayload[i]) {
+                        throw new AssertionError("4 MiB stream byte mismatch at " + i);
+                    }
+                }
+                check(
+                        largeUpstreamHits.get() <= 2,
+                        "4 MiB uncached read uses continuous upstream streaming (hits="
+                                + largeUpstreamHits.get()
+                                + " <= 2, not 16 serial 256 KiB blocks)");
+                int hitsAfterStream = largeUpstreamHits.get();
+                ByteArrayOutputStream bigCachedResp = new ByteArrayOutputStream();
+                streamCache.serveSession(bigSession, "GET", "bytes=524288-1048575", bigCachedResp);
+                check(
+                        largeUpstreamHits.get() == hitsAfterStream,
+                        "Immediate re-read inside streamed 4 MiB range hits memory/disk cache (0 upstream requests)");
+            } finally {
+                largeUpstream.stop(0);
+                deleteRecursive(largeRoot);
+            }
         } finally {
             upstream.stop(0);
             deleteRecursive(tempRoot);

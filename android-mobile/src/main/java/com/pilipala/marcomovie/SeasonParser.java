@@ -143,6 +143,26 @@ final class SeasonParser {
         return new SeasonMeta(t, 1, "第 1 季", false);
     }
 
+    /**
+     * Strips TV-series season numbers and Chinese edition tags (e.g. {@code 庆余年 第二季}, {@code 繁花
+     * 沪语版}) down to the canonical series title for Douban fallback matching.
+     */
+    static String stripSeriesEditionSuffix(String rawTitle) {
+        if (rawTitle == null || rawTitle.isEmpty()) return "";
+        String cleaned =
+                rawTitle.replaceAll(
+                                "(?:\\s*[（(【\\[]\\s*(?:沪语版|粤语版|国语版|原声版|台配版|日配版|剧版|电视剧版|动画版|真人版|未删减版|加长版|导演剪辑版|精编版|纯享版|贺岁版|典藏版|先导版|高能版)\\s*[）)】\\]])",
+                                "")
+                        .replaceAll(
+                                "(?:\\s*(?:沪语版|粤语版|国语版|原声版|台配版|日配版|剧版|电视剧版|动画版|未删减版|加长版|导演剪辑版|精编版|全\\d+集|更新至\\d+集?)|\\s*第\\s*[一二三四五六七八九十0-9]+\\s*[季部]|\\s*(?i)Season\\s*\\d+|\\s*(?i)Part\\s*\\d+)$",
+                                "")
+                        .trim();
+        if (cleaned.isEmpty()) return rawTitle.trim();
+        SeasonMeta sm = parseSeasonMeta(cleaned);
+        String base = sm != null && sm.baseTitle != null ? sm.baseTitle.trim() : cleaned;
+        return base.isEmpty() ? cleaned : base;
+    }
+
     static String normalizeBaseKey(String s) {
         if (s == null) return "";
         return s.toLowerCase(Locale.ROOT)
