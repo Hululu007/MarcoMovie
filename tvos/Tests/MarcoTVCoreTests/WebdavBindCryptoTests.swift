@@ -67,8 +67,8 @@ final class WebdavBindCryptoTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let storage = TvStorageManager(
-            baseDirectory: dir,
-            keychain: InMemoryTvKeychainStore()
+            cachesDirectory: dir,
+            keychain: InMemoryKeychainStore()
         )
         let server = LanConfigServer(storage: storage)
         let port = try await server.start(loopbackOnly: true)
