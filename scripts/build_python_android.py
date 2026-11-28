@@ -42,7 +42,7 @@ PURE_DEPS = [
     ),
     (
         'urllib3-2.2.3.zip',
-        'https://github.com/urllib3/urllib3/archive/refs/tags/v2.2.3.zip',
+        'https://github.com/urllib3/urllib3/archive/refs/tags/2.2.3.zip',
         'c487db502a4a09b98621714e47bddd96e6ccffbeb38e544375f43eacfea34022',
         'urllib3-2.2.3/src/urllib3/',
         'urllib3/',

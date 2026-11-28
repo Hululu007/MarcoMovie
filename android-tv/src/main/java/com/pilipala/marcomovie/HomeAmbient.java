@@ -46,6 +46,8 @@ final class HomeAmbient extends View {
     private final RectF dstRect = new RectF();
     private Bitmap cachedPrevBitmap;
     private Bitmap cachedCurrBitmap;
+    private Bitmap cachedScratchA;
+    private Bitmap cachedScratchB;
     private boolean cachedBitmapDirty = true;
 
     ImageView wanted;
@@ -427,15 +429,31 @@ final class HomeAmbient extends View {
         invalidate();
     }
 
+    private Bitmap acquireTvScratchBitmap() {
+        if (cachedScratchA == null || cachedScratchA.isRecycled()) {
+            cachedScratchA = Bitmap.createBitmap(TV_CACHE_W, TV_CACHE_H, Bitmap.Config.ARGB_8888);
+            return cachedScratchA;
+        }
+        if (cachedCurrBitmap == cachedScratchA) {
+            if (cachedScratchB == null || cachedScratchB.isRecycled()) {
+                cachedScratchB =
+                        Bitmap.createBitmap(TV_CACHE_W, TV_CACHE_H, Bitmap.Config.ARGB_8888);
+            }
+            return cachedScratchB;
+        }
+        return cachedScratchA;
+    }
+
     private Bitmap renderCachedField(int first, int second) {
         float eff = effectiveStrength();
         int mid = deriveTertiary(first, second);
         Bitmap b;
         try {
-            b = Bitmap.createBitmap(TV_CACHE_W, TV_CACHE_H, Bitmap.Config.ARGB_8888);
+            b = acquireTvScratchBitmap();
         } catch (Throwable ignored) {
             return null;
         }
+        b.eraseColor(0xff0b0e16);
         Canvas c = new Canvas(b);
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.DITHER_FLAG);
         p.setShader(

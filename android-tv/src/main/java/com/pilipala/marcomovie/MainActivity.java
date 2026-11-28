@@ -53,6 +53,7 @@ public final class MainActivity extends Activity {
 
     final Handler ui = new Handler(Looper.getMainLooper());
     final ExecutorService worker = boundedTvPool(4, "tv-worker");
+    final ExecutorService pageWorker = boundedTvPool(2, "tv-page");
     final ExecutorService details = boundedTvPool(4, "tv-details");
     final DetailCache detailCache = new DetailCache();
     final SingleFlight<String> detailFlights = new SingleFlight<>();
@@ -885,26 +886,24 @@ public final class MainActivity extends Activity {
                 densityDpi > 0
                         ? Math.round(Math.min(widthPixels, heightPixels) * 160f / densityDpi)
                         : 360;
-        if (viewportHint == null) {
-            try {
-                android.content.pm.ApplicationInfo appInfo =
-                        base.getPackageManager()
-                                .getApplicationInfo(
-                                        base.getPackageName(),
-                                        android.content.pm.PackageManager.GET_META_DATA);
-                if (appInfo != null && appInfo.metaData != null) {
-                    String edition = appInfo.metaData.getString("com.pilipala.marcomovie.EDITION");
-                    if ("mobile".equals(edition)) {
-                        return smallestDp >= 600
-                                ? TvLayoutPolicy.FORM_TABLET
-                                : TvLayoutPolicy.FORM_PHONE;
-                    }
-                    if ("tv".equals(edition)) {
-                        return TvLayoutPolicy.FORM_TV;
-                    }
+        try {
+            android.content.pm.ApplicationInfo appInfo =
+                    base.getPackageManager()
+                            .getApplicationInfo(
+                                    base.getPackageName(),
+                                    android.content.pm.PackageManager.GET_META_DATA);
+            if (appInfo != null && appInfo.metaData != null) {
+                String edition = appInfo.metaData.getString("com.pilipala.marcomovie.EDITION");
+                if ("mobile".equals(edition)) {
+                    return smallestDp >= 600
+                            ? TvLayoutPolicy.FORM_TABLET
+                            : TvLayoutPolicy.FORM_PHONE;
                 }
-            } catch (Exception ignored) {
+                if ("tv".equals(edition)) {
+                    return TvLayoutPolicy.FORM_TV;
+                }
             }
+        } catch (Exception ignored) {
         }
         boolean tvMode = false;
         try {
@@ -1138,33 +1137,12 @@ public final class MainActivity extends Activity {
         } catch (Exception ignored) {
         }
         try {
-            ConfigLibrary.recoverInterruptedRestoreIfNeeded(
-                    getFilesDir(),
-                    privateMode
-                            ? null
-                            : newPrefs ->
-                                    SettingsScreen.applyRestorablePrefsSnapshot(
-                                            prefs, newPrefs, true),
-                    privateMode
-                            ? null
-                            : txId ->
-                                    txId != null
-                                            && txId.equals(
-                                                    prefs.getString(
-                                                            ConfigLibrary
-                                                                    .RESTORE_TX_APPLIED_ID_PREF,
-                                                            "")));
-            File f = new File(getFilesDir(), "config.json");
-            String storedRaw = "";
-            if (f.exists()) {
-                try (InputStream i = new FileInputStream(f)) {
-                    storedRaw = Cms.read(i, Cms.MAX_JSON);
-                }
-            }
+            boolean loadedFromMultiSource = false;
             if (isTvDevice() && !privateMode && multiSourceStore != null) {
                 ConfigLibrary lib = new ConfigLibrary(configStore.directory);
                 TvMultiSourceStore.State msState = multiSourceStore.readState();
                 if (msState.initialized) {
+                    loadedFromMultiSource = true;
                     TvMultiSourceStore.EffectiveBuild built =
                             multiSourceStore.buildEffectiveConfig(
                                     lib,
@@ -1197,18 +1175,22 @@ public final class MainActivity extends Activity {
                         configOrigin = built.effectiveOrigin;
                         prefs.edit().putString(Prefs.SELECTED_SITE, "").apply();
                     }
-                } else if (!storedRaw.isEmpty()) {
+                }
+            }
+            if (!loadedFromMultiSource) {
+                File f = new File(getFilesDir(), "config.json");
+                String storedRaw = "";
+                if (f.exists()) {
+                    try (InputStream i = new FileInputStream(f)) {
+                        storedRaw = Cms.read(i, Cms.MAX_JSON);
+                    }
+                }
+                if (!storedRaw.isEmpty()) {
                     config = Cms.parseConfig(storedRaw, configOrigin);
                     SourcePicker.applyEdits(this, config, configOrigin);
                     if (priorBootCrashes == 0 && !priorLoadingCrash) {
                         SourcePreferences.restoreDefault(this);
                     }
-                }
-            } else if (!storedRaw.isEmpty()) {
-                config = Cms.parseConfig(storedRaw, configOrigin);
-                SourcePicker.applyEdits(this, config, configOrigin);
-                if (priorBootCrashes == 0 && !priorLoadingCrash) {
-                    SourcePreferences.restoreDefault(this);
                 }
             }
         } catch (Exception e) {
@@ -1289,13 +1271,6 @@ public final class MainActivity extends Activity {
                                     if (recoveredFromCrash) {
                                         clearRecoveredCrashSite(prefs);
                                     }
-                                    worker.execute(
-                                            () ->
-                                                    MagnetStream.cleanStaleSessions(
-                                                            MainActivity.this));
-                                    if (isTvDevice() && !privateMode) {
-                                        CatalogScreen.prewarmTvHistoryThemeAsync(MainActivity.this);
-                                    }
                                     if (!reduced
                                             && !recoveredFromCrash
                                             && priorBootCrashes == 0
@@ -1324,19 +1299,29 @@ public final class MainActivity extends Activity {
                                     layoutReady = true;
                                     ui.postDelayed(
                                             () -> clearStartupBootGuard(getCacheDir()), 3500);
-                                    if (!privateMode) {
-                                        CloudSyncDialog.pullOnStartup(MainActivity.this);
-                                        CrashReportDialog.maybePromptOnStartup(MainActivity.this);
-                                        if (priorBootCrashes < 2) {
-                                            ui.postDelayed(
-                                                    () ->
-                                                            SourceController
-                                                                    .runDailyAutoUpdateIfNeeded(
-                                                                            MainActivity.this,
-                                                                            false),
-                                                    3800);
-                                        }
-                                    }
+                                    ui.postDelayed(
+                                            () -> {
+                                                if (isFinishing() || isDestroyed()) return;
+                                                worker.execute(
+                                                        () ->
+                                                                MagnetStream.cleanStaleSessions(
+                                                                        MainActivity.this));
+                                                if (isTvDevice() && !privateMode) {
+                                                    CatalogScreen.prewarmTvHistoryThemeAsync(
+                                                            MainActivity.this);
+                                                }
+                                                if (!privateMode) {
+                                                    CloudSyncDialog.pullOnStartup(
+                                                            MainActivity.this);
+                                                    CrashReportDialog.maybePromptOnStartup(
+                                                            MainActivity.this);
+                                                    if (priorBootCrashes < 2) {
+                                                        SourceController.runDailyAutoUpdateIfNeeded(
+                                                                MainActivity.this, false);
+                                                    }
+                                                }
+                                            },
+                                            4200L);
                                     if (recoveredFromCrash) {
                                         toast("上次加载该片源时异常退出，已自动重置片源选择");
                                     } else if (priorBootCrashes >= 2) {
@@ -1461,6 +1446,7 @@ public final class MainActivity extends Activity {
     LinearLayout row() {
         LinearLayout v = new LinearLayout(this);
         v.setOrientation(LinearLayout.HORIZONTAL);
+        v.setBaselineAligned(false);
         v.setGravity(Gravity.CENTER_VERTICAL);
         return v;
     }
@@ -3054,12 +3040,13 @@ public final class MainActivity extends Activity {
     void cancelPageRequests() {
         for (Future<?> request : pageRequests) request.cancel(true);
         pageRequests.clear();
+        ((ThreadPoolExecutor) pageWorker).purge();
         ((ThreadPoolExecutor) worker).purge();
         ((ThreadPoolExecutor) details).purge();
     }
 
     Future<?> submitPage(Runnable task) {
-        Future<?> request = RequestScope.submit(worker, task);
+        Future<?> request = RequestScope.submit(pageWorker, task);
         for (int i = pageRequests.size() - 1; i >= 0; i--) {
             if (pageRequests.get(i).isDone()) pageRequests.remove(i);
         }
@@ -3100,7 +3087,7 @@ public final class MainActivity extends Activity {
     void initializePhonetic() {
         final boolean publicSpace = !privateMode;
         final SharedPreferences target = prefs;
-        worker.execute(
+        phoneticWork.execute(
                 () -> {
                     try {
                         if (!PinyinKeyboardModel.hasWarmSharedDictionary()) {
@@ -3991,9 +3978,16 @@ public final class MainActivity extends Activity {
 
         if (markerHost != null && markerHost.key(event)) return true;
 
-        if (!isTvDevice() && shortcutScreen != current) {
+        if (shortcutScreen != current) {
             homeKeys.reset();
             shortcutScreen = current;
+        }
+        if (searchScreen != null
+                && searchScreen.current()
+                && !isOwnModalDialogShowing()
+                && event.getKeyCode() == KeyEvent.KEYCODE_MENU) {
+            homeKeys.reset();
+            return searchScreen.handleMenuKey(event);
         }
         if (current != null && current.home) {
             int key = event.getKeyCode();
@@ -4008,8 +4002,19 @@ public final class MainActivity extends Activity {
                 }
                 return true;
             }
-            // TV directional taps always follow focus; the legacy non-TV shortcut is unchanged.
-            if (!isTvDevice() && event.getAction() == KeyEvent.ACTION_DOWN) {
+            if (isTvDevice() && event.getAction() == KeyEvent.ACTION_DOWN) {
+                if (key == KeyEvent.KEYCODE_DPAD_UP
+                        && current.retainedHome != null
+                        && current.retainedHome.canTriggerFilterTripleUp()) {
+                    if (homeKeys.up(event.getEventTime(), event.getRepeatCount())) {
+                        if (current.retainedHome.jumpToFilterMenu()) {
+                            return true;
+                        }
+                    }
+                } else {
+                    homeKeys.reset();
+                }
+            } else if (!isTvDevice() && event.getAction() == KeyEvent.ACTION_DOWN) {
                 if (key == KeyEvent.KEYCODE_DPAD_UP) {
                     if (homeKeys.up(event.getEventTime(), event.getRepeatCount())) {
                         jumpHomeTop();

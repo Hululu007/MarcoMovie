@@ -582,7 +582,10 @@ final class DoubanScoreRepository {
                 if (candCore.equals(targetCore)) {
                     rank = 100;
                 } else if (candCore.contains(targetCore) || targetCore.contains(candCore)) {
-                    rank = 60 - Math.min(30, Math.abs(candCore.length() - targetCore.length()) * 4);
+                    int minLen = Math.min(candCore.length(), targetCore.length());
+                    int maxLen = Math.max(candCore.length(), targetCore.length());
+                    if (minLen * 2 < maxLen) continue;
+                    rank = 68 - Math.min(30, (maxLen - minLen) * 4);
                 } else {
                     continue;
                 }
@@ -591,14 +594,14 @@ final class DoubanScoreRepository {
                                 target.optString("year", target.optString("card_subtitle", "")));
                 if (year != null && !year.isEmpty() && !candYear.isEmpty()) {
                     if (year.equals(candYear)) rank += 25;
-                    else rank -= 20;
+                    else rank -= 25;
                 }
                 if (rank > bestRank) {
                     bestRank = rank;
                     bestScore = val;
                 }
             }
-            return bestRank >= 40 ? bestScore : 0.0;
+            return bestRank >= 60 ? bestScore : 0.0;
         } catch (Exception ignored) {
             return 0.0;
         }

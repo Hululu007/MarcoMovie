@@ -32,6 +32,8 @@ final class HomeScreen {
     View curatedHeroBtn;
     int curatedHeroHeightPx;
     final int[] heroImageToken = new int[1];
+    private Runnable pendingHeroLoad;
+    private Runnable pendingHeroPrewarm;
     int tvContentLeftPadPx, tvContentRightPadPx;
     boolean fullBleedTvHero;
     final List<View> curatedDramaCards = new ArrayList<>(), curatedMovieCards = new ArrayList<>();
@@ -175,7 +177,7 @@ final class HomeScreen {
             curatedCatalog = TvCuratedHome.peekOrSeed(a);
             renderCuratedSection(curatedCatalog);
             final int curatedTicket = ticket;
-            if (!curatedCatalog.live) {
+            if (!curatedCatalog.live || curatedCatalog.stale) {
                 a.ui.postDelayed(
                         () -> {
                             if (!active()
@@ -188,60 +190,86 @@ final class HomeScreen {
                             TvCuratedHome.loadAsync(
                                     a,
                                     fresh -> {
-                                        if (!active()
-                                                || curatedTicket != ticket
-                                                || fresh == null
-                                                || a.current == null
-                                                || !a.current.home
-                                                || hasModalDialogOpen()) {
-                                            return;
-                                        }
-                                        if (!fresh.live
-                                                && curatedCatalog != null
-                                                && !curatedCatalog.live) {
-                                            return;
-                                        }
-                                        if (curatedCatalog != null
-                                                && curatedCatalog.live
-                                                && fresh == curatedCatalog) {
-                                            return;
-                                        }
-                                        View curF = a.getCurrentFocus();
-                                        String restoreCuratedTag =
-                                                (curF != null
-                                                                && curF.getTag() instanceof String
-                                                                && ((String) curF.getTag())
-                                                                        .startsWith(
-                                                                                "home-curated-"))
-                                                        ? (String) curF.getTag()
-                                                        : null;
-                                        curatedCatalog = fresh;
-                                        renderCuratedSection(fresh);
-                                        wireNavigation();
-                                        if (restoreCuratedTag != null && curatedHost != null) {
-                                            if (pendingSwitchAnchor == null
-                                                    || pendingSwitchAnchor.consumed
-                                                    || pendingSwitchAnchor.userMovedFocus) {
-                                                View match =
-                                                        curatedHost.findViewWithTag(
-                                                                restoreCuratedTag);
-                                                if (match != null && match.isShown()) {
-                                                    match.requestFocus();
-                                                } else if (curatedHeroBtn != null) {
-                                                    curatedHeroBtn.requestFocus();
-                                                }
-                                            }
-                                        } else if (pendingSwitchAnchor != null
-                                                && pendingSwitchAnchor.canApplyFocus(
-                                                        ticket,
-                                                        sourceSwitchSerial,
-                                                        site == null ? "" : site.key,
-                                                        hasModalDialogOpen())) {
-                                            alignSwitchAnchorIfActive(false);
-                                        }
+                                        final Runnable applyFresh =
+                                                new Runnable() {
+                                                    @Override
+                                                    public void run() {
+                                                        if (!active()
+                                                                || curatedTicket != ticket
+                                                                || fresh == null
+                                                                || a.current == null
+                                                                || !a.current.home
+                                                                || hasModalDialogOpen()) {
+                                                            return;
+                                                        }
+                                                        if (busy && a.isTvDevice()) {
+                                                            a.ui.postDelayed(this, 220L);
+                                                            return;
+                                                        }
+                                                        if (!fresh.live
+                                                                && curatedCatalog != null
+                                                                && !curatedCatalog.live) {
+                                                            return;
+                                                        }
+                                                        if (curatedCatalog != null
+                                                                && curatedCatalog.live
+                                                                && (fresh == curatedCatalog
+                                                                        || TvCuratedHome
+                                                                                .sameCatalogVisuals(
+                                                                                        curatedCatalog,
+                                                                                        fresh))) {
+                                                            curatedCatalog = fresh;
+                                                            return;
+                                                        }
+                                                        View curF = a.getCurrentFocus();
+                                                        String restoreCuratedTag =
+                                                                (curF != null
+                                                                                && curF.getTag()
+                                                                                        instanceof
+                                                                                        String
+                                                                                && ((String)
+                                                                                                curF
+                                                                                                        .getTag())
+                                                                                        .startsWith(
+                                                                                                "home-curated-"))
+                                                                        ? (String) curF.getTag()
+                                                                        : null;
+                                                        curatedCatalog = fresh;
+                                                        renderCuratedSection(fresh);
+                                                        wireNavigation();
+                                                        if (restoreCuratedTag != null
+                                                                && curatedHost != null) {
+                                                            if (pendingSwitchAnchor == null
+                                                                    || pendingSwitchAnchor.consumed
+                                                                    || pendingSwitchAnchor
+                                                                            .userMovedFocus) {
+                                                                View match =
+                                                                        curatedHost.findViewWithTag(
+                                                                                restoreCuratedTag);
+                                                                if (match != null
+                                                                        && match.isShown()) {
+                                                                    match.requestFocus();
+                                                                } else if (curatedHeroBtn != null) {
+                                                                    curatedHeroBtn.requestFocus();
+                                                                }
+                                                            }
+                                                        } else if (pendingSwitchAnchor != null
+                                                                && pendingSwitchAnchor
+                                                                        .canApplyFocus(
+                                                                                ticket,
+                                                                                sourceSwitchSerial,
+                                                                                site == null
+                                                                                        ? ""
+                                                                                        : site.key,
+                                                                                hasModalDialogOpen())) {
+                                                            alignSwitchAnchorIfActive(false);
+                                                        }
+                                                    }
+                                                };
+                                        applyFresh.run();
                                     });
                         },
-                        6000L);
+                        curatedCatalogRefreshDelayMs(curatedCatalog.live, curatedCatalog.stale));
             }
         }
         LinearLayout belowHeroWrap;
@@ -1244,7 +1272,8 @@ final class HomeScreen {
                     "近期热剧",
                     "home-curated-drama",
                     catalog.hotDramas,
-                    curatedDramaCards);
+                    curatedDramaCards,
+                    true);
             a.gap(curatedHost, 18);
         }
         if (!catalog.hotMovies.isEmpty()) {
@@ -1253,7 +1282,8 @@ final class HomeScreen {
                     "热门电影",
                     "home-curated-movie",
                     catalog.hotMovies,
-                    curatedMovieCards);
+                    curatedMovieCards,
+                    false);
             a.gap(curatedHost, 22);
         }
         if (ambient != null) {
@@ -1433,10 +1463,20 @@ final class HomeScreen {
                     final int heroTargetW = a.windowWidth();
                     final int heroTargetH = a.dp(heroHeightDp);
                     final int heroTicket = ticket;
+                    final int reqToken = ++heroImageToken[0];
+                    if (pendingHeroLoad != null) {
+                        a.ui.removeCallbacks(pendingHeroLoad);
+                        pendingHeroLoad = null;
+                    }
+                    if (pendingHeroPrewarm != null) {
+                        a.ui.removeCallbacks(pendingHeroPrewarm);
+                        pendingHeroPrewarm = null;
+                    }
                     final Runnable loadHeroNow =
                             () -> {
                                 if (!active()
                                         || heroTicket != ticket
+                                        || reqToken != heroImageToken[0]
                                         || a.current == null
                                         || !a.current.home
                                         || hasModalDialogOpen()) {
@@ -1447,6 +1487,7 @@ final class HomeScreen {
                                         item,
                                         heroArt,
                                         heroImageToken,
+                                        reqToken,
                                         heroTargetW,
                                         heroTargetH,
                                         (c0, c1) -> {
@@ -1460,25 +1501,43 @@ final class HomeScreen {
                                             }
                                         });
                             };
-                    if (ImmersivePoster.hasFeatheredHeroInCache(item, heroTargetW, heroTargetH)) {
+                    boolean hasMem =
+                            ImmersivePoster.hasFeatheredHeroInCache(item, heroTargetW, heroTargetH);
+                    boolean hasDisk = ImmersivePoster.hasDiskWideBackdrop(a, item);
+                    if (hasMem) {
                         loadHeroNow.run();
                     } else {
-                        a.ui.postDelayed(loadHeroNow, 3200L);
+                        if (item.poster != null && !item.poster.isEmpty()) {
+                            android.graphics.Bitmap memPortrait =
+                                    ImageLoader.cachedPosterBitmap(a, item.poster, 0, 0);
+                            if (memPortrait != null && !memPortrait.isRecycled()) {
+                                heroArt.setTag(null);
+                                heroArt.setImageBitmap(memPortrait);
+                            }
+                        }
+                        long heroDelay = curatedHeroLoadDelayMs(false, hasDisk);
+                        if (heroDelay <= 0L) {
+                            loadHeroNow.run();
+                        } else {
+                            pendingHeroLoad = loadHeroNow;
+                            a.ui.postDelayed(loadHeroNow, 100L);
+                        }
                     }
                     if (heroList.size() > 1) {
                         final Cms.Video nextHero = heroList.get((idx + 1) % heroList.size());
-                        a.ui.postDelayed(
+                        pendingHeroPrewarm =
                                 () -> {
                                     if (!active()
                                             || heroTicket != ticket
+                                            || reqToken != heroImageToken[0]
                                             || a.current == null
                                             || !a.current.home
                                             || hasModalDialogOpen()) {
                                         return;
                                     }
                                     ImmersivePoster.prewarmOfficialLandscape(a, nextHero);
-                                },
-                                4500L);
+                                };
+                        a.ui.postDelayed(pendingHeroPrewarm, 1200L);
                     }
                 };
 
@@ -1600,12 +1659,31 @@ final class HomeScreen {
         return baseScroll;
     }
 
+    static long curatedCatalogRefreshDelayMs(boolean live, boolean stale) {
+        return (!live || stale) ? 250L : 0L;
+    }
+
+    static long curatedHeroLoadDelayMs(boolean hasMemCache, boolean hasDiskCache) {
+        return (hasMemCache || hasDiskCache) ? 0L : 60L;
+    }
+
+    static boolean shouldEagerLoadCuratedCard(
+            boolean tvDevice, int scrollY, boolean firstShelf, int cardIndex) {
+        if (!tvDevice || scrollY > 0) return true;
+        return firstShelf && cardIndex >= 0 && cardIndex < 7;
+    }
+
+    static long curatedShelfHydrateDelayMs(boolean firstShelf) {
+        return firstShelf ? 350L : 500L;
+    }
+
     private void buildCuratedShelf(
             LinearLayout parent,
             String headingText,
             String tagPrefix,
             List<Cms.Video> items,
-            List<View> outCards) {
+            List<View> outCards,
+            boolean firstShelf) {
         LinearLayout header = a.row();
         header.setGravity(Gravity.CENTER_VERTICAL);
         if (fullBleedTvHero) {
@@ -1716,13 +1794,11 @@ final class HomeScreen {
             artWrap.addView(art, new FrameLayout.LayoutParams(-1, -1));
             TvV17PosterCard.attachDoubanBadge(a, artWrap, item);
             card.addView(artWrap, new LinearLayout.LayoutParams(a.dp(cardW), a.dp(cardW * 1.46f)));
-            // Below-the-fold curated shelves on TV start offscreen at scrollY=0: avoid blasting
-            // 28 immediate offscreen poster decodes during cold startup; hydrate lazily once Home
-            // settles or immediately when the user scrolls/focuses a shelf.
-            if (a.isTvDevice() && (a.scroll == null || a.scroll.getScrollY() == 0)) {
-                art.setTag(ImageLoader.normalizeArtworkAddress(item.poster));
-            } else {
+            int curScrollY = a.scroll == null ? 0 : a.scroll.getScrollY();
+            if (shouldEagerLoadCuratedCard(a.isTvDevice(), curScrollY, firstShelf, i)) {
                 a.poster(item.poster, art);
+            } else {
+                art.setTag(ImageLoader.normalizeArtworkAddress(item.poster));
             }
 
             TextView name = a.text(item.title, 13f, 0xffd0d4df);
@@ -1786,7 +1862,7 @@ final class HomeScreen {
                         }
                         resumeVisibleMissingPosters(strip);
                     },
-                    5000L);
+                    curatedShelfHydrateDelayMs(firstShelf));
         }
     }
 
@@ -2094,6 +2170,96 @@ final class HomeScreen {
         filterToggle.setContentDescription(
                 base + "，按确认键" + (state.filtersExpanded ? "收起筛选" : "展开筛选"));
         styleFilterToggle(filterToggle.hasFocus());
+    }
+
+    static boolean isFilterTripleUpEligible(
+            String focusTag, boolean filterableCategory, boolean scrolledOrPastFirstRow) {
+        if (!filterableCategory || !scrolledOrPastFirstRow || focusTag == null) return false;
+        return focusTag.startsWith("home-video:")
+                || "home-more".equals(focusTag)
+                || "home-earlier".equals(focusTag);
+    }
+
+    boolean canTriggerFilterTripleUp() {
+        if (!active()
+                || !a.isTvDevice()
+                || inlineFilters == null
+                || !inlineFilters.canShowForCurrentCategory()) {
+            return false;
+        }
+        View focus = a.getCurrentFocus();
+        if (focus == null || focus.getTag() == null) return false;
+        String tag = String.valueOf(focus.getTag());
+        boolean scrolled = a.scroll != null && a.scroll.getScrollY() > 0;
+        boolean pastFirstRow = false;
+        if (tag.startsWith("home-video:")) {
+            try {
+                int idx = Integer.parseInt(tag.substring("home-video:".length()));
+                pastFirstRow = idx >= Math.max(1, COLUMNS);
+            } catch (NumberFormatException ignored) {
+            }
+        } else if ("home-more".equals(tag)) {
+            pastFirstRow = true;
+        }
+        return isFilterTripleUpEligible(tag, true, scrolled || pastFirstRow);
+    }
+
+    private int computeFilterMenuScrollY() {
+        if (a.scroll == null) return 0;
+        View anchor =
+                (filters != null && filters.getVisibility() == View.VISIBLE)
+                        ? filters
+                        : inlineFilters;
+        if (anchor == null) return 0;
+        int y = 0;
+        View cursor = anchor;
+        while (cursor != null && cursor != a.scroll) {
+            y += cursor.getTop();
+            android.view.ViewParent p = cursor.getParent();
+            cursor = p instanceof View ? (View) p : null;
+        }
+        if (cursor != a.scroll) return 0;
+        return Math.max(0, y - a.dp(18));
+    }
+
+    boolean jumpToFilterMenu() {
+        if (!active()
+                || !a.isTvDevice()
+                || inlineFilters == null
+                || !inlineFilters.canShowForCurrentCategory()) {
+            return false;
+        }
+        if (pendingTabSwitch != null) {
+            a.ui.removeCallbacks(pendingTabSwitch);
+            pendingTabSwitch = null;
+        }
+        boolean wasApplying = applyingFilters;
+        applyingFilters = true;
+        try {
+            state.filtersExpanded = true;
+            inlineFilters.render();
+            updateTabs();
+            wireNavigation();
+            View target = inlineFilters.firstSelectedChip();
+            if (target == null) target = inlineFilters.entryChip(0);
+            if (target == null && filterToggle != null && filterToggle.isShown()) {
+                target = filterToggle;
+            }
+            if (target == null) target = selectedTab();
+            if (target != null) {
+                target.requestFocus();
+                if (a.current != null && target.getTag() != null) {
+                    a.current.focus = String.valueOf(target.getTag());
+                }
+            }
+            int targetScrollY = computeFilterMenuScrollY();
+            if (a.current != null) a.current.scroll = targetScrollY;
+            a.smoothHomeScroll(targetScrollY);
+        } finally {
+            applyingFilters = wasApplying;
+        }
+        a.toast("已回到筛选菜单");
+        return true;
     }
 
     void showFilters() {
@@ -2799,7 +2965,8 @@ final class HomeScreen {
     }
 
     int windowSize() {
-        return Math.max(COLUMNS, (MAX_RETAINED_CARDS / COLUMNS) * COLUMNS);
+        int cap = a != null && a.isTvDevice() ? 120 : MAX_RETAINED_CARDS;
+        return Math.max(COLUMNS, (cap / COLUMNS) * COLUMNS);
     }
 
     int windowEnd() {
@@ -2980,9 +3147,9 @@ final class HomeScreen {
             end = index + 1;
             if (System.nanoTime() - batchStarted >= budgetNs) break;
         }
-        wireNavigation(Math.max(0, (start - state.windowStart) / COLUMNS - 1));
-        resolvePendingFocus(false);
         if (end < windowEnd()) {
+            wireGridRowsFrom(Math.max(0, (start - state.windowStart) / COLUMNS - 1));
+            resolvePendingFocus(false);
             final int next = end;
             pendingGrid = () -> appendCards(next, epoch, restore);
             Runnable nextBatch = pendingGrid;
@@ -2991,10 +3158,11 @@ final class HomeScreen {
                         if (active() && epoch == gridEpoch) a.ui.post(nextBatch);
                     });
         } else {
+            wireNavigation(Math.max(0, rows.size() - 1));
             resolvePendingFocus(true);
             updateMore();
             updateFilterContinueButton();
-            wireNavigation(Math.max(0, rows.size() - 1));
+            wireGridRowsFrom(Math.max(0, rows.size() - 1));
             if (restore
                     && a.current != null
                     && a.current.focus != null
@@ -3133,6 +3301,54 @@ final class HomeScreen {
                 return target;
         }
         return null;
+    }
+
+    void wireGridRowsFrom(int firstRow) {
+        boolean tvLeftDock = a.homeDock != null && a.homeDock.tvLeft;
+        boolean inlineExpanded = inlineFilters != null && inlineFilters.expanded();
+        boolean inlineSummary = inlineFilters != null && inlineFilters.summaryShown();
+        int lastInlineRow = inlineExpanded ? inlineFilters.rows.size() - 1 : -1;
+        for (int r = Math.max(0, firstRow); r < rows.size(); r++) {
+            List<View> row = rows.get(r);
+            horizontal(row);
+            for (int c = 0; c < row.size(); c++) {
+                View card = row.get(c);
+                card.setNextFocusUpId(
+                        r == 0
+                                ? (earlier.isShown()
+                                        ? earlier.getId()
+                                        : inlineExpanded
+                                                ? inlineFilters
+                                                        .nearest(
+                                                                inlineFilters.rows.get(
+                                                                        lastInlineRow),
+                                                                card)
+                                                        .getId()
+                                                : inlineSummary
+                                                        ? inlineFilters.expandButton.getId()
+                                                        : selectedTab().getId())
+                                : rows.get(r - 1)
+                                        .get(Math.min(c, rows.get(r - 1).size() - 1))
+                                        .getId());
+                card.setNextFocusDownId(
+                        r + 1 < rows.size()
+                                ? rows.get(r + 1)
+                                        .get(Math.min(c, rows.get(r + 1).size() - 1))
+                                        .getId()
+                                : more.isShown() ? more.getId() : card.getId());
+            }
+            if (tvLeftDock && !row.isEmpty()) a.homeDock.leftEdge(row.get(0), false);
+        }
+        int aboveGridId =
+                inlineExpanded
+                        ? inlineFilters.rows.get(lastInlineRow).get(0).getId()
+                        : inlineSummary
+                                ? inlineFilters.expandButton.getId()
+                                : selectedTab().getId();
+        earlier.setNextFocusUpId(aboveGridId);
+        earlier.setNextFocusDownId(rows.isEmpty() ? more.getId() : rows.get(0).get(0).getId());
+        more.setNextFocusUpId(
+                rows.isEmpty() ? aboveGridId : rows.get(rows.size() - 1).get(0).getId());
     }
 
     void wireNavigation() {
@@ -3490,24 +3706,28 @@ final class HomeScreen {
 
     static final class SourceChevron extends android.graphics.drawable.Drawable {
         final android.graphics.Paint paint = new android.graphics.Paint(3);
+        final android.graphics.Path path = new android.graphics.Path();
         final MainActivity a;
 
         SourceChevron(MainActivity a) {
             this.a = a;
-            setBounds(0, 0, a.dp(10), a.dp(10));
-        }
-
-        public void draw(android.graphics.Canvas canvas) {
-            android.graphics.Rect b = getBounds();
             paint.setColor(0xffd7e2ed);
             paint.setStyle(android.graphics.Paint.Style.STROKE);
             paint.setStrokeWidth(a.dp(1.4f));
             paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
             paint.setStrokeJoin(android.graphics.Paint.Join.ROUND);
-            android.graphics.Path path = new android.graphics.Path();
+            setBounds(0, 0, a.dp(10), a.dp(10));
+        }
+
+        @Override
+        protected void onBoundsChange(android.graphics.Rect b) {
+            path.rewind();
             path.moveTo(b.left + b.width() * .15f, b.top + b.height() * .35f);
             path.lineTo(b.exactCenterX(), b.top + b.height() * .65f);
             path.lineTo(b.left + b.width() * .85f, b.top + b.height() * .35f);
+        }
+
+        public void draw(android.graphics.Canvas canvas) {
             canvas.drawPath(path, paint);
         }
 
@@ -3526,28 +3746,32 @@ final class HomeScreen {
 
     static final class FilterChevron extends android.graphics.drawable.Drawable {
         final android.graphics.Paint paint = new android.graphics.Paint(3);
+        final android.graphics.Path path = new android.graphics.Path();
         final MainActivity a;
         final boolean expanded;
 
         FilterChevron(MainActivity a, boolean expanded) {
             this.a = a;
             this.expanded = expanded;
-            setBounds(0, 0, a.dp(9), a.dp(9));
-        }
-
-        public void draw(android.graphics.Canvas canvas) {
-            android.graphics.Rect b = getBounds();
             paint.setColor(0xffe8eef6);
             paint.setStyle(android.graphics.Paint.Style.STROKE);
             paint.setStrokeWidth(a.dp(1.35f));
             paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
             paint.setStrokeJoin(android.graphics.Paint.Join.ROUND);
-            android.graphics.Path path = new android.graphics.Path();
+            setBounds(0, 0, a.dp(9), a.dp(9));
+        }
+
+        @Override
+        protected void onBoundsChange(android.graphics.Rect b) {
+            path.rewind();
             float yEdge = b.top + b.height() * (expanded ? .66f : .34f);
             float yTip = b.top + b.height() * (expanded ? .34f : .66f);
             path.moveTo(b.left + b.width() * .15f, yEdge);
             path.lineTo(b.exactCenterX(), yTip);
             path.lineTo(b.left + b.width() * .85f, yEdge);
+        }
+
+        public void draw(android.graphics.Canvas canvas) {
             canvas.drawPath(path, paint);
         }
 

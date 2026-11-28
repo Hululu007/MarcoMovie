@@ -331,8 +331,8 @@ public final class MobileEmbyAccounts {
                         final String address;
                         try {
                             address =
-                                    MobileEmbyLibrary.assembleServerUrl(
-                                            useHttps, rawHost, rawPath, rawPort);
+                                    MobileEmbyLibrary.composeServerAddress(
+                                            useHttps, rawHost, rawPort, rawPath);
                         } catch (Exception addrErr) {
                             status.setTextColor(p.danger);
                             status.setText(addrErr.getMessage());

@@ -57,6 +57,7 @@ final class WatchHistory {
         e.episodeKey = src.episodeKey;
         e.episodeMediaId = src.episodeMediaId;
         e.episodeUrl = src.episodeUrl;
+        e.shareUrl = src.shareUrl;
         e.index = src.index;
         e.position = src.position;
         e.duration = src.duration;
@@ -1144,6 +1145,15 @@ final class WatchHistory {
         e.episodeKey = stableEpisodeKey(rawEpisodeUrl);
         e.episodeMediaId = resolveEpisodeMediaIdForPlayback(rawEpisodeUrl, savedMatchedBookmark);
         e.episodeUrl = "";
+        if (Cms.Site.looksLikeNetdiskShareId(vodId)) {
+            e.shareUrl = vodId.trim();
+        } else if (Cms.Site.looksLikeNetdiskShareId(rawEpisodeUrl)) {
+            e.shareUrl = rawEpisodeUrl.trim();
+        } else if (savedMatchedBookmark != null
+                && savedMatchedBookmark.shareUrl != null
+                && Cms.Site.looksLikeNetdiskShareId(savedMatchedBookmark.shareUrl)) {
+            e.shareUrl = savedMatchedBookmark.shareUrl.trim();
+        }
         e.index = Math.max(0, episodeIndex);
         e.position = Math.max(0, positionMs);
         e.duration = Math.max(0, durationMs);
@@ -1350,7 +1360,8 @@ final class WatchHistory {
                 episode,
                 episodeKey,
                 episodeMediaId,
-                episodeUrl;
+                episodeUrl,
+                shareUrl;
         int index, position, duration;
         long updated;
 
@@ -1399,6 +1410,9 @@ final class WatchHistory {
             if (!effEpMediaId.isEmpty()) {
                 obj.put("episodeMediaId", effEpMediaId);
             }
+            if (shareUrl != null && Cms.Site.looksLikeNetdiskShareId(shareUrl)) {
+                obj.put("shareUrl", shareUrl.trim());
+            }
             return obj;
         }
 
@@ -1442,6 +1456,14 @@ final class WatchHistory {
                     e.driveKey = detectDriveKeyFromUrl(legacyUrl);
                 }
                 e.episodeUrl = "";
+                String rawShare = Cms.optSafeString(o, "shareUrl");
+                if (Cms.Site.looksLikeNetdiskShareId(rawShare)) {
+                    e.shareUrl = rawShare.trim();
+                } else if (Cms.Site.looksLikeNetdiskShareId(e.id)) {
+                    e.shareUrl = e.id.trim();
+                } else {
+                    e.shareUrl = "";
+                }
                 e.index = Math.max(0, o.optInt("index"));
                 e.position = Math.max(0, o.optInt("position"));
                 e.duration = Math.max(0, o.optInt("duration"));

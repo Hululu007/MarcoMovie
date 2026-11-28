@@ -618,6 +618,10 @@ class _DetailScreenState extends State<DetailScreen> {
       unawaited(MediaBadges.ensureInitialized().then((_) {
         if (mounted) setState(() {});
       }));
+      if (_isIosDetail) {
+        AiService.instance.addListener(_onIosDetailAiStateChanged);
+        unawaited(AiService.instance.ensureLoaded());
+      }
       if (!isWindowsDesktopUi) {
         unawaited(PlayerEnterTransition.prewarmShader());
       }
@@ -759,6 +763,7 @@ class _DetailScreenState extends State<DetailScreen> {
       });
     }
     _cancelDetailWork();
+    AiService.instance.removeListener(_onIosDetailAiStateChanged);
     PosterLoader.metadataRevision.removeListener(_onExternalMetadataRevision);
     widget.storage.watchHistoryRevision.removeListener(_onWatchHistoryChanged);
     widget.storage.seriesScrapeRevision.removeListener(_onSeriesScrapeRevision);
@@ -772,6 +777,11 @@ class _DetailScreenState extends State<DetailScreen> {
     _previewCardsScrollController.dispose();
     _pageRangeScrollController.dispose();
     super.dispose();
+  }
+
+  void _onIosDetailAiStateChanged() {
+    if (!mounted) return;
+    setState(() {});
   }
 
   void _onWatchHistoryChanged() {
@@ -1935,6 +1945,41 @@ class _DetailScreenState extends State<DetailScreen> {
       if (switchedTarget) {
         _detailSeedVideo = detailed;
       }
+      if (owner.key == targetSite.key &&
+          detailed.id != targetVideo.id &&
+          !CmsClient.isGenericPlaceholderVodId(detailed.id) &&
+          !owner.isEffectivelyPrivate) {
+        final existingHist = widget.storage
+            .getWatchHistory()
+            .where((item) => item.site == owner.key && item.id == targetVideo.id)
+            .toList();
+        if (existingHist.isNotEmpty) {
+          final oldItem = existingHist.first;
+          unawaited(() async {
+            await widget.storage.upsertWatchHistory(
+              WatchHistoryEntry(
+                site: owner.key,
+                id: detailed.id,
+                title: oldItem.title,
+                poster: oldItem.poster,
+                line: oldItem.line,
+                lineId: oldItem.lineId,
+                episode: oldItem.episode,
+                episodeUrl: oldItem.episodeUrl,
+                episodeMediaId: oldItem.episodeMediaId,
+                index: oldItem.index,
+                position: oldItem.position,
+                duration: oldItem.duration,
+                updated: oldItem.updated,
+              ),
+            );
+            await widget.storage.removeWatchHistoryItem(
+              owner.key,
+              targetVideo.id,
+            );
+          }());
+        }
+      }
       _isFavorite = widget.storage.isFavorite(
         owner.key,
         detailed.id,
@@ -2466,12 +2511,23 @@ class _DetailScreenState extends State<DetailScreen> {
   WatchHistoryEntry? _findBookmark([CmsVideo? currentVideo]) {
     if (_activeSite.isEffectivelyPrivate) return null;
     final video = currentVideo ?? _video;
-    for (final item in widget.storage.getWatchHistory()) {
+    final history = widget.storage.getWatchHistory();
+    for (final item in history) {
       if (item.site == _activeSite.key && item.id == video.id) {
         final bookmark = WoggSource.normalizeCachedBookmark(_activeSite, video, item);
         if (WoggSource.supports(_activeSite) &&
             WoggSource.resolveCachedBookmarkTarget(_activeSite, video, bookmark) == null) return null;
         return bookmark;
+      }
+    }
+    if (video.id != widget.video.id && _activeSite.key == widget.site.key) {
+      for (final item in history) {
+        if (item.site == _activeSite.key && item.id == widget.video.id) {
+          final bookmark = WoggSource.normalizeCachedBookmark(_activeSite, video, item);
+          if (WoggSource.supports(_activeSite) &&
+              WoggSource.resolveCachedBookmarkTarget(_activeSite, video, bookmark) == null) return null;
+          return bookmark;
+        }
       }
     }
     return null;

@@ -118,6 +118,89 @@ class DanmuSegmentCache extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
+  /// Binds preloaded [items] (e.g. from AI online danmu search) directly into
+  /// memory without going through [DanmuProvider.openSession], populates the
+  /// active playback window immediately, and enables normal seek/offset/filter
+  /// rendering across all player kernels.
+  void bindPreloadedItems(
+    List<DanmuItem> items, {
+    required String sessionId,
+    int initialPositionMs = 0,
+    bool playing = false,
+  }) {
+    if (_disposed || OhosRuntime.isOhos) return;
+    _cancelInFlight(cancelOpen: true);
+    _bindGeneration++;
+
+    final cleanId = sessionId.trim().isEmpty ? 'ai_online_danmu' : sessionId.trim();
+    final dedup = <String, DanmuItem>{};
+    final sortedInput = List<DanmuItem>.from(items)..sort(DanmuItem.compareOrder);
+    for (final item in sortedInput) {
+      if (item.timeMs < 0 || item.text.trim().isEmpty) continue;
+      dedup.putIfAbsent(item.id, () => item);
+      if (dedup.length >= maxTotalItems) break;
+    }
+    final normalized = List<DanmuItem>.unmodifiable(dedup.values);
+
+    _boundEpisodeId = cleanId;
+    _activeSession = DanmuEpisodeSession(
+      boundEpisodeId: cleanId,
+      segmented: false,
+      preloadComments: normalized,
+    );
+    _sessionEpoch = 0;
+    _session410RefreshCount = 0;
+    _activeRefreshFlight = null;
+    _retried410Windows.clear();
+    _windowCache.clear();
+    _totalCachedItems = 0;
+    _pendingWindowAfterOpen = null;
+    _seeking = false;
+    _invalidateSnapshotCache();
+
+    final effectiveMs = computeEffectiveMs(initialPositionMs, _timeOffsetMs);
+    final w = computeFetchWindowIndex(effectiveMs);
+    _currentPinnedWindow = w;
+    if (normalized.isNotEmpty) {
+      _putWindow(w, _slicePreloadedWindow(normalized, w));
+      final nextW = w + 1;
+      if (playing &&
+          effectiveMs >= (w * windowDurationMs) + prefetchOffsetMs &&
+          !_windowCache.containsKey(nextW)) {
+        _putWindow(nextW, _slicePreloadedWindow(normalized, nextW));
+      }
+    }
+    if (!_disposed) notifyListeners();
+  }
+
+  static List<DanmuItem> _slicePreloadedWindow(
+    List<DanmuItem> sorted,
+    int windowIndex,
+  ) {
+    if (sorted.isEmpty || windowIndex < 0) return const <DanmuItem>[];
+    final startMs = windowIndex * windowDurationMs;
+    final endMs = startMs + windowDurationMs;
+    var lo = 0;
+    var hi = sorted.length;
+    while (lo < hi) {
+      final mid = (lo + hi) >>> 1;
+      if (sorted[mid].timeMs < startMs) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    final out = <DanmuItem>[];
+    for (var i = lo; i < sorted.length && out.length < maxWindowItems; i++) {
+      final item = sorted[i];
+      if (item.timeMs >= endMs) break;
+      if (item.timeMs >= startMs) {
+        out.add(item);
+      }
+    }
+    return out;
+  }
+
   Future<void> bindSession(String boundEpisodeId) async {
     if (_disposed || OhosRuntime.isOhos) return;
     _cancelInFlight(cancelOpen: true);
@@ -384,6 +467,10 @@ class DanmuSegmentCache extends ChangeNotifier {
     int gen,
     DanmuCancelToken token,
   ) async {
+    if (!sessionSnapshot.segmented &&
+        sessionSnapshot.preloadComments.isNotEmpty) {
+      return _slicePreloadedWindow(sessionSnapshot.preloadComments, windowIndex);
+    }
     try {
       return await provider.fetchWindow(
         sessionSnapshot,

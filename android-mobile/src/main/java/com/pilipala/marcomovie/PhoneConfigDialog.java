@@ -62,74 +62,81 @@ final class PhoneConfigDialog {
             String ip = lanAddress();
             server =
                     ConfigTransferServer.withBatchImporter(
-                            (address, appendMerge) -> {
-                                List<SubscriptionManager.ImportSpec> specs =
-                                        SubscriptionManager.parseImportSpecsStrict(address);
-                                if (specs.size() == 1 && !appendMerge) {
-                                    String onlyUrl = specs.get(0).url;
-                                    Cms.Config config =
-                                            Cms.parseConfig(
-                                                    SourceController.fetchImport(a, onlyUrl),
-                                                    SourceController.importOrigin(onlyUrl));
-                                    CountDownLatch applied = new CountDownLatch(1);
-                                    AtomicReference<Exception> failure = new AtomicReference<>();
-                                    a.ui.post(
-                                            () -> {
-                                                try {
-                                                    if (server.closed
-                                                            || a.isFinishing()
-                                                            || a.phoneConfig != this)
-                                                        throw new java.io.IOException(
-                                                                "Session closed");
-                                                    a.saveConfig(
-                                                            config,
+                                    (address, appendMerge) -> {
+                                        List<SubscriptionManager.ImportSpec> specs =
+                                                SubscriptionManager.parseImportSpecsStrict(address);
+                                        if (specs.size() == 1 && !appendMerge) {
+                                            String onlyUrl = specs.get(0).url;
+                                            Cms.Config config =
+                                                    Cms.parseConfig(
+                                                            SourceController.fetchImport(
+                                                                    a, onlyUrl),
                                                             SourceController.importOrigin(onlyUrl));
-                                                    finished = true;
-                                                    if (dialog != null) dialog.dismiss();
-                                                } catch (Exception e) {
-                                                    failure.set(e);
-                                                } finally {
-                                                    applied.countDown();
-                                                }
-                                            });
-                                    if (!applied.await(20, TimeUnit.SECONDS))
-                                        throw new java.io.IOException("Apply timeout");
-                                    if (failure.get() != null) throw failure.get();
-                                    return;
-                                }
-                                SubscriptionManager.MergedResult merged =
-                                        SourceController.fetchAndMergeImportSpecs(
-                                                a, specs, appendMerge);
-                                CountDownLatch applied = new CountDownLatch(1);
-                                AtomicReference<Exception> failure = new AtomicReference<>();
-                                a.ui.post(
-                                        () -> {
-                                            try {
-                                                if (server.closed
-                                                        || a.isFinishing()
-                                                        || a.phoneConfig != this)
-                                                    throw new java.io.IOException("Session closed");
-                                                a.saveConfig(merged.config, merged.origin);
-                                                a.toast(
-                                                        "已导入 "
-                                                                + merged.sourceCount
-                                                                + " 个源并自动分组（共 "
-                                                                + merged.config.sites.size()
-                                                                + " 条线路）");
-                                                finished = true;
-                                                if (dialog != null) dialog.dismiss();
-                                            } catch (Exception e) {
-                                                failure.set(e);
-                                            } finally {
-                                                applied.countDown();
-                                            }
-                                        });
-                                if (!applied.await(20, TimeUnit.SECONDS))
-                                    throw new java.io.IOException("Apply timeout");
-                                if (failure.get() != null) throw failure.get();
-                            },
-                            CloudSyncDialog.lanSyncHandler(a));
+                                            CountDownLatch applied = new CountDownLatch(1);
+                                            AtomicReference<Exception> failure =
+                                                    new AtomicReference<>();
+                                            a.ui.post(
+                                                    () -> {
+                                                        try {
+                                                            if (server.closed
+                                                                    || a.isFinishing()
+                                                                    || a.phoneConfig != this)
+                                                                throw new java.io.IOException(
+                                                                        "Session closed");
+                                                            a.saveConfig(
+                                                                    config,
+                                                                    SourceController.importOrigin(
+                                                                            onlyUrl));
+                                                            finished = true;
+                                                            if (dialog != null) dialog.dismiss();
+                                                        } catch (Exception e) {
+                                                            failure.set(e);
+                                                        } finally {
+                                                            applied.countDown();
+                                                        }
+                                                    });
+                                            if (!applied.await(20, TimeUnit.SECONDS))
+                                                throw new java.io.IOException("Apply timeout");
+                                            if (failure.get() != null) throw failure.get();
+                                            return;
+                                        }
+                                        SubscriptionManager.MergedResult merged =
+                                                SourceController.fetchAndMergeImportSpecs(
+                                                        a, specs, appendMerge);
+                                        CountDownLatch applied = new CountDownLatch(1);
+                                        AtomicReference<Exception> failure =
+                                                new AtomicReference<>();
+                                        a.ui.post(
+                                                () -> {
+                                                    try {
+                                                        if (server.closed
+                                                                || a.isFinishing()
+                                                                || a.phoneConfig != this)
+                                                            throw new java.io.IOException(
+                                                                    "Session closed");
+                                                        a.saveConfig(merged.config, merged.origin);
+                                                        a.toast(
+                                                                "已导入 "
+                                                                        + merged.sourceCount
+                                                                        + " 个源并自动分组（共 "
+                                                                        + merged.config.sites.size()
+                                                                        + " 条线路）");
+                                                        finished = true;
+                                                        if (dialog != null) dialog.dismiss();
+                                                    } catch (Exception e) {
+                                                        failure.set(e);
+                                                    } finally {
+                                                        applied.countDown();
+                                                    }
+                                                });
+                                        if (!applied.await(20, TimeUnit.SECONDS))
+                                            throw new java.io.IOException("Apply timeout");
+                                        if (failure.get() != null) throw failure.get();
+                                    },
+                                    CloudSyncDialog.lanSyncHandler(a))
+                            .withBindHandler(CloudSyncDialog.lanBindHandler(a, null));
             String address = server.address(ip);
+            String qrPayload = server.bindQrAddress(ip);
             LinearLayout panel = a.vertical();
             panel.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
             TextView note =
@@ -142,7 +149,7 @@ final class PhoneConfigDialog {
             int qrSize =
                     Math.min(a.dp(172), Math.max(a.dp(132), Math.round(a.windowHeight() * 0.29f)));
             BitMatrix matrix =
-                    new QRCodeWriter().encode(address, BarcodeFormat.QR_CODE, qrSize, qrSize);
+                    new QRCodeWriter().encode(qrPayload, BarcodeFormat.QR_CODE, qrSize, qrSize);
             int[] pixels = new int[qrSize * qrSize];
             for (int y = 0; y < qrSize; y++)
                 for (int x = 0; x < qrSize; x++)
@@ -219,18 +226,21 @@ final class PhoneConfigDialog {
             String ip = lanAddress();
             server =
                     new ConfigTransferServer(
-                            null,
-                            remoteJson -> {
-                                String merged = CloudSyncDialog.lanSyncHandler(a).sync(remoteJson);
-                                if (remoteJson != null && onUpdated != null) {
-                                    a.ui.post(
-                                            () -> {
-                                                if (!a.isFinishing()) onUpdated.run();
-                                            });
-                                }
-                                return merged;
-                            });
+                                    null,
+                                    remoteJson -> {
+                                        String merged =
+                                                CloudSyncDialog.lanSyncHandler(a).sync(remoteJson);
+                                        if (remoteJson != null && onUpdated != null) {
+                                            a.ui.post(
+                                                    () -> {
+                                                        if (!a.isFinishing()) onUpdated.run();
+                                                    });
+                                        }
+                                        return merged;
+                                    })
+                            .withBindHandler(CloudSyncDialog.lanBindHandler(a, onUpdated));
             final String address = server.address(ip);
+            final String qrPayload = server.bindQrAddress(ip);
             LinearLayout panel = a.vertical();
             panel.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
             TextView note =
@@ -244,7 +254,7 @@ final class PhoneConfigDialog {
             int qrSize =
                     Math.min(a.dp(172), Math.max(a.dp(132), Math.round(a.windowHeight() * 0.29f)));
             BitMatrix matrix =
-                    new QRCodeWriter().encode(address, BarcodeFormat.QR_CODE, qrSize, qrSize);
+                    new QRCodeWriter().encode(qrPayload, BarcodeFormat.QR_CODE, qrSize, qrSize);
             int[] pixels = new int[qrSize * qrSize];
             for (int y = 0; y < qrSize; y++)
                 for (int x = 0; x < qrSize; x++)

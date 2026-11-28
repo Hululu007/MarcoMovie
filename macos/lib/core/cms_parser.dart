@@ -1753,6 +1753,30 @@ class CmsParser {
     return matched.isNotEmpty ? matched : categories;
   }
 
+  /// Returns genuine top-level categories provided by the active source that
+  /// are NOT already covered by the 4 fixed content tabs (`电影`, `剧集`, `动漫`,
+  /// `综艺`) — e.g. `44: 臻彩` / `臻彩视界` / `4K` / `短漫剧` / `纪录片` / `音乐` —
+  /// preserving exact source IDs and names without fabricating missing ones.
+  static List<CmsCategory> extraTopLevelHomeCategories(
+    List<CmsCategory> categories,
+  ) {
+    if (categories.isEmpty) return const [];
+    final out = <CmsCategory>[];
+    final seenIds = <String>{};
+    final seenNames = <String>{};
+    for (final c in categories) {
+      if (!c.isTopLevel) continue;
+      final name = c.name.trim();
+      if (name.isEmpty) continue;
+      if (classifyCategoryPrimaryTab(name).isNotEmpty) continue;
+      if (seenIds.add(c.id) && seenNames.add(name)) {
+        out.add(c);
+      }
+      if (out.length >= 12) break;
+    }
+    return out;
+  }
+
   /// Filters a list of [CmsVideo] by [filter] (`area`, `year`, `genreLabel`).
   static List<CmsVideo> filterVideos(List<CmsVideo> videos, CmsFilter filter) {
     if (!filter.hasSubFilter) return videos;

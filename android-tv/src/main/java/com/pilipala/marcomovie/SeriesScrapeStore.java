@@ -35,12 +35,14 @@ final class SeriesScrapeStore {
         boolean sortByScrapedEpisode;
         boolean sortPreferenceExplicit;
         boolean hideSpecials;
+        boolean preferRawEpisodeNames;
         String danmuTitleOverride = "";
         String danmuAnimeId = "";
         String danmuOrigin = "";
         long updatedAt;
         final Map<Integer, Integer> episodeNumberOverrides = new LinkedHashMap<>();
         final Map<Integer, String> officialEpisodeTitles = new LinkedHashMap<>();
+        final Map<Integer, String> danmuEpisodeIdOverrides = new LinkedHashMap<>();
 
         boolean isEmpty() {
             return matchedTitle.isEmpty()
@@ -50,10 +52,12 @@ final class SeriesScrapeStore {
                     && episodeOffset == 0
                     && !sortPreferenceExplicit
                     && !hideSpecials
+                    && !preferRawEpisodeNames
                     && danmuTitleOverride.isEmpty()
                     && danmuAnimeId.isEmpty()
                     && episodeNumberOverrides.isEmpty()
-                    && officialEpisodeTitles.isEmpty();
+                    && officialEpisodeTitles.isEmpty()
+                    && danmuEpisodeIdOverrides.isEmpty();
         }
 
         OverrideRecord copy() {
@@ -72,12 +76,14 @@ final class SeriesScrapeStore {
             c.sortByScrapedEpisode = sortByScrapedEpisode;
             c.sortPreferenceExplicit = sortPreferenceExplicit;
             c.hideSpecials = hideSpecials;
+            c.preferRawEpisodeNames = preferRawEpisodeNames;
             c.danmuTitleOverride = danmuTitleOverride;
             c.danmuAnimeId = danmuAnimeId;
             c.danmuOrigin = danmuOrigin;
             c.updatedAt = updatedAt;
             c.episodeNumberOverrides.putAll(episodeNumberOverrides);
             c.officialEpisodeTitles.putAll(officialEpisodeTitles);
+            c.danmuEpisodeIdOverrides.putAll(danmuEpisodeIdOverrides);
             return c;
         }
 
@@ -99,6 +105,7 @@ final class SeriesScrapeStore {
                 obj.put("sortPreferenceExplicit", true);
             }
             if (hideSpecials) obj.put("hideSpecials", true);
+            if (preferRawEpisodeNames) obj.put("preferRawEpisodeNames", true);
             if (!danmuTitleOverride.isEmpty()) obj.put("danmuTitleOverride", danmuTitleOverride);
             if (!danmuAnimeId.isEmpty()) obj.put("danmuAnimeId", danmuAnimeId);
             if (!danmuOrigin.isEmpty()) obj.put("danmuOrigin", danmuOrigin);
@@ -116,6 +123,13 @@ final class SeriesScrapeStore {
                     map.put(String.valueOf(e.getKey()), e.getValue());
                 }
                 obj.put("officialEpisodeTitles", map);
+            }
+            if (!danmuEpisodeIdOverrides.isEmpty()) {
+                JSONObject map = new JSONObject();
+                for (Map.Entry<Integer, String> e : danmuEpisodeIdOverrides.entrySet()) {
+                    map.put(String.valueOf(e.getKey()), e.getValue());
+                }
+                obj.put("danmuEpisodeIdOverrides", map);
             }
             return obj;
         }
@@ -138,6 +152,7 @@ final class SeriesScrapeStore {
             r.sortPreferenceExplicit = obj.optBoolean("sortPreferenceExplicit", false);
             r.sortByScrapedEpisode = obj.optBoolean("sortByScrapedEpisode", false);
             r.hideSpecials = obj.optBoolean("hideSpecials", false);
+            r.preferRawEpisodeNames = obj.optBoolean("preferRawEpisodeNames", false);
             r.danmuTitleOverride = safeStr(obj, "danmuTitleOverride", "");
             r.danmuAnimeId = safeStr(obj, "danmuAnimeId", "");
             r.danmuOrigin = safeStr(obj, "danmuOrigin", "");
@@ -166,6 +181,20 @@ final class SeriesScrapeStore {
                         String title = safeStr(titles, k, "");
                         if (epNum > 0 && !title.isEmpty())
                             r.officialEpisodeTitles.put(epNum, title);
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
+            JSONObject epDanmu = obj.optJSONObject("danmuEpisodeIdOverrides");
+            if (epDanmu != null) {
+                Iterator<String> it = epDanmu.keys();
+                while (it.hasNext()) {
+                    String k = it.next();
+                    try {
+                        int epIdx = Integer.parseInt(k);
+                        String bound = safeStr(epDanmu, k, "");
+                        if (epIdx >= 0 && !bound.isEmpty())
+                            r.danmuEpisodeIdOverrides.put(epIdx, bound);
                     } catch (NumberFormatException ignored) {
                     }
                 }

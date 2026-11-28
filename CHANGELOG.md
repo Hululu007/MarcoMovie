@@ -1,3 +1,33 @@
+## 2026-11-28 全端联合修复：Android 手机 0.7.5、Android 电视 0.6.6、iOS 0.7.13、Windows 0.7.6、macOS 0.6.3、Apple TV 0.1.4、HarmonyOS NEXT 0.1.4（「聚剧|四盘」聚合盘搜历史直连续播、电视端弹窗对齐与背景菱形纹、移动端横屏弹幕与 Emby 兼容/导入对比度修复）
+
+- **全 7 端修复「聚剧|四盘」等聚合盘搜源历史记录无法直接续播问题**：修复部分蜘蛛详情返回 `"0"`/`"1"` 占位 `vod_id` 覆盖真实标识及仅搜索/内联选集源重启后 `/api/detail` 失效导致点击历史记录被迫重新搜索的问题；在 Android 手机、Android 电视、iOS / Windows / HarmonyOS（Flutter）、macOS 与 Apple TV（tvOS）全链路增加占位 ID 保护、清晰分享标识留存、同站静默重搜合并内联选集与历史条目原地键迁移，保留断点直连续播体验。（Android Lite API 14 因不运行 `type=3` `csp_` 插件未受影响，保持 `0.5.11` 不变。）
+- **Android 电视 / 盒子 0.6.6（承接 0.6.5 背景菱形纹修复）**：全面关闭 `MainActivity.row()`、`DanmuSettingsPanel` 与 `DetailScreen` 剧集卡横向行的 `baselineAligned`，引入 `EqualHeightEpisodeRow` 同步等高测量并对齐 `AppDialog`、`TvDetailHost`、`SourcePicker` 与 `TvDanmuSearchDialog` 左右内边距与行高；完整保留 `0.6.5` `HomeAmbient` 32 位 `ARGB_8888` 柔光背景防菱形纹修复。
+- **Android 手机 0.7.5 与 Flutter 各端 Emby / 导入页 / 弹幕对比度优化**：手机端整合结构化 Emby（`HTTP / 8096`、`bareRoot` 回退、`.strm` 直播、浅/深色 `MobileBottomSheet` 表单与双向同步）并修复横屏弹幕设置面板顶部额外留白；Flutter 端新增 Emby 空白 `Views` 回退「全部媒体」与 `AddResourceLibraryView` 按钮/错误提示浅深色自适应对比度。
+
+## 2026-11-28 iOS / iPadOS 0.7.12 结构化 Emby 连接与编辑/4K STRM 兼容、局域网扫码直绑 WebDAV、AI 口令持久保存、纯净 Codex 模型列表与 AI 在线弹幕匹配（iOS / iPadOS 0.7.12）
+
+- [iOS / iPadOS 0.7.12](docs/releases/ios-v0.7.12.md)
+- **结构化 Emby 连接与编辑表单及 4K / HTTP 兼容升级**：iOS `连接 Emby 媒体库` 与 `订阅管理 → 编辑 Emby` 新增名称、是否允许云端同步开关、HTTPS 开关（默认 `HTTP / 8096`）、服务器地址、选填路径、端口号、用户名及可切换明文/密文的密码输入；支持 `/emby` 404/405 自动回退裸根路径、同源/升维重定向、标准 `X-Emby-Authorization` 请求头、HTTPS 错连 HTTP 端口中文探测提示、HEVC/AV1/多音轨 4K `DirectPlay`、跨源 `.strm` 播放隔离与 WebDAV / 局域网 `emby_accounts` 双向同步控制。
+- **局域网扫码直绑 WebDAV**：集成 `marco-bind-box-v1` 加密配对与 iOS 原生 `AVCaptureSession` 二维码扫描/剪贴板兜底绑定，一键完成 WebDAV 配置同步与双向合并。
+- **AI 实验室口令钥匙串持久化、模型列表净化与联网弹幕匹配**：解锁后的 `MMAILAB1` 口令自动写入本机 Keychain 重启免重复输入；过滤失效后缀模型解决 Codex `HTTP 400` 并支持自愈回退；新增 `AiDanmuMatcher` 联网检索匹配 B 站 / 弹弹play 在线弹幕并写入播放缓存。
+
+## 2026-11-28 Android 电视 / 盒子 0.6.5 修复首页大屏背景噪点菱形纹（Android 电视 / 盒子 0.6.5）
+
+- [Android 电视 / 盒子 0.6.5](docs/releases/android-tv-v0.6.5.md)
+- **修复电视端背景出现菱形网格纹问题**：将 `HomeAmbient` 缓存背景位图由 16 位 `RGB_565` 恢复为 32 位 `ARGB_8888`（保留双缓冲零 GC 复用并先擦除底色），彻底消除低色深渐变的有序抖动矩阵在大屏拉伸放大时产生的明显菱形纹，恢复纯净平滑的影院级柔光渐变。
+
+## 2026-11-28 Android 电视 / 盒子 0.6.4、Android 手机 / 平板 0.7.4、Windows 0.7.5、macOS 0.6.2、Apple TV 0.1.3、HarmonyOS NEXT 0.1.3 与 Android Lite 0.5.11 全端局域网扫码直绑 WebDAV 与 Emby 连接/4K 直连兼容升级，以及电视端与 macOS 专项修复
+
+- **全端局域网扫码直绑 WebDAV（Android TV / 手机 / Windows / macOS / Apple TV / 鸿蒙 / 精简版）**：新增 `marco-bind-box-v1`（HMAC-SHA256 CTR + Encrypt-then-MAC）端到端加密通道与 `/bind` 协议；电视端与桌面端开启二维码即可直接扫码双向绑定 WebDAV 服务器、账号、加密密码及同步选项并立即执行双向合并；Android 手机端与 HarmonyOS NEXT 端新增应用内相机扫码（支持相册识别与剪贴板兜底），同时完全保留既有人工 URL 双向同步向后兼容。
+- **全端 Emby / Jellyfin 连接表单、路径兼容与 4K DirectPlay 修复**：连接弹窗协议默认切换为 `HTTP（8096）` 并支持 HTTPS 切换、选填端口/路径/名称与裸域名直填（兼容粘贴 `/web/` 完整网址）；登录新增 `/emby` 与根路径 `/` 自动回退、同源及 HTTP→HTTPS 安全重定向、标准 `X-Emby-Authorization` 请求头与 TLS 握手失败无凭据探测明确引导；`PlaybackInfo` 默认放行 HEVC / AV1 / 多音轨 4K `DirectPlay`。
+- **Android 电视 / 盒子 0.6.4 流畅度与源码兼容性修复**：
+  - 修复多仓导入时部分多仓子线路及自定义分组丢失问题，增强常见 JS / `.py` / CatVod 模块及本地代理兼容性。
+  - 优化首页加载、全局搜索并发与超时预算，修复高画质/臻彩剧集海报加载失败，消除首页大图海报快速切换时的卡顿延迟并精简主链路冗余调度。
+  - 新增播放器 `45 分钟` 定时关闭预设、工具栏快捷开关、实时倒计时悬浮胶囊与到期安全退出。
+  - 优化剧集刮削分词与年份标题保留，降低无关联名误匹配与漏集概率。
+  - 优化盘搜与网盘聚合体验：播放页新增「手动搜索弹幕」并记忆绑定分集 ID；全局搜索为网盘资源提供宽卡片完整文件名与画质/码率标签展示；修复同片名二次搜索无结果及历史记录重开提示「原源已失效」问题（支持自动刷新详情地址重试）。
+- **macOS 0.6.2 与 Apple TV 0.1.3 同步合入**：macOS 合入 `CVDisplayLink` 帧同步、4K 臻彩分类识别与网盘优化、Finder 本地导入/窗口记忆、起播阶段测速、无感订阅更新与有界下一集预缓冲；Apple TV 完整合入 19 项播放器控制、6 路流式网盘 Range 代理、焦点恢复与 Swift 模拟器验证架构并升级至 `0.1.3`。
+
 ## 2026-11-28 Android 手机 / 平板 0.7.3 三端统一 `MMAILAB1` Ed25519 口令门禁「AI 观影实验室」、默认网盘优先级排序与四向悬浮 Dock、跨站/Windows 双向精准续播、详情页手选同步与离线缓存媒体指纹加固（Android 手机 / 平板 0.7.3）
 
 - [Android 手机 / 平板 0.7.3](docs/releases/android-mobile-v0.7.3.md)

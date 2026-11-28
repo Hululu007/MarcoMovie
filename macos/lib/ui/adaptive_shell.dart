@@ -26,11 +26,14 @@ import '../core/download_service.dart';
 import '../core/ios_avplayer_controller.dart';
 import '../core/live_channel_organizer.dart';
 import '../core/local_media_proxy.dart';
+import '../core/macos_video_sync.dart';
+import '../core/macos_window_bounds.dart';
 import '../core/mdk_platform_player.dart';
 import '../core/models.dart';
 import '../core/netdisk_service.dart';
 import '../core/python_source_host.dart';
 import '../core/storage_service.dart';
+import '../core/subscription_refresh_service.dart';
 import '../core/ohos_runtime.dart';
 import '../core/spider_plugin_registry.dart';
 import '../core/app_log.dart';
@@ -115,6 +118,7 @@ class AdaptiveShell extends StatefulWidget {
     required Future<void> Function() closeHost,
     required Future<void> Function() closeScripts,
     required Future<void> Function() destroyWindow,
+    Future<void> Function()? captureWindowBounds,
     Future<void> Function()? hideWindow,
     Duration totalBudget = defaultWindowCloseBudget,
   }) async {
@@ -149,6 +153,13 @@ class AdaptiveShell extends StatefulWidget {
           const Duration(milliseconds: 150),
           (_) => setPreventClose(true),
         );
+        if (captureWindowBounds != null) {
+          await runBounded(
+            'captureWindowBounds',
+            const Duration(milliseconds: 150),
+            (_) => captureWindowBounds(),
+          );
+        }
         if (hideWindow != null) {
           await runBounded(
             'hideWindow',
@@ -777,7 +788,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     if (matched != null) {
       if (!matched.supported) {
-        _showAppleNotice(matched.name, matched.unsupportedReason);
+        _showUnsupportedSiteNotice(matched);
         return;
       }
       _openVideoDetail(
@@ -843,6 +854,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       setPreventClose: (prevent) => widget.onSetPreventCloseForTest != null
           ? widget.onSetPreventCloseForTest!(prevent)
           : windowManager.setPreventClose(prevent),
+      captureWindowBounds: () async {
+        await MacosWindowBoundsController.shared?.captureNow();
+      },
       hideWindow: widget.onDestroyWindowForTest != null
           ? null
           : () => windowManager.hide(),
@@ -1051,7 +1065,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _liveGroupsScrollController.dispose();
     super.dispose();
   }
-  void _reloadSavedConfig({bool bypassHomeSnapshot = false}) {
+  void _reloadSavedConfig({
+    bool bypassHomeSnapshot = false,
+    bool preserveActivePlayback = false,
+  }) {
     // A deleted source may still have catalogue/live/search requests in flight.
     // Invalidate them before exposing the new registry, including an empty one.
     _cancelCatalogue();
@@ -1070,7 +1087,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _searchVerificationSites.clear();
     _searchPerformed = false;
     _searching = false;
-    _windowsLiveChannel = null;
+    if (!preserveActivePlayback) {
+      _windowsLiveChannel = null;
+    }
     final saved = widget.storage.loadSavedConfig();
     _config = saved;
     _cachedWatchHistory = widget.storage.getWatchHistory();
@@ -1078,6 +1097,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     unawaited(CmsClient.retainScriptSessions(
       (saved?.scriptOwners ?? const <CmsSite>[]).where((site) =>
         _privateSessionUnlocked || !site.isEffectivelyPrivate),
+      preservePinned: preserveActivePlayback,
     ));
     final availableSites = saved == null
         ? const <CmsSite>[]
@@ -1117,7 +1137,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     final lives = _visibleLives;
     if (lives.isNotEmpty) {
-      _loadLivePlaylist(0);
+      _loadLivePlaylist(0, preserveActiveLiveChannel: preserveActivePlayback);
     } else {
       _liveGroups = const [];
       _liveLoading = false;
@@ -1352,14 +1372,21 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         () => widget.client.fetchHome(site),
         cancellation: abort,
       );
+      final homeTimeout = (WoggSource.supports(site) ||
+              CspBridge.usesWoggNetdiskAdapter(site) ||
+              site.isCatPaw ||
+              site.api.toLowerCase().contains('guard'))
+          ? const Duration(seconds: 30)
+          : const Duration(seconds: 15);
       final (cats, listing) = !kIsWeb &&
               !Platform.environment.containsKey('FLUTTER_TEST')
-          ? await homeFuture.timeout(const Duration(seconds: 15))
+          ? await homeFuture.timeout(homeTimeout)
           : await homeFuture;
       if (!mounted || epoch != _homeEpoch || _activeSite?.key != site.key) {
         return;
       }
-      if (listing.videos.isNotEmpty && !site.isEffectivelyPrivate) {
+      if ((listing.videos.isNotEmpty || cats.isNotEmpty) &&
+          !site.isEffectivelyPrivate) {
         unawaited(widget.storage.saveCachedSiteHome(site, cats, listing));
       }
       if ((hadCached || keepVisible) &&
@@ -1424,10 +1451,33 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     await _reloadFilteredListing(page: 1);
   }
+  Future<void> _selectDirectSourceCategory(CmsCategory category) async {
+    if (_primaryTab == 'recommend' &&
+        _filterSubCategoryId == category.id &&
+        _selectedCategoryId == category.id) {
+      setState(() {
+        _filterExpanded = false;
+        _filterSubCategoryId = '';
+        _filterGenreLabel = '';
+        _selectedCategoryId = '';
+      });
+      await _reloadFilteredListing(page: 1);
+      return;
+    }
+    setState(() {
+      _primaryTab = 'recommend';
+      _filterExpanded = false;
+      _filterSubCategoryId = category.id;
+      _filterGenreLabel = '';
+      _selectedCategoryId = category.id;
+    });
+    await _reloadFilteredListing(page: 1);
+  }
   Future<void> _selectPrimaryTab(String tabKey) async {
     if (tabKey == 'recommend') {
       if (_primaryTab == 'recommend' &&
           _filterSubCategoryId.isEmpty &&
+          _selectedCategoryId.isEmpty &&
           _filterGenreLabel.isEmpty) {
         if (_filterExpanded) setState(() => _filterExpanded = false);
         return;
@@ -1437,6 +1487,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         _filterExpanded = false;
         _filterSubCategoryId = '';
         _filterGenreLabel = '';
+        _selectedCategoryId = '';
       });
       await _reloadFilteredListing(page: 1);
       return;
@@ -1498,8 +1549,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           page == 1) {
         final (cats, homeListing) = await read(() => widget.client.fetchHome(site));
         if (!mounted || epoch != _categoryEpoch || _activeSite?.key != site.key) return;
-        if (_categories.isEmpty && cats.isNotEmpty) {
+        if (cats.isNotEmpty) {
           _categories = cats;
+        }
+        if ((homeListing.videos.isNotEmpty || cats.isNotEmpty) &&
+            !site.isEffectivelyPrivate) {
+          unawaited(widget.storage.saveCachedSiteHome(site, cats, homeListing));
         }
         listing = homeListing;
       } else if (targetCategoryId.isEmpty && filter.hasSubFilter) {
@@ -1846,6 +1901,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     int sourceIndex, {
     bool forceRefresh = false,
     bool autoProbeAfterLoad = false,
+    bool preserveActiveLiveChannel = false,
   }) async {
     final lives = _visibleLives;
     if (sourceIndex < 0 || sourceIndex >= lives.length) return;
@@ -1862,7 +1918,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     if (cached != null && cached.isNotEmpty) {
       setState(() {
         _selectedLiveSource = sourceIndex;
-        _windowsLiveChannel = null;
+        if (!preserveActiveLiveChannel) {
+          _windowsLiveChannel = null;
+        }
         _selectedLiveGroup = 0;
         _liveGroups = cached;
         _liveLoading = false;
@@ -1876,7 +1934,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
 
     setState(() {
       _selectedLiveSource = sourceIndex;
-      _windowsLiveChannel = null;
+      if (!preserveActiveLiveChannel) {
+        _windowsLiveChannel = null;
+      }
       _selectedLiveGroup = 0;
       _liveGroups = const [];
       _liveLoading = true;
@@ -1982,6 +2042,56 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       });
     }
   }
+  void _showUnsupportedSiteNotice(
+    CmsSite site, {
+    BuildContext? dialogContext,
+    String dismissLabel = '好',
+  }) {
+    final targetCtx = dialogContext ?? context;
+    final reason = site.unsupportedReason;
+    final fullHint = site.actionableUnsupportedHint;
+    final detail = fullHint.startsWith(reason)
+        ? fullHint.substring(reason.length).trim()
+        : (fullHint != reason ? fullHint : '');
+    unawaited(
+      showCupertinoDialog<String>(
+        context: targetCtx,
+        barrierDismissible: true,
+        builder: (ctx) => CupertinoAlertDialog(
+          title: Text(site.name),
+          content: Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(reason),
+                if (detail.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(detail),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            CupertinoDialogAction(
+              isDefaultAction: true,
+              onPressed: () => Navigator.of(ctx).pop('extensions'),
+              child: const Text('配置蜘蛛扩展与网关'),
+            ),
+            CupertinoDialogAction(
+              onPressed: () => Navigator.of(ctx).pop('ok'),
+              child: Text(dismissLabel),
+            ),
+          ],
+        ),
+      ).then((actionId) {
+        if (actionId == 'extensions' && mounted) {
+          unawaited(_openSpiderExtensionsPage(iosBackLabel: '返回'));
+        }
+      }),
+    );
+  }
+
   void _openVideoDetail(
     CmsSite site,
     CmsVideo video, {
@@ -1993,7 +2103,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     Color? ambientColor,
   }) {
     if (!CuratedDiscoveryService.isCuratedSite(site) && !site.supported) {
-      _showAppleNotice(site.name, site.unsupportedReason);
+      _showUnsupportedSiteNotice(site);
       return;
     }
     if (video.id.startsWith('netdisk_qr:')) {
@@ -3774,6 +3884,38 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             );
           },
         ),
+        if (defaultTargetPlatform != TargetPlatform.iOS && _activeSite != null) ...[
+          const SizedBox(width: 6),
+          ApplePressableScale(
+            key: const ValueKey('home-refresh-button'),
+            pressedScale: 0.92,
+            onTap: _homeRefreshing
+                ? null
+                : () => unawaited(_refreshCurrentHomeView()),
+            child: Tooltip(
+              message: '刷新当前片源与分类',
+              child: LiquidGlass(
+                width: 34,
+                height: 34,
+                borderRadius: 999,
+                elevated: false,
+                rimStrength: 0.88,
+                tint: ApplePalette.isDarkOf(context)
+                    ? const Color(0x281E1E24)
+                    : const Color(0xCCFFFFFF),
+                child: Center(
+                  child: _homeRefreshing
+                      ? const CupertinoActivityIndicator(radius: 7)
+                      : Icon(
+                          CupertinoIcons.refresh,
+                          size: 14.5,
+                          color: ApplePalette.of(context).labelPrimary,
+                        ),
+                ),
+              ),
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -3902,6 +4044,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     required int activeFilterCount,
     required double topSpacing,
   }) {
+    final extraSourceCategories =
+        CmsParser.extraTopLevelHomeCategories(_categories);
+    final desktopCategoryCount =
+        CmsParser.primaryHomeTabs.length + extraSourceCategories.length;
     return Column(
       key: const ValueKey('home-category-filter-bar'),
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -3934,15 +4080,33 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         controller: _categoryPillsScrollController,
                         scrollDirection: Axis.horizontal,
                         physics: const BouncingScrollPhysics(),
-                        itemCount: CmsParser.primaryHomeTabs.length,
+                        itemCount: desktopCategoryCount,
                         separatorBuilder: (_, __) => const SizedBox(width: 8),
                         itemBuilder: (ctx, idx) {
-                          final (tabKey, tabLabel) =
-                              CmsParser.primaryHomeTabs[idx];
+                          if (idx < CmsParser.primaryHomeTabs.length) {
+                            final (tabKey, tabLabel) =
+                                CmsParser.primaryHomeTabs[idx];
+                            final selected = tabKey == 'recommend'
+                                ? (_primaryTab == 'recommend' &&
+                                    _filterSubCategoryId.isEmpty)
+                                : _primaryTab == tabKey;
+                            return _buildCategoryPill(
+                              label: tabLabel,
+                              selected: selected,
+                              onTap: () => _selectPrimaryTab(tabKey),
+                            );
+                          }
+                          final sourceCat = extraSourceCategories[
+                              idx - CmsParser.primaryHomeTabs.length];
+                          final selected = _primaryTab == 'recommend' &&
+                              _filterSubCategoryId == sourceCat.id;
                           return _buildCategoryPill(
-                            label: tabLabel,
-                            selected: _primaryTab == tabKey,
-                            onTap: () => _selectPrimaryTab(tabKey),
+                            pillKey: ValueKey(
+                              'home-source-category-${sourceCat.id}',
+                            ),
+                            label: sourceCat.name,
+                            selected: selected,
+                            onTap: () => _selectDirectSourceCategory(sourceCat),
                           );
                         },
                       ),
@@ -4816,15 +4980,21 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
   }
   Widget _buildPluginOnlyConfigNotice(BuildContext context) {
-    final pluginCount = _config?.pluginOnlySites.length ?? 0;
+    final pluginCount = _config?.unadaptedPluginSites.length ?? 0;
+    final netdiskPluginCount = _config?.unadaptedPluginSites
+            .where((s) => CspBridge.isNetdiskSite(s))
+            .length ??
+        0;
     final depotCount = _config?.depots.length ?? 0;
     final liveCount = _config?.supportedLives.length ?? 0;
     final String titleText;
     final String bodyText;
     if (pluginCount > 0) {
-      titleText = '已成功加载配置（共 $pluginCount 个安卓专用插件站点）';
+      titleText = netdiskPluginCount == pluginCount
+          ? '已加载配置（共 $pluginCount 个未适配网盘插件站点）'
+          : '已成功加载配置（共 $pluginCount 个未适配插件站点）';
       bodyText =
-          '当前仓库中的片源全部为安卓 JAR 爬虫插件（csp_*）。由于苹果 iOS / macOS 系统安全机制限制，无法直接运行安卓 DEX 字节码插件；Apple 端支持所有标准 HTTP/HTTPS CMS 站点（type 0 / 1 / 4）、已移植 Guard/DRPY/JS/Py 规则源与 M3U/TXT 电视直播源。';
+          '当前仓库中的片源均依赖安卓 JAR/DEX 插件或尚未适配的网盘爬虫（csp_*）。macOS 端支持所有标准 HTTP/HTTPS CMS 站点（type 0 / 1 / 4）、已适配的 4K 网盘源、Guard/DRPY/JS/Py 规则源与 M3U/TXT 直播源；您也可在「设置 → 蜘蛛扩展与网关」导入适配包或连接局域网 Android 蜘蛛网关。';
     } else if (liveCount > 0) {
       titleText = '已成功加载直播配置（共 $liveCount 个直播源）';
       bodyText = '当前订阅仅包含电视直播频道，可直接前往直播页观看，或导入点播订阅源。';
@@ -4880,11 +5050,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   compact: true,
                   onPressed: _showDepotPickerDialog,
                 ),
+              if (pluginCount > 0)
+                AppleCapsuleButton(
+                  label: '配置蜘蛛扩展与网关',
+                  icon: CupertinoIcons.cube_box_fill,
+                  primary: depotCount <= 1 && liveCount == 0,
+                  compact: true,
+                  onPressed: () =>
+                      unawaited(_openSpiderExtensionsPage(iosBackLabel: '首页')),
+                ),
               if (liveCount > 0)
                 AppleCapsuleButton(
                   label: '观看电视直播 ($liveCount)',
                   icon: CupertinoIcons.dot_radiowaves_left_right,
-                  primary: depotCount <= 1,
+                  primary: depotCount <= 1 && pluginCount == 0,
                   compact: true,
                   onPressed: () => setState(() => _tabIndex = 1),
                 ),
@@ -6220,12 +6399,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
   }
   Widget _buildCategoryPill({
+    Key? pillKey,
     required String label,
     required bool selected,
     required VoidCallback onTap,
   }) {
     final palette = ApplePalette.of(context);
     return ApplePressableScale(
+      key: pillKey,
       pressedScale: 0.92,
       pressedOpacity: 0.86,
       onTap: onTap,
@@ -7499,19 +7680,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             ),
                       onTap: () {
                         if (!s.supported) {
-                          unawaited(
-                            showAppleNativeAlert(
-                              ctx,
-                              title: s.name,
-                              message: s.unsupportedReason,
-                              actions: const [
-                                AppleNativeAlertAction(
-                                  id: 'ok',
-                                  title: '我知道了',
-                                  isDefault: true,
-                                ),
-                              ],
-                            ),
+                          _showUnsupportedSiteNotice(
+                            s,
+                            dialogContext: ctx,
+                            dismissLabel: '我知道了',
                           );
                           return;
                         }
@@ -11851,6 +12023,66 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               ),
             ),
             AppleGroupedTile(
+              icon: CupertinoIcons.bolt_horizontal_circle_fill,
+              iconBgColor: AppleColors.systemIndigo,
+              title: '下一集预缓冲（可选）',
+              subtitle: widget.storage.nextEpisodePrebufferEnabled
+                  ? '剩余 ${widget.storage.nextEpisodePrebufferTriggerSec} 秒触发 · 单集上限 ${widget.storage.nextEpisodePrebufferMaxMb} MB'
+                  : '关闭时不产生额外流量；开启后接近片尾提前预取下一集片头',
+              trailing: CupertinoSwitch(
+                key: const Key('next-episode-prebuffer-toggle'),
+                value: widget.storage.nextEpisodePrebufferEnabled,
+                activeTrackColor: AppleColors.systemGreen,
+                onChanged: (v) async {
+                  await widget.storage.setNextEpisodePrebufferEnabled(v);
+                  refreshBoth();
+                },
+              ),
+            ),
+            if (widget.storage.nextEpisodePrebufferEnabled) ...[
+              _buildExpandableChoiceDrawerTile<int>(
+                settingKey: 'next_episode_prebuffer_trigger',
+                icon: CupertinoIcons.timer,
+                iconBgColor: AppleColors.systemPurple,
+                title: '预缓冲触发时机',
+                subtitle: '当前剧集剩余时长进入此窗口且播放流畅时开始预取',
+                trailingText:
+                    '剩余 ${widget.storage.nextEpisodePrebufferTriggerSec} 秒',
+                currentValue: widget.storage.nextEpisodePrebufferTriggerSec,
+                onStateChanged: refreshBoth,
+                options: const [
+                  (30, '剩余 30 秒', '较晚触发，减少中途切集浪费的流量'),
+                  (45, '剩余 45 秒（推荐）', '平衡片尾等待时间与额外流量开销'),
+                  (60, '剩余 60 秒', '适合高码率 4K 或解析较慢片源'),
+                  (90, '剩余 90 秒', '提前准备，适配较长片尾或跳过片尾'),
+                ],
+                onSelected: (val) async {
+                  await widget.storage.setNextEpisodePrebufferTriggerSec(val);
+                  refreshBoth();
+                },
+              ),
+              _buildExpandableChoiceDrawerTile<int>(
+                settingKey: 'next_episode_prebuffer_cap',
+                icon: CupertinoIcons.tray_arrow_down_fill,
+                iconBgColor: AppleColors.systemTeal,
+                title: '单集预缓冲上限',
+                subtitle: '严格限制每集预取字节数，切源、跳集、退出或直播时立即取消',
+                trailingText: '${widget.storage.nextEpisodePrebufferMaxMb} MB',
+                currentValue: widget.storage.nextEpisodePrebufferMaxMb,
+                onStateChanged: refreshBoth,
+                options: const [
+                  (4, '4 MB', '轻量省流量，覆盖片头解析与起播关键帧'),
+                  (8, '8 MB（推荐）', '兼顾 1080p/4K 起播速度与带宽占用'),
+                  (16, '16 MB', '适合高码率 4K 片源快速首帧'),
+                  (32, '32 MB', '高宽带环境，更大片头缓冲余量'),
+                ],
+                onSelected: (val) async {
+                  await widget.storage.setNextEpisodePrebufferMaxMb(val);
+                  refreshBoth();
+                },
+              ),
+            ],
+            AppleGroupedTile(
               icon: CupertinoIcons.clock_fill,
               iconBgColor: AppleColors.systemTeal,
               title: '播放页常显时间',
@@ -11866,12 +12098,115 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             ),
           ],
         ),
+        if (defaultTargetPlatform == TargetPlatform.macOS) ...[
+          const SizedBox(height: 22),
+          _buildMacosVideoSyncSettingsSection(context, refreshBoth),
+        ],
         if (!OhosRuntime.isOhos) ...[
           const SizedBox(height: 22),
           IosDanmuSettingsSection(onChanged: refreshBoth),
           const SizedBox(height: 22),
           IosPlayerHudSettingsSection(onChanged: refreshBoth),
         ],
+      ],
+    );
+  }
+
+  Widget _buildMacosVideoSyncSettingsSection(
+    BuildContext context,
+    VoidCallback refreshBoth,
+  ) {
+    final mode = widget.storage.macosVideoSyncMode;
+    final tscale = widget.storage.macosVideoSyncTscale;
+    final isDefault = mode == MacosVideoSyncMode.defaultMode &&
+        tscale == MacosVideoSyncTscale.defaultTscale;
+    return AppleGroupedSection(
+      header: 'macOS 帧率同步与防抖动',
+      footer:
+          '点播视频将在检测到 CVDisplayLink 垂直同步后自动按显示器真实刷新率对齐帧节拍；直播流与未启用垂直同步路径始终安全回退音频同步。',
+      children: [
+        FutureBuilder<MacosDisplayRefreshInfo>(
+          future: MacosDisplayRefreshBridge.query(),
+          builder: (context, snapshot) {
+            final info = snapshot.data ?? MacosDisplayRefreshInfo.unavailable;
+            final plan = MacosVideoSyncPolicy.resolve(
+              mode: mode,
+              tscale: tscale,
+              display: info,
+              isLive: false,
+            );
+            final statusTitle = info.effectiveDisplayFps > 0
+                ? '${info.formattedRefreshRate} · ${info.vsyncPaced ? 'CVDisplayLink 已就绪' : '未启用垂直同步（自动回退）'}'
+                : '等待显示器刷新率检测';
+            final subtitle = plan.appliedDisplaySync
+                ? '当前点播生效：video-sync=display-resample${plan.appliedInterpolation ? ' + interpolation (${tscale.mpvValue})' : ''}'
+                : '当前点播生效：video-sync=audio（安全音频同步）';
+            return AppleGroupedTile(
+              key: const ValueKey('macos-video-sync-status'),
+              icon: CupertinoIcons.desktopcomputer,
+              iconBgColor: plan.appliedDisplaySync
+                  ? AppleColors.systemGreen
+                  : AppleColors.systemIndigo,
+              title: statusTitle,
+              subtitle: subtitle,
+            );
+          },
+        ),
+        _buildExpandableChoiceDrawerTile<MacosVideoSyncMode>(
+          settingKey: 'macos_video_sync_mode',
+          icon: CupertinoIcons.film,
+          iconBgColor: AppleColors.systemBlue,
+          title: '24p / 电影帧率同步策略',
+          subtitle: '改善 23.976 / 24 fps 电影在 60 Hz / 120 Hz 屏幕上的横移抖动',
+          trailingText: mode.shortLabelZh,
+          currentValue: mode,
+          onStateChanged: refreshBoth,
+          options: [
+            for (final item in MacosVideoSyncMode.values)
+              (item, item.labelZh, item.descriptionZh),
+          ],
+          onSelected: (val) async {
+            await widget.storage.setMacosVideoSyncMode(val);
+            refreshBoth();
+          },
+        ),
+        if (mode == MacosVideoSyncMode.smoothInterpolation)
+          _buildExpandableChoiceDrawerTile<MacosVideoSyncTscale>(
+            settingKey: 'macos_video_sync_tscale',
+            icon: CupertinoIcons.waveform_path_ecg,
+            iconBgColor: AppleColors.systemPurple,
+            title: '平滑插帧算法（tscale）',
+            subtitle: '仅在开启“显示器同步 + 平滑插帧”时生效',
+            trailingText: tscale.mpvValue,
+            currentValue: tscale,
+            onStateChanged: refreshBoth,
+            options: [
+              for (final item in MacosVideoSyncTscale.values)
+                (item, item.labelZh, item.descriptionZh),
+            ],
+            onSelected: (val) async {
+              await widget.storage.setMacosVideoSyncTscale(val);
+              refreshBoth();
+            },
+          ),
+        AppleGroupedTile(
+          key: const ValueKey('macos-video-sync-reset'),
+          icon: CupertinoIcons.arrow_counterclockwise,
+          iconBgColor: isDefault
+              ? CupertinoColors.systemGrey
+              : AppleColors.systemOrange,
+          title: '恢复默认帧率同步设置',
+          subtitle: isDefault
+              ? '当前已为默认配置（自动帧率同步 / oversample）'
+              : '一键恢复为默认配置（自动帧率同步 / oversample）',
+          trailingText: isDefault ? '已默认' : '恢复默认',
+          onTap: isDefault
+              ? null
+              : () async {
+                  await widget.storage.resetMacosVideoSyncSettings();
+                  refreshBoth();
+                },
+        ),
       ],
     );
   }
@@ -13316,6 +13651,47 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }) async {
     final isIos = defaultTargetPlatform == TargetPlatform.iOS;
     StateSetter? refreshSubPage;
+    var refreshingAll = false;
+    final refreshingIds = <String>{};
+    String? refreshBanner;
+    var refreshBannerError = false;
+    final refreshService = StagedSubscriptionRefreshService(
+      storage: widget.storage,
+      client: widget.client,
+    );
+
+    Future<void> runRefresh(List<SubscriptionEntry> targets, {bool all = false}) async {
+      if (refreshingAll || targets.isEmpty) return;
+      if (all) {
+        refreshingAll = true;
+      } else {
+        for (final t in targets) {
+          refreshingIds.add(t.id);
+        }
+      }
+      refreshBanner = null;
+      refreshBannerError = false;
+      refreshSubPage?.call(() {});
+      try {
+        final summary = await refreshService.refreshAll(targets: targets);
+        if (!mounted) return;
+        refreshBanner = summary.summaryText;
+        refreshBannerError = summary.hasFailures && !summary.hasUpdates;
+        if (summary.hasUpdates) {
+          _reloadSavedConfig(
+            bypassHomeSnapshot: true,
+            preserveActivePlayback: true,
+          );
+        }
+      } finally {
+        refreshingAll = false;
+        for (final t in targets) {
+          refreshingIds.remove(t.id);
+        }
+        refreshSubPage?.call(() {});
+      }
+    }
+
     await _openIosOrModalPage<void>(
       title: isIos ? '订阅管理' : '订阅源与分组管理中心',
       backLabel: iosBackLabel,
@@ -13336,8 +13712,38 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               mainAxisSize: MainAxisSize.min,
               children: [
                 CupertinoButton(
+                  key: const Key('subscriptions-refresh-all'),
                   padding: const EdgeInsets.symmetric(horizontal: 6),
-                  minSize: 28,
+                  minimumSize: const Size(28, 28),
+                  onPressed: () {
+                    final targets = widget.storage
+                        .getSubscriptions()
+                        .where(
+                          (s) =>
+                              !s.isEffectivelyPrivate &&
+                              StagedSubscriptionRefreshService.isRefreshable(s),
+                        )
+                        .toList();
+                    if (targets.isEmpty) {
+                      refreshBanner = '当前没有可刷新的网络订阅';
+                      refreshBannerError = false;
+                      refreshSubPage?.call(() {});
+                      return;
+                    }
+                    unawaited(runRefresh(targets, all: true));
+                  },
+                  child: Text(
+                    '刷新全部',
+                    style: TextStyle(
+                      color: AppleColors.systemBlue,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                CupertinoButton(
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  minimumSize: const Size(28, 28),
                   onPressed: () {
                     Navigator.of(context).pop();
                     _quickImportFromClipboard();
@@ -13352,7 +13758,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 ),
                 CupertinoButton(
                   padding: const EdgeInsets.symmetric(horizontal: 6),
-                  minSize: 28,
+                  minimumSize: const Size(28, 28),
                   onPressed: () {
                     Navigator.of(context).pop();
                     _showImportConfigDialog();
@@ -13455,6 +13861,51 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             shrinkWrap: true,
             padding: const EdgeInsets.all(16),
             children: [
+              if (refreshingAll) ...[
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Row(
+                    children: [
+                      const CupertinoActivityIndicator(radius: 8),
+                      const SizedBox(width: 8),
+                      Text(
+                        '正在安全暂存并校验远端订阅…',
+                        style: TextStyle(
+                          color: ApplePalette.of(context).labelSecondary,
+                          fontSize: 12.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              if (refreshBanner != null && refreshBanner!.isNotEmpty) ...[
+                Container(
+                  key: const Key('subscriptions-refresh-status'),
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 9,
+                  ),
+                  decoration: BoxDecoration(
+                    color: (refreshBannerError
+                            ? AppleColors.systemOrange
+                            : AppleColors.systemGreen)
+                        .withValues(alpha: 0.14),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    refreshBanner!,
+                    style: TextStyle(
+                      color: refreshBannerError
+                          ? AppleColors.systemOrange
+                          : AppleColors.systemGreen,
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
               if (isIos) ...[
                 IosSettingsGroup(
                   header: '快捷导入',
@@ -13513,6 +13964,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 AppleGroupedSection(
                   header: '${entry.key} (${entry.value.length})',
                   children: entry.value.map((sub) {
+                    final canRefresh =
+                        StagedSubscriptionRefreshService.isRefreshable(sub);
+                    final isBusy =
+                        refreshingAll || refreshingIds.contains(sub.id);
                     return AppleGroupedTile(
                       icon: sub.isPrivate
                           ? CupertinoIcons.lock_shield_fill
@@ -13526,6 +13981,22 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
+                          if (canRefresh)
+                            CupertinoButton(
+                              key: Key('subscription-refresh-${sub.id}'),
+                              padding: const EdgeInsets.only(right: 6),
+                              minimumSize: const Size(28, 28),
+                              onPressed: isBusy
+                                  ? null
+                                  : () => unawaited(runRefresh([sub])),
+                              child: isBusy
+                                  ? const CupertinoActivityIndicator(radius: 7)
+                                  : const Icon(
+                                      CupertinoIcons.refresh,
+                                      color: AppleColors.systemBlue,
+                                      size: 17,
+                                    ),
+                            ),
                           CupertinoSwitch(
                             value: sub.enabled,
                             activeTrackColor: AppleColors.systemGreen,
@@ -13540,7 +14011,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           ),
                           CupertinoButton(
                             padding: const EdgeInsets.only(left: 6),
-                            minSize: 28,
+                            minimumSize: const Size(28, 28),
                             onPressed: () async {
                               final nextGroup = await _promptGroupSelection(
                                 ctx,
@@ -13565,7 +14036,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           ),
                           CupertinoButton(
                             padding: const EdgeInsets.only(left: 6),
-                            minSize: 28,
+                            minimumSize: const Size(28, 28),
                             onPressed: () async {
                               try {
                                 await widget.storage.removeSubscription(sub.id);
@@ -15528,92 +15999,178 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     String group,
     bool isPrivate,
   ) async {
-    String server = '', username = '', password = '', error = '';
+    bool useHttps = false;
+    final serverCtrl = TextEditingController();
+    final portCtrl = TextEditingController(text: '8096');
+    final pathCtrl = TextEditingController();
+    final nameCtrl = TextEditingController();
+    final userCtrl = TextEditingController();
+    final passCtrl = TextEditingController();
+    String error = '';
     bool busy = false;
-    return await _openIosOrModalPage<bool>(
-          hostContext: parent,
-          title: '连接 Emby 媒体库',
-          backLabel: '导入订阅',
-          builder: (sheet) => StatefulBuilder(
-            builder: (ctx, update) => SingleChildScrollView(
-              padding: EdgeInsets.fromLTRB(
-                18,
-                18,
-                18,
-                18 + MediaQuery.viewInsetsOf(ctx).bottom,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextSelectionMouseGuard(
-                    child: CupertinoTextField(
-                      placeholder: '服务器地址（含端口或子路径）',
-                      keyboardType: TextInputType.url,
-                      autocorrect: false,
-                      onChanged: (v) => server = v,
+    try {
+      return await _openIosOrModalPage<bool>(
+            hostContext: parent,
+            title: '连接 Emby 媒体库',
+            backLabel: '导入订阅',
+            builder: (sheet) => StatefulBuilder(
+              builder: (ctx, update) => SingleChildScrollView(
+                padding: EdgeInsets.fromLTRB(
+                  18,
+                  18,
+                  18,
+                  18 + MediaQuery.viewInsetsOf(ctx).bottom,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    CupertinoSlidingSegmentedControl<bool>(
+                      groupValue: useHttps,
+                      children: const {
+                        false: Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 10),
+                          child: Text('HTTP（默认 8096）'),
+                        ),
+                        true: Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 10),
+                          child: Text('HTTPS'),
+                        ),
+                      },
+                      onValueChanged: (val) {
+                        if (val == null) return;
+                        update(() {
+                          useHttps = val;
+                          final curPort = portCtrl.text.trim();
+                          if (useHttps && curPort == '8096') {
+                            portCtrl.text = '';
+                          } else if (!useHttps && curPort.isEmpty) {
+                            portCtrl.text = '8096';
+                          }
+                        });
+                      },
                     ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextSelectionMouseGuard(
-                    child: CupertinoTextField(
-                      placeholder: '用户名',
-                      autocorrect: false,
-                      onChanged: (v) => username = v,
+                    const SizedBox(height: 12),
+                    TextSelectionMouseGuard(
+                      child: CupertinoTextField(
+                        controller: serverCtrl,
+                        placeholder: '服务器域名或 IP（如 emby.example）',
+                        keyboardType: TextInputType.url,
+                        autocorrect: false,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextSelectionMouseGuard(
-                    child: CupertinoTextField(
-                      placeholder: '密码',
-                      obscureText: true,
-                      onChanged: (v) => password = v,
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextSelectionMouseGuard(
+                            child: CupertinoTextField(
+                              controller: portCtrl,
+                              placeholder: useHttps ? '端口（默认 443）' : '端口（默认 8096）',
+                              keyboardType: TextInputType.number,
+                              autocorrect: false,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextSelectionMouseGuard(
+                            child: CupertinoTextField(
+                              controller: pathCtrl,
+                              placeholder: '路径（选填 /path）',
+                              autocorrect: false,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                  ),
-                  if (error.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 10),
-                      child: Text(error),
+                    const SizedBox(height: 10),
+                    TextSelectionMouseGuard(
+                      child: CupertinoTextField(
+                        controller: nameCtrl,
+                        placeholder: '名称（选填，留空自动识别）',
+                        autocorrect: false,
+                      ),
                     ),
-                  CupertinoButton(
-                    onPressed: busy
-                        ? null
-                        : () async {
-                            if (server.trim().isEmpty ||
-                                username.trim().isEmpty) {
-                              update(() => error = '请填写服务器地址和用户名');
-                              return;
-                            }
-                            update(() {
-                              busy = true;
-                              error = '';
-                            });
-                            try {
-                              final entry = await EmbyLibrary.login(
-                                server,
-                                username,
-                                password,
-                                group: group.isEmpty ? '默认分组' : group,
-                                isPrivate: isPrivate,
-                              );
-                              if (!ctx.mounted) return;
-                              await widget.storage.upsertSubscriptions([entry]);
-                              if (ctx.mounted) Navigator.of(ctx).pop(true);
-                            } catch (e) {
-                              if (ctx.mounted)
-                                update(() {
-                                  busy = false;
-                                  error = e.toString();
-                                });
-                            }
-                          },
-                    child: Text(busy ? '正在连接…' : '登录并添加'),
-                  ),
-                ],
+                    const SizedBox(height: 10),
+                    TextSelectionMouseGuard(
+                      child: CupertinoTextField(
+                        controller: userCtrl,
+                        placeholder: '用户名',
+                        autocorrect: false,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextSelectionMouseGuard(
+                      child: CupertinoTextField(
+                        controller: passCtrl,
+                        placeholder: '密码（可留空）',
+                        obscureText: true,
+                      ),
+                    ),
+                    if (error.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 10),
+                        child: Text(error),
+                      ),
+                    const SizedBox(height: 12),
+                    CupertinoButton.filled(
+                      onPressed: busy
+                          ? null
+                          : () async {
+                              final host = serverCtrl.text.trim();
+                              final uname = userCtrl.text.trim();
+                              if (host.isEmpty || uname.isEmpty) {
+                                update(() => error = '请填写服务器地址和用户名');
+                                return;
+                              }
+                              update(() {
+                                busy = true;
+                                error = '';
+                              });
+                              try {
+                                final composed = EmbyLibrary.composeServerAddress(
+                                  useHttps: useHttps,
+                                  hostOrUrl: host,
+                                  port: portCtrl.text.trim(),
+                                  path: pathCtrl.text.trim(),
+                                );
+                                final entry = await EmbyLibrary.login(
+                                  composed,
+                                  uname,
+                                  passCtrl.text,
+                                  group: group.isEmpty ? '默认分组' : group,
+                                  isPrivate: isPrivate,
+                                  label: nameCtrl.text.trim(),
+                                );
+                                if (!ctx.mounted) return;
+                                await widget.storage.upsertSubscriptions([entry]);
+                                if (ctx.mounted) Navigator.of(ctx).pop(true);
+                              } catch (e) {
+                                if (ctx.mounted) {
+                                  update(() {
+                                    busy = false;
+                                    error = e.toString();
+                                  });
+                                }
+                              }
+                            },
+                      child: Text(busy ? '正在连接…' : '登录并添加'),
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-        ) ??
-        false;
+          ) ??
+          false;
+    } finally {
+      serverCtrl.dispose();
+      portCtrl.dispose();
+      pathCtrl.dispose();
+      nameCtrl.dispose();
+      userCtrl.dispose();
+      passCtrl.dispose();
+    }
   }
   Future<void> _showImportConfigDialog({
     String? initialInput,
@@ -15631,6 +16188,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     bool isPrivate = initialIsPrivate;
     bool submitting = false;
     String? errorText = initialError;
+    String? loadedLocalPayload;
+    String? loadedLocalSummary;
     final showPrivacyToggle =
         initialIsPrivate || !widget.storage.hasPrivacyConfigured;
     const presetGroups = ['默认分组', '主力影视', '超清专线', '电视直播', '动漫番剧'];
@@ -15649,7 +16208,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             });
             try {
               final urlText = urlCtrl.text.trim();
-              final jsonText = jsonCtrl.text.trim();
+              final jsonText = (loadedLocalPayload ?? jsonCtrl.text).trim();
               final selectedGroup = groupCtrl.text.trim().isEmpty
                   ? '默认分组'
                   : groupCtrl.text.trim();
@@ -15729,23 +16288,32 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         if (picked == null || !ctx.mounted) return;
                         rawBytes = picked.bytes;
                         pickedName = picked.name;
+                      } else if (MacosLocalFilePicker.isAvailable) {
+                        final picked = await MacosLocalFilePicker.pickFile(
+                          title: '选择本地订阅 JSON 或 ZIP 配置包',
+                          maxBytes: CmsClient.maxResponseBytes,
+                        );
+                        if (picked == null || !ctx.mounted) return;
+                        rawBytes = picked.bytes;
+                        pickedName = picked.name;
                       } else {
                         final picked = await FilePicker.platform.pickFiles(
                           type: FileType.any,
                           withData: false,
                         );
-                        final entry = picked?.files.single;
-                        if (entry == null || !ctx.mounted) return;
+                        final files = picked?.files ?? const <PlatformFile>[];
+                        if (files.isEmpty || !ctx.mounted) return;
+                        final entry = files.first;
                         pickedName = entry.name;
                         if (entry.path != null && entry.path!.isNotEmpty) {
                           final file = File(entry.path!);
                           if (await file.length() > CmsClient.maxResponseBytes) {
-                            throw const FormatException('文件超过 6 MB');
+                            throw const FormatException('文件超过 16 MB');
                           }
                           rawBytes = await file.readAsBytes();
                         } else if (entry.bytes != null) {
                           if (entry.bytes!.length > CmsClient.maxResponseBytes) {
-                            throw const FormatException('文件超过 6 MB');
+                            throw const FormatException('文件超过 16 MB');
                           }
                           rawBytes = entry.bytes!;
                         } else {
@@ -15755,8 +16323,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       final body =
                           CmsClient.readSubscriptionFile(rawBytes, pickedName);
                       if (!ctx.mounted) return;
+                      final kb = (utf8.encode(body).length / 1024).toStringAsFixed(1);
                       setModalState(() {
-                        jsonCtrl.text = body;
+                        if (body.length > 32768) {
+                          loadedLocalPayload = body;
+                          loadedLocalSummary =
+                              '已载入本地配置：$pickedName（约 $kb KB），点击导入生效';
+                          jsonCtrl.clear();
+                        } else {
+                          loadedLocalPayload = null;
+                          loadedLocalSummary = '已载入本地文件：$pickedName（$kb KB）';
+                          jsonCtrl.text = body;
+                        }
                         urlCtrl.clear();
                         errorText = null;
                       });
@@ -15772,6 +16350,29 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   },
                   child: const Text('选择本地订阅或 ZIP 配置包'),
                 ),
+                if (loadedLocalSummary != null) ...[
+                  Container(
+                    key: const ValueKey('subscription-local-file-summary'),
+                    width: double.infinity,
+                    margin: const EdgeInsets.only(bottom: 10),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AppleColors.systemBlue.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      loadedLocalSummary!,
+                      style: const TextStyle(
+                        color: AppleColors.systemBlue,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
                 // 1. Group Selector
                 Text(
                   '订阅分组（可选择预设或直接输入自定义分组名）',
@@ -15979,8 +16580,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 TextSelectionMouseGuard(
                   child: CupertinoTextField(
                     controller: jsonCtrl,
-                    placeholder:
-                        '{"sites": [...]} 或 #EXTM3U 播放列表 或 频道名,https://live.example/tv.m3u8',
+                    onChanged: (_) {
+                      if (loadedLocalPayload != null || loadedLocalSummary != null) {
+                        setModalState(() {
+                          loadedLocalPayload = null;
+                          loadedLocalSummary = null;
+                        });
+                      }
+                    },
+                    placeholder: loadedLocalSummary != null
+                        ? '已载入本地配置（直接点击下方导入，或在此粘贴覆盖）'
+                        : '{"sites": [...]} 或 #EXTM3U 播放列表 或 频道名,https://live.example/tv.m3u8',
                     maxLines: 4,
                     minLines: 2,
                     autocorrect: false,
@@ -16214,7 +16824,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             fileName: 'marco-movie-backup.json',
                             type: FileType.custom,
                             allowedExtensions: const ['json'],
-                            bytes: bytes,
+                            bytes: (Platform.isIOS || Platform.isAndroid)
+                                ? bytes
+                                : null,
                           );
                           if (outputPath == null || !ctx.mounted) return;
                           if (!Platform.isIOS && !Platform.isAndroid && outputPath.isNotEmpty) {
@@ -16255,13 +16867,22 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             );
                             byteLength = picked.bytes.length;
                             text = picked.decodeUtf8(allowMalformed: false);
+                          } else if (MacosLocalFilePicker.isAvailable) {
+                            final picked = await MacosLocalFilePicker.pickFile(
+                              title: '选择 Marco Movie 备份 JSON 文件',
+                              maxBytes: StorageService.maxSyncPayloadBytes,
+                            );
+                            if (picked == null || !ctx.mounted) return;
+                            byteLength = picked.bytes.length;
+                            text = utf8.decode(picked.bytes);
                           } else {
                             final picked = await FilePicker.platform.pickFiles(
                               type: FileType.any,
                               withData: false,
                             );
-                            final entry = picked?.files.single;
-                            if (entry == null || !ctx.mounted) return;
+                            final files = picked?.files ?? const <PlatformFile>[];
+                            if (files.isEmpty || !ctx.mounted) return;
+                            final entry = files.first;
                             if (entry.path != null && entry.path!.isNotEmpty) {
                               final file = File(entry.path!);
                               final len = await file.length();

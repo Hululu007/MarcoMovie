@@ -42,14 +42,30 @@ public final class ConfigServer {
         void onKeyword(String keyword, boolean submitNow) throws Exception;
     }
 
+    public interface BindHandler {
+        String handleBind(String method, byte[] bindKey, String requestBody) throws Exception;
+    }
+
     private final ServerSocket server;
     private final Importer importer;
     private final SyncHandler syncHandler;
     private final SearchHandler searchHandler;
+    private volatile BindHandler bindHandler;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private volatile boolean closed;
     private volatile Socket active;
     public final String token = UUID.randomUUID().toString();
+    public final byte[] bindKey = com.pilipala.source.WebdavBindCrypto.generateKey();
+
+    public ConfigServer withBindHandler(BindHandler handler) {
+        this.bindHandler = handler;
+        return this;
+    }
+
+    public String bindQrUrl(String host) {
+        return com.pilipala.source.WebdavBindCrypto.buildBindQrUrl(
+                "http://" + host + ":" + port() + "/" + token, bindKey);
+    }
 
     public ConfigServer(Importer sink) throws IOException {
         this(sink, null, null, System.currentTimeMillis());
@@ -226,6 +242,12 @@ public final class ConfigServer {
             return;
         }
 
+        String bindPath = "/" + token + "/bind";
+        if (pathOnly.equals(bindPath)) {
+            handleBind(s, in, request[0], length, transfer, content, origin);
+            return;
+        }
+
         String searchPath = "/" + token + "/search";
         if (pathOnly.equals(searchPath)) {
             handleSearch(s, in, request[0], length, transfer, content, origin, referer, host);
@@ -346,6 +368,57 @@ public final class ConfigServer {
             reply(s, 200, "application/json; charset=utf-8", mergedJson == null ? "{}" : mergedJson);
         } catch (Exception e) {
             reply(s, 422, "application/json; charset=utf-8", "{\"error\":\"merge_failed\"}");
+        }
+    }
+
+    private void handleBind(
+            Socket s,
+            InputStream in,
+            String method,
+            int length,
+            String transfer,
+            String content,
+            String origin)
+            throws Exception {
+        if (!isAllowedLanPeer(s.getInetAddress())) {
+            reply(s, 403, "application/json; charset=utf-8", "{\"error\":\"lan_only\"}");
+            return;
+        }
+        if (isExpired()) {
+            reply(s, 410, "application/json; charset=utf-8", "{\"error\":\"session_expired\"}");
+            close();
+            return;
+        }
+        BindHandler handler = bindHandler;
+        if (handler == null) {
+            reply(s, 404, "application/json; charset=utf-8", "{\"error\":\"bind_unavailable\"}");
+            return;
+        }
+        if (origin.length() > 0) {
+            reply(s, 403, "application/json; charset=utf-8", "{\"error\":\"browser_origin_blocked\"}");
+            return;
+        }
+        String reqBody = "";
+        if ("POST".equals(method)) {
+            if (transfer.length() > 0 || length < 2 || length > 65536) {
+                reply(s, 413, "application/json; charset=utf-8", "{\"error\":\"payload_limit\"}");
+                return;
+            }
+            if (!content.toLowerCase(Locale.US).startsWith("application/json")) {
+                reply(s, 415, "application/json; charset=utf-8", "{\"error\":\"json_required\"}");
+                return;
+            }
+            byte[] b = readExact(in, length);
+            reqBody = new String(b, "UTF-8");
+        } else if (!"GET".equals(method)) {
+            reply(s, 405, "application/json; charset=utf-8", "{\"error\":\"method_not_allowed\"}");
+            return;
+        }
+        try {
+            String resp = handler.handleBind(method, bindKey, reqBody);
+            reply(s, 200, "application/json; charset=utf-8", resp == null ? "{}" : resp);
+        } catch (Exception e) {
+            reply(s, 400, "application/json; charset=utf-8", "{\"error\":\"bind_failed\"}");
         }
     }
 

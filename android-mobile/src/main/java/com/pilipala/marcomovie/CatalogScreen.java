@@ -243,6 +243,20 @@ final class CatalogScreen {
                 break;
             }
         }
+        if ((site == null || !a.available(site)) && e.site != null && !e.site.trim().isEmpty()) {
+            Cms.Site fallbackSite = null;
+            for (Cms.Site s : a.config.sites) {
+                if (s == null || !a.available(s)) continue;
+                if (e.site.equals(s.siteId()) || e.site.equals(s.name)) {
+                    if (fallbackSite != null) {
+                        fallbackSite = null;
+                        break;
+                    }
+                    fallbackSite = s;
+                }
+            }
+            if (fallbackSite != null) site = fallbackSite;
+        }
         if (site == null || !a.available(site)) {
             if (e.title != null
                     && !e.title.trim().isEmpty()
@@ -271,7 +285,13 @@ final class CatalogScreen {
         a.historyFallbackBookmark = WatchHistory.cloneEntry(e);
         a.historyFallbackInFlight = false;
         Cms.Video listing = new Cms.Video();
-        listing.id = e.id;
+        String targetId = e.id == null ? "" : e.id.trim();
+        if (Cms.Site.isGenericPlaceholderVodId(targetId)
+                && e.shareUrl != null
+                && !e.shareUrl.trim().isEmpty()) {
+            targetId = e.shareUrl.trim();
+        }
+        listing.id = targetId;
         listing.title = e.title;
         listing.poster = e.poster;
         a.open(new MainActivity.Screen(() -> a.detail(selected, listing)), true);

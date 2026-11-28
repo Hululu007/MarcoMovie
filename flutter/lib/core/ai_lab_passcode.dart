@@ -226,14 +226,7 @@ abstract final class AiLabPasscodeVerifier {
     if (kIsWeb) return 'web';
     final override = debugDefaultTargetPlatformOverride;
     if (override != null) {
-      return switch (override) {
-        TargetPlatform.windows => 'windows',
-        TargetPlatform.iOS => 'ios',
-        TargetPlatform.macOS => 'macos',
-        TargetPlatform.android => 'android',
-        TargetPlatform.linux => 'linux',
-        TargetPlatform.fuchsia => 'fuchsia',
-      };
+      return override.name.toLowerCase();
     }
     if (Platform.isWindows) return 'windows';
     if (Platform.isIOS) return 'ios';
@@ -677,6 +670,7 @@ class AiLabPasscodeStore extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(prefsPasscodeKey, result.canonicalToken);
+      await prefs.setString(altPrefsPasscodeKey, result.canonicalToken);
     } catch (_) {}
     notifyListeners();
     return result;

@@ -51,6 +51,7 @@ public final class Tv063Batch3Checks {
         checkIssue72And73NativeSigabrtGuards();
         checkIssue53TvApkInstallFlow();
         checkIntroOutroNextEpisodeCarryOver();
+        checkTv064Regressions();
         checkPrefsInvariant();
 
         System.out.println("Batch 3 summary: " + passed + " passed, " + failed + " failed");
@@ -509,6 +510,29 @@ public final class Tv063Batch3Checks {
                 hostSrc.contains("computeSeriesCarryOverSeconds(")
                         && hostSrc.contains("PlaybackControls.setVideoSkip(")
                         && hostSrc.contains("controls.updateLabels()"));
+    }
+
+    private static void checkTv064Regressions() throws Exception {
+        check(
+                "SleepTimerSheet exposes 45-minute preset MODE_45M == 3",
+                com.pilipala.marcomovie.hud.SleepTimerSheet.MODE_45M == 3);
+        check(
+                "TvSeriesScraper preserves year inside title (请回答1988)",
+                "请回答1988".equals(TvSeriesScraper.cleanWorkTitle("请回答1988")));
+        String danmuQuery = TvSeriesScraper.cleanNetdiskDanmuQuery("凡人修仙传.4K.HDR.高码率", "第01集.mp4");
+        check(
+                "TvSeriesScraper.cleanNetdiskDanmuQuery strips release noise",
+                danmuQuery != null && danmuQuery.contains("凡人修仙传"));
+        Cms.Site netdisk = new Cms.Site();
+        netdisk.key = "pansou_test";
+        netdisk.name = "盘搜测试";
+        netdisk.api = "https://pansou.example/api";
+        check("Cms.Site.isNetdiskSite recognizes netdisk search sources", netdisk.isNetdiskSite());
+        String multiStoreSrc =
+                readSrc("android-tv/src/main/java/com/pilipala/marcomovie/TvMultiSourceStore.java");
+        check(
+                "TvMultiSourceStore preserves _marco_depots multi-warehouse metadata",
+                multiStoreSrc.contains("_marco_depots"));
     }
 
     private static void checkPrefsInvariant() {

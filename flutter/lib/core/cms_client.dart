@@ -1862,6 +1862,11 @@ class CmsClient {
   /// Match a catalogue-only item to a playable item from the user's visible
   /// subscriptions, or recover a same-site sibling card on a netdisk source
   /// when an edition card's shares have all been cancelled upstream.
+  static bool isGenericPlaceholderVodId(String raw) {
+    final trimmed = raw.trim();
+    return trimmed.isEmpty || trimmed == '0' || trimmed == '1';
+  }
+
   Future<(CmsSite, CmsVideo)> playableDetail(
     CmsSite source,
     CmsVideo item,
@@ -1872,43 +1877,61 @@ class CmsClient {
         raw.trim().toLowerCase().replaceAll(RegExp(r'[\s·:：,，.。!！?？\-_—()（）\[\]【】《》]+'), '');
 
     CmsVideo? fetchedDetail;
-    FormatException? deadShareError;
+    Object? deadShareError;
     StackTrace? deadShareStack;
     final canTrySameSiteSibling = !CspBridge.isDoubanSite(source) &&
-        CspBridge.isPanOrNetdiskSite(source) &&
         source.searchable &&
-        !CspBridge.isSearchOnlySite(source) &&
-        !CspBridge.isMyDriveSite(source);
+        !CspBridge.isMyDriveSite(source) &&
+        (CspBridge.isPanOrNetdiskSite(source) ||
+            CspBridge.isSearchOnlySite(source) ||
+            isGenericPlaceholderVodId(item.id));
+    final skipUpfrontGenericDetail = canTrySameSiteSibling &&
+        isGenericPlaceholderVodId(item.id) &&
+        item.lines.every((l) => l.episodes.isEmpty);
 
-    try {
-      fetchedDetail = await fetchDetail(
-        source,
-        item,
-        forceRefresh: forceRefresh,
+    if (skipUpfrontGenericDetail) {
+      deadShareError = FormatException(
+        '原片源「${source.name}」的影片标识无效（${item.id}）',
       );
-      if (fetchedDetail.lines.any((l) => l.episodes.isNotEmpty)) {
-        return (source, fetchedDetail);
-      }
-    } on FormatException catch (e, st) {
-      final isDeadShareMsg = e.message.contains('分享链接已失效') ||
-          e.message.contains('已取消或已失效') ||
-          e.message.contains('原网盘分享暂不可用') ||
-          e.message.contains('网盘暂不支持');
-      if (canTrySameSiteSibling &&
-          isDeadShareMsg &&
-          !needsSourceVerification(source, e) &&
-          !_sourceCancelled()) {
-        deadShareError = e;
-        deadShareStack = st;
-      } else {
-        rethrow;
+      deadShareStack = StackTrace.current;
+    } else {
+      try {
+        fetchedDetail = await fetchDetail(
+          source,
+          item,
+          forceRefresh: forceRefresh,
+        );
+        if (fetchedDetail.lines.any((l) => l.episodes.isNotEmpty)) {
+          return (source, fetchedDetail);
+        }
+      } catch (e, st) {
+        final msg = e.toString();
+        final isDeadShareMsg = msg.contains('分享链接已失效') ||
+            msg.contains('已取消或已失效') ||
+            msg.contains('原网盘分享暂不可用') ||
+            msg.contains('网盘暂不支持');
+        final allowSameSiteFallback = canTrySameSiteSibling &&
+            (isDeadShareMsg ||
+                CspBridge.isSearchOnlySite(source) ||
+                CspBridge.isPanOrNetdiskSite(source) ||
+                isGenericPlaceholderVodId(item.id)) &&
+            !needsSourceVerification(source, e) &&
+            !_sourceCancelled();
+        if (allowSameSiteFallback) {
+          deadShareError = e;
+          deadShareStack = st;
+        } else {
+          rethrow;
+        }
       }
     }
 
     if (!CspBridge.isDoubanSite(source)) {
       if (canTrySameSiteSibling &&
           (deadShareError != null ||
-              (fetchedDetail != null && fetchedDetail.sourceWarnings.isNotEmpty))) {
+              fetchedDetail == null ||
+              fetchedDetail.sourceWarnings.isNotEmpty ||
+              fetchedDetail.lines.every((l) => l.episodes.isEmpty))) {
         final seedVideo = fetchedDetail ?? item;
         final rawTitle = CspBridge.searchTitleForVideo(seedVideo);
         final baseTitle = CspBridge.cleanNetdiskSearchTitle(rawTitle);
@@ -1916,10 +1939,15 @@ class CmsClient {
         if (baseTitle.isNotEmpty && normBase.isNotEmpty) {
           try {
             final searchListing = await fetchSearch(source, baseTitle);
-            final siblings = searchListing.videos.where((v) {
-              if (v.id.trim().isEmpty ||
-                  v.id == item.id ||
-                  (fetchedDetail != null && v.id == fetchedDetail.id)) {
+            final candidates = searchListing.videos.where((v) {
+              if (v.id.trim().isEmpty) {
+                return false;
+              }
+              final hasInline = v.lines.any((l) => l.episodes.isNotEmpty);
+              if (!hasInline &&
+                  deadShareError == null &&
+                  (v.id == item.id ||
+                      (fetchedDetail != null && v.id == fetchedDetail.id))) {
                 return false;
               }
               if (seedVideo.year.isNotEmpty &&
@@ -1934,16 +1962,37 @@ class CmsClient {
                 return false;
               }
               return normTitleOf(cleanedCand) == normBase;
-            }).take(3);
+            }).toList();
+            candidates.sort((a, b) {
+              final aInline = a.lines.any((l) => l.episodes.isNotEmpty) ? 0 : 1;
+              final bInline = b.lines.any((l) => l.episodes.isNotEmpty) ? 0 : 1;
+              return aInline.compareTo(bInline);
+            });
+            final siblings = candidates.take(4);
 
             for (final sib in siblings) {
               if (_sourceCancelled()) break;
               try {
-                final sibDetail = await fetchDetail(
-                  source,
-                  sib,
-                  forceRefresh: forceRefresh,
-                );
+                final CmsVideo sibDetail;
+                if (CspBridge.isSearchOnlySite(source) &&
+                    sib.lines.any((l) => l.episodes.isNotEmpty)) {
+                  sibDetail = _mergeDetail(sib, seedVideo);
+                } else {
+                  CmsVideo? fetched;
+                  try {
+                    fetched = await fetchDetail(
+                      source,
+                      sib,
+                      forceRefresh: forceRefresh,
+                    );
+                  } catch (_) {
+                    if (!sib.lines.any((l) => l.episodes.isNotEmpty)) rethrow;
+                  }
+                  sibDetail = (fetched != null &&
+                          fetched.lines.any((l) => l.episodes.isNotEmpty))
+                      ? fetched
+                      : _mergeDetail(sib, seedVideo);
+                }
                 if (sibDetail.lines.any((l) => l.episodes.isNotEmpty)) {
                   final note =
                       '当前版本原分享已失效，已自动加载同站可用片源「${sibDetail.title.isEmpty ? sib.title : sibDetail.title}」';
@@ -3191,8 +3240,10 @@ class CmsClient {
     final mergedRemarks = detailed.remarks.isNotEmpty
         ? detailed.remarks
         : (fallback.remarks.isNotEmpty ? fallback.remarks : extractedRemarks);
+    final keepFallbackId = !isGenericPlaceholderVodId(fallback.id) &&
+        isGenericPlaceholderVodId(detailed.id);
     return CmsVideo(
-      id: detailed.id.isEmpty ? fallback.id : detailed.id,
+      id: (detailed.id.isEmpty || keepFallbackId) ? fallback.id : detailed.id,
       title: mergedTitle,
       poster: CmsParser.isBrokenPosterUrl(detailed.poster)
           ? fallback.poster

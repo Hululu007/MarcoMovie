@@ -253,6 +253,179 @@ public enum CmsParser {
         try ConfigDecoder.decodeTextDocument(rawBytes)
     }
 
+    private enum ConfigJsonRootShape {
+        case topLevelSitesArray([Any])
+        case singleSiteObject([String: Any])
+        case standardObject([String: Any])
+    }
+
+    /// Single shared root-shape classifier used by BOTH `parseConfig` (import) and
+    /// `sanitizePublicRawConfig` (Backup / WebDAV / LAN QR public export) so every JSON shape
+    /// accepted on import receives identical child-level privacy filtering on export.
+    private static func classifyConfigJsonRoot(_ rawAny: Any) -> ConfigJsonRootShape? {
+        if let arr = rawAny as? [Any] {
+            return .topLevelSitesArray(arr)
+        }
+        guard let obj = rawAny as? [String: Any] else {
+            return nil
+        }
+        let isDirectVodListing = isMissing(obj["sites"])
+            && isMissing(obj["lives"])
+            && isMissing(obj["urls"])
+            && isMissing(obj["storeHouse"])
+            && isMissing(obj["depots"])
+            && (obj["list"] is [Any] || obj["class"] is [Any])
+        if !isDirectVodListing
+            && isMissing(obj["sites"])
+            && !isMissing(obj["api"])
+            && (!isMissing(obj["name"]) || !isMissing(obj["key"]))
+        {
+            return .singleSiteObject(obj)
+        }
+        return .standardObject(obj)
+    }
+
+    private static func isPrivateChildConfigItem(_ item: [String: Any], defaultGroup: String) -> Bool {
+        let privFlag = item["isPrivate"] ?? item["private"] ?? item["hidden"]
+        if asBool(privFlag, fallback: false) {
+            return true
+        }
+        if nonNullString(item["space"]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "private" {
+            return true
+        }
+        let itemGroup = nonNullString(item["group"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveGroup = itemGroup.isEmpty ? defaultGroup : itemGroup
+        return effectiveGroup.contains("隐私") || effectiveGroup.contains("私密")
+    }
+
+    /// Strips any private child VOD sites, private live sources, and private depots from a public
+    /// subscription's `rawContent` across ALL JSON root shapes accepted by `parseConfig`
+    /// (standard object, top-level sites array, and single-site object) before ordinary Backup,
+    /// WebDAV, or LAN QR export.
+    /// Returns `""` when every entry in the config was private; returns the original `rawContent`
+    /// unchanged when no private entries exist.
+    public static func sanitizePublicRawConfig(_ rawContent: String, defaultGroup: String = "") -> String {
+        let trimmed = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return rawContent }
+        if defaultGroup.contains("隐私") || defaultGroup.contains("私密") {
+            return ""
+        }
+        let cleaned = ConfigDecoder.stripJsonComments(ConfigDecoder.unpackConfigText(trimmed))
+        guard let data = cleaned.data(using: .utf8),
+              let rawAny = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+              let rootShape = classifyConfigJsonRoot(rawAny)
+        else {
+            return rawContent
+        }
+
+        switch rootShape {
+        case .topLevelSitesArray(let arr):
+            var removedAny = false
+            let filtered = arr.filter { entry in
+                guard let dict = entry as? [String: Any] else { return true }
+                if isPrivateChildConfigItem(dict, defaultGroup: defaultGroup) {
+                    removedAny = true
+                    return false
+                }
+                return true
+            }
+            guard removedAny else { return rawContent }
+            guard !filtered.isEmpty else { return "" }
+            guard let sanitizedData = try? JSONSerialization.data(
+                withJSONObject: filtered,
+                options: [.sortedKeys, .withoutEscapingSlashes]
+            ) else {
+                return ""
+            }
+            return String(decoding: sanitizedData, as: UTF8.self)
+
+        case .singleSiteObject(let obj):
+            if isPrivateChildConfigItem(obj, defaultGroup: defaultGroup) {
+                return ""
+            }
+            return rawContent
+
+        case .standardObject(var root):
+            var removedAny = false
+
+            if let rawSites = root["sites"] as? [Any] {
+                var sitesChanged = false
+                let filteredSites = rawSites.filter { entry in
+                    guard let dict = entry as? [String: Any] else { return true }
+                    if isPrivateChildConfigItem(dict, defaultGroup: defaultGroup) {
+                        removedAny = true
+                        sitesChanged = true
+                        return false
+                    }
+                    return true
+                }
+                if sitesChanged {
+                    root["sites"] = filteredSites
+                }
+            }
+
+            if let rawLives = root["lives"] as? [Any] {
+                var livesChanged = false
+                let filteredLives = rawLives.filter { entry in
+                    guard let dict = entry as? [String: Any] else { return true }
+                    if isPrivateChildConfigItem(dict, defaultGroup: defaultGroup) {
+                        removedAny = true
+                        livesChanged = true
+                        return false
+                    }
+                    return true
+                }
+                if livesChanged {
+                    root["lives"] = filteredLives
+                }
+            } else if let singleLive = root["lives"] as? [String: Any],
+                      isPrivateChildConfigItem(singleLive, defaultGroup: defaultGroup)
+            {
+                removedAny = true
+                root["lives"] = []
+            }
+
+            for depotField in ["urls", "storeHouse", "depots"] {
+                if let rawDepots = root[depotField] as? [Any] {
+                    var depotsChanged = false
+                    let filteredDepots = rawDepots.filter { entry in
+                        guard let dict = entry as? [String: Any] else { return true }
+                        if isPrivateChildConfigItem(dict, defaultGroup: defaultGroup) {
+                            removedAny = true
+                            depotsChanged = true
+                            return false
+                        }
+                        return true
+                    }
+                    if depotsChanged {
+                        root[depotField] = filteredDepots
+                    }
+                }
+            }
+
+            guard removedAny else { return rawContent }
+            let remainingSites = (root["sites"] as? [Any])?.count ?? 0
+            let remainingLives: Int = {
+                if let arr = root["lives"] as? [Any] { return arr.count }
+                if let val = root["lives"], !(val is NSNull) { return 1 }
+                return 0
+            }()
+            let remainingDepots = ["urls", "storeHouse", "depots"].reduce(0) { acc, field in
+                acc + ((root[field] as? [Any])?.count ?? 0)
+            }
+            if remainingSites == 0 && remainingLives == 0 && remainingDepots == 0 {
+                return ""
+            }
+            guard let sanitizedData = try? JSONSerialization.data(
+                withJSONObject: root,
+                options: [.sortedKeys, .withoutEscapingSlashes]
+            ) else {
+                return ""
+            }
+            return String(decoding: sanitizedData, as: UTF8.self)
+        }
+    }
+
     public static func parseConfig(
         _ rawJson: String,
         origin: String = "",
@@ -264,6 +437,7 @@ public enum CmsParser {
         let groupLabel = defaultGroup.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "默认分组"
             : defaultGroup.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parentPrivate = isPrivate || groupLabel.contains("隐私") || groupLabel.contains("私密")
         let unpacked = ConfigDecoder.unpackConfigText(rawJson)
         let trimmedUnpacked = unpacked.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedUnpacked.isEmpty {
@@ -294,7 +468,7 @@ public enum CmsParser {
                     api: apiName,
                     ext: extStr,
                     group: groupLabel,
-                    isPrivate: isPrivate,
+                    isPrivate: parentPrivate,
                     subscriptionId: subscriptionId
                 ),
             ])
@@ -319,7 +493,7 @@ public enum CmsParser {
                         api: apiUrl.isEmpty ? "m3u_vod://xml_inline" : apiUrl,
                         ext: apiUrl.isEmpty ? trimmedUnpacked : "",
                         group: groupLabel,
-                        isPrivate: isPrivate,
+                        isPrivate: parentPrivate,
                         subscriptionId: subscriptionId
                     ),
                 ])
@@ -342,7 +516,7 @@ public enum CmsParser {
                 trimmedUnpacked,
                 origin: origin,
                 groupLabel: groupLabel,
-                isPrivate: isPrivate,
+                isPrivate: parentPrivate,
                 subscriptionId: subscriptionId,
                 defaultName: defaultName
             ) {
@@ -358,7 +532,7 @@ public enum CmsParser {
                 trimmedUnpacked,
                 origin: origin,
                 groupLabel: groupLabel,
-                isPrivate: isPrivate,
+                isPrivate: parentPrivate,
                 subscriptionId: subscriptionId,
                 defaultName: defaultName
             ) {
@@ -367,13 +541,22 @@ public enum CmsParser {
             throw MarcoError.invalidFormat("不是有效的 JSON / VOD / M3U 配置格式：\(error.localizedDescription)")
         }
 
-        var decoded: [String: Any]
-        if let arr = rawAny as? [Any] {
-            decoded = ["sites": arr]
-        } else if let obj = rawAny as? [String: Any] {
-            decoded = obj
-        } else {
+        guard let rootShape = classifyConfigJsonRoot(rawAny) else {
             throw MarcoError.invalidFormat("配置根节点必须是 JSON 对象")
+        }
+
+        var decoded: [String: Any]
+        switch rootShape {
+        case .topLevelSitesArray(let arr):
+            decoded = ["sites": arr]
+        case .singleSiteObject(let obj):
+            let sp = nonNullString(obj["spider"]).isEmpty ? nonNullString(obj["jar"]) : nonNullString(obj["spider"])
+            decoded = [
+                "spider": sp,
+                "sites": [obj],
+            ]
+        case .standardObject(let obj):
+            decoded = obj
         }
 
         // 3. Direct MacCMS v10 JSON response (`{"code":1,"class":[...],"list":[...]}`)
@@ -399,22 +582,10 @@ public enum CmsParser {
                     api: apiUrl.isEmpty ? "m3u_vod://json_inline" : apiUrl,
                     ext: apiUrl.isEmpty ? cleaned : "",
                     group: groupLabel,
-                    isPrivate: isPrivate,
+                    isPrivate: parentPrivate,
                     subscriptionId: subscriptionId
                 ),
             ])
-        }
-
-        // 4. Single site JSON object
-        if isMissing(decoded["sites"])
-            && !isMissing(decoded["api"])
-            && (!isMissing(decoded["name"]) || !isMissing(decoded["key"]))
-        {
-            let sp = nonNullString(decoded["spider"]).isEmpty ? nonNullString(decoded["jar"]) : nonNullString(decoded["spider"])
-            decoded = [
-                "spider": sp,
-                "sites": [decoded],
-            ]
         }
 
         // Depots (`urls`, `storeHouse`, `depots`)
@@ -433,7 +604,7 @@ public enum CmsParser {
                 guard seenDepotUrls.insert(resolved).inserted else { continue }
                 let rawName = firstNonEmpty(item["name"], item["sourceName"])
                 let depotName = rawName.isEmpty ? "仓库 \(depots.count + 1)" : rawName
-                depots.append(CmsDepot(name: depotName, url: resolved, subscriptionId: subscriptionId))
+                depots.append(CmsDepot(name: depotName, url: resolved, subscriptionId: subscriptionId, isPrivate: parentPrivate))
             }
         }
 
@@ -518,9 +689,8 @@ public enum CmsParser {
                 }
 
                 let itemGroup = nonNullString(item["group"]).trimmingCharacters(in: .whitespacesAndNewlines)
-                let privFlag = item["isPrivate"] ?? item["private"] ?? item["hidden"]
-                let itemPrivate = asBool(privFlag, fallback: isPrivate)
-                    || nonNullString(item["space"]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "private"
+                // Parent subscription privacy strictly overrides any child flag (`isPrivate: false` cannot escape).
+                let itemPrivate = parentPrivate || isPrivateChildConfigItem(item, defaultGroup: groupLabel)
                 let itemPlayUrl = nonNullString(item["playUrl"]).trimmingCharacters(in: .whitespacesAndNewlines)
                 let itemParse = asInt(item["parse"], fallback: 0)
                 let itemJx = asInt(item["jx"], fallback: 0)
@@ -570,9 +740,8 @@ public enum CmsParser {
             let name = rawLiveName.isEmpty ? "直播源 \(index + 1)" : rawLiveName
             let itemGroup = nonNullString(item["group"]).trimmingCharacters(in: .whitespacesAndNewlines)
             let group = itemGroup.isEmpty ? groupLabel : itemGroup
-            let privFlag = item["isPrivate"] ?? item["private"] ?? item["hidden"]
-            let hidden = asBool(privFlag, fallback: isPrivate)
-                || nonNullString(item["space"]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "private"
+            // Parent subscription privacy strictly overrides any child live flag.
+            let hidden = parentPrivate || isPrivateChildConfigItem(item, defaultGroup: groupLabel)
             let headers = LiveCatalogParser.headers(from: item)
             let rawUrl = nonNullString(item["url"]).trimmingCharacters(in: .whitespacesAndNewlines)
             let api = nonNullString(item["api"]).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -859,8 +1028,19 @@ public enum CmsParser {
         var videos: [CmsVideo] = []
         for g in groups {
             for ch in g.channels {
-                let eps = ch.urls.enumerated().map { idx, u in
-                    CmsEpisode(name: ch.urls.count == 1 ? "正片" : "线路 \(idx + 1)", url: u)
+                let eps: [CmsEpisode]
+                if !ch.streams.isEmpty {
+                    eps = ch.streams.enumerated().map { idx, stream in
+                        CmsEpisode(
+                            name: ch.streams.count == 1 ? "正片" : "线路 \(idx + 1)",
+                            url: stream.url,
+                            headers: stream.headers
+                        )
+                    }
+                } else {
+                    eps = ch.urls.enumerated().map { idx, u in
+                        CmsEpisode(name: ch.urls.count == 1 ? "正片" : "线路 \(idx + 1)", url: u)
+                    }
                 }
                 videos.append(
                     CmsVideo(

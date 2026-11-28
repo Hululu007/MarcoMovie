@@ -1300,6 +1300,66 @@ public final class Batch3MobileChecks {
         return sb.toString();
     }
 
+    private static void testP6JujuFourPanHistoryAndPlaceholderGuard(File srcRoot) throws Exception {
+        check(
+                Cms.Site.isGenericPlaceholderVodId("")
+                        && Cms.Site.isGenericPlaceholderVodId("0")
+                        && Cms.Site.isGenericPlaceholderVodId("1")
+                        && Cms.Site.isGenericPlaceholderVodId("  0 ")
+                        && !Cms.Site.isGenericPlaceholderVodId(
+                                "https://pan.quark.cn/s/abc123def456")
+                        && !Cms.Site.isGenericPlaceholderVodId("vod_real_42"),
+                "P6: Cms.Site.isGenericPlaceholderVodId distinguishes generic placeholders from real share IDs");
+
+        Cms.Site juju = new Cms.Site();
+        juju.key = "s_juju";
+        juju.name = "聚剧|四盘";
+        juju.api = "csp_S_zps";
+        check(
+                juju.isNetdiskSite(),
+                "P6: Cms.Site.isNetdiskSite identifies 聚剧|四盘 / csp_S_zps as netdisk-class site");
+
+        String cleaned = HistoryResumeMatcher.cleanSearchTitle("庆余年 第二季 [4K HDR]");
+        check(
+                "庆余年 第二季".equals(cleaned),
+                "P6: HistoryResumeMatcher.cleanSearchTitle strips quality brackets cleanly");
+
+        WatchHistory.Entry entry = new WatchHistory.Entry();
+        entry.site = "s_juju";
+        entry.id = "0";
+        entry.title = "庆余年 第二季";
+        entry.line = "夸克4K";
+        entry.episode = "第1集";
+        entry.shareUrl = "https://pan.quark.cn/s/abc123def456";
+        entry.updated = 123456L;
+        JSONObject safeJson = entry.json();
+        List<WatchHistory.Entry> decodedList = WatchHistory.read("[" + safeJson.toString() + "]");
+        WatchHistory.Entry decoded = decodedList.isEmpty() ? null : decodedList.get(0);
+        check(
+                decoded != null && "https://pan.quark.cn/s/abc123def456".equals(decoded.shareUrl),
+                "P6: WatchHistory.Entry preserves clean public netdisk shareUrl across JSON round-trip");
+
+        WatchHistory.Entry signed = new WatchHistory.Entry();
+        signed.site = "s_juju";
+        signed.id = "0";
+        signed.title = "测试";
+        signed.shareUrl = "http://127.0.0.1:8080/proxy?token=secret123";
+        JSONObject strippedJson = signed.json();
+        List<WatchHistory.Entry> strippedList =
+                WatchHistory.read("[" + strippedJson.toString() + "]");
+        WatchHistory.Entry decodedStripped = strippedList.isEmpty() ? null : strippedList.get(0);
+        check(
+                !strippedJson.has("shareUrl")
+                        && decodedStripped != null
+                        && decodedStripped.shareUrl.isEmpty(),
+                "P6: WatchHistory.Entry strips non-shareUrl / signed proxy URLs before persistence");
+
+        String detailSrc = readUtf8(new File(srcRoot, "MobileDetailScreen.java"));
+        check(
+                detailSrc.contains("trySameSiteRecoverRef") && detailSrc.contains("enqueueUpsert"),
+                "P6: MobileDetailScreen implements silent same-site WatchHistory recovery and rebinding");
+    }
+
     public static void main(String[] args) throws Exception {
         File mediaDir = new File(args[0]);
         File workDir = new File(args[1]);
@@ -1309,6 +1369,7 @@ public final class Batch3MobileChecks {
         testP3IntroDbV4Semantics(srcRoot);
         testP4MdblistWordingAndSecrets(srcRoot);
         testP5LowSpaceUpdateResume(workDir);
+        testP6JujuFourPanHistoryAndPlaceholderGuard(srcRoot);
         System.out.println(checks + " Batch 3 mobile checks passed");
         System.exit(0);
     }

@@ -761,7 +761,7 @@ void main() {
         final models = await ai.fetchAvailableModelOptions();
         expect(
           models.map((m) => m.id),
-          containsAll(['gpt-5.4', 'o3-pro', 'gpt-5.3-codex', 'o3', 'gpt-4.1', 'gpt-4o']),
+          equals(['gpt-5.4', 'o3-pro']),
         );
 
         final lab = AiLabService(ai);

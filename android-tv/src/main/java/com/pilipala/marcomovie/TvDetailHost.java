@@ -166,9 +166,35 @@ final class TvDetailHost {
         return aliasMatch;
     }
 
+    private static boolean isGenericPlaceholderVodId(String id) {
+        if (id == null) return true;
+        String trimmed = id.trim();
+        return trimmed.isEmpty() || "0".equals(trimmed) || "1".equals(trimmed);
+    }
+
+    private static boolean looksLikeNetdiskShareId(String id) {
+        if (id == null) return false;
+        String lower = id.trim().toLowerCase(java.util.Locale.ROOT);
+        return lower.startsWith("push://")
+                || lower.contains("pan.quark.cn")
+                || lower.contains("aliyundrive.com")
+                || lower.contains("alipan.com")
+                || lower.contains("pan.baidu.com")
+                || lower.contains("uc.cn")
+                || lower.contains("cloud.189.cn")
+                || lower.contains("123pan.com")
+                || lower.contains("pan.xunlei.com");
+    }
+
     private static void mergeListingFallback(Cms.Video target, Cms.Video fallback) {
         if (target == null || fallback == null) return;
-        if (target.id == null || target.id.trim().isEmpty()) target.id = fallback.id;
+        String fallbackId = fallback.id == null ? "" : fallback.id.trim();
+        if (!fallbackId.isEmpty()
+                && (isGenericPlaceholderVodId(target.id)
+                        || (looksLikeNetdiskShareId(fallbackId)
+                                && !looksLikeNetdiskShareId(target.id)))) {
+            target.id = fallbackId;
+        }
         if (target.title == null || target.title.isEmpty()) target.title = fallback.title;
         if (target.poster == null || target.poster.isEmpty()) target.poster = fallback.poster;
         if (target.year == null || target.year.isEmpty()) target.year = fallback.year;
@@ -233,7 +259,7 @@ final class TvDetailHost {
         host.setTag("detail-episodes");
         host.setClipChildren(false);
         host.setClipToPadding(false);
-        host.setPadding(a.dp(6), a.dp(6), a.dp(6), a.dp(10));
+        host.setPadding(0, a.dp(2), 0, a.dp(6));
         if (epCount > 16) {
             host.setMinimumHeight(Math.max(a.dp(280), a.windowHeight() - a.dp(220)));
         }
@@ -335,6 +361,7 @@ final class TvDetailHost {
             TvSeriesScrapeDialog.applyOverrideToVideo(initialVideo, savedOv);
         }
         final Cms.Video[] activeVideo = {initialVideo};
+        final boolean[] sameSiteHistoryRetried = {false};
         WatchHistory.Entry initBm =
                 resolveHistoryFallbackBookmark(
                         findBookmark(a, site, initialVideo),
@@ -507,6 +534,7 @@ final class TvDetailHost {
         }
         a.restore(screen);
 
+        final MainActivity.Done<Cms.Video>[] bindInPlaceRef = new MainActivity.Done[1];
         MainActivity.Done<Cms.Video> bindInPlace =
                 resolved -> {
                     if (!valid.get() || resolved == null) return;
@@ -522,6 +550,12 @@ final class TvDetailHost {
                                     a.historyFallbackBookmark,
                                     site,
                                     resolved);
+                    if (bm == null
+                            && sameSiteHistoryRetried[0]
+                            && activeBookmark[0] != null
+                            && Objects.equals(activeBookmark[0].site, site.key)) {
+                        bm = activeBookmark[0];
+                    }
                     activeBookmark[0] = bm;
                     boolean playable = hasPlayableLines(resolved);
                     int[] sel =
@@ -560,6 +594,37 @@ final class TvDetailHost {
                         }
                         WatchHistory.Entry fallbackBm =
                                 resolveHistoryFallbackBookmark(bm, pendingFallback, site, resolved);
+                        if (fallbackBm != null && site.searchable && !sameSiteHistoryRetried[0]) {
+                            sameSiteHistoryRetried[0] = true;
+                            tryRecoverSameSiteHistoryDetail(
+                                    a,
+                                    site,
+                                    fallbackBm,
+                                    context,
+                                    valid,
+                                    listing,
+                                    ui,
+                                    activeBookmark,
+                                    bindInPlaceRef[0],
+                                    () -> {
+                                        if (!a.historyFallbackInFlight
+                                                && CatalogScreen.hasAlternativeHistorySources(
+                                                        a, site.key)) {
+                                            a.historyFallbackBookmark = null;
+                                            CatalogScreen.resumeHistoryFromAlternativeSources(
+                                                    a, fallbackBm, site.key, "原片源暂无可播放线路", true);
+                                            return;
+                                        }
+                                        ui.setLoadingStatus("该来源没有返回可播放线路");
+                                        if (resolved.title != null
+                                                && !resolved.title.trim().isEmpty()) {
+                                            ui.setSourceSwitchAction(
+                                                    "🔍 换其他源",
+                                                    () -> a.openSearch(resolved.title.trim()));
+                                        }
+                                    });
+                            return;
+                        }
                         if (fallbackBm != null
                                 && !a.historyFallbackInFlight
                                 && CatalogScreen.hasAlternativeHistorySources(a, site.key)) {
@@ -587,6 +652,7 @@ final class TvDetailHost {
                         }
                     }
                 };
+        bindInPlaceRef[0] = bindInPlace;
 
         MainActivity.Done<Throwable> onDetailError =
                 error -> {
@@ -601,6 +667,40 @@ final class TvDetailHost {
                     WatchHistory.Entry fallbackBm =
                             resolveHistoryFallbackBookmark(
                                     activeBookmark[0], pendingFallback, site, initialVideo);
+                    if (fallbackBm != null && site.searchable && !sameSiteHistoryRetried[0]) {
+                        sameSiteHistoryRetried[0] = true;
+                        tryRecoverSameSiteHistoryDetail(
+                                a,
+                                site,
+                                fallbackBm,
+                                context,
+                                valid,
+                                listing,
+                                ui,
+                                activeBookmark,
+                                bindInPlace,
+                                () -> {
+                                    if (!a.historyFallbackInFlight
+                                            && CatalogScreen.hasAlternativeHistorySources(
+                                                    a, site.key)) {
+                                        a.historyFallbackBookmark = null;
+                                        CatalogScreen.resumeHistoryFromAlternativeSources(
+                                                a, fallbackBm, site.key, "原片源加载失败", true);
+                                        return;
+                                    }
+                                    ui.setLoadingStatus(a.message(error));
+                                    String fallbackTitle =
+                                            initialVideo.title != null
+                                                    ? initialVideo.title.trim()
+                                                    : "";
+                                    if (!fallbackTitle.isEmpty()) {
+                                        ui.setSourceSwitchAction(
+                                                "🔍 全站搜其他源", () -> a.openSearch(fallbackTitle));
+                                        ui.switchSourceBtn.requestFocus();
+                                    }
+                                });
+                        return;
+                    }
                     if (fallbackBm != null
                             && !a.historyFallbackInFlight
                             && CatalogScreen.hasAlternativeHistorySources(a, site.key)) {
@@ -630,9 +730,132 @@ final class TvDetailHost {
                 ui.setLoadingStatus("正在补全详情…");
                 a.loadDetail(site, listing.id, bindInPlace, onDetailError);
             }
+        } else if (activeBookmark[0] != null
+                && site.searchable
+                && isGenericPlaceholderVodId(listing.id)) {
+            sameSiteHistoryRetried[0] = true;
+            WatchHistory.Entry placeholderBm = activeBookmark[0];
+            tryRecoverSameSiteHistoryDetail(
+                    a,
+                    site,
+                    placeholderBm,
+                    context,
+                    valid,
+                    listing,
+                    ui,
+                    activeBookmark,
+                    bindInPlace,
+                    () -> {
+                        if (!a.historyFallbackInFlight
+                                && CatalogScreen.hasAlternativeHistorySources(a, site.key)) {
+                            a.historyFallbackBookmark = null;
+                            CatalogScreen.resumeHistoryFromAlternativeSources(
+                                    a, placeholderBm, site.key, "原片源暂无可播放线路", true);
+                            return;
+                        }
+                        ui.setLoadingStatus("该来源没有返回可播放线路");
+                    });
         } else {
             a.loadDetail(site, listing.id, bindInPlace, onDetailError);
         }
+    }
+
+    private static void tryRecoverSameSiteHistoryDetail(
+            final MainActivity a,
+            final Cms.Site site,
+            final WatchHistory.Entry fallbackBm,
+            final TvSearchContext context,
+            final Valid valid,
+            final Cms.Video listingFallback,
+            final TvV17DetailScreen ui,
+            final WatchHistory.Entry[] activeBookmark,
+            final MainActivity.Done<Cms.Video> bindInPlace,
+            final Runnable onRecoverFailed) {
+        if (a == null
+                || site == null
+                || fallbackBm == null
+                || fallbackBm.title == null
+                || fallbackBm.title.trim().isEmpty()) {
+            if (onRecoverFailed != null) onRecoverFailed.run();
+            return;
+        }
+        ui.setLoadingStatus("正在从「" + site.name + "」恢复剧集与上次进度…");
+        a.details.execute(
+                () -> {
+                    Cms.Video recovered = null;
+                    try {
+                        String cleanKw = HistoryResumeMatcher.cleanSearchTitle(fallbackBm.title);
+                        SourceEngine eng = SourceController.engine(a, site, context);
+                        List<Cms.Video> cands = Cms.listing(eng.search(cleanKw, 1)).videos;
+                        Cms.Video bestCand = null;
+                        int bestScore = 54;
+                        if (cands != null) {
+                            for (Cms.Video cand : cands) {
+                                if (cand == null) continue;
+                                int sc = HistoryResumeMatcher.scoreTitleMatch(fallbackBm, cand);
+                                if (fallbackBm.id != null && fallbackBm.id.equals(cand.id)) {
+                                    sc += 20;
+                                }
+                                if (sc > bestScore) {
+                                    bestScore = sc;
+                                    bestCand = cand;
+                                }
+                            }
+                        }
+                        if (bestCand != null) {
+                            if (hasPlayableLines(bestCand)) {
+                                recovered = bestCand;
+                            } else {
+                                Cms.Listing det = Cms.listing(eng.detail(bestCand.id));
+                                if (det != null && !det.videos.isEmpty()) {
+                                    recovered = det.videos.get(0);
+                                }
+                            }
+                            if (recovered != null) {
+                                mergeListingFallback(recovered, bestCand);
+                                mergeListingFallback(recovered, listingFallback);
+                                if (isGenericPlaceholderVodId(recovered.id)
+                                        && !isGenericPlaceholderVodId(bestCand.id)) {
+                                    recovered.id = bestCand.id;
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                        recovered = null;
+                    }
+                    final Cms.Video finalVideo = recovered;
+                    final boolean playable = hasPlayableLines(finalVideo);
+                    a.ui.post(
+                            () -> {
+                                if (!valid.get()) return;
+                                if (playable) {
+                                    WatchHistory.Entry rebound =
+                                            WatchHistory.cloneEntry(fallbackBm);
+                                    if (rebound != null) {
+                                        if (!isGenericPlaceholderVodId(finalVideo.id)) {
+                                            rebound.id = finalVideo.id;
+                                        }
+                                        if (!a.privateMode
+                                                && !isGenericPlaceholderVodId(rebound.id)
+                                                && !Objects.equals(
+                                                        fallbackBm.key(), rebound.key())) {
+                                            a.pendingHistoryMigration =
+                                                    new WatchHistory.PendingMigration(
+                                                            fallbackBm.key(), site.key, rebound.id);
+                                        }
+                                        a.historyFallbackBookmark = rebound;
+                                        activeBookmark[0] = rebound;
+                                    }
+                                    try {
+                                        bindInPlace.accept(finalVideo);
+                                    } catch (Exception e) {
+                                        if (onRecoverFailed != null) onRecoverFailed.run();
+                                    }
+                                } else if (onRecoverFailed != null) {
+                                    onRecoverFailed.run();
+                                }
+                            });
+                });
     }
 
     /**

@@ -246,6 +246,12 @@ class OhosSystemBridge {
     );
     return ok ?? false;
   }
+
+  Future<String?> scanQrCode() async {
+    final value = await _channel.invokeMethod<String>('scanQrCode');
+    final trimmed = (value ?? '').trim();
+    return trimmed.isEmpty ? null : trimmed;
+  }
 }
 
 class OhosCreatedPlayer {

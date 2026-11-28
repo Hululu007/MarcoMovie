@@ -1575,13 +1575,41 @@ final class MobileDetailScreen {
                             });
                 });
 
+        final MainActivity.Screen screen = a.current;
+        final int ticket = a.generation;
+        final TvSearchContext recoverCtx =
+                new TvSearchContext(a.config, a.privateMode, a.engineEpoch);
+        final boolean[] sameSiteHistoryRetried = {false};
+        WatchHistory.Entry initBm = null;
+        for (WatchHistory.Entry entry : a.watchHistory()) {
+            if (entry != null
+                    && Objects.equals(entry.site, s.key)
+                    && Objects.equals(entry.id, listing.id)) {
+                initBm = entry;
+                break;
+            }
+        }
+        if (initBm == null
+                && a.historyFallbackBookmark != null
+                && Objects.equals(a.historyFallbackBookmark.site, s.key)) {
+            initBm = a.historyFallbackBookmark;
+        }
+        final WatchHistory.Entry openingBookmark = WatchHistory.cloneEntry(initBm);
+        final Runnable[] trySameSiteRecoverRef = new Runnable[1];
+
         // Populate initial metadata pills from listing
         populateHeroPills(a, pillsRow, listing, 0);
 
         MainActivity.Done<Cms.Video> present =
                 v -> {
                     final Cms.Site curSite = activeSiteRef[0];
-                    if (v.id == null || v.id.isEmpty()) v.id = listing.id;
+                    String listId = listing.id == null ? "" : listing.id.trim();
+                    if (!Cms.Site.isGenericPlaceholderVodId(listId)
+                            && (Cms.Site.isGenericPlaceholderVodId(v.id)
+                                    || (Cms.Site.looksLikeNetdiskShareId(listId)
+                                            && !Cms.Site.looksLikeNetdiskShareId(v.id)))) {
+                        v.id = listId;
+                    }
                     if (v.poster == null || v.poster.isEmpty()) v.poster = listing.poster;
                     if (v.title == null || v.title.isEmpty()) v.title = listing.title;
                     activeVideoRef[0] = v;
@@ -1603,14 +1631,21 @@ final class MobileDetailScreen {
                                 posterHook.setImageBitmap(hdBmp);
                                 refreshEpisodeStillBitmaps(a.root, hdBmp);
                             });
+                    for (java.util.Iterator<Cms.Line> it = v.lines.iterator(); it.hasNext(); ) {
+                        if (it.next().episodes.isEmpty()) it.remove();
+                    }
+                    if (v.lines.isEmpty()
+                            && openingBookmark != null
+                            && curSite.searchable
+                            && !sameSiteHistoryRetried[0]
+                            && trySameSiteRecoverRef[0] != null) {
+                        trySameSiteRecoverRef[0].run();
+                        return;
+                    }
                     lowerBody.removeView(loadingState);
                     synopsisWrap.removeAllViews();
                     playBtnWrap.removeAllViews();
                     detailsBody.removeAllViews();
-
-                    for (java.util.Iterator<Cms.Line> it = v.lines.iterator(); it.hasNext(); ) {
-                        if (it.next().episodes.isEmpty()) it.remove();
-                    }
                     PlaybackLineRules.applyToVideo(a, curSite, v);
                     int defaultLineIdx = SourcePreferences.lineIndex(a, curSite, v);
                     int firstLineCount =
@@ -1719,7 +1754,8 @@ final class MobileDetailScreen {
                     if (bookmark == null
                             && a.historyFallbackBookmark != null
                             && Objects.equals(a.historyFallbackBookmark.site, curSite.key)
-                            && Objects.equals(a.historyFallbackBookmark.id, v.id)) {
+                            && (Objects.equals(a.historyFallbackBookmark.id, v.id)
+                                    || sameSiteHistoryRetried[0])) {
                         bookmark = a.historyFallbackBookmark;
                     }
                     final WatchHistory.Entry remembered = bookmark;
@@ -1853,6 +1889,182 @@ final class MobileDetailScreen {
                             discoveredLabels);
                 };
 
+        final Runnable showUnavailableFallback =
+                () -> {
+                    if (openingBookmark != null
+                            && !a.historyFallbackInFlight
+                            && CatalogScreen.hasAlternativeHistorySources(a, s.key)) {
+                        a.historyFallbackBookmark = null;
+                        CatalogScreen.resumeHistoryFromAlternativeSources(
+                                a, openingBookmark, s.key, "原片源链接已失效", true);
+                        return;
+                    }
+                    loadingState.setVisibility(View.VISIBLE);
+                    loadingState.setText("暂未获取到可播放的剧集资源");
+                    sourceTopBtn.setText(s.name);
+                    srcDownIcon.setVisibility(View.GONE);
+                };
+
+        trySameSiteRecoverRef[0] =
+                () -> {
+                    if (sameSiteHistoryRetried[0]
+                            || openingBookmark == null
+                            || !s.searchable
+                            || openingBookmark.title == null
+                            || openingBookmark.title.trim().isEmpty()) {
+                        showUnavailableFallback.run();
+                        return;
+                    }
+                    sameSiteHistoryRetried[0] = true;
+                    if (loadingState.getParent() == null) {
+                        detailsBody.removeAllViews();
+                        detailsBody.addView(loadingState, new LinearLayout.LayoutParams(-1, -2));
+                    }
+                    loadingState.setVisibility(View.VISIBLE);
+                    loadingState.setText("正在从「" + s.name + "」重新匹配剧集与上次进度…");
+                    a.details.execute(
+                            () -> {
+                                Cms.Video recovered = null;
+                                try {
+                                    String cleanKw =
+                                            HistoryResumeMatcher.cleanSearchTitle(
+                                                    openingBookmark.title);
+                                    SourceEngine eng = SourceController.engine(a, s, recoverCtx);
+                                    List<Cms.Video> cands =
+                                            Cms.listing(eng.search(cleanKw, 1)).videos;
+                                    Cms.Video bestCand = null;
+                                    int bestScore = 54;
+                                    if (cands != null) {
+                                        for (Cms.Video cand : cands) {
+                                            if (cand == null) continue;
+                                            int sc =
+                                                    HistoryResumeMatcher.scoreTitleMatch(
+                                                            openingBookmark, cand);
+                                            if (openingBookmark.id != null
+                                                    && openingBookmark.id.equals(cand.id)) {
+                                                sc += 20;
+                                            }
+                                            if (sc > bestScore) {
+                                                bestScore = sc;
+                                                bestCand = cand;
+                                            }
+                                        }
+                                    }
+                                    if (bestCand != null) {
+                                        boolean hasInline = false;
+                                        if (bestCand.lines != null) {
+                                            for (Cms.Line line : bestCand.lines) {
+                                                if (line != null
+                                                        && line.episodes != null
+                                                        && !line.episodes.isEmpty()) {
+                                                    hasInline = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if (hasInline) {
+                                            recovered = bestCand;
+                                        } else {
+                                            Cms.Listing det = Cms.listing(eng.detail(bestCand.id));
+                                            if (det != null && !det.videos.isEmpty()) {
+                                                recovered = det.videos.get(0);
+                                            }
+                                        }
+                                        if (recovered != null) {
+                                            if (Cms.Site.isGenericPlaceholderVodId(recovered.id)
+                                                    && !Cms.Site.isGenericPlaceholderVodId(
+                                                            bestCand.id)) {
+                                                recovered.id = bestCand.id;
+                                            }
+                                            if (recovered.title == null
+                                                    || recovered.title.trim().isEmpty()) {
+                                                recovered.title =
+                                                        bestCand.title != null
+                                                                        && !bestCand.title
+                                                                                .trim()
+                                                                                .isEmpty()
+                                                                ? bestCand.title
+                                                                : openingBookmark.title;
+                                            }
+                                            if (recovered.poster == null
+                                                    || recovered.poster.trim().isEmpty()) {
+                                                recovered.poster =
+                                                        bestCand.poster != null
+                                                                        && !bestCand.poster
+                                                                                .trim()
+                                                                                .isEmpty()
+                                                                ? bestCand.poster
+                                                                : openingBookmark.poster;
+                                            }
+                                        }
+                                    }
+                                } catch (Throwable ignored) {
+                                    recovered = null;
+                                }
+                                final Cms.Video finalVideo = recovered;
+                                boolean hasLines = false;
+                                if (finalVideo != null && finalVideo.lines != null) {
+                                    for (Cms.Line l : finalVideo.lines) {
+                                        if (l != null
+                                                && l.episodes != null
+                                                && !l.episodes.isEmpty()) {
+                                            hasLines = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                final boolean readyPlayable = hasLines;
+                                a.ui.post(
+                                        () -> {
+                                            if (a.isFinishing()
+                                                    || a.current != screen
+                                                    || ticket != a.generation
+                                                    || !recoverCtx.matches(
+                                                            a.config,
+                                                            a.privateMode,
+                                                            a.engineEpoch)) {
+                                                return;
+                                            }
+                                            if (readyPlayable) {
+                                                WatchHistory.Entry rebound =
+                                                        WatchHistory.cloneEntry(openingBookmark);
+                                                if (rebound != null) {
+                                                    if (!Cms.Site.isGenericPlaceholderVodId(
+                                                            finalVideo.id)) {
+                                                        rebound.id = finalVideo.id;
+                                                    }
+                                                    if (Cms.Site.looksLikeNetdiskShareId(
+                                                            finalVideo.id)) {
+                                                        rebound.shareUrl = finalVideo.id.trim();
+                                                    }
+                                                    if (!a.privateMode
+                                                            && !Cms.Site.isGenericPlaceholderVodId(
+                                                                    rebound.id)
+                                                            && !Objects.equals(
+                                                                    openingBookmark.key(),
+                                                                    rebound.key())) {
+                                                        WatchHistory.enqueueUpsert(
+                                                                a.historyPersistence(), rebound);
+                                                        CloudSyncDialog.removeHistoryWithTombstone(
+                                                                a, openingBookmark.key(), null);
+                                                    }
+                                                    a.historyFallbackBookmark = rebound;
+                                                }
+                                                try {
+                                                    present.accept(finalVideo);
+                                                } catch (Exception e) {
+                                                    AppLog.w(
+                                                            "MobileDetailScreen",
+                                                            "present recovered detail failed",
+                                                            e);
+                                                }
+                                            } else {
+                                                showUnavailableFallback.run();
+                                            }
+                                        });
+                            });
+                };
+
         if (ready == null && MobileCuratedDiscovery.isCuratedSite(s)) {
             resolveCuratedFromUserSources(
                     a,
@@ -1866,7 +2078,33 @@ final class MobileDetailScreen {
                     detailsBody,
                     present);
         } else if (ready == null) {
-            a.loadDetail(s, listing.id, present);
+            if (openingBookmark != null
+                    && s.searchable
+                    && Cms.Site.isGenericPlaceholderVodId(listing.id)) {
+                trySameSiteRecoverRef[0].run();
+            } else {
+                a.loadDetail(
+                        s,
+                        listing.id,
+                        present,
+                        err -> {
+                            if (a.isFinishing()
+                                    || a.current != screen
+                                    || ticket != a.generation
+                                    || !recoverCtx.matches(
+                                            a.config, a.privateMode, a.engineEpoch)) {
+                                return;
+                            }
+                            if (openingBookmark != null
+                                    && s.searchable
+                                    && !sameSiteHistoryRetried[0]) {
+                                trySameSiteRecoverRef[0].run();
+                                return;
+                            }
+                            loadingState.setVisibility(View.VISIBLE);
+                            loadingState.setText(a.message(err));
+                        });
+            }
         } else {
             try {
                 present.accept(ready);

@@ -1033,6 +1033,21 @@ final class HistoryResumeMatcher {
         return TITLE_CLEAN_PATTERN.matcher(raw.trim().toLowerCase(Locale.ROOT)).replaceAll("");
     }
 
+    static String cleanSearchTitle(String raw) {
+        if (raw == null) return "";
+        String cleaned =
+                raw.trim()
+                        .replaceAll(
+                                "[【\\[（(][^】\\]）)]*(?:4[kK]|2160[pP]|1080[pP]|720[pP]|HDR|DV|杜比|臻彩|高码|国粤|双语|全集|合集|更新|完结|夸克|阿里|百度|迅雷|115|UC)[^】\\]）)]*[】\\]）)]",
+                                " ")
+                        .replaceAll(
+                                "(?i)(?:\\b(?:2160|1080|720|480)p\\b|\\b(?:4k|8k|hdr10?|dv|h265|hevc)\\b|杜比视界|臻彩)",
+                                " ")
+                        .replaceAll("\\s+", " ")
+                        .trim();
+        return cleaned.isEmpty() ? raw.trim() : cleaned;
+    }
+
     static List<Cms.Site> rankAlternativeSites(
             List<Cms.Site> availableSearchableSites,
             String failedSiteKey,

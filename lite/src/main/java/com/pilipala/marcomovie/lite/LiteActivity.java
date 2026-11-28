@@ -3691,7 +3691,8 @@ public final class LiteActivity extends Activity {
                                             });
                                 }
                             },
-                            createLanSyncHandler());
+                            createLanSyncHandler())
+                            .withBindHandler(createLanBindHandler());
             String host = null;
             Enumeration<NetworkInterface> nets = NetworkInterface.getNetworkInterfaces();
             while (nets.hasMoreElements()) {
@@ -3705,8 +3706,9 @@ public final class LiteActivity extends Activity {
             }
             if (host == null) throw new java.io.IOException();
             String url = "http://" + host + ":" + pairing.port() + "/" + pairing.token;
+            String qrPayload = pairing.bindQrUrl(host);
             BitMatrix matrix =
-                    new MultiFormatWriter().encode(url, BarcodeFormat.QR_CODE, 320, 320);
+                    new MultiFormatWriter().encode(qrPayload, BarcodeFormat.QR_CODE, 320, 320);
             Bitmap bitmap = Bitmap.createBitmap(320, 320, Bitmap.Config.RGB_565);
             for (int y = 0; y < 320; y++)
                 for (int x = 0; x < 320; x++)
@@ -4370,6 +4372,145 @@ public final class LiteActivity extends Activity {
         };
     }
 
+    private static boolean isValidLiteHttpUrl(String rawUrl) {
+        if (rawUrl == null) return false;
+        String trimmed = rawUrl.trim();
+        if (trimmed.length() == 0) return false;
+        try {
+            java.net.URI uri = java.net.URI.create(trimmed);
+            String scheme = uri.getScheme();
+            return ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))
+                    && uri.getHost() != null
+                    && uri.getHost().trim().length() > 0;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    ConfigServer.BindHandler createLanBindHandler() {
+        return new ConfigServer.BindHandler() {
+            public String handleBind(String method, byte[] bindKey, String requestBody)
+                    throws Exception {
+                if ("GET".equalsIgnoreCase(method)) {
+                    String url = getPreferences(0).getString("webdav_url", "").trim();
+                    org.json.JSONObject out = new org.json.JSONObject();
+                    out.put("v", 1);
+                    out.put("type", "webdav_bind");
+                    if (isValidLiteHttpUrl(url)) {
+                        String user = getPreferences(0).getString("webdav_user", "").trim();
+                        String pass = SecureStorage.getWebdavPass(LiteActivity.this);
+                        if (pass == null) pass = "";
+                        out.put("mode", "config");
+                        out.put("url", url);
+                        out.put("username", user);
+                        out.put("password", pass);
+                        out.put("auto", getPreferences(0).getBoolean("webdav_auto", true));
+                        out.put(
+                                "syncSubs",
+                                getPreferences(0).getBoolean("webdav_sync_subs", true));
+                        out.put("syncHistory", true);
+                    } else {
+                        out.put("mode", "unconfigured");
+                    }
+                    return com.pilipala.source.WebdavBindCrypto.sealJson(bindKey, out);
+                }
+                if ("POST".equalsIgnoreCase(method)) {
+                    org.json.JSONObject req =
+                            com.pilipala.source.WebdavBindCrypto.openJson(bindKey, requestBody);
+                    if (!"webdav_bind".equals(req.optString("type", ""))) {
+                        throw new java.io.IOException("Unsupported bind payload");
+                    }
+                    final String url = req.optString("url", "").trim();
+                    if (!isValidLiteHttpUrl(url)) {
+                        throw new java.io.IOException("Invalid WebDAV URL");
+                    }
+                    final String user = req.optString("username", "").trim();
+                    final String pass = req.optString("password", "");
+                    final boolean auto = req.optBoolean("auto", true);
+                    final boolean syncSubs = req.optBoolean("syncSubs", true);
+                    getPreferences(0)
+                            .edit()
+                            .putString("webdav_url", url)
+                            .putString("webdav_user", user)
+                            .putBoolean("webdav_auto", auto)
+                            .putBoolean("webdav_sync_subs", syncSubs)
+                            .commit();
+                    SecureStorage.setWebdavPass(LiteActivity.this, pass == null ? "" : pass);
+                    ui.post(
+                            new Runnable() {
+                                public void run() {
+                                    if (dead) return;
+                                    if (status != null) {
+                                        status.setText("已通过局域网扫码自动绑定 WebDAV：" + url);
+                                    }
+                                    if (auto) {
+                                        runBackgroundWebdavSync(true);
+                                    }
+                                }
+                            });
+                    org.json.JSONObject ack = new org.json.JSONObject();
+                    ack.put("v", 1);
+                    ack.put("type", "webdav_bind_ack");
+                    ack.put("ok", true);
+                    ack.put("url", url);
+                    return com.pilipala.source.WebdavBindCrypto.sealJson(bindKey, ack);
+                }
+                throw new java.io.IOException("Unsupported bind method");
+            }
+        };
+    }
+
+    private static String exchangeLiteLanBindHttp(String url, String method, String jsonBody)
+            throws Exception {
+        java.net.HttpURLConnection conn =
+                (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+        conn.setInstanceFollowRedirects(false);
+        conn.setConnectTimeout(8000);
+        conn.setReadTimeout(8000);
+        conn.setUseCaches(false);
+        conn.setRequestMethod(method);
+        conn.setRequestProperty("User-Agent", "MarcoMovie-Sync/2.0");
+        conn.setRequestProperty("Accept", "application/json");
+        try {
+            if ("POST".equals(method)) {
+                byte[] bytes = (jsonBody == null ? "" : jsonBody).getBytes("UTF-8");
+                conn.setDoOutput(true);
+                conn.setFixedLengthStreamingMode(bytes.length);
+                conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                java.io.OutputStream os = conn.getOutputStream();
+                try {
+                    os.write(bytes);
+                } finally {
+                    os.close();
+                }
+            }
+            int code = conn.getResponseCode();
+            if (code == 410) {
+                throw new java.io.IOException("对方设备二维码已过期，请刷新后再试");
+            }
+            if (code < 200 || code >= 300) {
+                throw new java.io.IOException("绑定请求失败 (HTTP " + code + ")");
+            }
+            java.io.InputStream is = conn.getInputStream();
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            try {
+                byte[] buf = new byte[4096];
+                int n;
+                while ((n = is.read(buf)) != -1) {
+                    if (bos.size() + n > 65536) {
+                        throw new java.io.IOException("绑定响应超出大小限制");
+                    }
+                    bos.write(buf, 0, n);
+                }
+                return new String(bos.toByteArray(), "UTF-8");
+            } finally {
+                is.close();
+            }
+        } finally {
+            conn.disconnect();
+        }
+    }
+
     void scheduleAutoPush(boolean immediate) {
         if (dead || !isWebdavConfigured() || !getPreferences(0).getBoolean("webdav_auto", true)) {
             return;
@@ -4672,9 +4813,106 @@ public final class LiteActivity extends Activity {
                                 new Runnable() {
                                     public void run() {
                                         try {
+                                            com.pilipala.source.WebdavBindCrypto.ParsedBindTarget
+                                                    bindTarget =
+                                                            com.pilipala.source.WebdavBindCrypto
+                                                                    .parseBindQrInput(peer);
+                                            String syncEndpoint = peer;
+                                            String bindPrefix = "局域网同步完成";
+                                            if (bindTarget != null) {
+                                                syncEndpoint = bindTarget.syncUrl;
+                                                String localUrl =
+                                                        getPreferences(0)
+                                                                .getString("webdav_url", "")
+                                                                .trim();
+                                                if (isValidLiteHttpUrl(localUrl)) {
+                                                    String localUser =
+                                                            getPreferences(0)
+                                                                    .getString("webdav_user", "")
+                                                                    .trim();
+                                                    String localPass =
+                                                            SecureStorage.getWebdavPass(
+                                                                    LiteActivity.this);
+                                                    if (localPass == null) localPass = "";
+                                                    org.json.JSONObject push =
+                                                            new org.json.JSONObject();
+                                                    push.put("v", 1);
+                                                    push.put("type", "webdav_bind");
+                                                    push.put("mode", "push");
+                                                    push.put("url", localUrl);
+                                                    push.put("username", localUser);
+                                                    push.put("password", localPass);
+                                                    push.put(
+                                                            "auto",
+                                                            getPreferences(0)
+                                                                    .getBoolean(
+                                                                            "webdav_auto", true));
+                                                    push.put(
+                                                            "syncSubs",
+                                                            getPreferences(0)
+                                                                    .getBoolean(
+                                                                            "webdav_sync_subs",
+                                                                            true));
+                                                    push.put("syncHistory", true);
+                                                    String reqEnv =
+                                                            com.pilipala.source.WebdavBindCrypto
+                                                                    .sealJson(bindTarget.key, push);
+                                                    String ackEnv =
+                                                            exchangeLiteLanBindHttp(
+                                                                    bindTarget.bindUrl,
+                                                                    "POST",
+                                                                    reqEnv);
+                                                    org.json.JSONObject ack =
+                                                            com.pilipala.source.WebdavBindCrypto
+                                                                    .openJson(
+                                                                            bindTarget.key, ackEnv);
+                                                    if (!ack.optBoolean("ok", false)) {
+                                                        throw new java.io.IOException(
+                                                                "对方拒绝了 WebDAV 绑定");
+                                                    }
+                                                    bindPrefix = "已推送 WebDAV 至对方设备并同步";
+                                                } else {
+                                                    String getEnv =
+                                                            exchangeLiteLanBindHttp(
+                                                                    bindTarget.bindUrl,
+                                                                    "GET",
+                                                                    null);
+                                                    org.json.JSONObject remote =
+                                                            com.pilipala.source.WebdavBindCrypto
+                                                                    .openJson(
+                                                                            bindTarget.key, getEnv);
+                                                    String rUrl =
+                                                            remote.optString("url", "").trim();
+                                                    if ("config".equals(remote.optString("mode", ""))
+                                                            && isValidLiteHttpUrl(rUrl)) {
+                                                        getPreferences(0)
+                                                                .edit()
+                                                                .putString("webdav_url", rUrl)
+                                                                .putString(
+                                                                        "webdav_user",
+                                                                        remote.optString(
+                                                                                        "username",
+                                                                                        "")
+                                                                                .trim())
+                                                                .putBoolean(
+                                                                        "webdav_auto",
+                                                                        remote.optBoolean(
+                                                                                "auto", true))
+                                                                .putBoolean(
+                                                                        "webdav_sync_subs",
+                                                                        remote.optBoolean(
+                                                                                "syncSubs", true))
+                                                                .commit();
+                                                        SecureStorage.setWebdavPass(
+                                                                LiteActivity.this,
+                                                                remote.optString("password", ""));
+                                                        bindPrefix = "已导入绑定 WebDAV 并同步";
+                                                    }
+                                                }
+                                            }
                                             final LiteSync.MergeResult res =
                                                     LiteSync.syncLanPeer(
-                                                            peer,
+                                                            syncEndpoint,
                                                             new LiteSync.LanPeerCallback() {
                                                                 public String exportLocalPayload() {
                                                                     boolean syncSubs =
@@ -4715,7 +4953,8 @@ public final class LiteActivity extends Activity {
                                                     getPreferences(0)
                                                             .getBoolean("webdav_sync_subs", true);
                                             final String msg =
-                                                    "局域网同步完成 · 历史 "
+                                                    bindPrefix
+                                                            + " · 历史 "
                                                             + res.historyCount
                                                             + " / 收藏 "
                                                             + res.favoriteCount

@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'app_log.dart';
 import 'catpaw_embedded_engine.dart';
 import 'ohos_runtime.dart';
 import 'quark_account.dart';
@@ -42,7 +43,8 @@ class CatPawHost {
     try {
       final result = await Process.run(
         nodePath,
-        const ['-v'],
+        [if (Platform.isMacOS) '--jitless', '-v'],
+        includeParentEnvironment: false,
       ).timeout(const Duration(seconds: 3));
       if (result.exitCode == 0) {
         final match = RegExp(r'v?(\d+)\.').firstMatch('${result.stdout}');
@@ -392,15 +394,57 @@ class CatPawHost {
         environment: environment,
         includeParentEnvironment: false,
       );
+      final stderrBuf = StringBuffer();
+      const maxStderrChars = 4096;
+      int? earlyExitCode;
       _process = process;
       process.stdout.drain<void>();
-      process.stderr.drain<void>();
-      process.exitCode.then((_) {
+      process.stderr.transform(utf8.decoder).listen(
+        (chunk) {
+          if (stderrBuf.length < maxStderrChars) {
+            final remaining = maxStderrChars - stderrBuf.length;
+            stderrBuf.write(
+              chunk.length <= remaining ? chunk : chunk.substring(0, remaining),
+            );
+          }
+        },
+        onError: (_) {},
+      );
+      process.exitCode.then((code) {
+        earlyExitCode = code;
         if (_process == process) {
           _process = null;
           _base = null;
         }
       });
+      final deadline = DateTime.now().add(const Duration(seconds: 12));
+      while (DateTime.now().isBefore(deadline) && epoch == _generation) {
+        if (await ready.exists()) {
+          try {
+            final parsed = _parseReadyJson(await ready.readAsString());
+            if (parsed != null) {
+              if (epoch != _generation) break;
+              if (parsed.seq > _rebindSeq) _rebindSeq = parsed.seq;
+              _base = parsed.base;
+              return parsed.base;
+            }
+          } catch (_) {}
+        }
+        if (earlyExitCode != null) break;
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+      }
+      final redactedStderr = AppLog.redact(stderrBuf.toString().trim());
+      AppLog.instance.logError(
+        'CatPaw 本机服务启动失败 (exit=${earlyExitCode ?? 'timeout'})',
+        source: 'CatPawHost',
+        context: redactedStderr.isEmpty ? null : redactedStderr,
+      );
+      await close();
+      throw StateError(
+        earlyExitCode != null
+            ? 'CatPaw 本机服务启动失败（退出码 $earlyExitCode），请在设置导出脱敏日志排查'
+            : 'CatPaw 本机服务启动超时，请检查安全权限或重试',
+      );
     }
     final deadline = DateTime.now().add(const Duration(seconds: 12));
     while (DateTime.now().isBefore(deadline) && epoch == _generation) {
@@ -417,6 +461,7 @@ class CatPawHost {
       }
       await Future<void>.delayed(const Duration(milliseconds: 40));
     }
+    AppLog.instance.logError('CatPaw 本机服务启动超时', source: 'CatPawHost');
     await close();
     throw StateError('CatPaw 本机服务启动失败');
   }
@@ -524,8 +569,15 @@ class CatPawHost {
           ? storage.getNetdiskCred('uc') : '';
       final baiduCookie = storage.isNetdiskLoggedIn('baidu')
           ? storage.getNetdiskCred('baidu') : '';
+      final aliToken = storage.isNetdiskLoggedIn('ali')
+          ? storage.getNetdiskCred('ali') : '';
+      final panOrder = storage.driveOrder;
       final cfgFile = File('${root.path}/wexfnwconfig.json');
-      if (quarkCookie.isEmpty && ucCookie.isEmpty && baiduCookie.isEmpty && !await cfgFile.exists()) {
+      if (quarkCookie.isEmpty &&
+          ucCookie.isEmpty &&
+          baiduCookie.isEmpty &&
+          aliToken.isEmpty &&
+          !await cfgFile.exists()) {
         return;
       }
       final payload = jsonEncode({
@@ -533,6 +585,8 @@ class CatPawHost {
           'quark': {'cookie': quarkCookie},
           'uc': {'cookie': ucCookie},
           'baidu': {'cookie': baiduCookie},
+          'ali': {'token': aliToken},
+          'order': panOrder,
         },
       });
       if (_lastSyncedPanJson == payload && await cfgFile.exists()) return;

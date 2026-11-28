@@ -594,6 +594,7 @@ public final class DanmuSettingsPanel {
 
         LinearLayout headerTop = new LinearLayout(context);
         headerTop.setOrientation(LinearLayout.HORIZONTAL);
+        headerTop.setBaselineAligned(false);
         headerTop.setGravity(Gravity.CENTER_VERTICAL);
         headerTop.setClipChildren(false);
         headerTop.setClipToPadding(false);
@@ -825,6 +826,7 @@ public final class DanmuSettingsPanel {
         // 6. 显示位置 (滚动 / 顶部 / 底部)
         LinearLayout posRow = new LinearLayout(context);
         posRow.setOrientation(LinearLayout.HORIZONTAL);
+        posRow.setBaselineAligned(false);
         posRow.setGravity(Gravity.CENTER_VERTICAL);
         posRow.setClipChildren(false);
         posRow.setClipToPadding(false);
@@ -904,6 +906,7 @@ public final class DanmuSettingsPanel {
 
         LinearLayout credContainer = new LinearLayout(context);
         credContainer.setOrientation(isTv ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
+        credContainer.setBaselineAligned(false);
         credContainer.setClipChildren(false);
         credContainer.setClipToPadding(false);
         LinearLayout.LayoutParams credWrapLp =
@@ -935,6 +938,7 @@ public final class DanmuSettingsPanel {
 
         LinearLayout serverFooter = new LinearLayout(context);
         serverFooter.setOrientation(LinearLayout.HORIZONTAL);
+        serverFooter.setBaselineAligned(false);
         serverFooter.setGravity(Gravity.CENTER_VERTICAL);
         serverFooter.setClipChildren(false);
         serverFooter.setClipToPadding(false);
@@ -996,6 +1000,7 @@ public final class DanmuSettingsPanel {
 
         LinearLayout ruleActions = new LinearLayout(context);
         ruleActions.setOrientation(LinearLayout.HORIZONTAL);
+        ruleActions.setBaselineAligned(false);
         ruleActions.setGravity(Gravity.CENTER_VERTICAL);
         ruleActions.setClipChildren(false);
         ruleActions.setClipToPadding(false);
@@ -1456,6 +1461,7 @@ public final class DanmuSettingsPanel {
     private static LinearLayout makeSegmentTrack(Context context, float d) {
         LinearLayout track = new LinearLayout(context);
         track.setOrientation(LinearLayout.HORIZONTAL);
+        track.setBaselineAligned(false);
         track.setGravity(Gravity.CENTER_VERTICAL);
         track.setClipChildren(false);
         track.setClipToPadding(false);
@@ -1523,11 +1529,13 @@ public final class DanmuSettingsPanel {
 
         if (isTv) {
             row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setBaselineAligned(false);
             row.setGravity(Gravity.CENTER_VERTICAL);
             row.setPadding(dp(d, 14), dp(d, 5), dp(d, 14), dp(d, 5));
 
             LinearLayout leftMeta = new LinearLayout(context);
             leftMeta.setOrientation(LinearLayout.HORIZONTAL);
+            leftMeta.setBaselineAligned(false);
             leftMeta.setGravity(Gravity.CENTER_VERTICAL);
             leftMeta.addView(title);
             if (valueBadge != null) {
@@ -1551,6 +1559,7 @@ public final class DanmuSettingsPanel {
 
             LinearLayout header = new LinearLayout(context);
             header.setOrientation(LinearLayout.HORIZONTAL);
+            header.setBaselineAligned(false);
             header.setGravity(Gravity.CENTER_VERTICAL);
             header.addView(
                     title,

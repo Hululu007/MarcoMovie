@@ -209,4 +209,126 @@ void main() {
       );
     },
   );
+
+  test(
+    'Emby supports composed HTTP 8096 address, bare-root fallback without /emby, and 4K DirectPlay',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      expect(
+        EmbyLibrary.composeServerAddress(
+          useHttps: false,
+          hostOrUrl: 'emby.example',
+          port: '8096',
+        ),
+        'http://emby.example:8096',
+      );
+      expect(
+        EmbyLibrary.composeServerAddress(
+          useHttps: true,
+          hostOrUrl: 'https://emby.example:8920/sub/',
+        ),
+        'https://emby.example:8920/sub',
+      );
+
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final sawHeaders = <String>[];
+      var sawHevcDirectPlay = false;
+      server.listen((r) async {
+        final path = r.uri.path;
+        final out = r.response;
+        if (path == '/emby/Users/AuthenticateByName') {
+          out.statusCode = 404;
+          await out.close();
+          return;
+        }
+        if (path == '/Users/AuthenticateByName') {
+          sawHeaders.add(r.headers.value('x-emby-authorization') ?? '');
+          out.write(
+            jsonEncode({
+              'AccessToken': 'root-token',
+              'User': {'Id': 'u2'},
+            }),
+          );
+          await out.close();
+          return;
+        }
+        if (r.headers.value('X-Emby-Token') != 'root-token') {
+          out.statusCode = 401;
+          await out.close();
+          return;
+        }
+        if (path == '/Users/u2/Views') {
+          out.write(
+            jsonEncode({
+              'Items': [
+                {'Name': '4K 电影', 'Id': 'v4k'},
+              ],
+            }),
+          );
+        } else if (path == '/System/Info/Public') {
+          out.write(jsonEncode({'ServerName': 'Home4K', 'Id': 'srv1'}));
+        } else if (path == '/Users/u2/Items/m4k') {
+          out.write(
+            jsonEncode({
+              'Name': '4K 样片',
+              'Type': 'Movie',
+              'Id': 'm4k',
+              'MediaSources': [
+                {'Id': 'ms4k'},
+              ],
+            }),
+          );
+        } else if (path == '/Items/m4k/PlaybackInfo') {
+          final input = jsonDecode(await utf8.decoder.bind(r).join());
+          final codecs =
+              input['DeviceProfile']?['DirectPlayProfiles']?[0]?['VideoCodec']
+                  ?.toString() ??
+              '';
+          sawHevcDirectPlay =
+              input['EnableDirectPlay'] == true && codecs.contains('hevc');
+          out.write(
+            jsonEncode({
+              'PlaySessionId': 'ps4k',
+              'MediaSources': [
+                {
+                  'Id': 'ms4k',
+                  'SupportsDirectPlay': true,
+                  'SupportsDirectStream': true,
+                },
+              ],
+            }),
+          );
+        } else {
+          out.statusCode = 404;
+        }
+        await out.close();
+      });
+
+      final composed = EmbyLibrary.composeServerAddress(
+        useHttps: false,
+        hostOrUrl: '127.0.0.1',
+        port: '${server.port}',
+      );
+      final entry = await EmbyLibrary.login(
+        composed,
+        'tester',
+        'secret',
+        group: '默认分组',
+        isPrivate: false,
+      );
+      expect(entry.name, 'Emby · Home4K');
+      expect(sawHeaders.single, contains('MediaBrowser Client='));
+
+      final store = await StorageService.init();
+      await store.upsertSubscriptions([entry]);
+      final site = store.loadSavedConfig()!.supportedSites.single;
+      final lib = await EmbyLibrary.open(site);
+      expect(lib.base.path, '');
+      final ep = (await lib.detail('m4k')).lines.single.episodes.single;
+      final resolved = await lib.resolve(ep);
+      expect(sawHevcDirectPlay, isTrue);
+      expect(resolved.url, contains('http://127.0.0.1:${server.port}/Videos/m4k/stream'));
+    },
+  );
 }

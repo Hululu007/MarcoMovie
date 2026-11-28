@@ -182,6 +182,7 @@ final class AppDialog extends Dialog {
         if (spec.title != null) {
             titleView = a.text(spec.title, a.isTvDevice() ? 22 : 20, MainActivity.WHITE);
             titleView.setTypeface(null, Typeface.BOLD);
+            titleView.setPadding(a.dp(6), 0, a.dp(6), 0);
             panel.addView(titleView);
             a.gap(panel, 12);
         }
@@ -284,24 +285,34 @@ final class AppDialog extends Dialog {
                 actions.put(code, button);
                 orderedActions.add(button);
             }
+        final int footerInnerWidth = Math.max(1, innerWidth - a.dp(12));
         final int footerCols =
                 orderedActions.isEmpty()
                         ? 1
                         : computeFooterColumns(
-                                innerWidth, maxActionNeedPx, a.dp(8), orderedActions.size());
+                                footerInnerWidth, maxActionNeedPx, a.dp(8), orderedActions.size());
         LinearLayout footer = a.vertical();
+        footer.setPadding(a.dp(6), 0, a.dp(6), 0);
         footer.setClipChildren(false);
         footer.setClipToPadding(false);
-        boolean wrapFooterLabels = footerCols == 1 && maxActionNeedPx > innerWidth;
+        boolean wrapFooterLabels = footerCols == 1 && maxActionNeedPx > footerInnerWidth;
         if (!orderedActions.isEmpty()) {
             LinearLayout fRow = null;
+            final boolean compactRightAligned =
+                    footerCols >= orderedActions.size()
+                            && orderedActions.size() <= 2
+                            && a.isTvDevice()
+                            && maxActionNeedPx * orderedActions.size() + a.dp(16)
+                                    <= footerInnerWidth;
             for (int i = 0; i < orderedActions.size(); i++) {
                 Button button = orderedActions.get(i);
                 button.setSingleLine(!wrapFooterLabels);
                 button.setMaxLines(wrapFooterLabels ? 2 : 1);
                 button.setEllipsize(
                         wrapFooterLabels ? android.text.TextUtils.TruncateAt.END : null);
-                if (i % footerCols == 0) {
+                int col = i % footerCols;
+                boolean lastInRow = (col == footerCols - 1) || (i == orderedActions.size() - 1);
+                if (col == 0) {
                     fRow = a.row();
                     fRow.setGravity(
                             footerCols >= orderedActions.size() && orderedActions.size() <= 2
@@ -311,20 +322,18 @@ final class AppDialog extends Dialog {
                     fRow.setClipToPadding(false);
                     footer.addView(fRow, new LinearLayout.LayoutParams(-1, -2));
                 }
-                if (footerCols >= orderedActions.size()
-                        && orderedActions.size() <= 2
-                        && a.isTvDevice()
-                        && maxActionNeedPx * orderedActions.size() + a.dp(16) <= innerWidth) {
+                if (compactRightAligned) {
                     LinearLayout.LayoutParams lp =
                             new LinearLayout.LayoutParams(
                                     Math.max(a.dp(92), maxActionNeedPx),
                                     wrapFooterLabels ? -2 : a.dp(42));
-                    lp.setMargins(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
+                    lp.setMargins(col == 0 ? 0 : a.dp(8), a.dp(4), 0, a.dp(4));
                     fRow.addView(button, lp);
                 } else {
                     LinearLayout.LayoutParams lp =
                             new LinearLayout.LayoutParams(0, wrapFooterLabels ? -2 : a.dp(42), 1f);
-                    lp.setMargins(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
+                    lp.setMargins(
+                            col == 0 ? 0 : a.dp(4), a.dp(4), lastInRow ? 0 : a.dp(4), a.dp(4));
                     fRow.addView(button, lp);
                 }
             }

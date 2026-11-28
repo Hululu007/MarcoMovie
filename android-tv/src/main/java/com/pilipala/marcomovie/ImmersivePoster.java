@@ -261,6 +261,9 @@ final class ImmersivePoster extends FrameLayout {
         return pool;
     }
 
+    private static final java.util.concurrent.ExecutorService HERO_POOL =
+            newBoundedBackgroundPool(1, "immersive-hero-active");
+    private static volatile java.util.concurrent.Future<?> activeHeroFuture;
     private static final java.util.concurrent.ExecutorService HD_POOL =
             newBoundedBackgroundPool(2, "immersive-hd-backdrop");
     private static final java.util.concurrent.ExecutorService RATING_POOL =
@@ -656,6 +659,21 @@ final class ImmersivePoster extends FrameLayout {
         return cached != null && !cached.isRecycled();
     }
 
+    static boolean hasDiskWideBackdrop(android.content.Context context, Cms.Video item) {
+        if (context == null || item == null || item.title == null) return false;
+        String cleanTitle = normalizeTitleForBackdrop(item.title);
+        if (cleanTitle.isEmpty()) return false;
+        String cleanYear = extractFourDigitYear(item.year);
+        String cacheKey = (cleanTitle + "#" + cleanYear).toLowerCase(Locale.ROOT);
+        Bitmap mem = WIDE_MEM_CACHE.get(cacheKey);
+        if (mem != null && !mem.isRecycled()) return true;
+        File diskFile =
+                new File(
+                        context.getCacheDir(),
+                        "tv_wide_v5_" + Integer.toHexString(cacheKey.hashCode()) + ".img");
+        return diskFile.isFile() && diskFile.length() > 8192L;
+    }
+
     static void prewarmOfficialLandscape(MainActivity a, Cms.Video item) {
         if (a == null || item == null || item.title == null || item.title.trim().isEmpty()) return;
         loadOfficialLandscapeInto(a, item, null, null, 0, 0, null);
@@ -667,6 +685,29 @@ final class ImmersivePoster extends FrameLayout {
      * WIDE_MEM_CACHE / tv_wide_v5_ disk cache, compositing a bottom-feathered exact-aspect bitmap
      * off the UI thread so the hero blends seamlessly into {@link HomeAmbient} with zero saveLayer.
      */
+    private static Bitmap decodeHeroPreviewBytes(byte[] bytes) {
+        if (bytes == null || bytes.length < 256 || bytes.length > MAX_DISK_IMAGE_BYTES) {
+            return null;
+        }
+        try {
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null;
+            BitmapFactory.Options opts = new BitmapFactory.Options();
+            int sample = 1;
+            while ((bounds.outWidth / (sample * 2)) >= 480
+                    && (bounds.outHeight / (sample * 2)) >= 480) {
+                sample *= 2;
+            }
+            opts.inSampleSize = sample;
+            opts.inPreferredConfig = Bitmap.Config.RGB_565;
+            return BitmapFactory.decodeByteArray(bytes, 0, bytes.length, opts);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
     static void loadOfficialLandscapeInto(
             MainActivity a,
             Cms.Video item,
@@ -675,8 +716,29 @@ final class ImmersivePoster extends FrameLayout {
             int viewWidthPx,
             int viewHeightPx,
             HeroColorsCallback colorsCallback) {
+        int preAssigned = requestSeq != null ? ++requestSeq[0] : 0;
+        loadOfficialLandscapeInto(
+                a,
+                item,
+                target,
+                requestSeq,
+                preAssigned,
+                viewWidthPx,
+                viewHeightPx,
+                colorsCallback);
+    }
+
+    static void loadOfficialLandscapeInto(
+            MainActivity a,
+            Cms.Video item,
+            ImageView target,
+            int[] requestSeq,
+            int preAssignedToken,
+            int viewWidthPx,
+            int viewHeightPx,
+            HeroColorsCallback colorsCallback) {
         if (a == null || item == null) return;
-        final int token = requestSeq != null ? ++requestSeq[0] : 0;
+        final int token = preAssignedToken;
         final String cleanTitle = normalizeTitleForBackdrop(item.title);
         if (cleanTitle.isEmpty()) return;
         if (item.poster != null && item.poster.contains("fixture.test")) return;
@@ -687,6 +749,10 @@ final class ImmersivePoster extends FrameLayout {
         if (target != null) {
             Bitmap featheredCached = HERO_FEATHERED_CACHE.get(featheredKey);
             if (featheredCached != null && !featheredCached.isRecycled()) {
+                if (activeHeroFuture != null) {
+                    activeHeroFuture.cancel(true);
+                    activeHeroFuture = null;
+                }
                 target.setTag(null);
                 target.setImageBitmap(featheredCached);
                 Bitmap rawMem = WIDE_MEM_CACHE.get(cacheKey);
@@ -703,9 +769,15 @@ final class ImmersivePoster extends FrameLayout {
         final String rawActor = item.actor == null ? "" : item.actor;
         final String rawDirector = item.director == null ? "" : item.director;
         final String fallbackPosterUrl = item.poster == null ? "" : item.poster.trim();
-        HD_POOL.execute(
+        final boolean interactiveHero = target != null && requestSeq != null;
+        if (interactiveHero && activeHeroFuture != null) {
+            activeHeroFuture.cancel(true);
+        }
+        Runnable task =
                 () -> {
-                    if (generation != a.generation || a.isFinishing()) return;
+                    if (generation != a.generation
+                            || a.isFinishing()
+                            || Thread.currentThread().isInterrupted()) return;
                     if (requestSeq != null && token != requestSeq[0]) return;
                     try {
                         Bitmap wide = WIDE_MEM_CACHE.get(cacheKey);
@@ -728,6 +800,55 @@ final class ImmersivePoster extends FrameLayout {
                                 }
                             }
                             if (wide == null) {
+                                // Show an instant feathered preview from local poster cache
+                                // (upgraded or raw URL) while multi-hop 16:9 lookup runs.
+                                if (target != null && !fallbackPosterUrl.isEmpty()) {
+                                    byte[] previewBytes =
+                                            ImageLoader.readDiskCachedPoster(
+                                                    a,
+                                                    ImageLoader.upgradePosterUrl(
+                                                            fallbackPosterUrl, false));
+                                    if (previewBytes == null) {
+                                        previewBytes =
+                                                ImageLoader.readDiskCachedPoster(
+                                                        a, fallbackPosterUrl);
+                                    }
+                                    if (previewBytes != null && previewBytes.length > 256) {
+                                        Bitmap previewRaw = decodeHeroPreviewBytes(previewBytes);
+                                        if (previewRaw != null && !previewRaw.isRecycled()) {
+                                            final Bitmap previewFeathered =
+                                                    composeFeatheredHeroBitmap(
+                                                            previewRaw, viewWidthPx, viewHeightPx);
+                                            if (previewFeathered != null) {
+                                                final int p0 = HomeAmbient.sample(previewRaw, 0);
+                                                final int p1 =
+                                                        HomeAmbient.harmonizeSecondary(
+                                                                p0,
+                                                                HomeAmbient.sample(previewRaw, 1));
+                                                a.ui.post(
+                                                        () -> {
+                                                            if (generation != a.generation
+                                                                    || a.isFinishing()
+                                                                    || (requestSeq != null
+                                                                            && token
+                                                                                    != requestSeq[
+                                                                                            0])) {
+                                                                return;
+                                                            }
+                                                            target.setTag(null);
+                                                            target.setImageBitmap(previewFeathered);
+                                                            if (colorsCallback != null) {
+                                                                colorsCallback.onHeroColors(p0, p1);
+                                                            }
+                                                        });
+                                            }
+                                        }
+                                    }
+                                }
+                                if (Thread.currentThread().isInterrupted()
+                                        || (requestSeq != null && token != requestSeq[0])) {
+                                    return;
+                                }
                                 Set<String> candidates = new LinkedHashSet<>();
                                 collectVerifiedDoubanOfficialLandscape(
                                         cleanTitle,
@@ -736,16 +857,22 @@ final class ImmersivePoster extends FrameLayout {
                                         rawDirector,
                                         likelyTvSeries,
                                         candidates);
-                                if (candidates.isEmpty()) {
+                                if (candidates.isEmpty()
+                                        && !Thread.currentThread().isInterrupted()
+                                        && (requestSeq == null || token == requestSeq[0])) {
                                     collectVerifiedBilibiliHorizontalCovers(
                                             cleanTitle, cleanYear, candidates);
                                 }
-                                if (candidates.isEmpty()) {
+                                if (candidates.isEmpty()
+                                        && !Thread.currentThread().isInterrupted()
+                                        && (requestSeq == null || token == requestSeq[0])) {
                                     collectVerifiedDoubanStillsFallback(
                                             cleanTitle, cleanYear, likelyTvSeries, candidates);
                                 }
                                 for (String candidate : candidates) {
-                                    if (generation != a.generation || a.isFinishing()) return;
+                                    if (generation != a.generation
+                                            || a.isFinishing()
+                                            || Thread.currentThread().isInterrupted()) return;
                                     if (requestSeq != null && token != requestSeq[0]) return;
                                     byte[] data = downloadImageBytes(candidate, 5500);
                                     if (data == null || data.length < 10240) continue;
@@ -760,14 +887,18 @@ final class ImmersivePoster extends FrameLayout {
                             }
                         }
                         if (wide == null && !fallbackPosterUrl.isEmpty()) {
+                            if (Thread.currentThread().isInterrupted()
+                                    || (requestSeq != null && token != requestSeq[0])) return;
                             byte[] fallbackData = downloadImageBytes(fallbackPosterUrl, 5000);
-                            if (fallbackData != null && fallbackData.length > 2048) {
-                                wide = decodePortraitHdBytes(fallbackData);
+                            if (fallbackData != null && fallbackData.length > 256) {
+                                wide = decodeHeroPreviewBytes(fallbackData);
                             }
                         }
                         if (wide == null || wide.isRecycled()) return;
                         if (target == null) return;
-                        if (generation != a.generation || a.isFinishing()) return;
+                        if (generation != a.generation
+                                || a.isFinishing()
+                                || Thread.currentThread().isInterrupted()) return;
                         if (requestSeq != null && token != requestSeq[0]) return;
                         final Bitmap feathered =
                                 composeFeatheredHeroBitmap(wide, viewWidthPx, viewHeightPx);
@@ -791,7 +922,12 @@ final class ImmersivePoster extends FrameLayout {
                                 });
                     } catch (Throwable ignored) {
                     }
-                });
+                };
+        if (interactiveHero) {
+            activeHeroFuture = HERO_POOL.submit(task);
+        } else {
+            HD_POOL.execute(task);
+        }
     }
 
     void resolveHdBackdrop(
@@ -2430,6 +2566,7 @@ final class ImmersivePoster extends FrameLayout {
 
         String[] types = {"media_bangumi", "media_ft"};
         for (String type : types) {
+            if (Thread.currentThread().isInterrupted()) return;
             try {
                 String url =
                         "https://api.bilibili.com/x/web-interface/search/type?search_type="
@@ -2656,6 +2793,7 @@ final class ImmersivePoster extends FrameLayout {
                 String referer = "https://m.douban.com/movie/subject/" + bestId + "/";
                 for (String kind : kinds) {
                     for (String pType : officialTypes) {
+                        if (Thread.currentThread().isInterrupted()) return;
                         String photosUrl =
                                 "https://m.douban.com/rexxar/api/v2/"
                                         + kind
@@ -2695,7 +2833,7 @@ final class ImmersivePoster extends FrameLayout {
                                 : new String[] {"movie", "tv"};
                 String referer = "https://m.douban.com/movie/subject/" + bestId + "/";
                 for (String kind : kinds) {
-                    if (!out.isEmpty()) break;
+                    if (!out.isEmpty() || Thread.currentThread().isInterrupted()) break;
                     String photosUrl =
                             "https://m.douban.com/rexxar/api/v2/"
                                     + kind
@@ -2722,6 +2860,7 @@ final class ImmersivePoster extends FrameLayout {
 
         String[] types = {"media_bangumi", "media_ft"};
         for (String type : types) {
+            if (Thread.currentThread().isInterrupted()) return;
             try {
                 String url =
                         "https://api.bilibili.com/x/web-interface/search/type?search_type="
@@ -2786,9 +2925,11 @@ final class ImmersivePoster extends FrameLayout {
 
     private static String httpGetText(
             String urlStr, String referer, boolean mobileUa, int timeoutMs) {
+        if (Thread.currentThread().isInterrupted()) return null;
         HttpURLConnection conn = null;
         try {
             conn = (HttpURLConnection) new URL(urlStr).openConnection();
+            RequestScope.attach(conn);
             conn.setConnectTimeout(timeoutMs);
             conn.setReadTimeout(timeoutMs);
             conn.setInstanceFollowRedirects(true);
@@ -2822,7 +2963,10 @@ final class ImmersivePoster extends FrameLayout {
         } catch (Exception e) {
             return null;
         } finally {
-            if (conn != null) conn.disconnect();
+            if (conn != null) {
+                RequestScope.detach(conn);
+                conn.disconnect();
+            }
         }
     }
 

@@ -110,6 +110,17 @@ public final class EmbyChecks {
                 || !"/emby".equals(split.optString("subpath"))) {
             throw new AssertionError("splitServerUrl failed: " + split);
         }
+        String composedHttp =
+                MobileEmbyLibrary.composeServerAddress(false, "emby.example", "8096", "");
+        if (!"http://emby.example:8096".equals(composedHttp)) {
+            throw new AssertionError("compose http 8096: " + composedHttp);
+        }
+        String composedHttps =
+                MobileEmbyLibrary.composeServerAddress(
+                        true, "https://emby.example:8920/sub/", "", "");
+        if (!"https://emby.example:8920/sub".equals(composedHttps)) {
+            throw new AssertionError("compose https explicit: " + composedHttps);
+        }
         System.out.println(
                 "PASS Emby library, stable episode identity, playback negotiation, scoped transcode, 204 check-ins and terminal reporter");
     }

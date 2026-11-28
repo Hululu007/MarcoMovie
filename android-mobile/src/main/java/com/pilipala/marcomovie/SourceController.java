@@ -428,7 +428,8 @@ final class SourceController {
                                                             && epoch == a.engineEpoch
                                                             && !Cms.listing(fetched)
                                                                     .videos
-                                                                    .isEmpty()) {
+                                                                    .isEmpty()
+                                                            && !site.isNetdiskSite()) {
                                                         a.detailCache.put(key, fetched);
                                                         if (!privateAtStart && !a.privateMode) {
                                                             writeDetailDiskCache(
@@ -480,7 +481,7 @@ final class SourceController {
                                         raw = null;
                                     }
                                 }
-                                if (raw == null) {
+                                if (raw == null && !site.isNetdiskSite()) {
                                     String disk = readDetailDiskCache(a, site, id);
                                     if (disk != null) {
                                         Cms.Listing diskListing = Cms.listing(disk);
@@ -527,11 +528,17 @@ final class SourceController {
                                 if (listing.videos.isEmpty()) throw new IOException("来源没有返回影片详情");
                                 timing.parsed = SystemClock.elapsedRealtime();
                                 Cms.Video video = listing.videos.get(0);
-                                if ((video.id == null || video.id.trim().isEmpty()) && id != null) {
-                                    video.id = id.trim();
+                                String reqId = id == null ? "" : id.trim();
+                                if (!Cms.Site.isGenericPlaceholderVodId(reqId)
+                                        && (Cms.Site.isGenericPlaceholderVodId(video.id)
+                                                || (Cms.Site.looksLikeNetdiskShareId(reqId)
+                                                        && !Cms.Site.looksLikeNetdiskShareId(
+                                                                video.id)))) {
+                                    video.id = reqId;
                                 }
                                 PlaybackLineRules.applyToVideo(a, site, video);
                                 if (!timing.cached
+                                        && !site.isNetdiskSite()
                                         && hasPlayableDetailLines(video)
                                         && detailContext.matches(
                                                 a.config, a.privateMode, a.engineEpoch)) {

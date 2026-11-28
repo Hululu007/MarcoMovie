@@ -803,6 +803,38 @@ class _DetailScreenState extends State<DetailScreen> {
         return;
       }
       _activeSite = owner;
+      if (owner.key == targetSite.key &&
+          detailed.id != targetVideo.id &&
+          !CmsClient.isGenericPlaceholderVodId(detailed.id) &&
+          !owner.isEffectivelyPrivate) {
+        final existingHist = widget.storage
+            .getWatchHistory()
+            .where((item) => item.site == owner.key && item.id == targetVideo.id)
+            .toList();
+        if (existingHist.isNotEmpty) {
+          final oldItem = existingHist.first;
+          unawaited(() async {
+            await widget.storage.upsertWatchHistory(
+              WatchHistoryEntry(
+                site: owner.key,
+                id: detailed.id,
+                title: oldItem.title,
+                poster: oldItem.poster,
+                line: oldItem.line,
+                episode: oldItem.episode,
+                index: oldItem.index,
+                position: oldItem.position,
+                duration: oldItem.duration,
+                updated: oldItem.updated,
+              ),
+            );
+            await widget.storage.removeWatchHistoryItem(
+              owner.key,
+              targetVideo.id,
+            );
+          }());
+        }
+      }
       _isFavorite = widget.storage.isFavorite(owner.key, detailed.id, forPrivate: owner.isEffectivelyPrivate);
       final bookmark = _findBookmark(detailed);
       int initialLine = 0;
@@ -1202,12 +1234,23 @@ class _DetailScreenState extends State<DetailScreen> {
   WatchHistoryEntry? _findBookmark([CmsVideo? currentVideo]) {
     if (_activeSite.isEffectivelyPrivate) return null;
     final video = currentVideo ?? _video;
-    for (final item in widget.storage.getWatchHistory()) {
+    final history = widget.storage.getWatchHistory();
+    for (final item in history) {
       if (item.site == _activeSite.key && item.id == video.id) {
         final bookmark = WoggSource.normalizeCachedBookmark(_activeSite, video, item);
         if (WoggSource.supports(_activeSite) &&
             WoggSource.resolveCachedBookmarkTarget(_activeSite, video, bookmark) == null) return null;
         return bookmark;
+      }
+    }
+    if (video.id != widget.video.id && _activeSite.key == widget.site.key) {
+      for (final item in history) {
+        if (item.site == _activeSite.key && item.id == widget.video.id) {
+          final bookmark = WoggSource.normalizeCachedBookmark(_activeSite, video, item);
+          if (WoggSource.supports(_activeSite) &&
+              WoggSource.resolveCachedBookmarkTarget(_activeSite, video, bookmark) == null) return null;
+          return bookmark;
+        }
       }
     }
     return null;

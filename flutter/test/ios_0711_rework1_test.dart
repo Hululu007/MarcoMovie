@@ -1454,7 +1454,7 @@ void main() {
       await ai.refreshApiBalance();
       expect(balanceProbeHits, 1);
 
-      // 401 -> refresh -> 200 Codex models path merges live + local fallback entries with `isLocalFallback` flag!
+      // 401 -> refresh -> 200 Codex models path returns clean live entries without mixing local fallbacks
       await ai.setOAuthSession(
         AiOAuthSession(
           accessToken: 'old_tok',
@@ -1468,7 +1468,7 @@ void main() {
         configOverride: ai.config.copyWith(authMode: AiAuthMode.codexOAuth),
       );
       expect(opts.any((m) => m.id == 'gpt-5.4-live' && !m.isLocalFallback), isTrue);
-      expect(opts.any((m) => m.isLocalFallback), isTrue);
+      expect(opts.any((m) => m.isLocalFallback), isFalse);
     });
   });
 

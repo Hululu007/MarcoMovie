@@ -14,7 +14,7 @@ public final class LocalProxy implements Closeable {
     }
 
     final Application app;
-    final Cms.Config config;
+    volatile Cms.Config config;
     final ServerSocket server;
     final String token = UUID.randomUUID().toString().replace("-", "");
     final ThreadPoolExecutor requests = createRequestExecutor();
@@ -125,6 +125,12 @@ public final class LocalProxy implements Closeable {
         server = bind();
         ProxyAddress.port = server.getLocalPort();
         ProxyAddress.token = token;
+        try {
+            Class.forName("com.github.catvod.Proxy")
+                    .getMethod("set", int.class)
+                    .invoke(null, ProxyAddress.port);
+        } catch (Throwable ignored) {
+        }
         Thread accept =
                 new Thread(
                         () -> {

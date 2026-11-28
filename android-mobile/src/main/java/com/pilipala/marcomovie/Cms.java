@@ -290,13 +290,22 @@ public final class Cms {
                     || lowerApi.contains("sokaka")
                     || lowerApi.contains("seedhub")
                     || lowerApi.contains("pansou")
+                    || lowerApi.contains("pansearch")
                     || lowerApi.contains("s_zps")
+                    || lowerApi.contains("juju")
                     || lowerApi.contains("ypanso")
                     || lowerApi.contains("bpanso")
                     || lowerApi.contains("yiso")
                     || lowerApi.contains("panta")
                     || lowerApi.contains("mypan")
                     || lowerKey.contains("mypan")
+                    || lowerKey.contains("szps")
+                    || lowerKey.contains("s_zps")
+                    || lowerKey.contains("juju")
+                    || lowerName.contains("聚剧")
+                    || lowerName.contains("四盘")
+                    || lowerName.contains("盘搜")
+                    || lowerName.contains("搜盘")
                     || lowerName.contains("我的云盘")
                     || lowerName.contains("我的网盘")
                     || lowerName.contains("我的┃网盘")
@@ -304,6 +313,27 @@ public final class Cms {
                     || lowerName.contains("云盘")
                     || lowerApi.contains("alipansou")
                     || lowerApi.contains("tudou");
+        }
+
+        public static boolean isGenericPlaceholderVodId(String id) {
+            if (id == null) return true;
+            String trimmed = id.trim();
+            return trimmed.isEmpty() || "0".equals(trimmed) || "1".equals(trimmed);
+        }
+
+        public static boolean looksLikeNetdiskShareId(String id) {
+            if (id == null) return false;
+            String lower = id.trim().toLowerCase(Locale.ROOT);
+            return lower.startsWith("push://")
+                    || lower.startsWith("mmshare://")
+                    || lower.contains("pan.quark.cn")
+                    || lower.contains("aliyundrive.com")
+                    || lower.contains("alipan.com")
+                    || lower.contains("pan.baidu.com")
+                    || lower.contains("uc.cn")
+                    || lower.contains("cloud.189.cn")
+                    || lower.contains("123pan.com")
+                    || lower.contains("pan.xunlei.com");
         }
 
         public boolean supported() {

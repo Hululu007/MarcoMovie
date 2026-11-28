@@ -769,6 +769,77 @@ public final class DandanplayProvider implements DanmuProvider {
     }
 
     @Override
+    public List<AnimeHit> searchAnimes(String keyword, CancellationToken token) throws IOException {
+        if (token != null) token.throwIfCancelled();
+        String raw = keyword == null ? "" : keyword.trim();
+        String cleaned = cleanTitle(raw);
+        String q = !cleaned.isEmpty() ? cleaned : raw;
+        if (q.isEmpty()) return Collections.emptyList();
+        List<AnimeHit> hits = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        IOException lastError = null;
+        for (String origin : originWhitelist) {
+            if (token != null) token.throwIfCancelled();
+            try {
+                boolean anyFromSearchAnime = false;
+                try {
+                    String animeUrl = origin + "/api/v2/search/anime?keyword=" + percentEncode(q);
+                    String body = executeHttp(origin, animeUrl, "GET", null, token);
+                    JSONObject root = new JSONObject(body);
+                    JSONArray animes = root.optJSONArray("animes");
+                    if (animes != null) {
+                        for (int i = 0; i < animes.length(); i++) {
+                            JSONObject a = animes.optJSONObject(i);
+                            if (a == null) continue;
+                            String aid = stringifyId(a.opt("animeId"));
+                            String atitle = a.optString("animeTitle", "").trim();
+                            if (aid.isEmpty() || atitle.isEmpty()) continue;
+                            if (!seen.add(origin + "|" + aid)) continue;
+                            String typeDesc = a.optString("typeDescription", "").trim();
+                            int epCount = Math.max(0, a.optInt("episodeCount", 0));
+                            hits.add(new AnimeHit(origin, aid, atitle, typeDesc, epCount));
+                            anyFromSearchAnime = true;
+                        }
+                    }
+                } catch (CancelledException ce) {
+                    throw ce;
+                } catch (Exception ignored) {
+                }
+                if (!anyFromSearchAnime) {
+                    String epUrl = origin + "/api/v2/search/episodes?anime=" + percentEncode(q);
+                    String body = executeHttp(origin, epUrl, "GET", null, token);
+                    JSONObject root = new JSONObject(body);
+                    JSONArray animes = root.optJSONArray("animes");
+                    if (animes != null) {
+                        for (int i = 0; i < animes.length(); i++) {
+                            JSONObject a = animes.optJSONObject(i);
+                            if (a == null) continue;
+                            String aid = stringifyId(a.opt("animeId"));
+                            String atitle = a.optString("animeTitle", "").trim();
+                            if (aid.isEmpty() || atitle.isEmpty()) continue;
+                            if (!seen.add(origin + "|" + aid)) continue;
+                            JSONArray eps = a.optJSONArray("episodes");
+                            int epCount = eps == null ? 0 : eps.length();
+                            String typeDesc = a.optString("typeDescription", "").trim();
+                            hits.add(new AnimeHit(origin, aid, atitle, typeDesc, epCount));
+                        }
+                    }
+                }
+            } catch (CancelledException ce) {
+                throw ce;
+            } catch (IOException io) {
+                lastError = io;
+            } catch (Exception e) {
+                lastError = new IOException(e);
+            }
+        }
+        if (hits.isEmpty() && lastError != null) {
+            throw lastError;
+        }
+        return hits;
+    }
+
+    @Override
     public List<Candidate> listEpisodes(
             String sourceOrigin, String animeId, CancellationToken token) throws IOException {
         if (token != null) token.throwIfCancelled();

@@ -545,14 +545,26 @@ def _install_requests_fallback():
         def json(self):
             return json.loads(self.text)
 
-    def _do_request(method: str, url: str, params=None, data=None, json_body=None, headers=None, timeout=15, **kw):
+    def _do_request(method: str, url: str, params=None, data=None, json=None, headers=None, cookies=None, timeout=15, verify=True, allow_redirects=True, **kw):
+        import gzip as _gzip
+        import json as _json
+        import ssl as _ssl
+        import zlib as _zlib
+        if json is None and "json_body" in kw:
+            json = kw.pop("json_body")
         if params:
             sep = "&" if "?" in url else "?"
             url = f"{url}{sep}{urllib.parse.urlencode(params)}"
         req_headers = dict(headers or {})
+        if isinstance(cookies, dict) and cookies:
+            ck = "; ".join(f"{k}={v}" for k, v in cookies.items())
+            if "Cookie" in req_headers and req_headers["Cookie"]:
+                req_headers["Cookie"] = f"{req_headers['Cookie']}; {ck}"
+            else:
+                req_headers["Cookie"] = ck
         body = None
-        if json_body is not None:
-            body = json.dumps(json_body).encode("utf-8")
+        if json is not None:
+            body = _json.dumps(json).encode("utf-8")
             req_headers.setdefault("Content-Type", "application/json")
         elif data is not None:
             if isinstance(data, dict):
@@ -563,11 +575,34 @@ def _install_requests_fallback():
             else:
                 body = str(data).encode("utf-8")
         request = urllib.request.Request(url, data=body, headers=req_headers, method=method.upper())
+        ctx = _ssl._create_unverified_context() if verify is False else None
+        def _decompress(raw_bytes, hdrs):
+            enc = ""
+            for k, v in (hdrs or {}).items():
+                if str(k).lower() == "content-encoding":
+                    enc = str(v).lower()
+                    break
+            if "gzip" in enc:
+                try:
+                    return _gzip.decompress(raw_bytes)
+                except Exception:
+                    pass
+            elif "deflate" in enc:
+                try:
+                    return _zlib.decompress(raw_bytes)
+                except Exception:
+                    try:
+                        return _zlib.decompress(raw_bytes, -_zlib.MAX_WBITS)
+                    except Exception:
+                        pass
+            return raw_bytes
         try:
-            with urllib.request.urlopen(request, timeout=timeout or 15) as resp:
-                return _Response(resp.status, dict(resp.headers.items()), resp.read(), resp.geturl())
+            with urllib.request.urlopen(request, timeout=timeout or 15, context=ctx) as resp:
+                hdrs = dict(resp.headers.items())
+                return _Response(resp.status, hdrs, _decompress(resp.read(), hdrs), resp.geturl())
         except urllib.error.HTTPError as err:
-            return _Response(err.code, dict(err.headers.items()) if err.headers else {}, err.read(), url)
+            hdrs = dict(err.headers.items()) if err.headers else {}
+            return _Response(err.code, hdrs, _decompress(err.read(), hdrs), url)
 
     class Session:
         def __init__(self):

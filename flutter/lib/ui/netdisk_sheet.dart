@@ -18,7 +18,7 @@ import '../core/netdisk_session.dart';
 import '../core/storage_service.dart';
 import '../core/quark_account.dart';
 import 'apple_theme.dart';
-import 'add_resource_library_sheet.dart' show openEditMediaServerSheet;
+import 'add_resource_library_sheet.dart' show showEmbyLibraryFormPage;
 import 'ios_drive_priority_sheet.dart';
 import 'ios_liquid_glass.dart';
 import 'ios_settings.dart';
@@ -1285,23 +1285,26 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
                           ),
                         ),
                       ),
-                      if (lib.id.startsWith('emby_') ||
-                          lib.id.startsWith('jellyfin_'))
+                      if (lib.id.startsWith('emby_'))
                         Semantics(
                           button: true,
                           label: '编辑 ${lib.name}',
                           child: GestureDetector(
                             behavior: HitTestBehavior.opaque,
                             onTap: () async {
-                              await openEditMediaServerSheet(
-                                context,
+                              final saved = await showEmbyLibraryFormPage(
+                                context: context,
                                 storage: widget.storage,
-                                existing: lib,
-                                onLibraryUpdated: () {
+                                editingSubscription: lib,
+                                initialGroup: lib.group,
+                                initialIsPrivate: lib.isEffectivelyPrivate,
+                                backLabel: '资源库',
+                                onSaved: () {
                                   widget.onChanged?.call();
                                   if (mounted) setState(() {});
                                 },
                               );
+                              if (saved && mounted) setState(() {});
                             },
                             child: const Padding(
                               padding: EdgeInsets.symmetric(

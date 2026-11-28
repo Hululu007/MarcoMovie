@@ -608,6 +608,21 @@ class DiskBlockCache {
     return mime.contains('mpegurl') || mime.contains('x-mpegurl');
   }
 
+  final StreamController<int> _upstreamBytesController =
+      StreamController<int>.broadcast();
+  int _upstreamBytesReceived = 0;
+
+  int get upstreamBytesReceived => _upstreamBytesReceived;
+  Stream<int> get upstreamByteChunks => _upstreamBytesController.stream;
+
+  void _recordUpstreamBytes(int bytes) {
+    if (bytes <= 0) return;
+    _upstreamBytesReceived += bytes;
+    if (!_upstreamBytesController.isClosed) {
+      _upstreamBytesController.add(bytes);
+    }
+  }
+
   Future<Uint8List> _readStreamBytes(
     Stream<List<int>> stream, {
     int? maxBytes,
@@ -617,6 +632,7 @@ class DiskBlockCache {
       if (maxBytes != null && builder.length + chunk.length > maxBytes) {
         throw const FormatException('缓存响应超出单次读取上限');
       }
+      _recordUpstreamBytes(chunk.length);
       builder.add(chunk);
     }
     return builder.takeBytes();
@@ -632,6 +648,7 @@ class DiskBlockCache {
       if (!hasNext) break;
       final chunk = iter.current;
       if (chunk.isEmpty) continue;
+      _recordUpstreamBytes(chunk.length);
       builder.add(chunk);
       final current = builder.toBytes();
       if (LocalMediaLease._startsWithM3u8Magic(current) ||
@@ -1748,6 +1765,303 @@ class DiskBlockCache {
       }
     }
   }
+
+  /// Prefetches aligned leading blocks (`0, 1, ...`) of [uri] into this disk
+  /// cache up to a hard cap of [maxBytes].
+  ///
+  /// - Skips blocks already cached (0 extra upstream traffic).
+  /// - Honors [isCancelled] and [cancelFuture] immediately, aborting any
+  ///   in-flight HTTP request without writing truncated blocks.
+  /// - Never downloads more than [maxBytes] (rounded down to [blockSize]
+  ///   aligned blocks for Range responses, or capped strictly at [maxBytes] for
+  ///   non-Range 200 responses).
+  Future<DiskBlockPrefetchResult> prefetchHead({
+    required Uri uri,
+    Map<String, String> headers = const {},
+    required int maxBytes,
+    required http.Client client,
+    required bool Function() isCancelled,
+    Future<void>? cancelFuture,
+    String? cacheKey,
+    Duration perBlockTimeout = const Duration(seconds: 12),
+  }) async {
+    final budget = math.min(maxBytes, _maxBytes);
+    if (budget <= 0 || isCancelled()) {
+      return DiskBlockPrefetchResult(
+        bytesFetched: 0,
+        blocksCached: 0,
+        cancelled: isCancelled(),
+        reachedEof: false,
+      );
+    }
+    await ensureInitialized();
+
+    final effectiveKey = (cacheKey != null && cacheKey.trim().isNotEmpty)
+        ? (cacheKey.length == 32 && RegExp(r'^[0-9a-f]+$').hasMatch(cacheKey)
+            ? cacheKey
+            : cacheKeyForString(cacheKey.trim()))
+        : cacheKeyForUri(uri);
+    final generation = _generation;
+    final maxBlocks = math.max(1, budget ~/ blockSize);
+    final effectiveCap = math.min(budget, maxBlocks * blockSize);
+
+    var bytesFetched = 0;
+    var blocksCached = 0;
+    var reachedEof = false;
+    var cancelled = false;
+    var meta = await _loadMeta(effectiveKey);
+
+    for (var blockIndex = 0; blockIndex < maxBlocks; blockIndex++) {
+      if (isCancelled() || generation != _generation) {
+        cancelled = true;
+        break;
+      }
+      final existing = await _readCachedBlock(effectiveKey, blockIndex);
+      if (existing != null) {
+        if (meta != null && (blockIndex + 1) * blockSize >= meta.totalLength) {
+          reachedEof = true;
+          break;
+        }
+        continue;
+      }
+
+      final blockStart = blockIndex * blockSize;
+      final knownTotal = meta?.totalLength;
+      if (knownTotal != null && blockStart >= knownTotal) {
+        reachedEof = true;
+        break;
+      }
+      final remainingBudget = effectiveCap - bytesFetched;
+      if (remainingBudget <= 0) break;
+      final requestedLen = math.min(blockSize, remainingBudget);
+      final blockEnd = knownTotal != null
+          ? math.min(knownTotal - 1, blockStart + requestedLen - 1)
+          : blockStart + requestedLen - 1;
+
+      final blockAbort = Completer<void>();
+      void triggerAbort() {
+        if (!blockAbort.isCompleted) blockAbort.complete();
+      }
+
+      cancelFuture?.then((_) => triggerAbort());
+      final timer = Timer(perBlockTimeout, triggerAbort);
+      try {
+        if (isCancelled()) {
+          triggerAbort();
+          cancelled = true;
+          break;
+        }
+        final req = http.AbortableRequest(
+          'GET',
+          uri,
+          abortTrigger: blockAbort.future,
+        )..followRedirects = true;
+        headers.forEach((k, v) {
+          final lower = k.toLowerCase();
+          if (lower == 'range' ||
+              lower == 'host' ||
+              lower == 'connection' ||
+              lower == 'content-length') {
+            return;
+          }
+          req.headers[k] = v;
+        });
+        req.headers['Range'] = 'bytes=$blockStart-$blockEnd';
+
+        final response = await client.send(req);
+        if (isCancelled() || generation != _generation) {
+          triggerAbort();
+          await response.stream.listen((_) {}).cancel();
+          cancelled = true;
+          break;
+        }
+
+        if (response.statusCode == HttpStatus.partialContent) {
+          final crTotal = _parseTotalLengthFromContentRange(
+            response.headers['content-range'],
+          );
+          final ct = response.headers['content-type'] ??
+              meta?.contentType ??
+              'application/octet-stream';
+          final builder = BytesBuilder(copy: false);
+          final subCompleter = Completer<void>();
+          late StreamSubscription<List<int>> sub;
+          sub = response.stream.listen(
+            (chunk) {
+              if (isCancelled() || generation != _generation) {
+                cancelled = true;
+                triggerAbort();
+                unawaited(sub.cancel());
+                if (!subCompleter.isCompleted) subCompleter.complete();
+                return;
+              }
+              final allowed = math.min(
+                chunk.length,
+                math.min(requestedLen - builder.length, effectiveCap - bytesFetched - builder.length),
+              );
+              if (allowed > 0) {
+                builder.add(
+                  allowed == chunk.length ? chunk : chunk.sublist(0, allowed),
+                );
+              }
+              if (builder.length >= requestedLen ||
+                  bytesFetched + builder.length >= effectiveCap) {
+                unawaited(sub.cancel());
+                if (!subCompleter.isCompleted) subCompleter.complete();
+              }
+            },
+            onError: (Object err, StackTrace st) {
+              if (!subCompleter.isCompleted) {
+                if (isCancelled() || blockAbort.isCompleted) {
+                  cancelled = true;
+                  subCompleter.complete();
+                } else {
+                  subCompleter.completeError(err, st);
+                }
+              }
+            },
+            onDone: () {
+              if (!subCompleter.isCompleted) subCompleter.complete();
+            },
+            cancelOnError: true,
+          );
+          await subCompleter.future;
+          if (cancelled || isCancelled() || generation != _generation) {
+            cancelled = true;
+            break;
+          }
+          final bytes = builder.takeBytes();
+          bytesFetched += bytes.length;
+          if (bytes.isEmpty) {
+            reachedEof = true;
+            break;
+          }
+          final expectedFull = crTotal != null
+              ? math.min(blockSize, crTotal - blockStart)
+              : blockSize;
+          if (crTotal != null) {
+            meta = _CachedObjectMeta(
+              totalLength: crTotal,
+              contentType: ct,
+              supportsRanges: true,
+            );
+            await _saveMeta(effectiveKey, meta, generation);
+          }
+          // Only persist complete aligned blocks (or final EOF block) so
+          // DiskBlockCache never serves truncated mid-file blocks.
+          if (bytes.length == expectedFull ||
+              (crTotal != null && blockStart + bytes.length >= crTotal)) {
+            await _writeCachedBlock(effectiveKey, blockIndex, bytes, generation);
+            blocksCached++;
+          }
+          if (crTotal != null && blockStart + bytes.length >= crTotal) {
+            reachedEof = true;
+            break;
+          }
+        } else if (response.statusCode == HttpStatus.ok) {
+          // Server ignored Range and returned 200 OK. Stream strictly within
+          // effectiveCap; if full file fits, cache all its blocks, otherwise
+          // abort immediately without wasting traffic.
+          final ct = response.headers['content-type'] ??
+              meta?.contentType ??
+              'application/octet-stream';
+          final declaredLen = _parseContentLength(response.headers);
+          if (declaredLen != null && declaredLen > effectiveCap) {
+            triggerAbort();
+            await response.stream.listen((_) {}).cancel();
+            break;
+          }
+          final builder = BytesBuilder(copy: false);
+          var exceededCap = false;
+          final subCompleter = Completer<void>();
+          late StreamSubscription<List<int>> sub;
+          sub = response.stream.listen(
+            (chunk) {
+              if (isCancelled() || generation != _generation) {
+                cancelled = true;
+                triggerAbort();
+                unawaited(sub.cancel());
+                if (!subCompleter.isCompleted) subCompleter.complete();
+                return;
+              }
+              if (builder.length + chunk.length > effectiveCap) {
+                final take = effectiveCap - builder.length;
+                if (take > 0) {
+                  builder.add(chunk.sublist(0, take));
+                }
+                exceededCap = true;
+                triggerAbort();
+                unawaited(sub.cancel());
+                if (!subCompleter.isCompleted) subCompleter.complete();
+                return;
+              }
+              builder.add(chunk);
+            },
+            onError: (Object err, StackTrace st) {
+              if (!subCompleter.isCompleted) {
+                if (isCancelled() || blockAbort.isCompleted) {
+                  cancelled = true;
+                  subCompleter.complete();
+                } else {
+                  subCompleter.completeError(err, st);
+                }
+              }
+            },
+            onDone: () {
+              if (!subCompleter.isCompleted) subCompleter.complete();
+            },
+            cancelOnError: true,
+          );
+          await subCompleter.future;
+          final fullBytes = builder.takeBytes();
+          bytesFetched += fullBytes.length;
+          if (!cancelled && !exceededCap && fullBytes.isNotEmpty) {
+            await _cacheFullBodyIntoBlocks(
+              effectiveKey,
+              fullBytes,
+              ct,
+              false,
+              generation,
+            );
+            blocksCached += (fullBytes.length + blockSize - 1) ~/ blockSize;
+            reachedEof = true;
+          }
+          break;
+        } else {
+          await response.stream.listen((_) {}).cancel();
+          break;
+        }
+      } on Object {
+        if (isCancelled() || blockAbort.isCompleted) {
+          cancelled = true;
+        }
+        break;
+      } finally {
+        timer.cancel();
+      }
+    }
+
+    return DiskBlockPrefetchResult(
+      bytesFetched: bytesFetched,
+      blocksCached: blocksCached,
+      cancelled: cancelled,
+      reachedEof: reachedEof,
+    );
+  }
+}
+
+class DiskBlockPrefetchResult {
+  const DiskBlockPrefetchResult({
+    required this.bytesFetched,
+    required this.blocksCached,
+    required this.cancelled,
+    required this.reachedEof,
+  });
+
+  final int bytesFetched;
+  final int blocksCached;
+  final bool cancelled;
+  final bool reachedEof;
 }
 
 class _CachedBlockEntry {
@@ -1897,6 +2211,9 @@ class LocalMediaLease {
   Object? _lastUpstreamError;
   int _removedHlsAdSegments = 0;
   double _removedHlsAdDurationSec = 0.0;
+  int _upstreamBytesReceived = 0;
+  final StreamController<int> _upstreamBytesController =
+      StreamController<int>.broadcast();
 
   Uri get url => _initialUrl;
   bool get isClosed => _closed;
@@ -1905,7 +2222,17 @@ class LocalMediaLease {
   Object? get lastUpstreamError => _lastUpstreamError;
   int get removedHlsAdSegments => _removedHlsAdSegments;
   double get removedHlsAdDurationSec => _removedHlsAdDurationSec;
+  int get upstreamBytesReceived => _upstreamBytesReceived;
+  Stream<int> get upstreamByteChunks => _upstreamBytesController.stream;
   DiskBlockCache get diskCache => _diskCache;
+
+  void _recordUpstreamBytes(int bytes) {
+    if (bytes <= 0 || _closed) return;
+    _upstreamBytesReceived += bytes;
+    if (!_upstreamBytesController.isClosed) {
+      _upstreamBytesController.add(bytes);
+    }
+  }
 
   /// Registers a companion stream (e.g. separate DASH `.m4s` audio track) onto
   /// this session's loopback gateway so it receives the same anti-leech headers.
@@ -3080,6 +3407,7 @@ class LocalMediaLease {
           return;
         }
         resetIdleTimer();
+        _recordUpstreamBytes(chunk.length);
         try {
           if (phase == 0) {
             prefixBuilder.add(chunk);
@@ -3358,6 +3686,9 @@ class LocalMediaLease {
       _client.close();
       _directOnlyClient?.close();
       _directOnlyClient = null;
+    }
+    if (!_upstreamBytesController.isClosed) {
+      unawaited(_upstreamBytesController.close());
     }
     await _server.close(force: true);
   }

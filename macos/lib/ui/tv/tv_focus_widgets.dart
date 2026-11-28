@@ -953,6 +953,7 @@ class TvQrSyncDialog extends StatefulWidget {
 class _TvQrSyncDialogState extends State<TvQrSyncDialog> {
   LanSyncServer? _server;
   String _lanUrl = '';
+  String _lanQrPayload = '';
   String _status = '正在启动局域网配置接收服务…';
 
   @override
@@ -1012,20 +1013,42 @@ class _TvQrSyncDialogState extends State<TvQrSyncDialog> {
             _status =
                 '已接收同步：订阅 $subscriptionCount 项 · 历史 $historyCount 条 · 收藏 $favoriteCount 条';
           });
-          if (changed || subscriptionsChanged) {
+            if (changed || subscriptionsChanged) {
+              widget.onConfigChanged();
+            }
+          },
+          onWebdavBound: (url) {
+            if (!mounted) {
+              return;
+            }
+            setState(() {
+              _status = '已扫码自动绑定 WebDAV（$url）';
+            });
             widget.onConfigChanged();
-          }
-        },
-      );
-      if (!mounted) {
-        await server.close(force: true);
-        return;
-      }
-      setState(() {
-        _server = server;
-        _lanUrl = server.addressForHost(host);
-        _status = '请使用同一 Wi-Fi / 局域网下的手机浏览器扫码推送配置或备份';
-      });
+            if (widget.storage.webdavAuto) {
+              unawaited(
+                widget.storage.syncWithWebdav().then(
+                  (_) {
+                    if (mounted) {
+                      widget.onConfigChanged();
+                    }
+                  },
+                  onError: (_) {},
+                ),
+              );
+            }
+          },
+        );
+        if (!mounted) {
+          await server.close(force: true);
+          return;
+        }
+        setState(() {
+          _server = server;
+          _lanUrl = server.addressForHost(host);
+          _lanQrPayload = server.bindQrUrlForHost(host);
+          _status = '请使用同一 Wi-Fi / 局域网下的手机端 App 或浏览器扫码推送配置或绑定 WebDAV';
+        });
     } catch (e) {
       if (!mounted) {
         return;
@@ -1085,7 +1108,9 @@ class _TvQrSyncDialogState extends State<TvQrSyncDialog> {
                       ),
                     ],
                   ),
-                  child: LocalQrCode(data: _lanUrl),
+                  child: LocalQrCode(
+                    data: _lanQrPayload.isNotEmpty ? _lanQrPayload : _lanUrl,
+                  ),
                 )
               else
                 const SizedBox(

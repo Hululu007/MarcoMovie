@@ -55,6 +55,8 @@ public final class TvUxOptimizationChecks {
         testAutoAudioSubtitleSelectionHistoryFailoverAndAlistMount();
         testTvPlaybackTooltipAndCustomToolbarOrder();
         testR7NavSwitchSourcePickerAndBoundsFixes();
+        testFastTvHomeCoverAndShelfLoading();
+        testTvDialogAlignmentAndJujuHistoryRecovery();
         System.out.println("ALL PASS (" + checks + " TV UX optimization checks)");
     }
 
@@ -111,7 +113,7 @@ public final class TvUxOptimizationChecks {
                 "Pre-API 30 TV storage fallback targets app details settings directly");
     }
 
-    private static void testSettingsCategoryAndTopDockShrink() {
+    private static void testSettingsCategoryAndTopDockShrink() throws Exception {
         check(
                 TvSettingsRegistry.CATEGORY_COUNT == 6
                         && SettingsScreen.resolveTvCategoryIndex("片源与直播") == 0
@@ -207,6 +209,17 @@ public final class TvUxOptimizationChecks {
                         && revOffHero == 1f
                         && revNoHero == 1f,
                 "HomeAmbient holds seamless base glow under feathered hero and rises smoothly to full strength on scroll");
+
+        String homeAmbientSrc = readJavaSource("HomeAmbient.java");
+        int scratchStart = homeAmbientSrc.indexOf("acquireTvScratchBitmap(");
+        int scratchEnd = homeAmbientSrc.indexOf("renderCachedField(", scratchStart);
+        check(
+                scratchStart >= 0 && scratchEnd > scratchStart,
+                "HomeAmbient locates acquireTvScratchBitmap()");
+        String scratchBody = homeAmbientSrc.substring(scratchStart, scratchEnd);
+        check(
+                scratchBody.contains("Bitmap.Config.ARGB_8888") && !scratchBody.contains("RGB_565"),
+                "HomeAmbient uses 32-bit ARGB_8888 scratch bitmaps instead of 16-bit RGB_565 to avoid TV Bayer diamond dithering");
     }
 
     private static void testCuratedHomeParsingAndSourceMatching() {
@@ -3151,5 +3164,139 @@ public final class TvUxOptimizationChecks {
                         && pickerSrc.contains("computeFooterColumns(")
                         && detailSrc.contains("maxHeroWidthDp"),
                 "HomeScreen, HomeDock, SourcePicker, and TvV17DetailScreen wire R7 fixes cleanly");
+    }
+
+    private static void testFastTvHomeCoverAndShelfLoading() throws Exception {
+        // 1. Curated catalog stale-while-revalidate disk cache
+        java.io.File tmp = java.io.File.createTempFile("tv_curated_swr_", ".json");
+        tmp.deleteOnExit();
+        long now = 1_800_000_000_000L;
+        long staleSavedAt = now - (10L * 60L * 60L * 1000L); // 10h old (> 6h TTL, < 14d max)
+        String payload =
+                "{\"savedAt\":"
+                        + staleSavedAt
+                        + ",\"dramas\":[{\"id\":\"d1\",\"title\":\"藏海传\",\"poster\":\"https://img.example/1.jpg\"}],"
+                        + "\"movies\":[{\"id\":\"m1\",\"title\":\"哪吒之魔童闹海\",\"poster\":\"https://img.example/2.jpg\"}]}";
+        try (java.io.FileOutputStream fos = new java.io.FileOutputStream(tmp)) {
+            fos.write(payload.getBytes(StandardCharsets.UTF_8));
+        }
+        TvCuratedHome.Catalog strict = TvCuratedHome.readDiskCache(tmp, now, false);
+        TvCuratedHome.Catalog swr = TvCuratedHome.readDiskCache(tmp, now, true);
+        check(
+                strict == null
+                        && swr != null
+                        && swr.live
+                        && swr.stale
+                        && swr.hotDramas.size() == 1
+                        && "https://img.example/1.jpg".equals(swr.hotDramas.get(0).poster),
+                "TvCuratedHome stale-while-revalidate returns cached posters immediately when >6h old while strict check still triggers refresh");
+
+        long ancientSavedAt = now - TvCuratedHome.STALE_CACHE_MAX_AGE_MS - 1000L;
+        String ancientPayload =
+                payload.replace(String.valueOf(staleSavedAt), String.valueOf(ancientSavedAt));
+        try (java.io.FileOutputStream fos = new java.io.FileOutputStream(tmp)) {
+            fos.write(ancientPayload.getBytes(StandardCharsets.UTF_8));
+        }
+        check(
+                TvCuratedHome.readDiskCache(tmp, now, true) == null,
+                "TvCuratedHome rejects stale disk cache older than max retention age");
+
+        // 2. Parallel collection body merge preserves priority order & deduplication
+        String bodyA =
+                "{\"subject_collection_items\":["
+                        + "{\"id\":\"1\",\"title\":\"剧A\",\"pic\":{\"large\":\"https://img.example/a.jpg\"}},"
+                        + "{\"id\":\"2\",\"title\":\"剧B\",\"pic\":{\"large\":\"https://img.example/b.jpg\"}}]}";
+        String bodyB =
+                "{\"subject_collection_items\":["
+                        + "{\"id\":\"3\",\"title\":\"剧B\",\"pic\":{\"large\":\"https://img.example/b2.jpg\"}},"
+                        + "{\"id\":\"4\",\"title\":\"剧C\",\"pic\":{\"large\":\"https://img.example/c.jpg\"}}]}";
+        List<Cms.Video> merged =
+                TvCuratedHome.mergeCollectionBodies(new String[] {bodyA, bodyB}, false, 18);
+        check(
+                merged.size() == 3
+                        && "剧A".equals(merged.get(0).title)
+                        && "剧B".equals(merged.get(1).title)
+                        && "https://img.example/b.jpg".equals(merged.get(1).poster)
+                        && "剧C".equals(merged.get(2).title),
+                "TvCuratedHome.mergeCollectionBodies preserves collection priority and deduplicates across parallel fetches");
+
+        // 3. Visual equality check avoids tearing down Home hero/shelves on identical refresh
+        TvCuratedHome.Catalog cat1 = TvCuratedHome.buildCatalog(merged, merged, true, true);
+        TvCuratedHome.Catalog cat2 = TvCuratedHome.buildCatalog(merged, merged, true, false);
+        check(
+                TvCuratedHome.sameCatalogVisuals(cat1, cat2),
+                "TvCuratedHome.sameCatalogVisuals matches stale and fresh catalogs with identical visuals");
+
+        // 4. HomeScreen immediate hero & first-shelf eager loading policy (eliminates 3.2s/5s/6s
+        // delays)
+        check(
+                HomeScreen.curatedHeroLoadDelayMs(true, false) == 0L
+                        && HomeScreen.curatedHeroLoadDelayMs(false, true) == 0L
+                        && HomeScreen.curatedHeroLoadDelayMs(false, false) <= 100L,
+                "HomeScreen loads TV hero cover immediately on RAM/disk hit and within 100ms on cold miss");
+        check(
+                HomeScreen.curatedCatalogRefreshDelayMs(false, false) <= 500L
+                        && HomeScreen.curatedCatalogRefreshDelayMs(true, true) <= 500L
+                        && HomeScreen.curatedCatalogRefreshDelayMs(true, false) == 0L,
+                "HomeScreen refreshes seed/stale curated catalog promptly instead of waiting 6s");
+        check(
+                HomeScreen.shouldEagerLoadCuratedCard(true, 0, true, 0)
+                        && HomeScreen.shouldEagerLoadCuratedCard(true, 0, true, 6)
+                        && !HomeScreen.shouldEagerLoadCuratedCard(true, 0, true, 7)
+                        && !HomeScreen.shouldEagerLoadCuratedCard(true, 0, false, 0)
+                        && HomeScreen.shouldEagerLoadCuratedCard(true, 120, false, 0)
+                        && HomeScreen.shouldEagerLoadCuratedCard(false, 0, false, 10),
+                "HomeScreen eagerly loads the visible first-shelf cards on TV initial viewport and defers offscreen cards");
+        check(
+                HomeScreen.curatedShelfHydrateDelayMs(true) <= 600L
+                        && HomeScreen.curatedShelfHydrateDelayMs(false) <= 600L,
+                "HomeScreen hydrates deferred curated shelf cards within 600ms instead of 5000ms");
+
+        String imgSrc = readJavaSource("ImageLoader.java");
+        String posterSrc = readJavaSource("ImmersivePoster.java");
+        check(
+                imgSrc.contains("DISK_DECODE_POOL")
+                        && imgSrc.contains("hasFreshDiskCachedPoster(")
+                        && posterSrc.contains("hasDiskWideBackdrop(")
+                        && posterSrc.contains("ImageLoader.readDiskCachedPoster("),
+                "ImageLoader separates local disk decode pool and ImmersivePoster paints disk fallback preview while wide backdrop resolves");
+    }
+
+    private static void testTvDialogAlignmentAndJujuHistoryRecovery() throws Exception {
+        Cms.Site juju = new Cms.Site();
+        juju.key = "s_juju";
+        juju.name = "聚剧|四盘";
+        juju.api = "csp_S_zps";
+        check(juju.isNetdiskSite(), "TV Cms.Site.isNetdiskSite recognizes 聚剧|四盘 / csp_S_zps");
+        check(
+                "庆余年 第二季".equals(HistoryResumeMatcher.cleanSearchTitle("庆余年 第二季 [4K HDR]")),
+                "TV HistoryResumeMatcher.cleanSearchTitle strips quality brackets cleanly");
+
+        String mainSrc = readJavaSource("MainActivity.java");
+        String detailSrc = readJavaSource("DetailScreen.java");
+        String dialogSrc = readJavaSource("AppDialog.java");
+        String hostSrc = readJavaSource("TvDetailHost.java");
+        String danmuSrc = readJavaSource("DanmuSettingsPanel.java");
+
+        check(
+                mainSrc.contains("v.setBaselineAligned(false);"),
+                "TV MainActivity.row() disables baseline alignment so multi-line cards never stagger");
+        check(
+                detailSrc.contains("class EqualHeightEpisodeRow extends LinearLayout")
+                        && detailSrc.contains("col == 0 ? 0 :"),
+                "TV DetailScreen uses EqualHeightEpisodeRow and flush outer margins in Episode Grid");
+        check(
+                dialogSrc.contains("titleView.setPadding(a.dp(6), 0, a.dp(6), 0)")
+                        && dialogSrc.contains("footer.setPadding(a.dp(6), 0, a.dp(6), 0)")
+                        && dialogSrc.contains(
+                                "footerInnerWidth = Math.max(1, innerWidth - a.dp(12))"),
+                "TV AppDialog aligns dialog title and footer horizontally with content inner column");
+        check(
+                danmuSrc.contains("setBaselineAligned(false)"),
+                "TV DanmuSettingsPanel disables baseline alignment across horizontal control rows");
+        check(
+                hostSrc.contains("tryRecoverSameSiteHistoryDetail(")
+                        && hostSrc.contains("pendingHistoryMigration"),
+                "TV TvDetailHost recovers same-site aggregated/4-pan watch history without forced re-search");
     }
 }

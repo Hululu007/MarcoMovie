@@ -9,6 +9,8 @@ import org.json.JSONObject;
 
 /** Reviewed data-only plugin adapters; unknown Android plugins retain their original host. */
 final class GuardEngine {
+    private static volatile boolean deviceNodeUnavailable = false;
+
     interface Fallback {
         SourceEngine open() throws Exception;
     }
@@ -83,6 +85,10 @@ final class GuardEngine {
                 site.jar != null && !site.jar.trim().isEmpty() ? site.jar : config.spider;
         // All acquisition, declared digest and ZIP checks occur before any permissible fallback.
         File artifact = CspEngine.obtain(context, declaration);
+        if ((android.os.Build.VERSION.SDK_INT > 0 && deviceNodeUnavailable)
+                || artifact.length() > 16L * 1024L * 1024L) {
+            return fallback.open();
+        }
         byte[] data;
         try (InputStream input = new FileInputStream(artifact);
                 ByteArrayOutputStream output = new ByteArrayOutputStream()) {
@@ -117,6 +123,10 @@ final class GuardEngine {
                                     });
         } catch (CatPawHost.UnsupportedGuardArtifactException
                 | NodeRuntime.RuntimeUnavailableException unavailable) {
+            if (unavailable instanceof NodeRuntime.RuntimeUnavailableException
+                    && android.os.Build.VERSION.SDK_INT > 0) {
+                deviceNodeUnavailable = true;
+            }
             if (caller.isInterrupted()) throw new InterruptedIOException("插件解析已取消");
             return fallback.open();
         } finally {

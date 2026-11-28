@@ -464,7 +464,15 @@ final class CatalogScreen {
         a.historyFallbackBookmark = forwarded;
         a.historyFallbackInFlight = false;
         Cms.Video listing = new Cms.Video();
-        listing.id = e.id;
+        listing.id =
+                (e.id == null
+                                        || e.id.trim().isEmpty()
+                                        || "0".equals(e.id.trim())
+                                        || "1".equals(e.id.trim()))
+                                && e.shareUrl != null
+                                && !e.shareUrl.trim().isEmpty()
+                        ? e.shareUrl.trim()
+                        : e.id;
         listing.title = e.title;
         listing.poster = e.poster;
         a.open(new MainActivity.Screen(() -> a.detail(selected, listing)), true);
@@ -1554,7 +1562,11 @@ final class CatalogScreen {
                         }
                         if (!readyAfterSplash[0]) {
                             readyAfterSplash[0] = true;
-                            a.ui.postDelayed(this, 700L);
+                            a.ui.postDelayed(this, 3600L);
+                            return;
+                        }
+                        if (a.current.retainedHome != null && a.current.retainedHome.busy) {
+                            a.ui.postDelayed(this, 900L);
                             return;
                         }
                         try {

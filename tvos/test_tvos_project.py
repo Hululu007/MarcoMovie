@@ -106,8 +106,72 @@ class TvOSWorkspaceTests(unittest.TestCase):
             self.assertTrue((include_dir / h_name).is_file(), f"Missing include/{h_name}")
 
         js_host_dir = TVOS_DIR / "Sources" / "MarcoTVCore" / "Resources" / "js-host"
-        for script_name in ("crypto-js.js", "catvod.mjs", "module-interop.js", "drpy-core.js"):
+        expected_js_host = set(prepare_tvos.REQUIRED_SHARED_JS_HOST_FILES) | set(prepare_tvos.REQUIRED_CATPAW_JS_HOST_FILES)
+        for script_name in sorted(expected_js_host):
             self.assertTrue((js_host_dir / script_name).is_file(), f"Missing js-host/{script_name}")
+        actual_js_host = {p.name for p in js_host_dir.iterdir() if p.is_file()}
+        self.assertEqual(actual_js_host, expected_js_host)
+
+        catpaw_dir = TVOS_DIR / "Sources" / "MarcoTVCore" / "Resources" / "catpaw"
+        self.assertTrue((catpaw_dir / "drpy-assets.json").is_file(), "Missing catpaw/drpy-assets.json")
+        _, manifest_files = prepare_tvos._load_catpaw_manifest()
+        expected_catpaw = {"drpy-assets.json"} | {
+            entry["name"]
+            for entry in manifest_files
+            if entry["name"] not in prepare_tvos.CATPAW_TVOS_SKIP_FILES
+        }
+        for name in sorted(expected_catpaw):
+            self.assertTrue((catpaw_dir / name).is_file(), f"Missing catpaw/{name}")
+
+    def test_sync_js_host_assets_requires_complete_manifest_and_tracked_brand_assets(self) -> None:
+        prepare_src = (TVOS_DIR / "prepare_tvos.py").read_text(encoding="utf-8")
+        self.assertNotIn('"android" / "src"', prepare_src)
+        self.assertNotIn('"flutter" / "assets" / "js-host"', prepare_src)
+        self.assertTrue(prepare_tvos.SHARED_JS_HOST_DIR.is_dir())
+
+        logo_path = prepare_tvos.resolve_logo_mark_png()
+        self.assertTrue(logo_path.is_file())
+        self.assertNotIn("/android/", logo_path.as_posix())
+        _, _, logo_rows = prepare_tvos.decode_png_rgba(logo_path)
+        has_transparent = any(row[i] == 0 for row in logo_rows for i in range(3, len(row), 4))
+        has_opaque = any(row[i] > 0 for row in logo_rows for i in range(3, len(row), 4))
+        self.assertTrue(has_transparent and has_opaque, "logo_mark.png must have real RGBA transparency")
+
+        front_png = (
+            TVOS_DIR
+            / "RunnerProject"
+            / "Assets.xcassets"
+            / "App Icon & Top Shelf Image.brandassets"
+            / "App Icon.imagestack"
+            / "Front.imagestacklayer"
+            / "Content.imageset"
+            / "front_400x240.png"
+        )
+        _, _, front_rows = prepare_tvos.decode_png_rgba(front_png)
+        front_has_transparent = any(row[i] == 0 for row in front_rows for i in range(3, len(row), 4))
+        front_has_opaque = any(row[i] > 0 for row in front_rows for i in range(3, len(row), 4))
+        self.assertTrue(front_has_transparent and front_has_opaque, "Front imagestack layer must preserve transparency")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            incomplete_js = tmp_path / "js-host-src"
+            incomplete_js.mkdir()
+            for name in prepare_tvos.REQUIRED_SHARED_JS_HOST_FILES:
+                if name == "crypto-js.js":
+                    continue
+                (incomplete_js / name).write_text("// stub\n", encoding="utf-8")
+            out_dir = tmp_path / "js-host-dst"
+            with self.assertRaises(FileNotFoundError) as ctx:
+                prepare_tvos.sync_js_host_assets(
+                    shared_js_host_dir=incomplete_js,
+                    shared_catpaw_dir=prepare_tvos.SHARED_CATPAW_DIR,
+                    dst_dir=out_dir,
+                )
+            self.assertIn("crypto-js.js", str(ctx.exception))
+
+            with self.assertRaises(FileNotFoundError) as logo_ctx:
+                prepare_tvos.resolve_logo_mark_png((tmp_path / "missing_logo_mark.png",))
+            self.assertIn("logo_mark.png", str(logo_ctx.exception))
 
     def test_tvos_layered_icons_and_top_shelf_dimensions(self) -> None:
         brand = (
@@ -227,9 +291,12 @@ class TvOSWorkspaceTests(unittest.TestCase):
             "../Sources/MarcoTVCore/Network/NetdiskService.swift",
             "../Sources/MarcoTVCore/Network/NetdiskRangeProxyServer.swift",
             "../Sources/MarcoTVCore/Network/NetdiskShareResolver.swift",
+            "../Sources/MarcoTVCore/Network/MediaEntryResolver.swift",
+            "../Sources/MarcoTVCore/Playback/PlaybackSessionCoordinator.swift",
+            "../Sources/MarcoTVCore/Playback/EpisodePaginationPlanner.swift",
             "../Sources/MarcoMovieTV/NetdiskAccountSheetView.swift",
         ):
-            self.assertIn(required_rel, referenced_paths, f"Phase 2 file missing from project.pbxproj: {required_rel}")
+            self.assertIn(required_rel, referenced_paths, f"Required file missing from project.pbxproj: {required_rel}")
 
         for swift_file in core_swift + app_swift:
             rel_path = f"../{swift_file.relative_to(TVOS_DIR).as_posix()}"
@@ -238,6 +305,28 @@ class TvOSWorkspaceTests(unittest.TestCase):
         for c_file in sorted((TVOS_DIR / "Sources" / "CQuickJS").glob("*.c")):
             rel_path = f"../{c_file.relative_to(TVOS_DIR).as_posix()}"
             self.assertIn(rel_path, referenced_paths, f"{rel_path} missing from project.pbxproj")
+
+        # Verify unit-test target exists for tvOS Simulator without leaking into Release config
+        self.assertIn(
+            "../Tests/MarcoMovieTVSimulatorTests/TvOSSimulatorVerificationTests.swift",
+            referenced_paths,
+        )
+        target_names = {
+            obj.get("name")
+            for obj in objects.values()
+            if isinstance(obj, dict) and obj.get("isa") == "PBXNativeTarget"
+        }
+        self.assertIn("MarcoMovieTVTests", target_names)
+        app_target = next(
+            obj
+            for obj in objects.values()
+            if isinstance(obj, dict) and obj.get("isa") == "PBXNativeTarget" and obj.get("name") == "MarcoMovieTV"
+        )
+        app_cfg_list = objects[app_target["buildConfigurationList"]]
+        app_rel_cfg = next(
+            objects[cid] for cid in app_cfg_list["buildConfigurations"] if objects[cid]["name"] == "Release"
+        )
+        self.assertNotIn("OTHER_LDFLAGS", app_rel_cfg["buildSettings"])
 
     def test_swift_files_have_balanced_delimiters_and_imports(self) -> None:
         swift_files = sorted(TVOS_DIR.rglob("*.swift"))
@@ -287,8 +376,41 @@ class TvOSWorkspaceTests(unittest.TestCase):
             "testRangeProxyHeadMultiChunkStreaming416AndSeekPreemption",
             "testNetdiskQrStateMachineAndShareResolver",
             "testKeychainNetdiskCrudBackupIsolationAndLanPush",
+            "testAliRefreshTokenIsolationAndHlsProxyPerTargetMinimalHeaders",
+            "testLargeFileRangeIgnoring200BoundedStreamingSeekExitAndPeakMemory",
         ):
             self.assertIn(token, test_text)
+
+        player_src = (TVOS_DIR / "Sources" / "MarcoMovieTV" / "TvPlayerView.swift").read_text(encoding="utf-8")
+        self.assertIn("transportBarCustomMenuItems", player_src)
+        self.assertIn('title: "选集"', player_src)
+
+        for extra_test, required_fns in (
+            (
+                "PlaybackAndMediaEntryTests.swift",
+                (
+                    "testRapidEpisodeSwitchAPlayingBSlowCFast",
+                    "testExitDuringStreamResolutionCancelsAndNeverLoads",
+                    "testDuplicateOutroAndEndCallbacksTriggerAutoAdvanceOnce",
+                    "testPlaybackItemLoadAndMidPlaybackFailureSurfacesRetryAndLineSwitch",
+                    "testLiveSameChannelLineSwitchFirstFailsSecondSucceeds",
+                    "testCrossSiteSameIdIsolationAndDisabledOriginRetention",
+                    "testM3uVodWatched60SecondsResumesAfterRestartFromAllThreeEntries",
+                ),
+            ),
+            (
+                "EpisodePaginationAndFocusTests.swift",
+                (
+                    "testCrossLineJumpFromLineBToLineAEpisode45AscendingAndDescending",
+                    "testMultiLayerBackFocusRestorationPlayerToDetailToPosterWall",
+                ),
+            ),
+        ):
+            p = TVOS_DIR / "Tests" / "MarcoTVCoreTests" / extra_test
+            self.assertTrue(p.is_file(), f"Missing {extra_test}")
+            txt = p.read_text(encoding="utf-8")
+            for fn in required_fns:
+                self.assertIn(fn, txt)
 
     def test_patch_tvos_ipa_macho_and_plist_and_packaging(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

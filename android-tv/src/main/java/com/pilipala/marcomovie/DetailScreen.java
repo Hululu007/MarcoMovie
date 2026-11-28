@@ -781,7 +781,7 @@ final class DetailScreen {
         // 1. Minimalist Apple Line Switcher Header
         LinearLayout lineHeader = a.row();
         lineHeader.setGravity(Gravity.CENTER_VERTICAL);
-        lineHeader.setPadding(a.dp(2), a.dp(2), a.dp(2), a.dp(10));
+        lineHeader.setPadding(0, a.dp(2), 0, a.dp(10));
         TextView lineTitle = a.text("播放线路", 15, 0xfff5f5f7);
         lineTitle.setTypeface(null, Typeface.BOLD);
         lineHeader.addView(lineTitle);
@@ -801,7 +801,7 @@ final class DetailScreen {
         sources.setTag("detail-line-buttons");
         sources.setClipChildren(false);
         sources.setClipToPadding(false);
-        sources.setPadding(a.dp(2), a.dp(2), a.dp(2), a.dp(10));
+        sources.setPadding(0, a.dp(2), 0, a.dp(10));
         panel.addView(sources, new LinearLayout.LayoutParams(-1, -2));
         for (int n = 0; n < video.lines.size(); n++) {
             final int index = n;
@@ -915,7 +915,7 @@ final class DetailScreen {
         // 2. Episode Section Header + Sort + Pagination Controls
         LinearLayout orderRow = a.row();
         orderRow.setGravity(Gravity.CENTER_VERTICAL);
-        orderRow.setPadding(a.dp(2), a.dp(0), a.dp(2), a.dp(10));
+        orderRow.setPadding(0, 0, 0, a.dp(10));
 
         TextView epHeader = a.text("选集", 16, 0xfff5f5f7);
         epHeader.setTypeface(null, Typeface.BOLD);
@@ -925,8 +925,11 @@ final class DetailScreen {
                 a.text(
                         "   共 "
                                 + totalEpisodes
-                                + " 集"
+                                + (scrapedLine.isVarietyLine ? " 期" : " 集")
                                 + (sortByScraped ? " · 已刮削排序" : "")
+                                + (scrapeOverride != null && scrapeOverride.preferRawEpisodeNames
+                                        ? " · 原始名"
+                                        : "")
                                 + (scrapeOverride != null && scrapeOverride.episodeOffset != 0
                                         ? " · 偏移"
                                                 + (scrapeOverride.episodeOffset > 0 ? "+" : "")
@@ -989,7 +992,7 @@ final class DetailScreen {
             pages.setGravity(Gravity.CENTER_VERTICAL);
             pages.setClipChildren(false);
             pages.setClipToPadding(false);
-            pages.setPadding(a.dp(2), a.dp(2), a.dp(2), a.dp(12));
+            pages.setPadding(0, a.dp(2), 0, a.dp(12));
 
             int pageCount = (totalEpisodes + 49) / 50;
             for (int p = 0; p < pageCount; p++) {
@@ -1159,6 +1162,64 @@ final class DetailScreen {
         return 6;
     }
 
+    /**
+     * Horizontal episode grid row that disables baseline alignment and synchronously equalizes all
+     * card heights during measure so mixed 1/2/3-line titles align on exact row edges inside both
+     * the detail shelf and {@link TvDetailHost#showEpisodesDialog}.
+     */
+    static final class EqualHeightEpisodeRow extends LinearLayout {
+        private final int minCardHeightPx;
+
+        EqualHeightEpisodeRow(MainActivity a, int minCardHeightPx) {
+            super(a);
+            this.minCardHeightPx = Math.max(0, minCardHeightPx);
+            setOrientation(HORIZONTAL);
+            setBaselineAligned(false);
+            setGravity(Gravity.TOP);
+            setClipChildren(false);
+            setClipToPadding(false);
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+            int maxButtonH = minCardHeightPx;
+            int count = getChildCount();
+            for (int i = 0; i < count; i++) {
+                View ch = getChildAt(i);
+                if (ch.getVisibility() == GONE) continue;
+                if (ch instanceof Button && ch.getMeasuredHeight() > maxButtonH) {
+                    maxButtonH = ch.getMeasuredHeight();
+                }
+            }
+            if (maxButtonH <= 0) return;
+            int maxRowSpanH = 0;
+            for (int i = 0; i < count; i++) {
+                View ch = getChildAt(i);
+                if (ch.getVisibility() == GONE) continue;
+                if (ch.getMeasuredHeight() != maxButtonH) {
+                    int childWSpec =
+                            MeasureSpec.makeMeasureSpec(
+                                    Math.max(0, ch.getMeasuredWidth()), MeasureSpec.EXACTLY);
+                    int childHSpec = MeasureSpec.makeMeasureSpec(maxButtonH, MeasureSpec.EXACTLY);
+                    ch.measure(childWSpec, childHSpec);
+                }
+                int vertMargins = 0;
+                ViewGroup.LayoutParams rawLp = ch.getLayoutParams();
+                if (rawLp instanceof MarginLayoutParams) {
+                    MarginLayoutParams mlp = (MarginLayoutParams) rawLp;
+                    vertMargins = mlp.topMargin + mlp.bottomMargin;
+                }
+                int span = ch.getMeasuredHeight() + vertMargins;
+                if (span > maxRowSpanH) maxRowSpanH = span;
+            }
+            int finalH =
+                    resolveSize(
+                            maxRowSpanH + getPaddingTop() + getPaddingBottom(), heightMeasureSpec);
+            setMeasuredDimension(getMeasuredWidth(), finalH);
+        }
+    }
+
     static void appendEpisodeCells(
             MainActivity a,
             Cms.Site site,
@@ -1180,15 +1241,12 @@ final class DetailScreen {
         int batchSize = columns * 4;
         int stop = Math.min(end, start + batchSize);
         LinearLayout row = null;
-        final List<LinearLayout> createdRows = new ArrayList<>();
+        final int minCardHeightPx = a.dp(52);
         for (int i = start; i < stop; i++) {
-            if ((i - start) % columns == 0) {
-                row = a.row();
-                row.setGravity(Gravity.TOP);
-                row.setClipChildren(false);
-                row.setClipToPadding(false);
+            int col = (i - start) % columns;
+            if (col == 0) {
+                row = new EqualHeightEpisodeRow(a, minCardHeightPx);
                 cells.addView(row, new LinearLayout.LayoutParams(-1, -2));
-                createdRows.add(row);
             }
             final int originalIndex = orderedIndices.get(i);
             final Cms.Episode episode = line.episodes.get(originalIndex);
@@ -1221,8 +1279,8 @@ final class DetailScreen {
                     label.length() > 12
                             ? (Gravity.START | Gravity.CENTER_VERTICAL)
                             : Gravity.CENTER);
-            button.setMinHeight(a.dp(52));
-            button.setMinimumHeight(a.dp(52));
+            button.setMinHeight(minCardHeightPx);
+            button.setMinimumHeight(minCardHeightPx);
             styleAppleEpisodeCard(a, button, false, isBookmarked);
             button.setOnFocusChangeListener(
                     (view, focus) -> {
@@ -1234,7 +1292,8 @@ final class DetailScreen {
                     });
             LinearLayout.LayoutParams cell =
                     new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-            cell.setMargins(a.dp(5), a.dp(5), a.dp(5), a.dp(6));
+            cell.setMargins(
+                    col == 0 ? 0 : a.dp(5), a.dp(5), col == columns - 1 ? 0 : a.dp(5), a.dp(6));
             row.addView(button, cell);
             if (focusTag != null && focusTag.equals(button.getTag())) button.requestFocus();
         }
@@ -1244,30 +1303,11 @@ final class DetailScreen {
                 for (int n = rem; n < columns; n++) {
                     View spacer = new View(a);
                     LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(0, 1, 1f);
-                    sp.setMargins(a.dp(5), a.dp(5), a.dp(5), a.dp(6));
+                    sp.setMargins(
+                            n == 0 ? 0 : a.dp(5), a.dp(5), n == columns - 1 ? 0 : a.dp(5), a.dp(6));
                     row.addView(spacer, sp);
                 }
             }
-        }
-        // Equalize button heights within each row so multi-line titles align cleanly
-        for (final LinearLayout createdRow : createdRows) {
-            createdRow.post(
-                    () -> {
-                        int maxH = a.dp(52);
-                        for (int c = 0; c < createdRow.getChildCount(); c++) {
-                            View ch = createdRow.getChildAt(c);
-                            if (ch instanceof Button && ch.getHeight() > maxH) {
-                                maxH = ch.getHeight();
-                            }
-                        }
-                        for (int c = 0; c < createdRow.getChildCount(); c++) {
-                            View ch = createdRow.getChildAt(c);
-                            if (ch instanceof Button && ch.getHeight() < maxH) {
-                                ((Button) ch).setMinHeight(maxH);
-                                ((Button) ch).setMinimumHeight(maxH);
-                            }
-                        }
-                    });
         }
         if (stop < end)
             cells.postOnAnimation(

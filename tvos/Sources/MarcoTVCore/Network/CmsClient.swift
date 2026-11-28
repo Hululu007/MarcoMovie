@@ -77,12 +77,18 @@ public final class CmsClient: @unchecked Sendable {
     private var scriptHosts: [String: ScriptHostBackend] = [:]
     private var jarCache: [String: Data] = [:]
 
-    public init(timeoutSeconds: TimeInterval = 15, netdiskResolver: NetdiskShareResolver? = nil) {
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = timeoutSeconds
-        config.timeoutIntervalForResource = timeoutSeconds * 2
-        config.httpShouldSetCookies = false
-        let builtSession = URLSession(configuration: config)
+    public init(
+        timeoutSeconds: TimeInterval = 15,
+        netdiskResolver: NetdiskShareResolver? = nil,
+        session: URLSession? = nil
+    ) {
+        let builtSession: URLSession = session ?? {
+            let config = URLSessionConfiguration.ephemeral
+            config.timeoutIntervalForRequest = timeoutSeconds
+            config.timeoutIntervalForResource = timeoutSeconds * 2
+            config.httpShouldSetCookies = false
+            return URLSession(configuration: config)
+        }()
         self.session = builtSession
         self.netdiskResolver = netdiskResolver ?? NetdiskShareResolver(session: builtSession)
     }
@@ -242,23 +248,45 @@ public final class CmsClient: @unchecked Sendable {
             throw MarcoError.unsupportedSite(site.unsupportedReason)
         }
         if site.isM3uVodApi {
-            return video
+            if !video.lines.isEmpty {
+                return video
+            }
+            let (_, listing) = try CmsParser.parseM3uVodHome(site.ext, origin: site.api)
+            if let matched = listing.videos.first(where: { $0.id == video.id }) {
+                return mergeVideoDetail(summary: video, detail: matched)
+            }
+            throw MarcoError.unsupportedSite("在原片源「\(site.name)」中未找到该 M3U 点播影片，请检查或刷新订阅")
         }
         if site.hasQuickJsAdapter {
             let host = try await resolveJsHost(for: site)
-            if let detailed = try await host.detailContent(ids: [video.id]) {
+            let targetId = video.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let detailed = try await host.detailContent(ids: [targetId]) {
+                let returnedId = detailed.id.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !returnedId.isEmpty && !Self.isGenericPlaceholderVodId(returnedId) && returnedId != targetId {
+                    throw MarcoError.unsupportedSite(
+                        "原片源「\(site.name)」返回了不匹配的影片（期望 ID: \(targetId)，实际 ID: \(returnedId)），原片不可用，观看断点已保留"
+                    )
+                }
                 return mergeVideoDetail(summary: video, detail: detailed)
             }
-            return video
+            if !video.lines.isEmpty {
+                return video
+            }
+            throw MarcoError.unsupportedSite("原片源「\(site.name)」未返回目标影片（ID: \(targetId)），原片不可用，观看断点已保留")
         }
         if !video.lines.isEmpty && !video.description.isEmpty {
             return video
         }
-        let url = appendQuery(site.api, params: [("ac", "detail"), ("ids", video.id)])
+        let targetId = video.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url = appendQuery(site.api, params: [("ac", "detail"), ("ids", targetId)])
         let bytes = try await fetchRawBytes(url: url, headers: site.headers)
         let text = try ConfigDecoder.decodeTextDocument(bytes)
         let listing = try CmsParser.parseListing(text)
-        guard let detail = listing.videos.first else { return video }
+        guard let detail = listing.videos.first(where: {
+            $0.id.trimmingCharacters(in: .whitespacesAndNewlines) == targetId
+        }) else {
+            throw MarcoError.unsupportedSite("原片源「\(site.name)」未返回目标影片（ID: \(targetId)），原片不可用，观看断点已保留")
+        }
         return mergeVideoDetail(summary: video, detail: detail)
     }
 
@@ -426,33 +454,38 @@ public final class CmsClient: @unchecked Sendable {
         let preferredKernel = storage?.preferences().playerKernel ?? "range_proxy"
 
         if !isLiveStream, isDirectContainer, preferredKernel == "range_proxy", let rangeProxy = rangeProxyServer {
+            let host = (finalUrl.host ?? "").lowercased()
+            let isLoopback = (host == "127.0.0.1" || host == "localhost" || host == "::1")
             let policy = NetdiskHeaderPolicy(
                 originUrl: finalUrl,
                 baseHeaders: mergedHeaders,
-                cookieDomains: []
+                cookieDomains: [],
+                allowInsecureLoopbackCredentials: isLoopback
             )
-            let (_, loopbackUrl) = try await rangeProxy.registerStream(url: finalUrl, policy: policy)
+            let (resourceId, loopbackUrl) = try await rangeProxy.registerStream(url: finalUrl, policy: policy)
             return ResolvedPlayback(
                 originalUrl: finalUrl.absoluteString,
                 playableUrl: loopbackUrl,
                 headers: mergedHeaders,
                 isProxied: true,
                 kernelLabel: "\(rangeProxy.workers) 线程分片代理",
-                resolutionBadge: badge
+                resolutionBadge: badge,
+                rangeProxyResourceId: resourceId
             )
         }
 
         let needsHeaderProxy = !mergedHeaders.isEmpty
             && (finalUrl.scheme?.lowercased() == "http" || finalUrl.scheme?.lowercased() == "https")
         if needsHeaderProxy, let proxy = proxyServer {
-            let loopbackUrl = try await proxy.registerStream(url: finalUrl, headers: mergedHeaders)
+            let (sessionId, loopbackUrl) = try await proxy.registerStreamWithId(url: finalUrl, headers: mergedHeaders)
             return ResolvedPlayback(
                 originalUrl: finalUrl.absoluteString,
                 playableUrl: loopbackUrl,
                 headers: mergedHeaders,
                 isProxied: true,
                 kernelLabel: lowerExt == "m3u8" ? "HLS 代理硬解" : "AVKit 硬解",
-                resolutionBadge: badge
+                resolutionBadge: badge,
+                headerProxySessionId: sessionId
             )
         }
         return ResolvedPlayback(
@@ -584,9 +617,115 @@ public final class CmsClient: @unchecked Sendable {
         return comps.string ?? normalized
     }
 
+    public static func isGenericPlaceholderVodId(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || trimmed == "0" || trimmed == "1"
+    }
+
+    public static func isNetdiskOrAggregatedSearchSite(_ site: CmsSite) -> Bool {
+        if site.hasQuickJsAdapter { return true }
+        let hay = "\(site.key) \(site.name) \(site.api)".lowercased()
+        let tokens = [
+            "pan", "wogg", "mogg", "quark", "uc", "ali", "115",
+            "baidu", "tianyi", "123", "pikpak", "pansou", "juju",
+            "szps", "s_zps", "网盘", "玩偶", "木偶", "聚剧", "四盘", "盘搜", "搜盘"
+        ]
+        return tokens.contains { hay.contains($0) }
+    }
+
+    public static func cleanNetdiskSearchTitle(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bracketPattern = #"\s*[\[\【（(][^\]\】）)]*(?:4k|hdr|dv|hfr|高码|臻彩|原盘|蓝光|web|remux|合集|更新|全\d+)[^\]\】）)]*[\]\】）)]"#
+        s = s.replacingOccurrences(of: bracketPattern, with: "", options: [.regularExpression, .caseInsensitive])
+        s = s.replacingOccurrences(of: #"\s*(?:\[[^\]]*\]|【[^】]*】)$"#, with: "", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func normalizedSearchMatchTitle(_ raw: String) -> String {
+        let stripped = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return stripped.replacingOccurrences(
+            of: #"[\s·:：,，.。!！?？\-_—()（）\[\]【】《》]+"#,
+            with: "",
+            options: .regularExpression
+        )
+    }
+
+    public func fetchDetailWithSameSiteRecovery(site: CmsSite, video: CmsVideo) async throws -> CmsVideo {
+        let isAggOrNetdisk = Self.isNetdiskOrAggregatedSearchSite(site)
+        let isPlaceholder = Self.isGenericPlaceholderVodId(video.id)
+        if !isAggOrNetdisk && !isPlaceholder {
+            return try await fetchDetail(site: site, video: video)
+        }
+
+        var initialError: Error?
+        var fetched: CmsVideo?
+        if !isPlaceholder || !video.lines.isEmpty {
+            do {
+                let candidate = try await fetchDetail(site: site, video: video)
+                if candidate.lines.contains(where: { !$0.episodes.isEmpty }) {
+                    return candidate
+                }
+                fetched = candidate
+            } catch {
+                initialError = error
+            }
+        } else {
+            initialError = MarcoError.unsupportedSite("原片源「\(site.name)」的影片标识无效（\(video.id)），正在尝试同站重新匹配")
+        }
+
+        let isDouban = site.api.lowercased().contains("douban") || site.key.lowercased().contains("douban") || site.name.contains("豆瓣")
+        guard !isDouban, site.searchable else {
+            if let fetched { return fetched }
+            if let initialError { throw initialError }
+            return video
+        }
+
+        let seed = fetched ?? video
+        let baseTitle = Self.cleanNetdiskSearchTitle(seed.title.isEmpty ? video.title : seed.title)
+        let normBase = Self.normalizedSearchMatchTitle(baseTitle)
+        if !baseTitle.isEmpty, !normBase.isEmpty {
+            if let results = try? await searchSite(site: site, keyword: baseTitle, page: 1) {
+                var matched = results.filter { cand in
+                    let cleanCandId = cand.id.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !cleanCandId.isEmpty else { return false }
+                    if !seed.year.isEmpty, !cand.year.isEmpty, seed.year != cand.year {
+                        return false
+                    }
+                    let cleanedCandTitle = Self.cleanNetdiskSearchTitle(cand.title)
+                    if !baseTitle.contains("·") && cleanedCandTitle.contains("·") {
+                        return false
+                    }
+                    return Self.normalizedSearchMatchTitle(cleanedCandTitle) == normBase
+                }
+                matched.sort { lhs, rhs in
+                    let lInline = lhs.lines.contains(where: { !$0.episodes.isEmpty }) ? 0 : 1
+                    let rInline = rhs.lines.contains(where: { !$0.episodes.isEmpty }) ? 0 : 1
+                    return lInline < rInline
+                }
+                for cand in matched.prefix(4) {
+                    let hasInline = cand.lines.contains(where: { !$0.episodes.isEmpty })
+                    if let resolved = try? await fetchDetail(site: site, video: cand),
+                       resolved.lines.contains(where: { !$0.episodes.isEmpty })
+                    {
+                        return mergeVideoDetail(summary: seed, detail: resolved)
+                    }
+                    if hasInline {
+                        return mergeVideoDetail(summary: seed, detail: cand)
+                    }
+                }
+            }
+        }
+
+        if let fetched { return fetched }
+        if let initialError { throw initialError }
+        throw MarcoError.unsupportedSite("原片源「\(site.name)」暂未找到可播放片源，观看断点已保留")
+    }
+
     private func mergeVideoDetail(summary: CmsVideo, detail: CmsVideo) -> CmsVideo {
-        CmsVideo(
-            id: detail.id.isEmpty ? summary.id : detail.id,
+        let keepSummaryId = !Self.isGenericPlaceholderVodId(summary.id) && Self.isGenericPlaceholderVodId(detail.id)
+        return CmsVideo(
+            id: (detail.id.isEmpty || keepSummaryId) ? summary.id : detail.id,
             title: detail.title.isEmpty ? summary.title : detail.title,
             poster: detail.poster.isEmpty ? summary.poster : detail.poster,
             remarks: detail.remarks.isEmpty ? summary.remarks : detail.remarks,
