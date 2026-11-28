@@ -148,6 +148,11 @@ class DefaultSecureCredentialStore implements SecureCredentialStore {
     OhosSecureStorageBackend.clearTestFallback();
   }
 
+  /// Removes a single in-memory fallback Keychain slot during test resets.
+  static void deleteTestFallbackKey(String key) {
+    FlutterSecureStorageBackend._unmockedTestFallback.remove(key);
+  }
+
   /// True when a legacy `secure_credentials.enc` file existed on disk, failed decryption
   /// or parsing, and was preserved as `secure_credentials.enc.bak`.
   bool get didLegacyMigrationFail => _legacyMigrationFailed;

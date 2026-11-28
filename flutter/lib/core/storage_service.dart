@@ -1889,7 +1889,8 @@ class StorageService {
     if (tombsChanged) {
       await _writeSyncTombstones(tombs);
     }
-    if (webdavSyncSubs && incoming.any((s) => !s.isEffectivelyPrivate)) {
+    if (webdavSyncSubs &&
+        incoming.any((s) => !s.isEffectivelyPrivate && !_isEmbyCloudSyncDisabled(s))) {
       scheduleAutoWebdavSync(immediate: true, nowMs: nowSync);
     }
 
@@ -1957,7 +1958,7 @@ class StorageService {
     final tombs = _readSyncTombstones();
     var hadPublicRemoval = false;
     for (final old in removed) {
-      if (!old.isEffectivelyPrivate) {
+      if (!old.isEffectivelyPrivate && !_isLocalOnlySubscription(old)) {
         final pubRaw = _publicRawConfig(old.rawContent, old.url);
         final syncKey = canonicalSubscriptionSyncKey(
           old.url,
@@ -1966,6 +1967,11 @@ class StorageService {
         );
         tombs['sub:$syncKey'] = nowSync;
         hadPublicRemoval = true;
+      }
+      final embyKey = _embyKeyForSubscription(old);
+      if (embyKey != null &&
+          !next.any((s) => _embyKeyForSubscription(s) == embyKey)) {
+        await _prefs.remove('emby.account.$embyKey');
       }
     }
     if (hadPublicRemoval) {
@@ -2869,7 +2875,9 @@ class StorageService {
   String get preferredLineName => _prefs.getString(keyPreferredLine) ?? '';
   Future<void> setPreferredSiteKey(String key) async {
     if (key.isNotEmpty && !(loadSavedConfig()?.publicAvailableSites ?? const <CmsSite>[])
-        .any((s) => s.key == key)) throw const FormatException('请选择已启用的公开片源');
+        .any((s) => s.key == key)) {
+      throw const FormatException('请选择已启用的公开片源');
+    }
     await _prefs.setString(keyPreferredSite, key);
   }
   Future<void> setPreferredLineName(String name) => _prefs.setString(keyPreferredLine, name);
@@ -4578,7 +4586,10 @@ class StorageService {
     if (raw.isEmpty) return raw;
     final parsed = CmsParser.parseConfig(raw, origin: origin);
     if (parsed.sites.every((s) => s.isEffectivelyPrivate) &&
-        parsed.lives.every((s) => s.isEffectivelyPrivate) && parsed.depots.isEmpty) return '';
+        parsed.lives.every((s) => s.isEffectivelyPrivate) &&
+        parsed.depots.isEmpty) {
+      return '';
+    }
     if (!parsed.sites.any((s) => s.isEffectivelyPrivate) && !parsed.lives.any((s) => s.isEffectivelyPrivate)) return raw;
     bool privateItem(dynamic item) {
       if (item is! Map) return false;
@@ -4598,8 +4609,11 @@ class StorageService {
       if (value is Map) {
         if (value['api'] != null && privateItem(value)) return '{"sites":[]}';
         for (final key in ['sites', 'lives']) {
-          if (value[key] is List) value[key] = (value[key] as List).where((entry) => !privateItem(entry)).toList();
-          else if (value[key] is Map && privateItem(value[key])) value[key] = [];
+          if (value[key] is List) {
+            value[key] = (value[key] as List).where((entry) => !privateItem(entry)).toList();
+          } else if (value[key] is Map && privateItem(value[key])) {
+            value[key] = [];
+          }
         }
         return jsonEncode(value);
       }
@@ -5577,13 +5591,58 @@ class StorageService {
     return trimmedUrl.isEmpty && rawContent.contains('file:///');
   }
 
+  static String? _embyKeyForSubscription(SubscriptionEntry s) {
+    if (s.id.startsWith('emby_') && s.id.length > 5) {
+      return s.id.substring(5);
+    }
+    final match =
+        RegExp(r'emby://account/([A-Za-z0-9_-]+)').firstMatch(s.rawContent);
+    return match?.group(1);
+  }
+
+  bool _isEmbyCloudSyncDisabled(SubscriptionEntry s) {
+    final key = _embyKeyForSubscription(s);
+    if (key == null || key.isEmpty) return false;
+    final raw = _prefs.getString('emby.account.$key');
+    if (raw == null || raw.trim().isEmpty) return false;
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is Map && decoded['allowCloudSync'] == false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool _isLocalOnlySubscription(SubscriptionEntry s) =>
+      _isLocalFileSubscription(s.url, s.rawContent) ||
+      _isEmbyCloudSyncDisabled(s);
+
+  Map<String, dynamic> _collectPublicEmbyAccounts(
+    List<SubscriptionEntry> pubSubs,
+  ) {
+    final out = <String, dynamic>{};
+    for (final s in pubSubs) {
+      final key = _embyKeyForSubscription(s);
+      if (key == null || key.isEmpty) continue;
+      final raw = _prefs.getString('emby.account.$key');
+      if (raw == null || raw.trim().isEmpty) continue;
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map && decoded['allowCloudSync'] != false) {
+          out[key] = Map<String, dynamic>.from(decoded);
+        }
+      } catch (_) {}
+    }
+    return out;
+  }
+
   List<SubscriptionEntry> _collectPublicSyncSubscriptions() {
     final result = <SubscriptionEntry>[];
     final seenSyncKeys = <String>{};
     if (_hasAuthoritativeSubscriptions) {
       for (final s in getSubscriptions()) {
         if (s.isEffectivelyPrivate) continue;
-        if (_isLocalFileSubscription(s.url, s.rawContent)) continue;
+        if (_isLocalOnlySubscription(s)) continue;
         final pubRaw = _publicRawConfig(s.rawContent, s.url);
         if (pubRaw.trim().isEmpty) continue;
         final syncKey = canonicalSubscriptionSyncKey(
@@ -5758,6 +5817,7 @@ class StorageService {
   String exportSyncPayload({
     int? nowMs,
     List<dynamic>? preservedRemoteSubscriptions,
+    Map<String, dynamic>? preservedRemoteEmbyAccounts,
     List<dynamic>? preservedRemoteHistory,
     List<dynamic>? preservedRemoteFavorites,
     Map<String, int>? preservedRemoteTombstones,
@@ -5793,6 +5853,7 @@ class StorageService {
       }
     }
     List<dynamic>? subsPayload;
+    Map<String, dynamic>? embyAccountsPayload;
     if (webdavSyncSubs) {
       final pubSubs = _collectPublicSyncSubscriptions();
       subsPayload = [
@@ -5807,8 +5868,18 @@ class StorageService {
             'isPrivate': false,
           },
       ];
-    } else if (preservedRemoteSubscriptions != null) {
-      subsPayload = preservedRemoteSubscriptions;
+      final collectedEmby = _collectPublicEmbyAccounts(pubSubs);
+      if (collectedEmby.isNotEmpty) {
+        embyAccountsPayload = collectedEmby;
+      }
+    } else {
+      if (preservedRemoteSubscriptions != null) {
+        subsPayload = preservedRemoteSubscriptions;
+      }
+      if (preservedRemoteEmbyAccounts != null &&
+          preservedRemoteEmbyAccounts.isNotEmpty) {
+        embyAccountsPayload = preservedRemoteEmbyAccounts;
+      }
     }
     return jsonEncode({
       'schema': syncSchema,
@@ -5817,6 +5888,7 @@ class StorageService {
       'watch_history': hist,
       'favorites': favs,
       if (subsPayload != null) 'subscriptions': subsPayload,
+      if (embyAccountsPayload != null) 'emby_accounts': embyAccountsPayload,
       'tombstones': _boundSyncTombstones(tombs),
     });
   }
@@ -5918,7 +5990,9 @@ class StorageService {
     final remoteFavs = <FavoriteEntry>[];
     final remoteTombs = <String, int>{};
     final remoteSubsRaw = <Map<String, dynamic>>[];
+    final remoteEmbyAccounts = <String, Map<String, dynamic>>{};
     List<dynamic>? preservedRemoteSubs;
+    Map<String, dynamic>? preservedRemoteEmbyAccounts;
     List<dynamic>? preservedRemoteHist;
     List<dynamic>? preservedRemoteFavs;
 
@@ -5960,6 +6034,21 @@ class StorageService {
         preservedRemoteSubs = rs;
         for (final item in rs.whereType<Map>()) {
           remoteSubsRaw.add(Map<String, dynamic>.from(item));
+        }
+      }
+      final re = decoded['emby_accounts'];
+      if (re is Map) {
+        for (final entry in re.entries) {
+          final key = entry.key.toString().trim();
+          final val = entry.value;
+          if (key.isNotEmpty && val is Map) {
+            remoteEmbyAccounts[key] = Map<String, dynamic>.from(val);
+          }
+        }
+        if (remoteEmbyAccounts.isNotEmpty) {
+          preservedRemoteEmbyAccounts = Map<String, dynamic>.from(
+            remoteEmbyAccounts,
+          );
         }
       }
       final rt = decoded['tombstones'];
@@ -6053,8 +6142,16 @@ class StorageService {
                   _isLocalFileSubscription(s.url, s.rawContent),
             )
             .toList();
+        final localEmbyDisabledSubs = currentAll
+            .where(
+              (s) =>
+                  !s.isEffectivelyPrivate &&
+                  !_isLocalFileSubscription(s.url, s.rawContent) &&
+                  _isEmbyCloudSyncDisabled(s),
+            )
+            .toList();
         final privateSyncKeys = <String>{
-          for (final p in localPrivateSubs)
+          for (final p in [...localPrivateSubs, ...localEmbyDisabledSubs])
             if (p.rawContent.isNotEmpty)
               canonicalSubscriptionSyncKey(
                 p.url,
@@ -6065,6 +6162,7 @@ class StorageService {
         final reservedIds = <String>{
           for (final p in localPrivateSubs) p.id,
           for (final f in localFileSubs) f.id,
+          for (final e in localEmbyDisabledSubs) e.id,
         };
 
         final currentPublic = _collectPublicSyncSubscriptions();
@@ -6184,18 +6282,57 @@ class StorageService {
 
         final mergedPublic = subByKey.values.toList();
         finalSubCount = mergedPublic.length;
+        final activeEmbyKeys = <String>{
+          for (final s in mergedPublic)
+            if (_embyKeyForSubscription(s) case final k?) k,
+        };
+        var embyAccountsChanged = false;
+        for (final key in activeEmbyKeys) {
+          final remoteAcc = remoteEmbyAccounts[key];
+          if (remoteAcc == null || remoteAcc['allowCloudSync'] == false) {
+            continue;
+          }
+          final prefKey = 'emby.account.$key';
+          final existingRaw = _prefs.getString(prefKey);
+          if (existingRaw == null || existingRaw.trim().isEmpty) {
+            await _prefs.setString(prefKey, jsonEncode(remoteAcc));
+            embyAccountsChanged = true;
+            continue;
+          }
+          try {
+            final localDecoded = jsonDecode(existingRaw);
+            if (localDecoded is Map) {
+              if (localDecoded['allowCloudSync'] == false) continue;
+              final localTs = (localDecoded['updatedAt'] as num?)?.toInt() ?? 0;
+              final remoteTs = (remoteAcc['updatedAt'] as num?)?.toInt() ?? 0;
+              if (remoteTs > localTs) {
+                await _prefs.setString(prefKey, jsonEncode(remoteAcc));
+                embyAccountsChanged = true;
+              }
+            }
+          } catch (_) {
+            await _prefs.setString(prefKey, jsonEncode(remoteAcc));
+            embyAccountsChanged = true;
+          }
+        }
         final afterSubsDigest = _subscriptionSnapshotDigest(mergedPublic);
         if (afterSubsDigest != beforeSubsDigest ||
+            embyAccountsChanged ||
             (!hadRegistry && mergedPublic.isNotEmpty)) {
           subscriptionsChanged = true;
           await saveSubscriptions([
             ...mergedPublic,
             ...localFileSubs,
+            ...localEmbyDisabledSubs,
             ...localPrivateSubs,
           ]);
           final primary = mergedPublic.isNotEmpty
               ? mergedPublic.first
-              : (localFileSubs.isNotEmpty ? localFileSubs.first : null);
+              : (localFileSubs.isNotEmpty
+                  ? localFileSubs.first
+                  : (localEmbyDisabledSubs.isNotEmpty
+                      ? localEmbyDisabledSubs.first
+                      : null));
           await _prefs.setString(keyRawConfig, primary?.rawContent ?? '');
           await _prefs.setString(keyOrigin, primary?.url ?? '');
           await _prefs.setString(keyDepots, '[]');
@@ -6249,6 +6386,7 @@ class StorageService {
         final payloadJson = exportSyncPayload(
           nowMs: now,
           preservedRemoteSubscriptions: preservedRemoteSubs,
+          preservedRemoteEmbyAccounts: preservedRemoteEmbyAccounts,
           preservedRemoteHistory: preservedRemoteHist,
           preservedRemoteFavorites: preservedRemoteFavs,
           preservedRemoteTombstones: remoteTombs,
@@ -6386,6 +6524,7 @@ class StorageService {
       final payloadJson = exportSyncPayload(
         nowMs: now,
         preservedRemoteSubscriptions: preservedRemoteSubs,
+        preservedRemoteEmbyAccounts: preservedRemoteEmbyAccounts,
       );
       return (
         historyCount: mergedPublicHist.length,

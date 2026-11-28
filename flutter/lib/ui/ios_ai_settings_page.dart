@@ -338,6 +338,7 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
   bool _oauthNoticeIsError = false;
   String? _cacheStatusNotice;
   String? _labGateError;
+  bool _hydratingGate = false;
   bool _refreshingQuota = false;
   bool _refreshingApiBalance = false;
 
@@ -352,51 +353,59 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
   void initState() {
     super.initState();
     _service = widget.service ?? AiService.instance;
+    _hydratingGate = !_service.isLoaded && !_service.isLabUnlocked;
     _service.addListener(_onServiceChanged);
     unawaited(_loadInitialState());
   }
 
   Future<void> _loadInitialState() async {
-    await _service.ensureLoaded();
-    final key = await _service.readApiKey();
-    if (!mounted) return;
-    final cfg = _service.config;
-    setState(() {
-      _config = cfg;
-      if (_baseUrlCtrl.text != cfg.baseUrl) {
-        _baseUrlCtrl.text = cfg.baseUrl;
+    try {
+      await _service.ensureLoaded();
+      final key = await _service.readApiKey();
+      if (!mounted) return;
+      final cfg = _service.config;
+      setState(() {
+        _hydratingGate = false;
+        _config = cfg;
+        if (_baseUrlCtrl.text != cfg.baseUrl) {
+          _baseUrlCtrl.text = cfg.baseUrl;
+        }
+        if (_apiKeyCtrl.text != key) {
+          _apiKeyCtrl.text = key;
+        }
+        if (_modelCtrl.text != cfg.model) {
+          _modelCtrl.text = cfg.model;
+        }
+        if (_fastModelCtrl.text != cfg.fastModel) {
+          _fastModelCtrl.text = cfg.fastModel;
+        }
+        final budgetText =
+            cfg.monthlyTokenBudget > 0 ? '${cfg.monthlyTokenBudget}' : '';
+        if (_budgetCtrl.text != budgetText) {
+          _budgetCtrl.text = budgetText;
+        }
+        _lastConnectionFingerprint = _currentConnectionFingerprint(cfg);
+        _lastModelCatalogFingerprint = _currentModelCatalogFingerprint(cfg);
+        _lastSeenByoEndpointGen = _service.byoEndpointGen;
+        _lastSeenOAuthSessionGen = _service.oauthSessionGen;
+      });
+      if (!_service.isPrivacySessionActive &&
+          _service.isLabUnlocked &&
+          _service.isExperimentalOAuthAllowed &&
+          _service.hasOAuthSession) {
+        unawaited(_refreshQuotaSilently());
       }
-      if (_apiKeyCtrl.text != key) {
-        _apiKeyCtrl.text = key;
+      if (!_service.isPrivacySessionActive &&
+          _service.isLabUnlocked &&
+          cfg.authMode == AiAuthMode.apiKey &&
+          cfg.baseUrl.trim().isNotEmpty &&
+          key.trim().isNotEmpty) {
+        unawaited(_refreshApiBalanceSilently());
       }
-      if (_modelCtrl.text != cfg.model) {
-        _modelCtrl.text = cfg.model;
+    } finally {
+      if (mounted && _hydratingGate) {
+        setState(() => _hydratingGate = false);
       }
-      if (_fastModelCtrl.text != cfg.fastModel) {
-        _fastModelCtrl.text = cfg.fastModel;
-      }
-      final budgetText =
-          cfg.monthlyTokenBudget > 0 ? '${cfg.monthlyTokenBudget}' : '';
-      if (_budgetCtrl.text != budgetText) {
-        _budgetCtrl.text = budgetText;
-      }
-      _lastConnectionFingerprint = _currentConnectionFingerprint(cfg);
-      _lastModelCatalogFingerprint = _currentModelCatalogFingerprint(cfg);
-      _lastSeenByoEndpointGen = _service.byoEndpointGen;
-      _lastSeenOAuthSessionGen = _service.oauthSessionGen;
-    });
-    if (!_service.isPrivacySessionActive &&
-        _service.isLabUnlocked &&
-        _service.isExperimentalOAuthAllowed &&
-        _service.hasOAuthSession) {
-      unawaited(_refreshQuotaSilently());
-    }
-    if (!_service.isPrivacySessionActive &&
-        _service.isLabUnlocked &&
-        cfg.authMode == AiAuthMode.apiKey &&
-        cfg.baseUrl.trim().isNotEmpty &&
-        key.trim().isNotEmpty) {
-      unawaited(_refreshApiBalanceSilently());
     }
   }
 
@@ -450,9 +459,23 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
       _testResult = null;
     }
     setState(() {
+      if (_service.isLoaded && _hydratingGate) {
+        _hydratingGate = false;
+      }
+      final modelHealed =
+          _config.model != cfg.model ||
+              (_modelCtrl.text.trim() == _config.model &&
+                  cfg.model.trim().isNotEmpty);
+      final fastHealed =
+          _config.fastModel != cfg.fastModel &&
+              _fastModelCtrl.text.trim() == _config.fastModel;
       _config = cfg;
-      if (_modelCtrl.text.trim().isEmpty && cfg.model.isNotEmpty) {
+      if ((_modelCtrl.text.trim().isEmpty && cfg.model.isNotEmpty) ||
+          (modelHealed && _modelCtrl.text.trim() != cfg.model)) {
         _modelCtrl.text = cfg.model;
+      }
+      if (fastHealed && _fastModelCtrl.text.trim() != cfg.fastModel) {
+        _fastModelCtrl.text = cfg.fastModel;
       }
       _lastConnectionFingerprint = nextConnFp;
       _lastModelCatalogFingerprint = nextCatalogFp;
@@ -806,6 +829,16 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
     }
 
     if (!isCatalogStillValid()) return;
+    final svcCfg = _service.config;
+    if (svcCfg.authMode == AiAuthMode.codexOAuth) {
+      if (AiService.isDisallowedCodexModelSlug(_modelCtrl.text) &&
+          svcCfg.model.isNotEmpty) {
+        _modelCtrl.text = svcCfg.model;
+      }
+      if (AiService.isDisallowedCodexModelSlug(_fastModelCtrl.text)) {
+        _fastModelCtrl.text = svcCfg.fastModel;
+      }
+    }
     final liveCount = models.where((m) => !m.isLocalFallback).length;
     setState(() {
       _fetchingModels = false;
@@ -1818,9 +1851,14 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
             alignment: Alignment.topCenter,
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 740),
-              child: !_service.isLabUnlocked
-                  ? _buildLabPasscodeGateView(context)
-                  : Column(
+              child: _hydratingGate && !_service.isLabUnlocked
+                  ? const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 48),
+                      child: Center(child: CupertinoActivityIndicator()),
+                    )
+                  : !_service.isLabUnlocked
+                      ? _buildLabPasscodeGateView(context)
+                      : Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         _buildLabUnlockedHeaderBanner(context),
@@ -1950,6 +1988,20 @@ class _IosAiSettingsPageState extends State<IosAiSettingsPage> {
                               onChanged: (val) {
                                 final next = _draftConfigFromControllers()
                                     .copyWith(smartDiagnosticsEnabled: val);
+                                unawaited(_persistDraft(overrideConfig: next));
+                              },
+                            ),
+                            _buildSwitchCell(
+                              rowKey:
+                                  const ValueKey('ios-ai-danmumatch-switch'),
+                              icon: CupertinoIcons.captions_bubble,
+                              iconColor: AppleColors.systemCyan,
+                              title: 'AI 全网弹幕搜索与自动匹配',
+                              subtitle: '从公开弹幕源检索匹配当前剧集的弹幕并智能校对时间轴',
+                              value: _config.danmuMatchEnabled,
+                              onChanged: (val) {
+                                final next = _draftConfigFromControllers()
+                                    .copyWith(danmuMatchEnabled: val);
                                 unawaited(_persistDraft(overrideConfig: next));
                               },
                             ),
@@ -2951,6 +3003,12 @@ class _IosAiUsageDetailPageState extends State<IosAiUsageDetailPage> {
       case 'diagnostics':
       case 'ai_diag_v1':
         return '播放与源故障排障';
+      case 'ai_danmu_match':
+      case 'ai_danmu_match_v1':
+        return 'AI 全网弹幕匹配';
+      case 'ai_danmu_offset':
+      case 'ai_danmu_offset_v1':
+        return 'AI 弹幕时间轴校对';
       case 'connection_test':
       case 'ping':
         return '接口连接测试';

@@ -618,6 +618,10 @@ class _DetailScreenState extends State<DetailScreen> {
       unawaited(MediaBadges.ensureInitialized().then((_) {
         if (mounted) setState(() {});
       }));
+      if (_isIosDetail) {
+        AiService.instance.addListener(_onIosDetailAiStateChanged);
+        unawaited(AiService.instance.ensureLoaded());
+      }
       if (!isWindowsDesktopUi) {
         unawaited(PlayerEnterTransition.prewarmShader());
       }
@@ -759,6 +763,7 @@ class _DetailScreenState extends State<DetailScreen> {
       });
     }
     _cancelDetailWork();
+    AiService.instance.removeListener(_onIosDetailAiStateChanged);
     PosterLoader.metadataRevision.removeListener(_onExternalMetadataRevision);
     widget.storage.watchHistoryRevision.removeListener(_onWatchHistoryChanged);
     widget.storage.seriesScrapeRevision.removeListener(_onSeriesScrapeRevision);
@@ -772,6 +777,11 @@ class _DetailScreenState extends State<DetailScreen> {
     _previewCardsScrollController.dispose();
     _pageRangeScrollController.dispose();
     super.dispose();
+  }
+
+  void _onIosDetailAiStateChanged() {
+    if (!mounted) return;
+    setState(() {});
   }
 
   void _onWatchHistoryChanged() {

@@ -1894,6 +1894,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       widget.storage.danmuSourcesRevision.addListener(
         _onDanmuSourcesRevisionChanged,
       );
+      AiService.instance.addListener(_onPlayerAiStateChanged);
+      unawaited(AiService.instance.ensureLoaded());
     }
     IosLiquidGlassBridge.reduceTransparencyNotifier.addListener(
       _onReduceTransparencyChanged,
@@ -6630,6 +6632,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       widget.storage.danmuSourcesRevision.removeListener(
         _onDanmuSourcesRevisionChanged,
       );
+      AiService.instance.removeListener(_onPlayerAiStateChanged);
     }
     _castController.removeListener(_onCastStateChanged);
     _castController.dispose();
@@ -7355,6 +7358,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   void _onDanmuSourcesRevisionChanged() {
     if (!mounted || OhosRuntime.isOhos) return;
     unawaited(_reloadDanmuSettingsFromStorage());
+  }
+
+  void _onPlayerAiStateChanged() {
+    if (!mounted) return;
+    setState(() {});
   }
 
   Future<void> _reloadDanmuSettingsFromStorage() async {
@@ -8150,6 +8158,14 @@ class _PlayerScreenState extends State<PlayerScreen>
             episodeOffset: matchCtx?.episodeOffset ?? _activeDanmuEpisodeOffset,
             initialSearchKeyword: matchCtx?.effectiveTitle ?? _activeVideo.title,
             initialEpisodeNumber: matchCtx?.scrapedEpisodeNumber,
+            onOpenAiMatch: (!_isLiveStream &&
+                    _canUsePlayerAi &&
+                    AiService.instance.config.danmuMatchEnabled)
+                ? () {
+                    Navigator.of(ctx).pop();
+                    _openAiDanmuMatchSheet();
+                  }
+                : null,
             onEpisodeOffsetChanged: _isLiveStream
                 ? null
                 : (offset) {
@@ -8182,6 +8198,14 @@ class _PlayerScreenState extends State<PlayerScreen>
         episodeOffset: matchCtx?.episodeOffset ?? _activeDanmuEpisodeOffset,
         initialSearchKeyword: matchCtx?.effectiveTitle ?? _activeVideo.title,
         initialEpisodeNumber: matchCtx?.scrapedEpisodeNumber,
+        onOpenAiMatch: (!_isLiveStream &&
+                _canUsePlayerAi &&
+                AiService.instance.config.danmuMatchEnabled)
+            ? () {
+                Navigator.of(context).pop();
+                _openAiDanmuMatchSheet();
+              }
+            : null,
         onEpisodeOffsetChanged: _isLiveStream
             ? null
             : (offset) {
@@ -15487,6 +15511,15 @@ class _PlayerScreenState extends State<PlayerScreen>
         section: 2,
       ),
       if (_canUsePlayerAi) ...[
+        if (!live && AiService.instance.config.danmuMatchEnabled)
+          const AppleNativePickerOption<String>(
+            value: 'ai_danmu_match',
+            title: 'AI 全网搜弹幕',
+            subtitle: '自动识别剧集并检索全网弹幕与时间轴校对',
+            symbol: 'sparkles',
+            section: 3,
+            sectionTitle: 'AI 观影助手',
+          ),
         if (!live && AiService.instance.config.subtitleTranslateEnabled)
           AppleNativePickerOption<String>(
             value: 'ai_subtitle_studio',
@@ -15607,6 +15640,8 @@ class _PlayerScreenState extends State<PlayerScreen>
           }
         case 'ai_subtitle_studio':
           _openAiSubtitleStudio();
+        case 'ai_danmu_match':
+          _openAiDanmuMatchSheet();
         case 'ai_watch_brief':
           unawaited(
             showIosAiWatchBriefSheet(
@@ -15884,6 +15919,90 @@ class _PlayerScreenState extends State<PlayerScreen>
       !widget.site.isEffectivelyPrivate &&
       !AiService.instance.isPrivacySessionActive &&
       AiService.instance.isLabUnlocked;
+
+  void _openAiDanmuMatchSheet() {
+    if (_isLiveStream ||
+        !_canUsePlayerAi ||
+        !AiService.instance.config.danmuMatchEnabled) {
+      return;
+    }
+    final session = _playSession;
+    final epIdx = _episodeIndex;
+    final lineIdx = _lineIndex;
+    final matchCtx = _resolveDanmuMatchContext();
+    final rawSubLines = _currentActiveEmbeddedSubtitleLines;
+    final sampleSubtitles = <({int timeMs, String text})>[
+      for (final line in rawSubLines.take(15))
+        (
+          timeMs: _position.inMilliseconds,
+          text: line,
+        ),
+    ];
+    unawaited(
+      showIosAiDanmuMatchSheet(
+        context,
+        title: matchCtx.effectiveTitle.isNotEmpty
+            ? matchCtx.effectiveTitle
+            : _activeVideo.title,
+        episodeName: _currentEpisode.name,
+        episodeNumber: matchCtx.scrapedEpisodeNumber ?? (_episodeIndex + 1),
+        year: _activeVideo.year,
+        durationSec: matchCtx.query.durationSec > 0
+            ? matchCtx.query.durationSec
+            : _duration.inSeconds,
+        currentDanmuSettings: _danmuSettings,
+        initialOffsetMs: _danmuSettings.timeOffsetMs,
+        sampleSubtitles: sampleSubtitles,
+        onApplyDanmu: (cand, items) {
+          if (!mounted ||
+              session != _playSession ||
+              epIdx != _episodeIndex ||
+              lineIdx != _lineIndex) {
+            return;
+          }
+          if (_danmuProvider == null || _danmuCache == null) {
+            _rebuildDanmuPipeline();
+          }
+          _danmuMatchToken?.cancel();
+          _danmuMatchToken = null;
+          _danmuSessionGen++;
+          final tickMs = _position.inMilliseconds > 0
+              ? _position.inMilliseconds
+              : (_pendingResumeMs > 0
+                  ? _pendingResumeMs
+                  : _lastKnownPositionMs);
+          _danmuCache?.bindPreloadedItems(
+            items,
+            sessionId: 'ai_online:${cand.sourceKey}:${cand.fetchTarget}',
+            initialPositionMs: tickMs,
+            playing: _playing,
+          );
+          _matchedDanmuCandidate = cand.toDanmuCandidate();
+          _pendingDanmuCandidates = const <DanmuCandidate>[];
+          _danmuBoundForEpisode = true;
+          if (!_danmuSettings.enabled) {
+            _applyDanmuSettings(
+              _danmuSettings.copyWith(enabled: true),
+              persist: true,
+            );
+          } else {
+            _danmuCache?.onPlaybackTick(tickMs, playing: _playing);
+            setState(() {});
+          }
+          _showHud('AI 已匹配加载 ${items.length} 条弹幕');
+        },
+        onUpdateOffsetMs: (nextOffsetMs) {
+          if (!mounted || session != _playSession) return;
+          _applyDanmuSettings(
+            _danmuSettings.copyWith(
+              timeOffsetMs: nextOffsetMs.clamp(-30000, 30000),
+            ),
+            persist: true,
+          );
+        },
+      ),
+    );
+  }
 
   void _openAiSubtitleStudio() {
     if (!_canUsePlayerAi) return;
@@ -16353,6 +16472,14 @@ class _PlayerScreenState extends State<PlayerScreen>
         symbol: 'slider.horizontal.3',
         section: 0,
       ),
+      if (_canUsePlayerAi && AiService.instance.config.danmuMatchEnabled)
+        const AppleNativePickerOption<String>(
+          value: 'ai_danmu_match',
+          title: 'AI 全网搜弹幕',
+          subtitle: '自动识别剧集并检索全网弹幕与时间轴校对',
+          symbol: 'sparkles',
+          section: 0,
+        ),
       const AppleNativePickerOption<String>(
         value: 'subtitle_tracks',
         title: '切换片源内嵌字幕',
@@ -16379,6 +16506,8 @@ class _PlayerScreenState extends State<PlayerScreen>
           _handleDanmuToggle();
         case 'danmu_settings':
           _handleDanmuSettingsTap(anchorRect: anchorRect);
+        case 'ai_danmu_match':
+          _openAiDanmuMatchSheet();
         case 'subtitle_tracks':
           _showSubtitleTracksSheet();
         case 'ai_subtitle':
@@ -16500,6 +16629,15 @@ class _PlayerScreenState extends State<PlayerScreen>
     _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
     final cfg = AiService.instance.config;
     final options = <AppleNativePickerOption<String>>[
+      if (cfg.danmuMatchEnabled)
+        const AppleNativePickerOption<String>(
+          value: 'ai_danmu_match',
+          title: 'AI 全网搜弹幕',
+          subtitle: '自动识别剧集并检索全网弹幕与时间轴校对',
+          symbol: 'sparkles',
+          section: 0,
+          sectionTitle: 'AI 观影助手',
+        ),
       if (cfg.subtitleTranslateEnabled)
         AppleNativePickerOption<String>(
           value: 'ai_subtitle_studio',
@@ -16565,6 +16703,8 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     void runPicked(String action) {
       switch (action) {
+        case 'ai_danmu_match':
+          _openAiDanmuMatchSheet();
         case 'ai_subtitle_studio':
           _openAiSubtitleStudio();
         case 'ai_watch_brief':

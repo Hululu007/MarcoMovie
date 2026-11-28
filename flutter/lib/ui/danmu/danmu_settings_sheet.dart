@@ -29,6 +29,7 @@ class DanmuSettingsSheet extends StatefulWidget {
   final ValueChanged<DanmuCandidate>? onSelectCandidate;
   final String initialSearchKeyword;
   final int? initialEpisodeNumber;
+  final VoidCallback? onOpenAiMatch;
 
   const DanmuSettingsSheet({
     super.key,
@@ -42,6 +43,7 @@ class DanmuSettingsSheet extends StatefulWidget {
     this.onSelectCandidate,
     this.initialSearchKeyword = '',
     this.initialEpisodeNumber,
+    this.onOpenAiMatch,
   });
 
   static Color resolveSurfaceColor(BuildContext context) {
@@ -65,6 +67,7 @@ class DanmuSettingsSheet extends StatefulWidget {
     ValueChanged<DanmuCandidate>? onSelectCandidate,
     String initialSearchKeyword = '',
     int? initialEpisodeNumber,
+    VoidCallback? onOpenAiMatch,
   }) async {
     if (OhosRuntime.isOhos) return;
     await showIos27LiquidSheet<void>(
@@ -81,6 +84,7 @@ class DanmuSettingsSheet extends StatefulWidget {
         onSelectCandidate: onSelectCandidate,
         initialSearchKeyword: initialSearchKeyword,
         initialEpisodeNumber: initialEpisodeNumber,
+        onOpenAiMatch: onOpenAiMatch,
       ),
     );
   }
@@ -735,6 +739,12 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
                         FilledButton.tonal(
                           onPressed: _openManualMatchDialog,
                           child: const Text('手动匹配弹幕'),
+                        ),
+                      if (widget.onOpenAiMatch != null)
+                        FilledButton.tonal(
+                          key: const ValueKey('danmu-ai-online-match-btn'),
+                          onPressed: widget.onOpenAiMatch,
+                          child: const Text('AI 全网搜弹幕'),
                         ),
                     ],
                   ),

@@ -76,6 +76,8 @@ class AiModelOption {
   final String description;
   final int priority;
   final bool isLocalFallback;
+  final String defaultReasoningEffort;
+  final List<String>? supportedReasoningEfforts;
 
   const AiModelOption({
     required this.id,
@@ -83,6 +85,8 @@ class AiModelOption {
     this.description = '',
     this.priority = 1000,
     this.isLocalFallback = false,
+    this.defaultReasoningEffort = '',
+    this.supportedReasoningEfforts,
   }) : displayName = (displayName == null || displayName == '') ? id : displayName;
 
   bool get hasDistinctDisplayName =>
@@ -99,6 +103,8 @@ class AiModelOption {
         description: description,
         priority: nextPriority,
         isLocalFallback: isLocalFallback ?? this.isLocalFallback,
+        defaultReasoningEffort: defaultReasoningEffort,
+        supportedReasoningEfforts: supportedReasoningEfforts,
       );
 }
 
@@ -241,6 +247,7 @@ class AiConfig {
   final bool spoilerFreeRecapEnabled;
   final bool moodCurationEnabled;
   final bool smartDiagnosticsEnabled;
+  final bool danmuMatchEnabled;
   final List<AiCustomSkill> customSkills;
   final bool picksEnabled;
   final bool firstUseConsentAccepted;
@@ -261,6 +268,7 @@ class AiConfig {
     this.spoilerFreeRecapEnabled = true,
     this.moodCurationEnabled = true,
     this.smartDiagnosticsEnabled = true,
+    this.danmuMatchEnabled = true,
     this.customSkills = const <AiCustomSkill>[],
     this.picksEnabled = true,
     this.firstUseConsentAccepted = false,
@@ -294,6 +302,7 @@ class AiConfig {
     bool? spoilerFreeRecapEnabled,
     bool? moodCurationEnabled,
     bool? smartDiagnosticsEnabled,
+    bool? danmuMatchEnabled,
     List<AiCustomSkill>? customSkills,
     bool? picksEnabled,
     bool? firstUseConsentAccepted,
@@ -320,6 +329,7 @@ class AiConfig {
       moodCurationEnabled: moodCurationEnabled ?? this.moodCurationEnabled,
       smartDiagnosticsEnabled:
           smartDiagnosticsEnabled ?? this.smartDiagnosticsEnabled,
+      danmuMatchEnabled: danmuMatchEnabled ?? this.danmuMatchEnabled,
       customSkills: customSkills ?? this.customSkills,
       picksEnabled: picksEnabled ?? this.picksEnabled,
       firstUseConsentAccepted:
@@ -343,6 +353,7 @@ class AiConfig {
         'spoilerFreeRecapEnabled': spoilerFreeRecapEnabled,
         'moodCurationEnabled': moodCurationEnabled,
         'smartDiagnosticsEnabled': smartDiagnosticsEnabled,
+        'danmuMatchEnabled': danmuMatchEnabled,
         if (customSkills.isNotEmpty)
           'customSkills': customSkills.map((s) => s.toJson()).toList(),
         'picksEnabled': picksEnabled,
@@ -383,6 +394,7 @@ class AiConfig {
       spoilerFreeRecapEnabled: json['spoilerFreeRecapEnabled'] != false,
       moodCurationEnabled: json['moodCurationEnabled'] != false,
       smartDiagnosticsEnabled: json['smartDiagnosticsEnabled'] != false,
+      danmuMatchEnabled: json['danmuMatchEnabled'] != false,
       customSkills: List<AiCustomSkill>.unmodifiable(parsedSkills),
       picksEnabled: json['picksEnabled'] != false,
       firstUseConsentAccepted: json['firstUseConsentAccepted'] == true,
@@ -474,6 +486,8 @@ class AiUsageLogEntry {
     'ai_sommelier_v1' => '观影口味策展',
     'ai_ep_curate_v1' => '剧集智能编排',
     'ai_diag_v1' => '播放与源智能排障',
+    'ai_danmu_match_v1' => 'AI 弹幕智能匹配',
+    'ai_danmu_offset_v1' => '弹幕时间轴校准',
     _ => feature.startsWith('skill:') ? '自定义技能' : 'AI 助手调用',
   };
 
@@ -825,7 +839,7 @@ class AiService extends ChangeNotifier {
   // Official public PKCE client parameters for user-initiated ChatGPT
   // subscription sign-in (aligned with OpenMinis / Codex CLI PKCE spec).
   static const String codexClientId = 'app_EMoamEEZ73f0CkXaXp7hrann';
-  static const String codexClientVersion = '0.116.0';
+  static const String codexClientVersion = '0.180.0';
   static const int codexLoopbackPort = 1455;
   static const String codexRedirectUri = 'http://localhost:1455/auth/callback';
   static const String _defaultCodexAuthorizeEndpoint =
@@ -834,8 +848,6 @@ class AiService extends ChangeNotifier {
       'https://auth.openai.com/oauth/token';
   static const String _defaultCodexModelsEndpoint =
       'https://chatgpt.com/backend-api/codex/models';
-  static const String _defaultChatgptWebModelsEndpoint =
-      'https://chatgpt.com/backend-api/models';
   static const String _defaultCodexUsageEndpoint =
       'https://chatgpt.com/backend-api/wham/usage';
   static const String _defaultCodexResponsesEndpoint =
@@ -875,100 +887,46 @@ class AiService extends ChangeNotifier {
 
   static const List<AiModelOption> fallbackCodexModels = <AiModelOption>[
     AiModelOption(
+      id: 'gpt-6.2-sol',
+      displayName: 'GPT-6.2 Sol',
+      description: '最新旗舰通用与深度推理订阅模型',
+      priority: 1,
+    ),
+    AiModelOption(
+      id: 'gpt-6.1-sol',
+      displayName: 'GPT-6.1 Sol',
+      description: '高速均衡通用对话与推理订阅模型',
+      priority: 2,
+    ),
+    AiModelOption(
       id: 'gpt-5.4',
       displayName: 'GPT-5.4',
-      description: '最新旗舰通用与深度推理模型',
-      priority: 1,
+      description: '经典旗舰通用与深度推理模型',
+      priority: 3,
     ),
     AiModelOption(
       id: 'gpt-5.3-codex',
       displayName: 'GPT-5.3 Codex',
       description: '高速结构化理解与精准分析模型',
-      priority: 2,
-    ),
-    AiModelOption(
-      id: 'gpt-5.2',
-      displayName: 'GPT-5.2',
-      description: '均衡高智商通用对话与推理模型',
-      priority: 3,
+      priority: 4,
     ),
     AiModelOption(
       id: 'gpt-5.2-codex',
       displayName: 'GPT-5.2 Codex',
-      description: '指令遵循与复杂结构化输出增强版',
-      priority: 4,
-    ),
-    AiModelOption(
-      id: 'gpt-5.1',
-      displayName: 'GPT-5.1',
-      description: '稳定旗舰多场景通用模型',
+      description: '指令遵循与复杂结构化输出模型',
       priority: 5,
-    ),
-    AiModelOption(
-      id: 'gpt-5.1-codex-max',
-      displayName: 'GPT-5.1 Codex Max',
-      description: '长上下文与高强度推理模型',
-      priority: 6,
     ),
     AiModelOption(
       id: 'gpt-5.1-codex-mini',
       displayName: 'GPT-5.1 Codex Mini',
       description: '高性价比轻量快速订阅模型',
-      priority: 7,
-    ),
-    AiModelOption(
-      id: 'gpt-5',
-      displayName: 'GPT-5',
-      description: 'GPT-5 标准订阅模型',
-      priority: 8,
-    ),
-    AiModelOption(
-      id: 'gpt-5-mini',
-      displayName: 'GPT-5 Mini',
-      description: '低延迟省额度日常问答与字幕翻译模型',
-      priority: 9,
-    ),
-    AiModelOption(
-      id: 'gpt-5-pro',
-      displayName: 'GPT-5 Pro',
-      description: 'Pro 订阅高阶深度思考模型',
-      priority: 10,
-    ),
-    AiModelOption(
-      id: 'o3',
-      displayName: 'o3',
-      description: 'OpenAI 深度逻辑推理模型',
-      priority: 11,
-    ),
-    AiModelOption(
-      id: 'o4-mini',
-      displayName: 'o4-mini',
-      description: '极速轻量推理模型（省 5h 额度）',
-      priority: 12,
-    ),
-    AiModelOption(
-      id: 'gpt-4.1',
-      displayName: 'GPT-4.1',
-      description: '高准确度长文本与双语精译模型',
-      priority: 13,
-    ),
-    AiModelOption(
-      id: 'gpt-4.1-mini',
-      displayName: 'GPT-4.1 Mini',
-      description: '极速标题清洗与实时双语字幕首选',
-      priority: 14,
-    ),
-    AiModelOption(
-      id: 'gpt-4o',
-      displayName: 'GPT-4o',
-      description: '经典自然语言多领域理解模型',
-      priority: 15,
+      priority: 6,
     ),
     AiModelOption(
       id: 'codex-mini-latest',
       displayName: 'Codex Mini',
       description: '轻量极速低延迟模型（适合标题清洗）',
-      priority: 16,
+      priority: 7,
     ),
   ];
 
@@ -1014,6 +972,9 @@ class AiService extends ChangeNotifier {
   Future<void>? _apiKeyKeychainChain;
   int _apiKeyKeychainTailToken = 0;
   int _apiKeySlotWriteSeq = 0;
+  Future<void>? _labTokenKeychainChain;
+  int _labTokenKeychainTailToken = 0;
+  int _labTokenKeychainWriteSeq = 0;
   final Map<String, int> _profileSecretWriteSeq = <String, int>{};
   int _balanceEpoch = 0;
   int _quotaEpoch = 0;
@@ -1446,6 +1407,10 @@ class AiService extends ChangeNotifier {
       _apiKeyKeychainChain = null;
       _apiKeyKeychainTailToken++;
       _apiKeySlotWriteSeq = 0;
+      _labTokenKeychainChain = null;
+      _labTokenKeychainTailToken++;
+      _labTokenKeychainWriteSeq = 0;
+      DefaultSecureCredentialStore.deleteTestFallbackKey(secureLabTokenSlot);
       _profileSecretWriteSeq.clear();
       _balanceEpoch++;
       _quotaEpoch++;
@@ -1506,6 +1471,10 @@ class AiService extends ChangeNotifier {
     _apiKeyKeychainChain = null;
     _apiKeyKeychainTailToken++;
     _apiKeySlotWriteSeq = 0;
+    _labTokenKeychainChain = null;
+    _labTokenKeychainTailToken++;
+    _labTokenKeychainWriteSeq = 0;
+    DefaultSecureCredentialStore.deleteTestFallbackKey(secureLabTokenSlot);
     _profileSecretWriteSeq.clear();
     _balanceEpoch++;
     _quotaEpoch++;
@@ -1550,6 +1519,23 @@ class AiService extends ChangeNotifier {
         }
       } else {
         _config = const AiConfig();
+      }
+      if (_config.authMode == AiAuthMode.codexOAuth) {
+        final healedModel = sanitizeCodexModelSlug(_config.model);
+        final healedFast = isDisallowedCodexModelSlug(_config.fastModel)
+            ? ''
+            : sanitizeCodexModelSlug(_config.fastModel);
+        if (healedModel != _config.model || healedFast != _config.fastModel) {
+          _config = _config.copyWith(
+            model: healedModel,
+            fastModel: healedFast,
+          );
+          if (!OhosRuntime.isOhos) {
+            try {
+              await prefs.setString(prefsConfigKey, jsonEncode(_config.toJson()));
+            } catch (_) {}
+          }
+        }
       }
 
       final expectedMonth = currentMonthKey;
@@ -1721,18 +1707,21 @@ class AiService extends ChangeNotifier {
       }
 
       if (!_passcodeStore.isUnlockedAt(_clock())) {
-        // One-time migration if an earlier build saved a token in Keychain only.
-        if (_secureBackend is! FlutterSecureStorageBackend) {
-          try {
-            final storedLabTok = await _secureBackend.read(secureLabTokenSlot);
-            if (storedLabTok != null && storedLabTok.trim().isNotEmpty) {
-              await _passcodeStore.unlockWithPasscode(
-                storedLabTok,
-                nowOverride: _clock(),
-              );
-            }
-          } catch (_) {}
-        }
+        // Restore signed passcode token from Keychain if SharedPreferences was
+        // cleared or not yet hydrated (never gated by backend type on iOS).
+        try {
+          final pendingLabKeychain = _labTokenKeychainChain;
+          if (pendingLabKeychain != null) {
+            await pendingLabKeychain.catchError((_) {});
+          }
+          final storedLabTok = await _secureBackend.read(secureLabTokenSlot);
+          if (storedLabTok != null && storedLabTok.trim().isNotEmpty) {
+            await _passcodeStore.unlockWithPasscode(
+              storedLabTok,
+              nowOverride: _clock(),
+            );
+          }
+        } catch (_) {}
       }
     } catch (_) {
       _usage ??= AiMonthlyUsage(monthKey: currentMonthKey);
@@ -1749,6 +1738,43 @@ class AiService extends ChangeNotifier {
     return _apiKey;
   }
 
+  Future<void> _enqueueLabTokenKeychainOp(Future<void> Function() op) {
+    final prev = _labTokenKeychainChain;
+    final token = ++_labTokenKeychainTailToken;
+    final run = (prev == null
+            ? Future<void>.sync(op)
+            : prev.catchError((_) {}).then((_) => op()))
+        .whenComplete(() {
+      if (_labTokenKeychainTailToken == token) {
+        _labTokenKeychainChain = null;
+      }
+    });
+    _labTokenKeychainChain = run.catchError((_) {});
+    return run;
+  }
+
+  Future<void> _persistLabTokenToKeychain(String canonicalToken) async {
+    final trimmed = canonicalToken.trim();
+    if (trimmed.isEmpty) return;
+    final mySeq = ++_labTokenKeychainWriteSeq;
+    await _enqueueLabTokenKeychainOp(() async {
+      if (mySeq != _labTokenKeychainWriteSeq) return;
+      try {
+        await _secureBackend.write(secureLabTokenSlot, trimmed);
+      } catch (_) {}
+    });
+  }
+
+  Future<void> _clearLabTokenFromKeychain() async {
+    final mySeq = ++_labTokenKeychainWriteSeq;
+    await _enqueueLabTokenKeychainOp(() async {
+      if (mySeq != _labTokenKeychainWriteSeq) return;
+      try {
+        await _secureBackend.delete(secureLabTokenSlot);
+      } catch (_) {}
+    });
+  }
+
   /// Verifies an offline Ed25519-signed AI Lab passcode (`MMAILAB1...`) via
   /// [AiLabPasscodeStore], persists the signed token, and unlocks AI Lab.
   Future<AiLabTokenClaims> unlockAiLab(String rawPasscode) async {
@@ -1759,6 +1785,7 @@ class AiService extends ChangeNotifier {
     if (!res.isValid || res.payload == null) {
       throw FormatException(res.messageZh);
     }
+    await _persistLabTokenToKeychain(res.canonicalToken);
     notifyListeners();
     return AiLabTokenClaims(
       rawToken: res.canonicalToken,
@@ -1774,6 +1801,9 @@ class AiService extends ChangeNotifier {
       rawPasscode,
       nowOverride: _clock(),
     );
+    if (res.isValid && res.payload != null) {
+      await _persistLabTokenToKeychain(res.canonicalToken);
+    }
     notifyListeners();
     return res;
   }
@@ -1783,6 +1813,7 @@ class AiService extends ChangeNotifier {
     _debugLabUnlockedOverride = null;
     _debugExperimentalOAuthOverride = null;
     await _passcodeStore.lock();
+    await _clearLabTokenFromKeychain();
     notifyListeners();
   }
 
@@ -1808,10 +1839,12 @@ class AiService extends ChangeNotifier {
     return run;
   }
 
-  /// Waits for all queued OAuth and BYO API-key Keychain operations to settle.
+  /// Waits for all queued OAuth, BYO API-key, and Lab passcode Keychain ops.
   @visibleForTesting
   Future<void> waitForPendingKeychainOpsForTest() async {
-    while (_oauthKeychainChain != null || _apiKeyKeychainChain != null) {
+    while (_oauthKeychainChain != null ||
+        _apiKeyKeychainChain != null ||
+        _labTokenKeychainChain != null) {
       final pendingOAuth = _oauthKeychainChain;
       if (pendingOAuth != null) {
         await pendingOAuth.catchError((_) {});
@@ -1819,6 +1852,10 @@ class AiService extends ChangeNotifier {
       final pendingApi = _apiKeyKeychainChain;
       if (pendingApi != null) {
         await pendingApi.catchError((_) {});
+      }
+      final pendingLab = _labTokenKeychainChain;
+      if (pendingLab != null) {
+        await pendingLab.catchError((_) {});
       }
     }
   }
@@ -3050,10 +3087,7 @@ class AiService extends ChangeNotifier {
     final seenIds = <String>{
       for (final m in merged) m.id.toLowerCase(),
     };
-    final webModelsEndpoint = _codexWebModelsEndpointOverride ??
-        (_codexModelsEndpointOverride == null
-            ? _defaultChatgptWebModelsEndpoint
-            : null);
+    final webModelsEndpoint = _codexWebModelsEndpointOverride;
     if (webModelsEndpoint != null && webModelsEndpoint.isNotEmpty) {
       void verifySecondaryCatalogAuth() => _assertOutboundStillAuthorized(
             capturedAuthEpoch: capturedAuthEpoch,
@@ -3100,13 +3134,6 @@ class AiService extends ChangeNotifier {
       capturedOAuthGen: capturedOAuthGen,
       expectedOAuthAccountKey: expectedOAuthAccountKey,
     );
-    for (final fb in fallbackCodexModels) {
-      if (seenIds.add(fb.id.toLowerCase())) {
-        merged.add(
-          fb.copyWithPriority(500 + fb.priority, isLocalFallback: true),
-        );
-      }
-    }
     _discoveredModels = merged.isNotEmpty
         ? List<AiModelOption>.unmodifiable(merged)
         : List<AiModelOption>.unmodifiable([
@@ -3114,8 +3141,84 @@ class AiService extends ChangeNotifier {
               fb.copyWithPriority(fb.priority, isLocalFallback: true),
           ]);
     _discoveredModelsScopeKey = 'codex|$expectedOAuthAccountKey';
+    if (!isPrivateSession && _config.authMode == AiAuthMode.codexOAuth) {
+      await _reconcileCodexConfiguredModels(_discoveredModels);
+    }
     notifyListeners();
     return _discoveredModels;
+  }
+
+  Future<void> _reconcileCodexConfiguredModels(
+    List<AiModelOption> catalog,
+  ) async {
+    if (catalog.isEmpty || _config.authMode != AiAuthMode.codexOAuth) {
+      return;
+    }
+    String? findCaseExactMatch(String candidate) {
+      final lower = candidate.trim().toLowerCase();
+      if (lower.isEmpty) return null;
+      for (final opt in catalog) {
+        if (opt.id.toLowerCase() == lower) return opt.id;
+      }
+      return null;
+    }
+
+    String resolveNextPrimary(String cur) {
+      final trimmed = cur.trim();
+      if (trimmed.isNotEmpty) {
+        final exact = findCaseExactMatch(trimmed);
+        if (exact != null && !isDisallowedCodexModelSlug(exact)) {
+          return exact;
+        }
+        final stripped = sanitizeCodexModelSlug(trimmed);
+        final strippedExact = findCaseExactMatch(stripped);
+        if (strippedExact != null) return strippedExact;
+        if (!isDisallowedCodexModelSlug(trimmed) &&
+            !trimmed.toLowerCase().endsWith('-wm')) {
+          return trimmed;
+        }
+      }
+      return catalog.first.id;
+    }
+
+    String resolveNextFast(String cur) {
+      final trimmed = cur.trim();
+      if (trimmed.isEmpty) return '';
+      if (!isDisallowedCodexModelSlug(trimmed)) {
+        final exact = findCaseExactMatch(trimmed);
+        if (exact != null) return exact;
+        return trimmed;
+      }
+      final stripped = sanitizeCodexModelSlug(trimmed);
+      final strippedExact = findCaseExactMatch(stripped);
+      if (strippedExact != null) return strippedExact;
+      for (final opt in catalog) {
+        final l = opt.id.toLowerCase();
+        if (l.contains('mini') || l.contains('spark')) {
+          return opt.id;
+        }
+      }
+      return '';
+    }
+
+    final nextModel = isDisallowedCodexModelSlug(_config.model) ||
+            (_config.model.trim().isNotEmpty &&
+                findCaseExactMatch(_config.model) == null &&
+                _config.model.trim().toLowerCase().endsWith('-wm'))
+        ? resolveNextPrimary(_config.model)
+        : _config.model;
+    final nextFast = isDisallowedCodexModelSlug(_config.fastModel)
+        ? resolveNextFast(_config.fastModel)
+        : _config.fastModel;
+    if (nextModel != _config.model || nextFast != _config.fastModel) {
+      _config = _config.copyWith(model: nextModel, fastModel: nextFast);
+      if (!OhosRuntime.isOhos) {
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString(prefsConfigKey, jsonEncode(_config.toJson()));
+        } catch (_) {}
+      }
+    }
   }
 
   /// Fetches live available models (rich [AiModelOption] entries) for either
@@ -3279,6 +3382,41 @@ class AiService extends ChangeNotifier {
     return models;
   }
 
+  static final RegExp _datedSnapshotSuffixRe =
+      RegExp(r'-\d{4}-\d{2}-\d{2}$');
+  static final RegExp _codexWmSuffixRe = RegExp(r'-wm$', caseSensitive: false);
+
+  /// Returns true when [id] is a web-only (`-wm`), internal/auto-review, or
+  /// non-chat utility slug that must not be selected for Codex subscription calls.
+  static bool isDisallowedCodexModelSlug(String id) {
+    final s = id.trim().toLowerCase();
+    if (s.isEmpty) return false;
+    return s == 'codex-auto-review' ||
+        s == 'auto-review' ||
+        s.endsWith('-wm') ||
+        s.contains('-wm-') ||
+        s.contains('auto-review') ||
+        s.startsWith('text-embedding') ||
+        s.startsWith('omni-moderation') ||
+        s.startsWith('tts-') ||
+        s.startsWith('whisper-') ||
+        s.startsWith('dall-e') ||
+        s.startsWith('gpt-image-') ||
+        s.startsWith('chatgpt-image-') ||
+        s.startsWith('sora-');
+  }
+
+  /// Strips web-only `-wm` suffixes or clears internal slugs for Codex config.
+  static String sanitizeCodexModelSlug(String id) {
+    var s = id.trim();
+    if (s.isEmpty) return '';
+    if (_codexWmSuffixRe.hasMatch(s)) {
+      s = s.replaceFirst(_codexWmSuffixRe, '').trim();
+    }
+    if (isDisallowedCodexModelSlug(s)) return '';
+    return s;
+  }
+
   /// Parses `/models` payloads across Codex, OpenAI, Anthropic, and Gemini.
   static List<AiModelOption> parseModelsResponse(
     String rawBody, {
@@ -3312,7 +3450,9 @@ class AiService extends ChangeNotifier {
       final entry = rawItems[i];
       if (entry is String) {
         final id = entry.trim();
-        if (id.isNotEmpty && seen.add(id.toLowerCase())) {
+        if (id.isEmpty) continue;
+        if (isCodex && isDisallowedCodexModelSlug(id)) continue;
+        if (seen.add(id.toLowerCase())) {
           out.add(AiModelOption(id: id, priority: 100 + i));
         }
         continue;
@@ -3323,7 +3463,7 @@ class AiService extends ChangeNotifier {
           continue;
         }
         final vis = (entry['visibility'] ?? '').toString().trim().toLowerCase();
-        if (vis == 'internal') {
+        if (vis == 'internal' || vis == 'hide' || vis == 'hidden') {
           continue;
         }
       }
@@ -3346,14 +3486,27 @@ class AiService extends ChangeNotifier {
       }
       if (rawId.isEmpty) continue;
       final lowerId = rawId.toLowerCase();
-      // Filter non-text embedding / moderation / audio-only utility models on OpenAI.
+      if (isCodex && isDisallowedCodexModelSlug(rawId)) {
+        continue;
+      }
+      // Filter non-text embedding / moderation / audio / image / legacy utility models on OpenAI.
       if (!isCodex &&
           protocol == AiApiProtocol.openaiCompatible &&
           (lowerId.startsWith('text-embedding') ||
               lowerId.startsWith('omni-moderation') ||
               lowerId.startsWith('tts-') ||
               lowerId.startsWith('whisper-') ||
-              lowerId.startsWith('dall-e'))) {
+              lowerId.startsWith('dall-e') ||
+              lowerId.startsWith('gpt-image-') ||
+              lowerId.startsWith('chatgpt-image-') ||
+              lowerId.startsWith('sora-') ||
+              lowerId.startsWith('babbage-') ||
+              lowerId.startsWith('davinci-') ||
+              lowerId.startsWith('curie-') ||
+              lowerId.startsWith('ada-') ||
+              lowerId.startsWith('ft:') ||
+              lowerId.contains('realtime') ||
+              lowerId.contains('transcribe'))) {
         continue;
       }
       if (!seen.add(lowerId)) continue;
@@ -3366,19 +3519,51 @@ class AiService extends ChangeNotifier {
           .trim();
       final desc = (entry['description'] ?? '').toString().trim();
       final prio = (entry['priority'] as num?)?.toInt() ?? (100 + i);
+      final defaultReasoning =
+          (entry['default_reasoning_level'] ?? '').toString().trim().toLowerCase();
+      List<String>? supportedReasoning;
+      if (entry['supported_reasoning_levels'] is List) {
+        final levels = <String>[];
+        for (final lvl in entry['supported_reasoning_levels'] as List) {
+          String eff = '';
+          if (lvl is Map) {
+            eff = (lvl['effort'] ?? lvl['id'] ?? lvl['name'] ?? '')
+                .toString()
+                .trim()
+                .toLowerCase();
+          } else {
+            eff = lvl.toString().trim().toLowerCase();
+          }
+          if (eff.isNotEmpty && !levels.contains(eff)) {
+            levels.add(eff);
+          }
+        }
+        supportedReasoning = List<String>.unmodifiable(levels);
+      }
       out.add(
         AiModelOption(
           id: rawId,
           displayName: disp.isNotEmpty ? disp : rawId,
           description: desc,
           priority: prio,
+          defaultReasoningEffort: defaultReasoning,
+          supportedReasoningEfforts: supportedReasoning,
         ),
       );
     }
 
     out.sort((a, b) {
+      final aHasExplicit = a.priority < 100;
+      final bHasExplicit = b.priority < 100;
+      if (aHasExplicit != bHasExplicit) {
+        return aHasExplicit ? -1 : 1;
+      }
       final cmp = a.priority.compareTo(b.priority);
-      return cmp != 0 ? cmp : a.id.compareTo(b.id);
+      if (cmp != 0) return cmp;
+      final aDated = _datedSnapshotSuffixRe.hasMatch(a.id.toLowerCase());
+      final bDated = _datedSnapshotSuffixRe.hasMatch(b.id.toLowerCase());
+      if (aDated != bDated) return aDated ? 1 : -1;
+      return a.id.compareTo(b.id);
     });
     return List<AiModelOption>.unmodifiable(out);
   }
@@ -3395,7 +3580,8 @@ class AiService extends ChangeNotifier {
   }) {
     final trimmed = rawModel.trim();
     if (trimmed.isEmpty) return '';
-    final lower = trimmed.toLowerCase();
+    final effective = isCodex ? sanitizeCodexModelSlug(trimmed) : trimmed;
+    final lower = (effective.isNotEmpty ? effective : trimmed).toLowerCase();
     final expectedScope = catalogScopeKey ?? _currentActiveModelCatalogScopeKey;
     final hasMatchingCatalog = _discoveredModels.isNotEmpty &&
         _discoveredModelsScopeKey.isNotEmpty &&
@@ -3410,8 +3596,14 @@ class AiService extends ChangeNotifier {
         return m.id;
       }
     }
-    if (isCodex && trimmed.contains(' ')) {
-      return lower.replaceAll(RegExp(r'\s+'), '-');
+    if (isCodex) {
+      if (effective.isEmpty && candidates.isNotEmpty) {
+        return candidates.first.id;
+      }
+      if (effective.contains(' ')) {
+        return effective.toLowerCase().replaceAll(RegExp(r'\s+'), '-');
+      }
+      return effective;
     }
     return trimmed;
   }
@@ -4931,12 +5123,12 @@ class AiService extends ChangeNotifier {
     final uri = Uri.parse(
       _codexResponsesEndpointOverride ?? _defaultCodexResponsesEndpoint,
     );
-    final promptCacheKey = sha256
-        .convert(utf8.encode('marco_codex|$model|$systemPrompt'))
-        .toString()
-        .substring(0, 32);
 
-    Map<String, String> buildCodexHeaders(AiOAuthSession s) => <String, String>{
+    Map<String, String> buildCodexHeaders(
+      AiOAuthSession s,
+      String targetModel,
+    ) =>
+        <String, String>{
           'Authorization': 'Bearer ${s.accessToken}',
           'Content-Type': 'application/json',
           'Accept': 'text/event-stream, application/json',
@@ -4944,65 +5136,91 @@ class AiService extends ChangeNotifier {
           'Openai-Beta': 'responses=experimental',
           'Originator': 'codex_cli_rs',
           'User-Agent': 'codex_cli_rs/$codexClientVersion (iOS; arm64)',
-          'x-codex-routing-hint': 'model=$model',
+          'x-codex-routing-hint': 'model=$targetModel',
           if (s.accountId.isNotEmpty) 'Chatgpt-Account-Id': s.accountId,
         };
 
-    final body = <String, dynamic>{
-      'model': model,
-      'stream': true,
-      'store': false,
-      'parallel_tool_calls': true,
-      'prompt_cache_key': promptCacheKey,
-      'include': const <String>['reasoning.encrypted_content'],
-      'reasoning': const <String, String>{
-        'effort': 'low',
-        'summary': 'auto',
-      },
-      'instructions': systemPrompt.trim().isNotEmpty
-          ? systemPrompt.trim()
-          : 'You are a helpful assistant.',
-      'input': <Map<String, dynamic>>[
-        <String, dynamic>{
-          'type': 'message',
-          'role': 'user',
-          'content': <Map<String, String>>[
-            <String, String>{
-              'type': 'input_text',
-              'text': userPrompt,
-            },
-          ],
-        },
-      ],
-    };
-    final bodyJson = jsonEncode(body);
+    String? pickCodexReasoningEffort(String targetModel) {
+      final scope = 'codex|$acctKey';
+      AiModelOption? match;
+      if (_discoveredModelsScopeKey == scope) {
+        final lower = targetModel.trim().toLowerCase();
+        for (final opt in _discoveredModels) {
+          if (opt.id.toLowerCase() == lower) {
+            match = opt;
+            break;
+          }
+        }
+      }
+      final supported = match?.supportedReasoningEfforts;
+      if (supported != null) {
+        if (supported.isEmpty) return null;
+        if (supported.contains('low')) return 'low';
+        if (match!.defaultReasoningEffort.isNotEmpty &&
+            supported.contains(match.defaultReasoningEffort)) {
+          return match.defaultReasoningEffort;
+        }
+        return supported.first;
+      }
+      if (match != null && match.defaultReasoningEffort.isNotEmpty) {
+        return match.defaultReasoningEffort;
+      }
+      return 'low';
+    }
 
-    final sw = Stopwatch()..start();
-    var resp = await _postBareJson(
-      uri,
-      headers: buildCodexHeaders(session),
-      bodyJson: bodyJson,
-      timeout: Duration(seconds: cfg.timeoutSeconds),
-    );
-    _assertOutboundStillAuthorized(
-      capturedAuthEpoch: authEpoch,
-      isPrivateSession: false,
-      requireExperimentalOAuth: true,
-      capturedOAuthGen: oauthGen,
-      expectedOAuthAccountKey: acctKey,
-    );
-    if (resp.statusCode == 401 && session.refreshToken.isNotEmpty) {
-      session = await ensureFreshOAuthSession(forceRefresh: true);
-      _assertOutboundStillAuthorized(
-        capturedAuthEpoch: authEpoch,
-        isPrivateSession: false,
-        requireExperimentalOAuth: true,
-        capturedOAuthGen: oauthGen,
-        expectedOAuthAccountKey: acctKey,
+    String buildCodexBody(
+      String targetModel, {
+      bool includeOptionalFields = true,
+    }) {
+      final promptCacheKey = sha256
+          .convert(utf8.encode('marco_codex|$targetModel|$systemPrompt'))
+          .toString()
+          .substring(0, 32);
+      final effort =
+          includeOptionalFields ? pickCodexReasoningEffort(targetModel) : null;
+      final body = <String, dynamic>{
+        'model': targetModel,
+        'stream': true,
+        'store': false,
+        if (includeOptionalFields) 'parallel_tool_calls': true,
+        'prompt_cache_key': promptCacheKey,
+        if (includeOptionalFields && effort != null)
+          'include': const <String>['reasoning.encrypted_content'],
+        if (includeOptionalFields && effort != null)
+          'reasoning': <String, String>{
+            'effort': effort,
+            'summary': 'auto',
+          },
+        'instructions': systemPrompt.trim().isNotEmpty
+            ? systemPrompt.trim()
+            : 'You are a helpful assistant.',
+        'input': <Map<String, dynamic>>[
+          <String, dynamic>{
+            'type': 'message',
+            'role': 'user',
+            'content': <Map<String, String>>[
+              <String, String>{
+                'type': 'input_text',
+                'text': userPrompt,
+              },
+            ],
+          },
+        ],
+      };
+      return jsonEncode(body);
+    }
+
+    Future<http.Response> dispatchCodexPost(
+      String targetModel, {
+      bool includeOptionalFields = true,
+    }) async {
+      final bodyJson = buildCodexBody(
+        targetModel,
+        includeOptionalFields: includeOptionalFields,
       );
-      resp = await _postBareJson(
+      var resp = await _postBareJson(
         uri,
-        headers: buildCodexHeaders(session),
+        headers: buildCodexHeaders(session, targetModel),
         bodyJson: bodyJson,
         timeout: Duration(seconds: cfg.timeoutSeconds),
       );
@@ -5013,6 +5231,126 @@ class AiService extends ChangeNotifier {
         capturedOAuthGen: oauthGen,
         expectedOAuthAccountKey: acctKey,
       );
+      if (resp.statusCode == 401 && session.refreshToken.isNotEmpty) {
+        session = await ensureFreshOAuthSession(forceRefresh: true);
+        _assertOutboundStillAuthorized(
+          capturedAuthEpoch: authEpoch,
+          isPrivateSession: false,
+          requireExperimentalOAuth: true,
+          capturedOAuthGen: oauthGen,
+          expectedOAuthAccountKey: acctKey,
+        );
+        resp = await _postBareJson(
+          uri,
+          headers: buildCodexHeaders(session, targetModel),
+          bodyJson: bodyJson,
+          timeout: Duration(seconds: cfg.timeoutSeconds),
+        );
+        _assertOutboundStillAuthorized(
+          capturedAuthEpoch: authEpoch,
+          isPrivateSession: false,
+          requireExperimentalOAuth: true,
+          capturedOAuthGen: oauthGen,
+          expectedOAuthAccountKey: acctKey,
+        );
+      }
+      return resp;
+    }
+
+    var activeModel = model;
+    final sw = Stopwatch()..start();
+    var resp = await dispatchCodexPost(activeModel);
+
+    // Self-heal HTTP 400 caused by optional reasoning/include parameters or stale/web model slugs.
+    if (resp.statusCode == 400) {
+      final firstBody = utf8.decode(resp.bodyBytes, allowMalformed: true);
+      final lowerErr = firstBody.toLowerCase();
+      final isParamError = lowerErr.contains('reasoning') ||
+          lowerErr.contains('effort') ||
+          lowerErr.contains('summary') ||
+          lowerErr.contains('parallel_tool_calls') ||
+          lowerErr.contains('unsupported parameter') ||
+          lowerErr.contains("'include'");
+      final isUnsupportedModel =
+          lowerErr.contains('not supported when using codex') ||
+              lowerErr.contains('unsupported model') ||
+              lowerErr.contains('invalid model') ||
+              lowerErr.contains('model_not_found') ||
+              (lowerErr.contains('model') &&
+                  (lowerErr.contains('does not exist') ||
+                      lowerErr.contains('not supported')));
+      if (isParamError && !isUnsupportedModel) {
+        resp = await dispatchCodexPost(
+          activeModel,
+          includeOptionalFields: false,
+        );
+      } else if (isUnsupportedModel) {
+        String? healedModel;
+        final stripped = sanitizeCodexModelSlug(activeModel);
+        List<AiModelOption> catalog = const <AiModelOption>[];
+        try {
+          catalog = await fetchAvailableModelOptions(
+            configOverride: cfg.copyWith(authMode: AiAuthMode.codexOAuth),
+          );
+        } catch (_) {}
+        _assertOutboundStillAuthorized(
+          capturedAuthEpoch: authEpoch,
+          isPrivateSession: false,
+          requireExperimentalOAuth: true,
+          capturedOAuthGen: oauthGen,
+          expectedOAuthAccountKey: acctKey,
+        );
+        final pool = catalog.isNotEmpty ? catalog : fallbackCodexModels;
+        if (stripped.isNotEmpty &&
+            stripped.toLowerCase() != activeModel.trim().toLowerCase()) {
+          for (final opt in pool) {
+            if (opt.id.toLowerCase() == stripped.toLowerCase()) {
+              healedModel = opt.id;
+              break;
+            }
+          }
+          healedModel ??= stripped;
+        }
+        if (healedModel == null) {
+          for (final opt in pool) {
+            if (opt.id.toLowerCase() != activeModel.trim().toLowerCase() &&
+                !isDisallowedCodexModelSlug(opt.id)) {
+              healedModel = opt.id;
+              break;
+            }
+          }
+        }
+        if (healedModel != null &&
+            healedModel.isNotEmpty &&
+            healedModel.toLowerCase() != activeModel.trim().toLowerCase()) {
+          if (_config.authMode == AiAuthMode.codexOAuth) {
+            final updatePrimary =
+                _config.model.trim().toLowerCase() == activeModel.trim().toLowerCase() ||
+                    isDisallowedCodexModelSlug(_config.model);
+            final updateFast = _config.fastModel.trim().toLowerCase() ==
+                    activeModel.trim().toLowerCase() ||
+                isDisallowedCodexModelSlug(_config.fastModel);
+            if (updatePrimary || updateFast) {
+              _config = _config.copyWith(
+                model: updatePrimary ? healedModel : _config.model,
+                fastModel: updateFast ? '' : _config.fastModel,
+              );
+              if (!OhosRuntime.isOhos) {
+                try {
+                  final prefs = await SharedPreferences.getInstance();
+                  await prefs.setString(
+                    prefsConfigKey,
+                    jsonEncode(_config.toJson()),
+                  );
+                } catch (_) {}
+              }
+              notifyListeners();
+            }
+          }
+          activeModel = healedModel;
+          resp = await dispatchCodexPost(activeModel);
+        }
+      }
     }
     sw.stop();
     _captureCodexRateLimitHeaders(
@@ -5041,7 +5379,7 @@ class AiService extends ChangeNotifier {
       promptTokens: parsed.promptTokens,
       completionTokens: parsed.completionTokens,
       feature: feature,
-      model: model,
+      model: activeModel,
       authModeId: AiAuthMode.codexOAuth.id,
       latencyMs: sw.elapsedMilliseconds,
     );
@@ -5228,7 +5566,10 @@ class AiService extends ChangeNotifier {
     final lowerDetail = detail.toLowerCase();
     final isInvalidModel = lowerDetail.contains('invalid model') ||
         lowerDetail.contains('model_not_found') ||
-        (lowerDetail.contains('model') && lowerDetail.contains('does not exist'));
+        lowerDetail.contains('not supported when using codex') ||
+        (lowerDetail.contains('model') &&
+            (lowerDetail.contains('does not exist') ||
+                lowerDetail.contains('not supported')));
 
     if (detail.length > 80) {
       detail = '${detail.substring(0, 80)}…';

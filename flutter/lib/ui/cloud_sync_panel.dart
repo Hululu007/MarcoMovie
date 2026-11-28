@@ -552,7 +552,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
       };
       _notifyNotice(
         '局域网同步完成',
-        '${prefix}双向合并观看历史 ${res.historyCount} 条 · 收藏 ${res.favoriteCount} 部$subPart。',
+        '$prefix双向合并观看历史 ${res.historyCount} 条 · 收藏 ${res.favoriteCount} 部$subPart。',
       );
     } catch (e) {
       final msg = e is FormatException ? e.message : e.toString();
