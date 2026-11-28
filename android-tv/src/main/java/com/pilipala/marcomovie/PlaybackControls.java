@@ -98,6 +98,84 @@ final class PlaybackControls {
     // transitions within the same playback session, cleared on exit/destroy/new playback session).
     static final SleepTimerSheet.Controller SESSION_SLEEP_TIMER = new SleepTimerSheet.Controller();
     private static boolean preserveSleepTimerForInPlaceSwitch;
+
+    /**
+     * Session-scoped playback speed for TV: keeps user-adjusted speed across continuous episode/line
+     * switches within the same drama, and automatically resets to 1.0x when returning to Home or
+     * opening a different drama.
+     */
+    static final TvDramaSpeedSession TV_DRAMA_SPEED_SESSION = new TvDramaSpeedSession();
+
+    static final class TvDramaSpeedSession {
+        private String activeDramaKey = "";
+        private float speed = 1.0f;
+
+        static String buildDramaKey(Cms.Site site, Cms.Video video) {
+            if (video == null) return "";
+            String siteKey = site != null && site.key != null ? site.key.trim() : "";
+            if ("live".equals(siteKey)) return "";
+            String id = video.id != null ? video.id.trim() : "";
+            boolean placeholderId = id.isEmpty() || "0".equals(id) || "1".equals(id);
+            String rawTitle = video.title != null ? video.title.trim() : "";
+            String cleanTitle = HistoryResumeMatcher.cleanSearchTitle(rawTitle);
+            String titleSeed =
+                    (cleanTitle != null && !cleanTitle.isEmpty()) ? cleanTitle : rawTitle;
+            String normTitle =
+                    titleSeed
+                            .toLowerCase(Locale.ROOT)
+                            .replaceAll("[\\s·•:：,，.。!！?？\\-_—()（）\\[\\]【】《》]+", "");
+            if (placeholderId && normTitle.isEmpty()) return "";
+            return siteKey + "|" + (placeholderId ? "" : id) + "|" + normTitle;
+        }
+
+        synchronized float onEnterDramaPlayback(Cms.Site site, Cms.Video video) {
+            String key = buildDramaKey(site, video);
+            if (key.isEmpty() || !key.equals(activeDramaKey)) {
+                activeDramaKey = key;
+                speed = 1.0f;
+            }
+            return speed;
+        }
+
+        synchronized void onEnterDetailPage(Cms.Site site, Cms.Video video) {
+            String key = buildDramaKey(site, video);
+            if (key.isEmpty() || !key.equals(activeDramaKey)) {
+                activeDramaKey = "";
+                speed = 1.0f;
+            }
+        }
+
+        synchronized void setSpeedForDrama(Cms.Site site, Cms.Video video, float newSpeed) {
+            float clamped =
+                    Float.isNaN(newSpeed) || Float.isInfinite(newSpeed) || newSpeed <= 0f
+                            ? 1.0f
+                            : Math.max(0.5f, Math.min(2.0f, newSpeed));
+            String key = buildDramaKey(site, video);
+            if (key.isEmpty()) {
+                activeDramaKey = "";
+                speed = 1.0f;
+                return;
+            }
+            activeDramaKey = key;
+            speed = clamped;
+        }
+
+        synchronized float getSpeedForDrama(Cms.Site site, Cms.Video video) {
+            String key = buildDramaKey(site, video);
+            if (key.isEmpty() || !key.equals(activeDramaKey)) return 1.0f;
+            return speed;
+        }
+
+        synchronized void reset() {
+            activeDramaKey = "";
+            speed = 1.0f;
+        }
+    }
+
+    static void resetTvSessionSpeed() {
+        TV_DRAMA_SPEED_SESSION.reset();
+    }
+
     final SkipCountdownPill skipCountdownPill;
     final SleepTimerSheet.WarningPill sleepWarningPill;
     boolean outroSkipCancelledForEpisode;
@@ -630,6 +708,16 @@ final class PlaybackControls {
             Cms.Video v,
             Cms.Episode ep) {
         a = host;
+        if (a != null && a.isTvDevice()) {
+            if (s != null && "live".equals(s.key)) {
+                TV_DRAMA_SPEED_SESSION.reset();
+            } else {
+                TV_DRAMA_SPEED_SESSION.onEnterDramaPlayback(s, v);
+            }
+            if (a.prefs != null && Math.abs(a.prefs.getFloat(Prefs.PLAY_SPEED, 1f) - 1f) > 0.001f) {
+                a.prefs.edit().putFloat(Prefs.PLAY_SPEED, 1f).apply();
+            }
+        }
         boolean preservedSleep = preserveSleepTimerForInPlaceSwitch;
         preserveSleepTimerForInPlaceSwitch = false;
         SESSION_SLEEP_TIMER.onNewPlaybackSession(
@@ -1243,9 +1331,17 @@ final class PlaybackControls {
         buttonTooltip = tip;
     }
 
+    float effectivePlaybackSpeed() {
+        if (site != null && "live".equals(site.key)) return 1.0f;
+        if (a != null && a.isTvDevice()) {
+            return TV_DRAMA_SPEED_SESSION.getSpeedForDrama(site, video);
+        }
+        return a != null && a.prefs != null ? a.prefs.getFloat(Prefs.PLAY_SPEED, 1f) : 1f;
+    }
+
     private String tooltipLabelFor(String key) {
         boolean live = "live".equals(site.key);
-        float rate = a.prefs != null ? a.prefs.getFloat(Prefs.PLAY_SPEED, 1f) : 1f;
+        float rate = effectivePlaybackSpeed();
         int introSec = live ? 0 : getVideoIntro(a, site, video);
         int outroSec = live ? 0 : getVideoOutro(a, site, video);
         int engineMode = a.prefs != null ? a.prefs.getInt(Prefs.PLAYER_ENGINE, 0) : 0;
@@ -3101,13 +3197,21 @@ final class PlaybackControls {
         int current = 2;
         for (int i = 0; i < speeds.length; i++) if (speeds[i] == a.player.getSpeed()) current = i;
         choose(
-                "播放倍速（以后播放沿用）",
+                a.isTvDevice() ? "播放倍速（仅当前剧连播有效）" : "播放倍速（以后播放沿用）",
                 labels,
                 current,
                 i -> {
                     if (a.player != null) a.player.setSpeed(speeds[i]);
                     onDanmuPlaySpeedChanged(speeds[i]);
-                    a.prefs.edit().putFloat(Prefs.PLAY_SPEED, speeds[i]).apply();
+                    if (a.isTvDevice()) {
+                        TV_DRAMA_SPEED_SESSION.setSpeedForDrama(site, video, speeds[i]);
+                        if (a.prefs != null
+                                && Math.abs(a.prefs.getFloat(Prefs.PLAY_SPEED, 1f) - 1f) > 0.001f) {
+                            a.prefs.edit().putFloat(Prefs.PLAY_SPEED, 1f).apply();
+                        }
+                    } else if (a.prefs != null) {
+                        a.prefs.edit().putFloat(Prefs.PLAY_SPEED, speeds[i]).apply();
+                    }
                     if (a.touchPlayerGesture != null) {
                         a.touchPlayerGesture.onManualSpeedChanged();
                     }
@@ -6253,7 +6357,7 @@ final class PlaybackControls {
     }
 
     void updateLabels() {
-        float rate = a.prefs.getFloat(Prefs.PLAY_SPEED, 1f);
+        float rate = effectivePlaybackSpeed();
         Button speedBtn = buttons.get("speed");
         if (speedBtn != null) {
             if (speedBtn instanceof ModernIconButton) {
@@ -6833,7 +6937,7 @@ final class PlaybackControls {
         if ("live".equals(site.key)) {
             a.player.setSpeed(1.0f);
         } else {
-            float speed = a.prefs.getFloat(Prefs.PLAY_SPEED, 1);
+            float speed = effectivePlaybackSpeed();
             a.player.setSpeed(speed);
             onDanmuPlaySpeedChanged(speed);
             a.player.setRepeatOne(

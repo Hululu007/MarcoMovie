@@ -116,6 +116,9 @@ final class HomeScreen {
     }
 
     void show() {
+        if (a.isTvDevice()) {
+            PlaybackControls.resetTvSessionSpeed();
+        }
         a.renderPage("", "", true);
         ambient = a.homeAmbient;
         ticket = a.generation;
@@ -899,6 +902,9 @@ final class HomeScreen {
                 || retainedEngineEpoch != a.engineEpoch
                 || !appearance().equals(retainedAppearance)
                 || !site.key.equals(a.prefs.getString(Prefs.SELECTED_SITE, ""))) return false;
+        if (a.isTvDevice()) {
+            PlaybackControls.resetTvSessionSpeed();
+        }
         a.preparePage(true);
         ticket = a.generation;
         request++;

@@ -22,6 +22,8 @@
   - `PluginDialogStyler` 接管蜘蛛自定义非扫码 `PopupWindow` / 子面板窗口，放宽 `FLAG_NOT_FOCUSABLE`、接管返回键关闭与首次默认聚焦；识别同音网盘名（夸夸/优汐/摆渡/迅蕾/光雅/115/天意）与状态胶囊（`未登录`/`已登录` 等），规范横向行与可点击 `TextView` 边界与焦点态，彻底消除右侧白胶囊被弹窗边界切半且遥控器无法选点的问题。
 - **彻底修复小米电视 3s 等 Android 6.0.1（API 23）设备选剧进入后闪退问题**：
   - 将 `android-tv/dependencies.json` 中携带未脱糖 API 24/26 字节码（`ThreadLocal.withInitial`、`ArrayList.sort`、`Stream`、`java.nio.file`）的 `jsoup 1.18.3` 降级为 API 23 兼容的 `jsoup 1.15.4`，消除爬虫详情解析触发的 `NoSuchMethodError`；同时在 API 23 上禁用需 API 24 Bionic 符号的 `MPV` 内核、修复 `Cms.evictDohCache` / `SpiderGatewayServer` / `TvAudioEffectProcessor` API 24+ 调用并加宽 `LinkageError` 安全兜底捕获。
+- **电视端倍速播放改为当前剧连播有效、返回主页自动重置**：
+  - 新增 `PlaybackControls.TvDramaSpeedSession`，电视端在播放器内调节的倍速仅在当前剧连续选集/换线播放时保持；返回主页、搜索页、片库分类或切换其他剧集后自动重置为 `1.0×`，不再将上一部剧的倍速延续到其他剧集。
 
 ## 安装与校验
 

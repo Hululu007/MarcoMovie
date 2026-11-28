@@ -3436,5 +3436,96 @@ public final class TvUxOptimizationChecks {
                         && gwSrc.contains("Build.VERSION.SDK_INT >= 24")
                         && !audioSrc.contains("Float.isFinite("),
                 "Cms, SpiderGatewayServer, and TvAudioEffectProcessor contain zero unguarded API 24+ method calls");
+
+        // 5. TV session-scoped playback speed: keep within same drama continuous play, reset on
+        // different drama or Home return
+        PlaybackControls.resetTvSessionSpeed();
+        Cms.Site siteA = new Cms.Site();
+        siteA.key = "site_a";
+        Cms.Video dramaA = new Cms.Video();
+        dramaA.id = "1001";
+        dramaA.title = "庆余年 第二季";
+        Cms.Video dramaB = new Cms.Video();
+        dramaB.id = "2002";
+        dramaB.title = "唐朝诡事录";
+        check(
+                Math.abs(
+                                PlaybackControls.TV_DRAMA_SPEED_SESSION.onEnterDramaPlayback(
+                                                siteA, dramaA)
+                                        - 1.0f)
+                        < 0.001f,
+                "TvDramaSpeedSession starts a fresh drama at 1.0x");
+        PlaybackControls.TV_DRAMA_SPEED_SESSION.setSpeedForDrama(siteA, dramaA, 1.5f);
+        check(
+                Math.abs(
+                                PlaybackControls.TV_DRAMA_SPEED_SESSION.onEnterDramaPlayback(
+                                                siteA, dramaA)
+                                        - 1.5f)
+                        < 0.001f,
+                "TvDramaSpeedSession retains user speed during continuous episodes of same drama");
+        PlaybackControls.TV_DRAMA_SPEED_SESSION.onEnterDetailPage(siteA, dramaA);
+        check(
+                Math.abs(
+                                PlaybackControls.TV_DRAMA_SPEED_SESSION.getSpeedForDrama(
+                                                siteA, dramaA)
+                                        - 1.5f)
+                        < 0.001f,
+                "TvDramaSpeedSession keeps speed when returning to same drama detail page");
+        check(
+                Math.abs(
+                                        PlaybackControls.TV_DRAMA_SPEED_SESSION
+                                                        .onEnterDramaPlayback(siteA, dramaB)
+                                                - 1.0f)
+                                < 0.001f
+                        && Math.abs(
+                                        PlaybackControls.TV_DRAMA_SPEED_SESSION
+                                                        .onEnterDramaPlayback(siteA, dramaA)
+                                                - 1.0f)
+                                < 0.001f,
+                "TvDramaSpeedSession resets speed when switching to another drama and back");
+
+        Cms.Site aggSite = new Cms.Site();
+        aggSite.key = "juju";
+        aggSite.api = "csp_S_zps";
+        Cms.Video aggDrama1 = new Cms.Video();
+        aggDrama1.id = "0";
+        aggDrama1.title = "凡人修仙传【4K】";
+        Cms.Video aggDrama2 = new Cms.Video();
+        aggDrama2.id = "1";
+        aggDrama2.title = "剑来";
+        PlaybackControls.TV_DRAMA_SPEED_SESSION.onEnterDramaPlayback(aggSite, aggDrama1);
+        PlaybackControls.TV_DRAMA_SPEED_SESSION.setSpeedForDrama(aggSite, aggDrama1, 1.75f);
+        check(
+                Math.abs(
+                                        PlaybackControls.TV_DRAMA_SPEED_SESSION
+                                                        .onEnterDramaPlayback(aggSite, aggDrama2)
+                                                - 1.0f)
+                                < 0.001f
+                        && Math.abs(
+                                        PlaybackControls.TV_DRAMA_SPEED_SESSION.getSpeedForDrama(
+                                                        aggSite, aggDrama2)
+                                                - 1.0f)
+                                < 0.001f,
+                "TvDramaSpeedSession distinguishes aggregated search dramas even with 0/1 placeholder IDs");
+
+        PlaybackControls.TV_DRAMA_SPEED_SESSION.onEnterDramaPlayback(siteA, dramaA);
+        PlaybackControls.TV_DRAMA_SPEED_SESSION.setSpeedForDrama(siteA, dramaA, 1.5f);
+        PlaybackControls.resetTvSessionSpeed();
+        check(
+                Math.abs(
+                                PlaybackControls.TV_DRAMA_SPEED_SESSION.getSpeedForDrama(
+                                                siteA, dramaA)
+                                        - 1.0f)
+                        < 0.001f,
+                "PlaybackControls.resetTvSessionSpeed clears TV speed upon returning to Home");
+        check(
+                readJavaSource("MainActivity.java")
+                                .contains("PlaybackControls.resetTvSessionSpeed()")
+                        && readJavaSource("HomeScreen.java")
+                                .contains("PlaybackControls.resetTvSessionSpeed()")
+                        && readJavaSource("DetailScreen.java")
+                                .contains("TV_DRAMA_SPEED_SESSION.onEnterDetailPage(")
+                        && readJavaSource("SettingsScreen.java").contains("同剧连播保持，返回主页自动重置"),
+                "MainActivity/HomeScreen/DetailScreen/SettingsScreen wire TV session-scoped speed lifecycle");
     }
 }

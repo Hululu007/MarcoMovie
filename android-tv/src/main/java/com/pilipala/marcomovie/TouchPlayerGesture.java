@@ -848,7 +848,12 @@ final class TouchPlayerGesture implements View.OnTouchListener {
                 a.player != null && a.prepared ? Math.max(0, a.player.getDuration()) : durationMs;
         env.controlsVisible = a.controlsVisible;
         env.startedInsideControls = downEvent && isTouchInsideControls(localX, localY);
-        env.userNormalSpeed = a.prefs != null ? a.prefs.getFloat(Prefs.PLAY_SPEED, 1.0f) : 1.0f;
+        env.userNormalSpeed =
+                a.isTvDevice()
+                        ? (a.playbackControls != null
+                                ? a.playbackControls.effectivePlaybackSpeed()
+                                : 1.0f)
+                        : (a.prefs != null ? a.prefs.getFloat(Prefs.PLAY_SPEED, 1.0f) : 1.0f);
         return env;
     }
 

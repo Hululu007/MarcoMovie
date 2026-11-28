@@ -46,6 +46,9 @@ final class CatalogScreen {
     }
 
     static void categories(MainActivity a, Cms.Site s) {
+        if (a.isTvDevice()) {
+            PlaybackControls.resetTvSessionSpeed();
+        }
         a.prefs.edit().putString(Prefs.SELECTED_SITE, s.key).apply();
         a.renderPage(s.name, "CHOOSE A CATEGORY");
         addBack(a, "catalog-back");
@@ -89,6 +92,9 @@ final class CatalogScreen {
 
     static void videos(
             MainActivity a, Cms.Site s, String cat, String title, int page, String search) {
+        if (a.isTvDevice()) {
+            PlaybackControls.resetTvSessionSpeed();
+        }
         a.renderPage(title, "EXPLORE THE LIBRARY");
         addBack(a, "catalog-back");
         a.paragraph(s.name + " · 第 " + page + " 页");

@@ -33,6 +33,9 @@ final class TvV17WelcomeHomeScreen {
     }
 
     void show() {
+        if (a.isTvDevice()) {
+            PlaybackControls.resetTvSessionSpeed();
+        }
         a.renderPage("", "", true);
         if (a.current != null) a.current.home = true;
 

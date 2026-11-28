@@ -36,6 +36,8 @@ final class DetailScreen {
     static void show(MainActivity a, Cms.Site s, Cms.Video listing, Cms.Video ready) {
         if (a.redirectListing(s, listing)) return;
         if (a.isTvDevice()) {
+            PlaybackControls.TV_DRAMA_SPEED_SESSION.onEnterDetailPage(
+                    s, ready != null ? ready : listing);
             TvDetailHost.show(a, s, listing, ready);
             return;
         }

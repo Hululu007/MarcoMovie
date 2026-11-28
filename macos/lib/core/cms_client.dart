@@ -1925,7 +1925,8 @@ class CmsClient {
         final allowSameSiteFallback = canTrySameSiteSibling &&
             (isDeadShareMsg ||
                 CspBridge.isSearchOnlySite(source) ||
-                CspBridge.isPanOrNetdiskSite(source) ||
+                (CspBridge.isPanOrNetdiskSite(source) &&
+                    !WoggSource.supports(source)) ||
                 isGenericPlaceholderVodId(item.id)) &&
             !needsSourceVerification(source, e) &&
             !_sourceCancelled();

@@ -1066,37 +1066,24 @@ final class SettingsScreen {
     }
 
     private void tvPlaybackRows() {
-        // Row 1: 默认倍速
+        // Row 1: 默认倍速（电视端按剧集连播会话保持，返回主页或切换其他剧集自动重置 1.0×）
+        if (a.prefs != null && Math.abs(a.prefs.getFloat(Prefs.PLAY_SPEED, 1f) - 1f) > 0.001f) {
+            a.prefs.edit().putFloat(Prefs.PLAY_SPEED, 1f).apply();
+        }
         link(
                 "默认倍速",
-                a.prefs.getFloat(Prefs.PLAY_SPEED, 1f) + "× · 以后播放沿用",
+                "1.0× · 同剧连播保持，返回主页自动重置",
                 "setting-play_speed",
                 () -> {
-                    String[] speedLabels =
-                            new String[] {"0.5×", "0.75×", "1×", "1.25×", "1.5×", "1.75×", "2×"};
-                    float[] speedVals = new float[] {.5f, .75f, 1f, 1.25f, 1.5f, 1.75f, 2f};
-                    float curSpeed = a.prefs.getFloat(Prefs.PLAY_SPEED, 1f);
-                    int curIdx = 2;
-                    for (int i = 0; i < speedVals.length; i++) {
-                        if (Math.abs(curSpeed - speedVals[i]) < 0.05f) {
-                            curIdx = i;
-                            break;
-                        }
+                    if (a.prefs != null
+                            && Math.abs(a.prefs.getFloat(Prefs.PLAY_SPEED, 1f) - 1f) > 0.001f) {
+                        a.prefs.edit().putFloat(Prefs.PLAY_SPEED, 1f).apply();
                     }
                     new AppDialog.Builder(a)
-                            .setTitle("默认倍速（以后播放沿用）")
-                            .setSingleChoiceItems(
-                                    speedLabels,
-                                    curIdx,
-                                    (d, i) -> {
-                                        a.prefs
-                                                .edit()
-                                                .putFloat(Prefs.PLAY_SPEED, speedVals[i])
-                                                .apply();
-                                        d.dismiss();
-                                        a.refresh();
-                                    })
-                            .setNegativeButton("取消", null)
+                            .setTitle("默认倍速说明")
+                            .setMessage(
+                                    "电视端每次从主页或新剧集进入均默认 1.0× 原速播放；播放中调节的倍速仅在同一部剧连续选集播放时保持，返回主页或切换其他剧集后自动重置为 1.0×。")
+                            .setPositiveButton("知道了", null)
                             .show();
                 });
         toggle("自动播放下一集", Prefs.AUTO_NEXT, true, null);
@@ -2760,17 +2747,15 @@ final class SettingsScreen {
                                 });
                         return;
                     }
+                    if (a.prefs != null
+                            && Math.abs(a.prefs.getFloat(Prefs.PLAY_SPEED, 1f) - 1f) > 0.001f) {
+                        a.prefs.edit().putFloat(Prefs.PLAY_SPEED, 1f).apply();
+                    }
                     new AppDialog.Builder(a)
-                            .setTitle("播放速度")
-                            .setItems(
-                                    speedLabels,
-                                    (d, i) -> {
-                                        a.prefs
-                                                .edit()
-                                                .putFloat(Prefs.PLAY_SPEED, speedVals[i])
-                                                .apply();
-                                        a.refresh();
-                                    })
+                            .setTitle("默认倍速说明")
+                            .setMessage(
+                                    "电视端每次从主页或新剧集进入均默认 1.0× 原速播放；播放中调节的倍速仅在同一部剧连续选集播放时保持，返回主页或切换其他剧集后自动重置为 1.0×。")
+                            .setPositiveButton("知道了", null)
                             .show();
                 });
         toggle("自动播放下一集", Prefs.AUTO_NEXT, true, null);

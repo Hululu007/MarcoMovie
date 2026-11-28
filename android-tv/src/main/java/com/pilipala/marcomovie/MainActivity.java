@@ -2707,6 +2707,13 @@ public final class MainActivity extends Activity {
     }
 
     void renderReturn(Screen screen) {
+        if (isTvDevice()
+                && (screen == null
+                        || screen.home
+                        || screen.retainedHome != null
+                        || screen.retainedSearch != null)) {
+            PlaybackControls.resetTvSessionSpeed();
+        }
         if (!isTvDevice() && screen.mobileHome != null && screen.mobileHome.resume()) return;
         if (isTvDevice() && screen.retainedHome != null && screen.retainedHome.resume()) return;
         screen.render.run();
@@ -3161,6 +3168,7 @@ public final class MainActivity extends Activity {
             MobileShell.show(this);
             return;
         }
+        PlaybackControls.resetTvSessionSpeed();
         Cms.Site selected = null;
         if (config != null)
             for (Cms.Site s : config.sites)
@@ -3178,6 +3186,7 @@ public final class MainActivity extends Activity {
             MobileShell.show(this);
             return;
         }
+        PlaybackControls.resetTvSessionSpeed();
         new HomeScreen(this, site).show();
     }
 
@@ -3550,6 +3559,7 @@ public final class MainActivity extends Activity {
             MobileShell.openSearchTab(this, initial);
             return;
         }
+        PlaybackControls.resetTvSessionSpeed();
         GlobalSearchScreen screen = new GlobalSearchScreen(this, initial);
         Screen s =
                 new Screen(
@@ -3566,8 +3576,12 @@ public final class MainActivity extends Activity {
     }
 
     void minePage() {
-        if (isTvDevice()) new TvV17MineScreen(this).show();
-        else new FavoritesScreen(this).show();
+        if (isTvDevice()) {
+            PlaybackControls.resetTvSessionSpeed();
+            new TvV17MineScreen(this).show();
+        } else {
+            new FavoritesScreen(this).show();
+        }
     }
 
     void stopMagnet() {
