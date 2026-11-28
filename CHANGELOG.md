@@ -1,3 +1,10 @@
+## 2026-11-28 iOS / iPadOS 0.7.12 结构化 Emby 连接与编辑/4K STRM 兼容、局域网扫码直绑 WebDAV、AI 口令持久保存、纯净 Codex 模型列表与 AI 在线弹幕匹配（iOS / iPadOS 0.7.12）
+
+- [iOS / iPadOS 0.7.12](docs/releases/ios-v0.7.12.md)
+- **结构化 Emby 连接与编辑表单及 4K / HTTP 兼容升级**：iOS `连接 Emby 媒体库` 与 `订阅管理 → 编辑 Emby` 新增名称、是否允许云端同步开关、HTTPS 开关（默认 `HTTP / 8096`）、服务器地址、选填路径、端口号、用户名及可切换明文/密文的密码输入；支持 `/emby` 404/405 自动回退裸根路径、同源/升维重定向、标准 `X-Emby-Authorization` 请求头、HTTPS 错连 HTTP 端口中文探测提示、HEVC/AV1/多音轨 4K `DirectPlay`、跨源 `.strm` 播放隔离与 WebDAV / 局域网 `emby_accounts` 双向同步控制。
+- **局域网扫码直绑 WebDAV**：集成 `marco-bind-box-v1` 加密配对与 iOS 原生 `AVCaptureSession` 二维码扫描/剪贴板兜底绑定，一键完成 WebDAV 配置同步与双向合并。
+- **AI 实验室口令钥匙串持久化、模型列表净化与联网弹幕匹配**：解锁后的 `MMAILAB1` 口令自动写入本机 Keychain 重启免重复输入；过滤失效后缀模型解决 Codex `HTTP 400` 并支持自愈回退；新增 `AiDanmuMatcher` 联网检索匹配 B 站 / 弹弹play 在线弹幕并写入播放缓存。
+
 ## 2026-11-28 Android 电视 / 盒子 0.6.4、Android 手机 / 平板 0.7.4、Windows 0.7.5、macOS 0.6.2、Apple TV 0.1.3、HarmonyOS NEXT 0.1.3 与 Android Lite 0.5.11 全端局域网扫码直绑 WebDAV 与 Emby 连接/4K 直连兼容升级，以及电视端与 macOS 专项修复
 
 - **全端局域网扫码直绑 WebDAV（Android TV / 手机 / Windows / macOS / Apple TV / 鸿蒙 / 精简版）**：新增 `marco-bind-box-v1`（HMAC-SHA256 CTR + Encrypt-then-MAC）端到端加密通道与 `/bind` 协议；电视端与桌面端开启二维码即可直接扫码双向绑定 WebDAV 服务器、账号、加密密码及同步选项并立即执行双向合并；Android 手机端与 HarmonyOS NEXT 端新增应用内相机扫码（支持相册识别与剪贴板兜底），同时完全保留既有人工 URL 双向同步向后兼容。
