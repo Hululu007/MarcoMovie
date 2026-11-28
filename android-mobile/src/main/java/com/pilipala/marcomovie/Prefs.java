@@ -194,6 +194,7 @@ final class Prefs {
     static final String MOBILE_HOME_SECTION_HIDDEN = "mobile_home_section_hidden";
     static final String MOBILE_HOME_SECTION_ORDER = "mobile_home_section_order";
     static final String MOBILE_SEARCH_EXACT_MODE = "mobile_search_exact_mode";
+    static final String FOLDABLE_TABLETOP_SPLIT_HUD = "foldable_tabletop_split_hud";
 
     // Device-local credentials stored ONLY in SECRETS_FILE ("movie_secrets"), never plain-exported.
     static final String SECRET_TMDB_API_KEY = "tmdb_api_key";
@@ -318,7 +319,8 @@ final class Prefs {
         DANMAKU_SOURCES_JSON,
         MOBILE_HOME_SECTION_HIDDEN,
         MOBILE_HOME_SECTION_ORDER,
-        MOBILE_SEARCH_EXACT_MODE
+        MOBILE_SEARCH_EXACT_MODE,
+        FOLDABLE_TABLETOP_SPLIT_HUD
     };
 
     static final Set<String> CROSS_FORM_SAFE_KEYS =
@@ -359,7 +361,8 @@ final class Prefs {
                                     AI_TRANSLATE_SUB,
                                     AI_PY_SECURITY_CHECK,
                                     SUBTITLE_BILINGUAL,
-                                    MOBILE_SEARCH_EXACT_MODE)));
+                                    MOBILE_SEARCH_EXACT_MODE,
+                                    FOLDABLE_TABLETOP_SPLIT_HUD)));
 
     private static final Map<String, int[]> MOBILE_INT_RANGES;
     private static final Set<String> ALLOWED_BUTTON_TOKENS =

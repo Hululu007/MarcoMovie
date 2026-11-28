@@ -159,6 +159,12 @@ final class MobileSettingsIndex {
         add(SUB_PLAYBACK, "ms-mini-bar", "播放与触控手势", "隐藏按钮后保留底部进度细线", "迷你进度条 底部 进度线");
         add(
                 SUB_PLAYBACK,
+                "ms-foldable-split",
+                "播放与触控手势",
+                "折叠屏半折画面与控制分离",
+                "折叠 折叠屏 悬停 分屏 半折 控制栏 hud");
+        add(
+                SUB_PLAYBACK,
                 "ms-btn-order",
                 "播放与触控手势",
                 "播放页 HUD 按钮自定义（添减与排序）",

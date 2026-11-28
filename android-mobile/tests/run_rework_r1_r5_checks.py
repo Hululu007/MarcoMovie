@@ -288,6 +288,7 @@ public class MainActivity extends android.app.Activity {
     public final SeekGesture seekGesture = new SeekGesture();
     public TouchPlayerGesture touchPlayerGesture;
     public MobilePlayerOverlay mobilePlayerOverlay;
+    public FoldableTabletopController foldableTabletop;
     public WatchHistory.Entry playingBookmark;
     public MobileEmbyLibrary.Reporter embyReporter;
     public boolean miniMode;
@@ -778,6 +779,7 @@ public class MainActivity extends android.app.Activity {
     public MobileInlinePlayer inlinePlayer;
     public TouchPlayerGesture touchPlayerGesture;
     public MobilePlayerOverlay mobilePlayerOverlay;
+    public FoldableTabletopController foldableTabletop;
     public WatchHistory.Entry playingBookmark;
     public MobileEmbyLibrary.Reporter embyReporter;
     public Cms.Config config;

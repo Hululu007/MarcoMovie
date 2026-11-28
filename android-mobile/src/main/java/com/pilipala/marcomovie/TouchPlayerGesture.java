@@ -232,6 +232,10 @@ final class TouchPlayerGesture implements View.OnTouchListener {
                     return;
                 }
                 if (a.playerLocked) return;
+                if (a.foldableTabletop != null && a.foldableTabletop.isTabletopActive()) {
+                    a.foldableTabletop.onUpperStageSingleTap();
+                    return;
+                }
                 a.showControls(!a.controlsVisible);
             }
 
@@ -602,8 +606,14 @@ final class TouchPlayerGesture implements View.OnTouchListener {
     }
 
     private int effectiveHostHeight() {
-        if (a.root != null && a.root.getHeight() > 0) return a.root.getHeight();
-        return Math.max(1, a.windowHeight());
+        int rawH =
+                (a.root != null && a.root.getHeight() > 0)
+                        ? a.root.getHeight()
+                        : Math.max(1, a.windowHeight());
+        if (a.foldableTabletop != null && a.foldableTabletop.isTabletopActive()) {
+            return Math.max(1, a.foldableTabletop.effectiveVideoStageHeight(rawH));
+        }
+        return rawH;
     }
 
     void updateSafeTop(int safeTopPx) {
@@ -955,7 +965,15 @@ final class TouchPlayerGesture implements View.OnTouchListener {
         env.durationMs =
                 a.player != null && a.prepared ? Math.max(0, a.player.getDuration()) : durationMs;
         env.controlsVisible = a.controlsVisible;
-        env.startedInsideControls = downEvent && isTouchInsideControls(localX, localY);
+        boolean insideLowerFoldDeck =
+                downEvent
+                        && a.foldableTabletop != null
+                        && a.foldableTabletop.isTabletopActive()
+                        && localY
+                                > a.foldableTabletop.effectiveVideoStageHeight(
+                                        effectiveHostHeight());
+        env.startedInsideControls =
+                downEvent && (insideLowerFoldDeck || isTouchInsideControls(localX, localY));
         env.userNormalSpeed = a.prefs != null ? a.prefs.getFloat(Prefs.PLAY_SPEED, 1.0f) : 1.0f;
         return env;
     }

@@ -3194,12 +3194,26 @@ public final class GlobalSearchScreen implements AutoCloseable {
                     ImmersivePoster.trimMemory(
                             android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL);
                 };
-        SearchCoordinator.configureMaxPoolThreads(tvDevice ? (lowRam ? 6 : 8) : 14);
+        SearchCoordinator.configureMaxPoolThreads(tvDevice ? (lowRam ? 12 : 16) : 16);
         SearchCoordinator.configureThreads(effectiveThreads);
         long rawSearchTimeoutMs =
                 Prefs.clampSearchTimeoutSeconds(a.prefs.getInt(Prefs.SEARCH_TIMEOUT, 20)) * 1000L;
         long effectiveSearchTimeoutMs =
-                sources.size() > 3 ? Math.min(10000L, rawSearchTimeoutMs) : rawSearchTimeoutMs;
+                total >= 80
+                        ? Math.min(8000L, rawSearchTimeoutMs)
+                        : (sources.size() > 3
+                                ? Math.min(10000L, rawSearchTimeoutMs)
+                                : rawSearchTimeoutMs);
+        final List<String> effectiveVariants =
+                total >= 80
+                                && variants != null
+                                && variants.size() > 1
+                                && !query.matches("[A-Za-z0-9' -]+")
+                        ? Collections.singletonList(variants.get(0))
+                        : variants;
+        long effectiveSessionMs =
+                SearchCoordinator.computeSessionTimeoutMs(
+                        total, effectiveSearchTimeoutMs, effectiveThreads);
         final SearchCoordinator[] sessionOwner = new SearchCoordinator[1];
         sessionOwner[0] =
                 new SearchCoordinator(
@@ -3208,7 +3222,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                         context,
                                         site,
                                         query,
-                                        variants,
+                                        effectiveVariants,
                                         requestMode,
                                         batches,
                                         initialPerSource),
@@ -3358,7 +3372,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                             }
                                         }),
                         effectiveSearchTimeoutMs,
-                        90000L,
+                        effectiveSessionMs,
                         tvDevice ? TvSearchPages.MAX_RESULTS : 24);
         coordinator = sessionOwner[0];
         coordinator.start(sources, query);

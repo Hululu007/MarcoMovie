@@ -2830,7 +2830,11 @@ final class PlaybackControls {
                             video != null && video.id != null ? video.id : "",
                             video != null && video.title != null ? video.title : "");
             scraped =
-                    TvSeriesScraper.scrapeLine(video != null ? video.title : "", line.episodes, ov);
+                    TvSeriesScraper.scrapeLine(
+                            video != null ? video.title : "",
+                            line.name != null ? line.name : "",
+                            line.episodes,
+                            ov);
             hasOverrideOrScrambled = ov != null || scraped.sourceOrderScrambled;
         }
         for (int i = 0; i < count; i++) {

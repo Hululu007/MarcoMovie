@@ -131,7 +131,7 @@ final class TvSeriesScraper {
                     dateKey,
                     dateLabel,
                     cleanedRawLabel,
-                    extractEpisodeSpecSummary(rawName));
+                    extractEpisodeSpecSummary(rawName, "", ""));
         }
 
         ScrapedEpisode(
@@ -483,6 +483,26 @@ final class TvSeriesScraper {
                     "(?i)(?:^|[^a-z0-9])(\\d+(?:\\.\\d{1,2})?)\\s*(tb|tib|gb|gib|mb|mib)(?=$|[^a-z0-9])");
     private static final Pattern BRACKET_SHORT_SIZE_PATTERN =
             Pattern.compile("(?i)[\\[【(（]\\s*(\\d+(?:\\.\\d{1,2})?)\\s*(t|g|m)\\s*[\\]】)）]");
+    private static final Pattern DECIMAL_SHORT_SIZE_PATTERN =
+            Pattern.compile(
+                    "(?i)(?<![0-9]\\.)(?<![a-z0-9])(\\d{1,4}\\.\\d{1,2})\\s*(t|g|m)(?![a-z0-9])");
+    private static final Pattern DELIMITED_SHORT_SIZE_PATTERN =
+            Pattern.compile(
+                    "(?i)(?:[丨|/_\\-\\s]|^)(\\d{2,4})\\s*(m)(?=$|[^a-z0-9])|(?:[丨|])+\\s*(\\d{1,3})\\s*(g)(?=$|[^a-z0-9])");
+    private static final Pattern URL_BYTE_PARAM_PATTERN =
+            Pattern.compile(
+                    "(?i)(?:[?&;\"'\\s]|^)(?:file_?size|fsize|size|bytes)\\s*[:=]\\s*(\\d{8,12})(?=$|[^0-9])");
+    private static final Pattern SPIDER_EXT_SIZE_PATTERN =
+            Pattern.compile(
+                    "(?i)\\.(?:mkv|mp4|m4v|avi|mov|ts|m2ts|iso|flv|wmv|rmvb)[+|*#$]+(\\d{8,12})(?=$|[+|*#$&?])");
+    private static final Pattern URL_SCHEME_HOST_PATTERN = Pattern.compile("(?i)^https?://[^/?#]+");
+    private static final Pattern BARE_YEAR_OR_PUNCT_PATTERN =
+            Pattern.compile("^(?:(?:19|20)\\d{2}|[0-9\\s._\\-·•&+|/]+)$");
+    private static final Pattern SHORT_ASCII_RELEASE_TOKEN_PATTERN =
+            Pattern.compile(
+                    "(?i)(?:^|[\\s.·•])(?:yk|edr|dv|hfr|hq|bd|hd|uhd|fhd|sdr|hdr|hevc|avc|av1|x265|x264|h265|h264|ddp|dts|web|dl|aac|iso|rip|ver)(?=$|[\\s.·•])");
+    private static final Pattern RELEASE_GROUP_SUFFIX_PATTERN =
+            Pattern.compile("\\s*-\\s*[\\u4e00-\\u9fffA-Za-z0-9]{1,8}(?=$|\\s)");
     private static final Pattern STANDALONE_DV_PATTERN =
             Pattern.compile("(?i)(?:^|[^a-z0-9])dv(?:$|[^a-z0-9])");
     private static final Pattern STANDALONE_HQ_PATTERN =
@@ -491,18 +511,54 @@ final class TvSeriesScraper {
             Pattern.compile("(?i)(?:(?:60|120)\\s*(?:fps|帧)|(?:^|[^a-z0-9])hfr(?:$|[^a-z0-9]))");
 
     static String extractEpisodeSizeTag(String rawName) {
-        if (rawName == null || rawName.trim().isEmpty()) return "";
+        return extractEpisodeSizeTag(rawName, "");
+    }
+
+    static String extractEpisodeSizeTag(String rawName, String epUrl) {
+        String tag = extractHumanReadableSizeTag(rawName);
+        if (!tag.isEmpty()) return tag;
+        String urlSpec = extractUrlSpecText(epUrl);
+        if (urlSpec.isEmpty()) return "";
+        tag = extractHumanReadableSizeTag(urlSpec);
+        if (!tag.isEmpty()) return tag;
+        String rawBytes = matchByteSizeString(urlSpec);
+        if (rawBytes.isEmpty()) {
+            rawBytes = matchByteSizeString(epUrl);
+        }
+        return rawBytes.isEmpty() ? "" : formatByteSizeTag(rawBytes);
+    }
+
+    private static String extractHumanReadableSizeTag(String text) {
+        if (text == null || text.trim().isEmpty()) return "";
         String num = "";
         String unit = "";
-        Matcher m = EPISODE_FILE_SIZE_PATTERN.matcher(rawName);
+        Matcher m = EPISODE_FILE_SIZE_PATTERN.matcher(text);
         if (m.find()) {
             num = m.group(1);
             unit = m.group(2);
         } else {
-            Matcher bm = BRACKET_SHORT_SIZE_PATTERN.matcher(rawName);
+            Matcher bm = BRACKET_SHORT_SIZE_PATTERN.matcher(text);
             if (bm.find()) {
                 num = bm.group(1);
                 unit = bm.group(2);
+            } else {
+                Matcher dm = DECIMAL_SHORT_SIZE_PATTERN.matcher(text);
+                if (dm.find()) {
+                    num = dm.group(1);
+                    unit = dm.group(2);
+                } else {
+                    Matcher sm = DELIMITED_SHORT_SIZE_PATTERN.matcher(text);
+                    while (sm.find()) {
+                        String gNum = sm.group(1) != null ? sm.group(1) : sm.group(3);
+                        String gUnit = sm.group(2) != null ? sm.group(2) : sm.group(4);
+                        int val = parsePositiveInt(gNum);
+                        if ("m".equalsIgnoreCase(gUnit) && val < 25) continue;
+                        if ("g".equalsIgnoreCase(gUnit) && (val <= 0 || val > 500)) continue;
+                        num = gNum;
+                        unit = gUnit;
+                        break;
+                    }
+                }
             }
         }
         if (num == null || num.isEmpty() || unit == null || unit.isEmpty()) return "";
@@ -516,57 +572,74 @@ final class TvSeriesScraper {
         return num + u;
     }
 
-    static String extractEpisodeSpecSummary(String rawName) {
-        if (rawName == null || rawName.trim().isEmpty()) return "";
-        String core = stripTrailingNetdiskSuffix(rawName, "");
-        String probe = core.isEmpty() ? rawName : core;
-        String lower = probe.toLowerCase(Locale.ROOT);
+    private static String matchByteSizeString(String input) {
+        if (input == null || input.isEmpty()) return "";
+        Matcher pm = URL_BYTE_PARAM_PATTERN.matcher(input);
+        if (pm.find()) return pm.group(1);
+        Matcher em = SPIDER_EXT_SIZE_PATTERN.matcher(input);
+        if (em.find()) return em.group(1);
+        return "";
+    }
 
-        String resolution = "";
-        if (lower.contains("8k") || lower.contains("4320p") || lower.contains("7680x")) {
-            resolution = "8K";
-        } else if (lower.contains("4k")
-                || lower.contains("2160p")
-                || lower.contains("uhd")
-                || lower.contains("3840x")) {
-            resolution = "4K";
-        } else if (lower.contains("2k") || lower.contains("1440p") || lower.contains("2560x")) {
-            resolution = "2K";
-        } else if (lower.contains("1080p")
-                || lower.contains("1080i")
-                || lower.contains("1920x")
-                || lower.contains("fhd")) {
-            resolution = "1080P";
-        } else if (lower.contains("720p") || lower.contains("1280x")) {
-            resolution = "720P";
+    private static String formatByteSizeTag(String digits) {
+        if (digits == null || digits.isEmpty()) return "";
+        try {
+            long bytes = Long.parseLong(digits);
+            if (bytes < 20_000_000L || bytes > 250_000_000_000L) return "";
+            double gb = bytes / (1024.0 * 1024.0 * 1024.0);
+            if (gb >= 1.0) {
+                String formatted = String.format(Locale.US, "%.1f", gb);
+                formatted = formatted.replaceAll("0+$", "").replaceAll("\\.$", "");
+                return formatted + "GB";
+            }
+            long mb = Math.round(bytes / (1024.0 * 1024.0));
+            return mb >= 20 ? (mb + "MB") : "";
+        } catch (NumberFormatException ignored) {
+            return "";
+        }
+    }
+
+    private static String extractUrlSpecText(String epUrl) {
+        if (epUrl == null) return "";
+        String trimmed = epUrl.trim();
+        if (trimmed.isEmpty()) return "";
+        String withoutHost = URL_SCHEME_HOST_PATTERN.matcher(trimmed).replaceFirst("");
+        String decoded = MediaBadges.percentDecodeUtf8PreservePlus(withoutHost);
+        return decoded == null ? "" : decoded.trim();
+    }
+
+    static String extractEpisodeSpecSummary(String rawName) {
+        return extractEpisodeSpecSummary(rawName, "", "");
+    }
+
+    static String extractEpisodeSpecSummary(String rawName, String epUrl, String lineName) {
+        String safeRaw = rawName == null ? "" : rawName;
+        String urlSpec = extractUrlSpecText(epUrl);
+        if (safeRaw.trim().isEmpty() && urlSpec.isEmpty()) return "";
+        String core = safeRaw.isEmpty() ? "" : stripTrailingNetdiskSuffix(safeRaw, "");
+        String probe = core.isEmpty() ? safeRaw : core;
+        String combinedProbe = urlSpec.isEmpty() ? probe : (probe + " " + urlSpec);
+        String combinedRaw = urlSpec.isEmpty() ? safeRaw : (safeRaw + " " + urlSpec);
+
+        String resolution = detectResolutionTag(combinedProbe);
+        if (resolution.isEmpty() && !combinedRaw.equals(combinedProbe)) {
+            resolution = detectResolutionTag(combinedRaw);
         }
 
         List<String> tags = new ArrayList<>();
-        String hdrProbe = probe;
-        if (resolution.isEmpty() && !rawName.equals(probe)) {
-            String rawLower = rawName.toLowerCase(Locale.ROOT);
-            if (rawLower.contains("8k") || rawLower.contains("4320p")) resolution = "8K";
-            else if (rawLower.contains("4k")
-                    || rawLower.contains("2160p")
-                    || rawLower.contains("uhd")) resolution = "4K";
-            else if (rawLower.contains("2k") || rawLower.contains("1440p")) resolution = "2K";
-            else if (rawLower.contains("1080p") || rawLower.contains("1080i")) resolution = "1080P";
-            else if (rawLower.contains("720p")) resolution = "720P";
-        }
-
-        String hdrLower = hdrProbe.toLowerCase(Locale.ROOT);
+        String hdrLower = combinedProbe.toLowerCase(Locale.ROOT);
         if (hdrLower.contains("杜比")
                 || hdrLower.contains("dovi")
                 || hdrLower.contains("dolby")
                 || hdrLower.contains("atmos")
-                || STANDALONE_DV_PATTERN.matcher(hdrProbe).find()) {
+                || STANDALONE_DV_PATTERN.matcher(combinedProbe).find()) {
             tags.add("杜比");
-        } else if (rawName.contains("杜比")) {
+        } else if (safeRaw.contains("杜比")) {
             tags.add("杜比");
         }
         if (hdrLower.contains("hdr10+")) {
             tags.add("HDR10+");
-        } else if (hdrLower.contains("hdr") || hdrProbe.contains("臻彩")) {
+        } else if (hdrLower.contains("hdr") || combinedProbe.contains("臻彩")) {
             tags.add("HDR");
         }
         if (hdrLower.contains("remux")
@@ -581,26 +654,45 @@ final class TvSeriesScraper {
                 || hdrLower.endsWith(".iso")) {
             tags.add("原盘");
         }
-        if (hdrProbe.contains("高码") || STANDALONE_HQ_PATTERN.matcher(hdrProbe).find()) {
+        if (combinedProbe.contains("高码") || STANDALONE_HQ_PATTERN.matcher(combinedProbe).find()) {
             tags.add("高码");
         }
-        if (HIGH_FPS_PATTERN.matcher(hdrProbe).find()) {
+        if (HIGH_FPS_PATTERN.matcher(combinedProbe).find()) {
             tags.add("60帧");
         }
+        if (hdrLower.contains("atmos") || combinedProbe.contains("全景声")) {
+            tags.add("全景声");
+        } else if (hdrLower.contains("truehd")) {
+            tags.add("TrueHD");
+        } else if (hdrLower.contains("ddp")
+                || hdrLower.contains("dd+")
+                || hdrLower.contains("eac3")
+                || hdrLower.contains("e-ac-3")) {
+            tags.add("DD+");
+        } else if (hdrLower.contains("dts")) {
+            tags.add("DTS");
+        }
 
-        String sizeTag = extractEpisodeSizeTag(rawName);
-        List<String> summary = new ArrayList<>(3);
+        String sizeTag = extractEpisodeSizeTag(safeRaw, epUrl);
+        if (resolution.isEmpty()
+                && lineName != null
+                && !lineName.trim().isEmpty()
+                && (!sizeTag.isEmpty()
+                        || !tags.isEmpty()
+                        || looksLikeNoisyResourceLabel(safeRaw)
+                        || !urlSpec.isEmpty())) {
+            resolution = detectResolutionTag(lineName);
+        }
+
+        List<String> summary = new ArrayList<>(5);
         if (!resolution.isEmpty()) summary.add(resolution);
-        int maxTagSlots = sizeTag.isEmpty() ? (3 - summary.size()) : (2 - summary.size());
-        if (!sizeTag.isEmpty() && summary.isEmpty()) maxTagSlots = 2;
-        for (int i = 0; i < tags.size() && maxTagSlots > 0; i++) {
+        for (int i = 0; i < tags.size() && summary.size() < 4; i++) {
             String t = tags.get(i);
             if (!summary.contains(t)) {
                 summary.add(t);
-                maxTagSlots--;
             }
         }
-        if (!sizeTag.isEmpty() && summary.size() < 3) {
+        if (!sizeTag.isEmpty()) {
             summary.add(sizeTag);
         }
         if (summary.isEmpty()) return "";
@@ -610,6 +702,40 @@ final class TvSeriesScraper {
             sb.append(summary.get(i));
         }
         return sb.toString();
+    }
+
+    private static String detectResolutionTag(String text) {
+        if (text == null || text.isEmpty()) return "";
+        String lower = text.toLowerCase(Locale.ROOT);
+        if (lower.contains("8k") || lower.contains("4320p") || lower.contains("7680x")) {
+            return "8K";
+        }
+        if (lower.contains("4k")
+                || lower.contains("2160p")
+                || lower.contains("uhd")
+                || lower.contains("3840x")) {
+            return "4K";
+        }
+        if (lower.contains("2k") || lower.contains("1440p") || lower.contains("2560x")) {
+            return "2K";
+        }
+        if (lower.contains("1080p")
+                || lower.contains("1080i")
+                || lower.contains("1920x")
+                || lower.contains("fhd")) {
+            return "1080P";
+        }
+        if (lower.contains("720p") || lower.contains("1280x")) {
+            return "720P";
+        }
+        return "";
+    }
+
+    private static boolean looksLikeNoisyResourceLabel(String rawName) {
+        if (rawName == null) return false;
+        return rawName.contains("..")
+                || rawName.contains("【")
+                || TECH_NOISE_PATTERN.matcher(rawName).find();
     }
 
     private static String extractTrailingBalancedLenticular(String s) {
@@ -1044,6 +1170,14 @@ final class TvSeriesScraper {
             String seriesTitle,
             List<Cms.Episode> episodes,
             SeriesScrapeStore.OverrideRecord override) {
+        return scrapeLine(seriesTitle, "", episodes, override);
+    }
+
+    static ScrapedLine scrapeLine(
+            String seriesTitle,
+            String lineName,
+            List<Cms.Episode> episodes,
+            SeriesScrapeStore.OverrideRecord override) {
         if (episodes == null || episodes.isEmpty()) {
             return new ScrapedLine(
                     Collections.<ScrapedEpisode>emptyList(), false, false, 0, 0, false, false);
@@ -1068,6 +1202,8 @@ final class TvSeriesScraper {
         for (int i = 0; i < episodes.size(); i++) {
             Cms.Episode ep = episodes.get(i);
             String raw = ep != null && ep.name != null ? ep.name.trim() : "";
+            String rawUrl = ep != null && ep.url != null ? ep.url.trim() : "";
+            String specSummary = extractEpisodeSpecSummary(raw, rawUrl, lineName);
             if (!raw.isEmpty()) nonEmptyCount++;
             String core =
                     stripCopySuffixIfOtherNumberPresent(
@@ -1120,7 +1256,8 @@ final class TvSeriesScraper {
                                 variantTag,
                                 dateKey,
                                 dateShort,
-                                readableRaw));
+                                readableRaw,
+                                specSummary));
                 continue;
             }
 
@@ -1145,7 +1282,8 @@ final class TvSeriesScraper {
                                 variantTag,
                                 dateKey,
                                 dateShort,
-                                readableRaw));
+                                readableRaw,
+                                specSummary));
                 continue;
             }
 
@@ -1214,7 +1352,8 @@ final class TvSeriesScraper {
                             variantTag,
                             dateKey,
                             dateShort,
-                            readableRaw));
+                            readableRaw,
+                            specSummary));
         }
 
         boolean multiSeason = distinctSeasons.size() >= 2;
@@ -1264,7 +1403,9 @@ final class TvSeriesScraper {
                         formatDatedFallbackLabel(
                                 fullDateLabel, item.variantTag, item.cleanedRawLabel);
             } else {
-                cleanLabel = item.cleanedRawLabel.isEmpty() ? item.rawName : item.cleanedRawLabel;
+                cleanLabel =
+                        synthesizeUnnumberedResourceLabel(
+                                item.rawName, item.cleanedRawLabel, commonTrailingBlock);
             }
             finalized.add(
                     new ScrapedEpisode(
@@ -1283,7 +1424,8 @@ final class TvSeriesScraper {
                             item.variantTag,
                             item.dateKey,
                             fullDateLabel,
-                            item.cleanedRawLabel));
+                            item.cleanedRawLabel,
+                            item.specSummary));
         }
 
         disambiguateDuplicateLabels(finalized, seriesTitle);
@@ -1314,10 +1456,78 @@ final class TvSeriesScraper {
         return dateLabel + "期";
     }
 
+    private static String synthesizeUnnumberedResourceLabel(
+            String rawName, String cleanedRaw, String commonTrailingBlock) {
+        String safeRaw = rawName == null ? "" : rawName.trim();
+        String candidate = cleanedRaw == null ? "" : cleanedRaw.trim();
+        boolean noisy =
+                looksLikeNoisyResourceLabel(safeRaw)
+                        || SHORT_ASCII_RELEASE_TOKEN_PATTERN.matcher(candidate).find()
+                        || RELEASE_GROUP_SUFFIX_PATTERN.matcher(candidate).find();
+        if (!noisy
+                && !candidate.isEmpty()
+                && !BARE_YEAR_OR_PUNCT_PATTERN.matcher(candidate).matches()) {
+            return candidate;
+        }
+        String core = stripTrailingNetdiskSuffix(safeRaw, commonTrailingBlock);
+        String qualifierProbe = (core + " " + candidate).toLowerCase(Locale.ROOT);
+        List<String> quals = new ArrayList<>(2);
+        if (qualifierProbe.contains("imax")) quals.add("IMAX版");
+        if (qualifierProbe.contains("未删减") || qualifierProbe.contains("uncut")) {
+            quals.add("未删减版");
+        } else if (qualifierProbe.contains("无删减") || qualifierProbe.contains("unrated")) {
+            quals.add("无删减版");
+        } else if (qualifierProbe.contains("导剪") || qualifierProbe.contains("director")) {
+            quals.add("导剪版");
+        } else if (qualifierProbe.contains("加长") || qualifierProbe.contains("extended")) {
+            quals.add("加长版");
+        } else if (qualifierProbe.contains("fixed")
+                || qualifierProbe.contains("修正")
+                || qualifierProbe.contains("修复")) {
+            quals.add("修正版");
+        } else if (qualifierProbe.contains("重映")) {
+            quals.add("重映版");
+        }
+        if (qualifierProbe.contains("国粤")) quals.add("国粤");
+        else if (qualifierProbe.contains("粤语") || qualifierProbe.contains("粤配")) {
+            quals.add("粤语");
+        } else if (qualifierProbe.contains("国语") || qualifierProbe.contains("国配")) {
+            quals.add("国语");
+        }
+        if (!quals.isEmpty()) {
+            StringBuilder sb = new StringBuilder("正片");
+            for (int i = 0; i < quals.size() && i < 2; i++) {
+                sb.append(" · ").append(quals.get(i));
+            }
+            return sb.toString();
+        }
+        String strippedSkeleton =
+                DELIMITED_YEAR_PATTERN
+                        .matcher(RELEASE_GROUP_SUFFIX_PATTERN.matcher(candidate).replaceAll(" "))
+                        .replaceAll(" ");
+        String prev;
+        do {
+            prev = strippedSkeleton;
+            strippedSkeleton =
+                    SHORT_ASCII_RELEASE_TOKEN_PATTERN.matcher(strippedSkeleton).replaceAll(" ");
+        } while (!strippedSkeleton.equals(prev));
+        strippedSkeleton =
+                strippedSkeleton
+                        .replaceAll("(?:\\s*[.·•]+\\s*)+", " ")
+                        .replaceAll("^\\s*[-·._&]+\\s*|\\s*[-·._&]+\\s*$", "")
+                        .replaceAll("\\s+", " ")
+                        .trim();
+        if (strippedSkeleton.isEmpty()
+                || BARE_YEAR_OR_PUNCT_PATTERN.matcher(strippedSkeleton).matches()) {
+            return "正片";
+        }
+        return strippedSkeleton;
+    }
+
     /**
      * Guarantees no two episodes in the same line render indistinguishable duplicate scraped labels
      * (such as {@code 第01集 | 第01集}). Appends date, distinguishing spec/language token, or falls
-     * back to cleaned readable raw name whenever collisions remain.
+     * back to cleaned readable raw name or clean cut indexing whenever collisions remain.
      */
     private static void disambiguateDuplicateLabels(List<ScrapedEpisode> list, String seriesTitle) {
         if (list.size() < 2) return;
@@ -1336,6 +1546,21 @@ final class TvSeriesScraper {
         String cleanSeries = cleanWorkTitle(seriesTitle);
         for (List<Integer> indices : byLabel.values()) {
             if (indices.size() < 2) continue;
+
+            // Step 0: If every item in this duplicate-title group already has a distinct
+            // specSummary (e.g. "正片" 4K·18.5GB vs "正片" 4K·60fps·22GB), keep clean titlePart
+            // and let card spec line differentiate them cleanly.
+            Set<String> cardKeys = new HashSet<>();
+            boolean allCardKeysDistinct = true;
+            for (int idx : indices) {
+                ScrapedEpisode ep = list.get(idx);
+                if (ep.specSummary.isEmpty()
+                        || !cardKeys.add(ep.cleanDisplayLabel + "|" + ep.specSummary)) {
+                    allCardKeysDistinct = false;
+                    break;
+                }
+            }
+            if (allCardKeysDistinct) continue;
 
             // Step 1: Try disambiguating by air date (e.g. "10.22" vs "10.23")
             Set<String> dates = new HashSet<>();
@@ -1378,8 +1603,9 @@ final class TvSeriesScraper {
                 if (allDistinctLabels(list, indices)) continue;
             }
 
-            // Step 3: Fall back to cleaned readable raw name (stripped of redundant series prefix)
-            for (int idx : indices) {
+            // Step 3: Fall back to cleaned readable raw name if non-noisy, else clean indexed cuts
+            for (int k = 0; k < indices.size(); k++) {
+                int idx = indices.get(k);
                 ScrapedEpisode ep = list.get(idx);
                 if (ep.manualOverride) continue;
                 String readable = ep.cleanedRawLabel.isEmpty() ? ep.rawName : ep.cleanedRawLabel;
@@ -1392,7 +1618,15 @@ final class TvSeriesScraper {
                                     .trim();
                     if (!trimmed.isEmpty()) readable = trimmed;
                 }
-                if (!readable.isEmpty()) {
+                boolean usableReadable =
+                        !readable.isEmpty()
+                                && !looksLikeNoisyResourceLabel(ep.rawName)
+                                && !BARE_YEAR_OR_PUNCT_PATTERN.matcher(readable).matches();
+                if (!usableReadable) {
+                    String numStr = (k + 1) < 10 ? "0" + (k + 1) : String.valueOf(k + 1);
+                    String baseTitle = ep.cleanDisplayLabel.isEmpty() ? "片源" : ep.cleanDisplayLabel;
+                    list.set(idx, ep.withCleanDisplayLabel(baseTitle + " " + numStr));
+                } else {
                     list.set(idx, ep.withCleanDisplayLabel(readable));
                 }
             }
@@ -1579,7 +1813,19 @@ final class TvSeriesScraper {
      */
     static String formatGridEpisodeLabel(
             ScrapedEpisode scraped, boolean isBookmarked, boolean hasOverrideOrScrambled) {
-        if (scraped == null) return "";
+        String[] parts = formatGridEpisodeCardParts(scraped, isBookmarked, hasOverrideOrScrambled);
+        if (parts[0].isEmpty()) return "";
+        return parts[1].isEmpty() ? parts[0] : (parts[0] + " · " + parts[1]);
+    }
+
+    /**
+     * Returns {@code {titlePart, specPart}} for two-line TV episode grid cards so resolution,
+     * dynamic range, audio, and file size render cleanly on a secondary metadata line without
+     * misaligning card titles.
+     */
+    static String[] formatGridEpisodeCardParts(
+            ScrapedEpisode scraped, boolean isBookmarked, boolean hasOverrideOrScrambled) {
+        if (scraped == null) return new String[] {"", ""};
         String base = scraped.rawName;
         boolean scrapedFormatted = false;
         if (scraped.manualOverride || !scraped.episodeTitle.isEmpty()) {
@@ -1607,22 +1853,26 @@ final class TvSeriesScraper {
                 && (scraped.rawName.length() > 18
                         || scraped.rawName.contains("【")
                         || scraped.rawName.contains("..")
-                        || TECH_NOISE_PATTERN.matcher(scraped.rawName).find())) {
+                        || TECH_NOISE_PATTERN.matcher(scraped.rawName).find()
+                        || !scraped.specSummary.isEmpty())) {
             base = scraped.cleanDisplayLabel;
             scrapedFormatted = true;
         }
+        String specPart = "";
         if (scrapedFormatted && !scraped.specSummary.isEmpty()) {
             String lowerBase = base.toLowerCase(Locale.ROOT);
-            StringBuilder sb = new StringBuilder(base);
+            StringBuilder specSb = new StringBuilder();
             for (String token : scraped.specSummary.split(" · ")) {
                 String trimmed = token.trim();
                 if (!trimmed.isEmpty() && !lowerBase.contains(trimmed.toLowerCase(Locale.ROOT))) {
-                    sb.append(" · ").append(trimmed);
+                    if (specSb.length() > 0) specSb.append(" · ");
+                    specSb.append(trimmed);
                 }
             }
-            base = sb.toString();
+            specPart = specSb.toString();
         }
-        return isBookmarked ? ("● " + base) : base;
+        String titlePart = isBookmarked ? ("● " + base) : base;
+        return new String[] {titlePart, specPart};
     }
 
     /**

@@ -2757,5 +2757,54 @@ public final class MobileUiRedesignChecks {
                                 .equals(Prefs.sanitizeMobileSetting(Prefs.MOBILE_HUD_TOGGLES, 21))
                         && Prefs.sanitizeMobileSetting(Prefs.MOBILE_HUD_TOGGLES, 99) == null,
                 "Pillar 11: Prefs.sanitizeMobileSetting validates MOBILE_HUD_BUTTONS and MOBILE_HUD_TOGGLES");
+
+        // 3. Foldable half-folded tabletop split HUD & video stage controller
+        check(
+                !FoldableTabletopController.shouldEnterByHingeAngle(false, 45f)
+                        && !FoldableTabletopController.shouldEnterByHingeAngle(false, 175f)
+                        && FoldableTabletopController.shouldEnterByHingeAngle(false, 90f)
+                        && FoldableTabletopController.shouldEnterByHingeAngle(false, 138f)
+                        && FoldableTabletopController.shouldEnterByHingeAngle(true, 150f)
+                        && !FoldableTabletopController.shouldEnterByHingeAngle(true, 160f)
+                        && !FoldableTabletopController.shouldEnterByHingeAngle(true, 50f),
+                "Pillar 12: FoldableTabletopController hinge angle hysteresis [68..142] enter / [55..155] hold");
+
+        FoldableTabletopController.SplitBounds horiz =
+                FoldableTabletopController.computeSplitBounds(
+                        2200, 1800, true, 0, 888, 2200, 912, false, 10);
+        check(
+                horiz.active
+                        && !horiz.needsOrientationFlipForHorizontalHinge
+                        && horiz.upperBottomPx == 888
+                        && horiz.lowerTopPx == 912,
+                "Pillar 12: computeSplitBounds activates horizontal crease upper/lower split");
+
+        FoldableTabletopController.SplitBounds vert =
+                FoldableTabletopController.computeSplitBounds(
+                        2200, 1800, true, 1088, 0, 1112, 1800, false, 10);
+        check(
+                !vert.active && vert.needsOrientationFlipForHorizontalHinge,
+                "Pillar 12: computeSplitBounds requests orientation flip on vertical half-fold crease");
+
+        FoldableTabletopController.SplitBounds sensorFallback =
+                FoldableTabletopController.computeSplitBounds(
+                        2200, 1800, false, 0, 0, 0, 0, true, 12);
+        check(
+                sensorFallback.active
+                        && sensorFallback.upperBottomPx == 888
+                        && sensorFallback.lowerTopPx == 912,
+                "Pillar 12: computeSplitBounds falls back cleanly to centered sensor split");
+
+        FoldableTabletopController.SplitBounds flat =
+                FoldableTabletopController.computeSplitBounds(
+                        2200, 1800, false, 0, 0, 0, 0, false, 12);
+        check(
+                !flat.active && !flat.needsOrientationFlipForHorizontalHinge,
+                "Pillar 12: computeSplitBounds stays inactive when phone is flat");
+
+        check(
+                !java.util.Arrays.asList(Prefs.KEYS).contains(Prefs.FOLDABLE_TABLETOP_SPLIT_HUD)
+                        && !MobileSettingsIndex.search("折叠", false, false).isEmpty(),
+                "Pillar 12: FOLDABLE_TABLETOP_SPLIT_HUD stays outside Prefs.KEYS and is searchable");
     }
 }

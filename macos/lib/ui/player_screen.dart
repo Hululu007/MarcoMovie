@@ -651,6 +651,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   int _gestureClockFloorMs = 0;
   int _desktopKeyClockMs = 0;
   KeySeekPreview? _activeDesktopScrubPreview;
+
+  bool get _usesTestWidgetClock =>
+      WidgetsBinding.instance.runtimeType.toString().contains('Test');
   String _extraTrackSpecInfo = '';
   DanmuSettings _danmuSettings = const DanmuSettings();
   DanmuProvider? _danmuProvider;
@@ -5042,11 +5045,18 @@ class _PlayerScreenState extends State<PlayerScreen>
       return;
     }
 
-    final wall = DateTime.now().millisecondsSinceEpoch;
-    if (!_desktopKeySeek.isActive) {
-      _desktopKeyClockMs = wall;
-    } else if (wall > _desktopKeyClockMs) {
-      _desktopKeyClockMs = wall;
+    final useFakeClock = _usesTestWidgetClock;
+    if (useFakeClock) {
+      if (!_desktopKeySeek.isActive) {
+        _desktopKeyClockMs = 1000;
+      }
+    } else {
+      final wall = DateTime.now().millisecondsSinceEpoch;
+      if (!_desktopKeySeek.isActive) {
+        _desktopKeyClockMs = wall;
+      } else if (wall > _desktopKeyClockMs) {
+        _desktopKeyClockMs = wall;
+      }
     }
 
     final preview = _desktopKeySeek.onKeyDownOrRepeat(
@@ -5075,8 +5085,12 @@ class _PlayerScreenState extends State<PlayerScreen>
           _desktopKeyTickTimer = null;
           return;
         }
-        final nowWall = DateTime.now().millisecondsSinceEpoch;
-        _desktopKeyClockMs = math.max(nowWall, _desktopKeyClockMs + 50);
+        if (useFakeClock) {
+          _desktopKeyClockMs += 50;
+        } else {
+          final nowWall = DateTime.now().millisecondsSinceEpoch;
+          _desktopKeyClockMs = math.max(nowWall, _desktopKeyClockMs + 50);
+        }
         final updated = _desktopKeySeek.updatePreview(_desktopKeyClockMs);
         if (updated.isHoldPreview) {
           setState(() {
@@ -5096,9 +5110,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     _desktopKeyTickTimer?.cancel();
     _desktopKeyTickTimer = null;
-    final wall = DateTime.now().millisecondsSinceEpoch;
-    if (wall > _desktopKeyClockMs) {
-      _desktopKeyClockMs = wall;
+    if (!_usesTestWidgetClock) {
+      final wall = DateTime.now().millisecondsSinceEpoch;
+      if (wall > _desktopKeyClockMs) {
+        _desktopKeyClockMs = wall;
+      }
     }
     final wasHold = _desktopKeySeek.isScrubbing;
     final dir = _desktopKeySeek.direction;

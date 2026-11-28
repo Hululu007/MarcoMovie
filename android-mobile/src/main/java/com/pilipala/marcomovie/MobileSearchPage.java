@@ -70,6 +70,7 @@ final class MobileSearchPage {
         private String selectedSiteFilter = "";
         volatile boolean cancelled;
         volatile ExecutorService pool;
+        volatile SearchCoordinator coordinator;
 
         SearchSession(
                 long querySeq,
@@ -210,6 +211,11 @@ final class MobileSearchPage {
             pool = null;
             if (p != null) {
                 p.shutdownNow();
+            }
+            SearchCoordinator c = coordinator;
+            coordinator = null;
+            if (c != null) {
+                c.close();
             }
         }
     }
@@ -846,10 +852,12 @@ final class MobileSearchPage {
                     siteFilterChips.clear();
                     resultsStage.removeAllViews();
 
-                    final List<Cms.Site> searchable = new ArrayList<>();
+                    final List<Cms.Site> rawSearchable = new ArrayList<>();
                     for (Cms.Site s : a.config.sites) {
-                        if (a.available(s) && s.searchable) searchable.add(s);
+                        if (a.available(s) && s.searchable) rawSearchable.add(s);
                     }
+                    final List<Cms.Site> searchable =
+                            SourcePreferences.prioritized(a, rawSearchable);
                     if (searchable.isEmpty()) {
                         invalidateSession();
                         displayedSession[0] = null;
@@ -872,101 +880,114 @@ final class MobileSearchPage {
                     displayedSession[0] = session;
                     statusText.setText(session.status());
 
-                    int threads = Math.max(2, Math.min(6, a.prefs.getInt(Prefs.SEARCH_THREADS, 6)));
+                    final int configuredThreads =
+                            Math.max(2, Math.min(6, a.prefs.getInt(Prefs.SEARCH_THREADS, 6)));
+                    final int poolCap = 16;
+                    SearchCoordinator.configureMaxPoolThreads(poolCap);
+                    SearchCoordinator.configureThreads(configuredThreads);
                     final int timeoutSec =
                             Prefs.clampSearchTimeoutSeconds(
                                     a.prefs.getInt(Prefs.SEARCH_TIMEOUT, 20));
-                    a.submitPage(
+                    final long perSourceTimeoutMs =
+                            searchable.size() >= 80
+                                    ? Math.min(timeoutSec * 1000L, 8000L)
+                                    : timeoutSec * 1000L;
+                    final long sessionTimeoutMs =
+                            SearchCoordinator.computeSessionTimeoutMs(
+                                    searchable.size(), perSourceTimeoutMs, poolCap);
+                    final TvSearchContext searchCtx =
+                            new TvSearchContext(a.config, a.privateMode, a.engineEpoch);
+                    final boolean[] uiRefreshPending = {false};
+                    final long[] lastUiRefreshMs = {0L};
+                    final Runnable flushUi =
                             () -> {
-                                if (session.cancelled) return;
-                                ExecutorService pool = Executors.newFixedThreadPool(threads);
-                                session.pool = pool;
-                                if (session.cancelled) {
-                                    pool.shutdownNow();
+                                uiRefreshPending[0] = false;
+                                if (a.isFinishing() || a.isDestroyed() || a.switchingPrivacy) {
                                     return;
                                 }
-                                try {
-                                    List<Future<?>> futures = new ArrayList<>();
-                                    for (final Cms.Site site : searchable) {
-                                        if (session.cancelled) break;
-                                        futures.add(
-                                                pool.submit(
-                                                        () -> {
-                                                            if (session.cancelled
-                                                                    || Thread.currentThread()
-                                                                            .isInterrupted()) {
-                                                                return;
-                                                            }
-                                                            final List<Hit> localHits =
-                                                                    new ArrayList<>();
-                                                            try {
-                                                                Cms.Listing res =
-                                                                        Cms.listing(
-                                                                                a.engine(site)
-                                                                                        .search(
-                                                                                                q,
-                                                                                                1));
-                                                                if (!session.cancelled
-                                                                        && res.videos != null
-                                                                        && !res.videos.isEmpty()) {
-                                                                    for (Cms.Video v : res.videos) {
-                                                                        localHits.add(
-                                                                                new Hit(site, v));
-                                                                    }
-                                                                }
-                                                            } catch (Throwable ignored) {
-                                                            } finally {
-                                                                if (!session.cancelled) {
-                                                                    a.ui.post(
-                                                                            () -> {
-                                                                                if (a.isFinishing()
-                                                                                        || a
-                                                                                                .isDestroyed()
-                                                                                        || a.switchingPrivacy) {
-                                                                                    return;
-                                                                                }
-                                                                                if (!acceptBatchIfCurrent(
-                                                                                        session,
-                                                                                        a.privateMode,
-                                                                                        a.config,
-                                                                                        a.engineEpoch,
-                                                                                        a.generation,
-                                                                                        localHits)) {
-                                                                                    return;
-                                                                                }
-                                                                                displayedSession[
-                                                                                                0] =
-                                                                                        session;
-                                                                                statusText.setText(
-                                                                                        session
-                                                                                                .status());
-                                                                                rebuildResults
-                                                                                        .run();
-                                                                            });
-                                                                }
-                                                            }
-                                                        }));
-                                    }
-                                    for (Future<?> f : futures) {
-                                        if (session.cancelled
-                                                || Thread.currentThread().isInterrupted()) {
-                                            break;
-                                        }
-                                        try {
-                                            f.get(timeoutSec, TimeUnit.SECONDS);
-                                        } catch (InterruptedException ie) {
-                                            Thread.currentThread().interrupt();
-                                            break;
-                                        } catch (Exception ignored) {
-                                        }
-                                    }
-                                } finally {
-                                    pool.shutdownNow();
-                                    if (session.pool == pool) {
-                                        session.pool = null;
-                                    }
+                                if (displayedSession[0] != session || session.cancelled) {
+                                    return;
                                 }
-                            });
+                                lastUiRefreshMs[0] = android.os.SystemClock.uptimeMillis();
+                                statusText.setText(session.status());
+                                rebuildResults.run();
+                            };
+
+                    final SearchCoordinator coordinator =
+                            new SearchCoordinator(
+                                    (site, query) ->
+                                            Cms.listing(
+                                                            SourceController.engine(
+                                                                            a, site, searchCtx)
+                                                                    .search(query, 1))
+                                                    .videos,
+                                    (site, videos, outcome) ->
+                                            a.ui.post(
+                                                    () -> {
+                                                        if (a.isFinishing()
+                                                                || a.isDestroyed()
+                                                                || a.switchingPrivacy) {
+                                                            return;
+                                                        }
+                                                        final List<Hit> localHits;
+                                                        if (videos != null && !videos.isEmpty()) {
+                                                            localHits =
+                                                                    new ArrayList<>(videos.size());
+                                                            for (Cms.Video v : videos) {
+                                                                localHits.add(new Hit(site, v));
+                                                            }
+                                                        } else {
+                                                            localHits = Collections.emptyList();
+                                                        }
+                                                        if (!acceptBatchIfCurrent(
+                                                                session,
+                                                                a.privateMode,
+                                                                a.config,
+                                                                a.engineEpoch,
+                                                                a.generation,
+                                                                localHits)) {
+                                                            return;
+                                                        }
+                                                        displayedSession[0] = session;
+                                                        statusText.setText(session.status());
+                                                        if (searchable.size() < 40
+                                                                || session.isComplete()) {
+                                                            a.ui.removeCallbacks(flushUi);
+                                                            uiRefreshPending[0] = false;
+                                                            lastUiRefreshMs[0] =
+                                                                    android.os.SystemClock
+                                                                            .uptimeMillis();
+                                                            rebuildResults.run();
+                                                        } else if (!uiRefreshPending[0]) {
+                                                            long elapsed =
+                                                                    android.os.SystemClock
+                                                                                    .uptimeMillis()
+                                                                            - lastUiRefreshMs[0];
+                                                            if (elapsed >= 90L) {
+                                                                lastUiRefreshMs[0] =
+                                                                        android.os.SystemClock
+                                                                                .uptimeMillis();
+                                                                rebuildResults.run();
+                                                            } else {
+                                                                uiRefreshPending[0] = true;
+                                                                a.ui.postDelayed(
+                                                                        flushUi,
+                                                                        Math.max(
+                                                                                16L,
+                                                                                90L - elapsed));
+                                                            }
+                                                        }
+                                                    }),
+                                    perSourceTimeoutMs,
+                                    sessionTimeoutMs,
+                                    24,
+                                    poolCap);
+                    session.coordinator = coordinator;
+                    if (session.cancelled) {
+                        coordinator.close();
+                        return;
+                    }
+                    coordinator.start(searchable, q);
                 };
 
         View.OnClickListener switchMode =

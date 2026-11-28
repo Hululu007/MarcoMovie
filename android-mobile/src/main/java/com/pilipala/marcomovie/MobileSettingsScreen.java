@@ -1441,6 +1441,20 @@ final class MobileSettingsScreen {
                             }
                         }));
         gestureRows.add(
+                mobileToggleRow(
+                        a,
+                        "ms-foldable-split",
+                        MobileIcons.IC_ASPECT,
+                        TINT_VIOLET,
+                        "折叠屏半折画面与控制分离",
+                        Prefs.FOLDABLE_TABLETOP_SPLIT_HUD,
+                        true,
+                        () -> {
+                            if (a.foldableTabletop != null) {
+                                a.foldableTabletop.onPreferenceChanged();
+                            }
+                        }));
+        gestureRows.add(
                 tagged(
                         MobileSectionGroup.navRow(
                                 a,

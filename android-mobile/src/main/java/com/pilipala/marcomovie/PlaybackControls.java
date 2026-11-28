@@ -1910,6 +1910,14 @@ final class PlaybackControls {
         }
     }
 
+    boolean isDanmakuEnabled() {
+        return danmaku != null && danmaku.enabled;
+    }
+
+    void toggleMobileDanmakuFromDeck() {
+        toggleMobileDanmakuQuick();
+    }
+
     private void toggleMobileDanmakuQuick() {
         if (a.touchPlayerGesture != null) {
             a.touchPlayerGesture.cancelActiveGesture();
@@ -3806,7 +3814,7 @@ final class PlaybackControls {
     }
 
     /** Layer 4 — Frosted Side/Bottom Panel housing secondary cinema tools with vector icons. */
-    private void showMobileMoreSheet() {
+    void showMobileMoreSheet() {
         final boolean live = "live".equals(site.key);
         final Dialog[] dlgRef = new Dialog[1];
         LinearLayout body = a.vertical();
@@ -3950,6 +3958,20 @@ final class PlaybackControls {
                                 if (a.playerChrome != null) a.playerChrome.update();
                             }));
         }
+        hudRows.add(
+                buildMobileMoreToggleRow(
+                        MobileIcons.IC_ASPECT,
+                        "折叠屏半折画面与控制分离",
+                        a.mobilePrefs().getBoolean(Prefs.FOLDABLE_TABLETOP_SPLIT_HUD, true),
+                        on -> {
+                            a.mobilePrefs()
+                                    .edit()
+                                    .putBoolean(Prefs.FOLDABLE_TABLETOP_SPLIT_HUD, on)
+                                    .apply();
+                            if (a.foldableTabletop != null) {
+                                a.foldableTabletop.onPreferenceChanged();
+                            }
+                        }));
         String posDesc =
                 MobilePlayerOverlay.describeCornerPosition(
                         a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_ANCHOR, 0),
@@ -7240,6 +7262,9 @@ final class PlaybackControls {
         if (!a.isTvDevice() && a.playerChrome != null) {
             a.playerChrome.refreshMobileHeaderBadges();
         }
+        if (!a.isTvDevice() && a.foldableTabletop != null) {
+            a.foldableTabletop.syncDynamicStates();
+        }
         if (a.isTvDevice() && activeTooltipButton != null && activeTooltipButton.hasFocus()) {
             refreshTooltipForCurrentFocus();
         }
@@ -7807,9 +7832,13 @@ final class PlaybackControls {
         videoHeight = height;
         if (a.playerChrome != null) a.playerChrome.resolution(width, height);
         if (width <= 0 || height <= 0 || a.playbackLayer.getWidth() == 0) return;
-        int w = a.playbackLayer.getWidth(),
-                h = a.playbackLayer.getHeight(),
-                mode = a.prefs.getInt(Prefs.ASPECT, 0);
+        int w = a.playbackLayer.getWidth();
+        int rawH = a.playbackLayer.getHeight();
+        int h =
+                !a.isTvDevice() && a.foldableTabletop != null
+                        ? Math.max(1, a.foldableTabletop.effectiveVideoStageHeight(rawH))
+                        : rawH;
+        int mode = a.prefs.getInt(Prefs.ASPECT, 0);
         float ratio = mode == 2 ? 16f / 9 : mode == 3 ? 4f / 3 : (float) width / height;
         if (mode != 1) {
             if (mode == 4) {

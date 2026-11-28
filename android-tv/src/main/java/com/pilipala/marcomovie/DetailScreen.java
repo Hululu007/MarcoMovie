@@ -679,6 +679,41 @@ final class DetailScreen {
         b.setPadding(a.dp(16), a.dp(7), a.dp(16), a.dp(7));
     }
 
+    private static void bindEpisodeCardText(
+            Button b, String titlePart, String specPart, boolean focused) {
+        String safeTitle = titlePart == null ? "" : titlePart;
+        String safeSpec = specPart == null ? "" : specPart.trim();
+        if (safeSpec.isEmpty()) {
+            b.setText(safeTitle);
+            return;
+        }
+        android.text.SpannableStringBuilder ssb = new android.text.SpannableStringBuilder();
+        ssb.append(safeTitle);
+        int titleEnd = ssb.length();
+        ssb.append('\n');
+        int specStart = ssb.length();
+        ssb.append(safeSpec);
+        int specEnd = ssb.length();
+        int titleColor = focused ? 0xff0b0e14 : 0xfff5f5f7;
+        int specColor = focused ? 0xcc1e293b : 0xccbfd0e6;
+        ssb.setSpan(
+                new android.text.style.ForegroundColorSpan(titleColor),
+                0,
+                titleEnd,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        ssb.setSpan(
+                new android.text.style.ForegroundColorSpan(specColor),
+                specStart,
+                specEnd,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        ssb.setSpan(
+                new android.text.style.RelativeSizeSpan(0.84f),
+                specStart,
+                specEnd,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        b.setText(ssb);
+    }
+
     private static void styleAppleEpisodeCard(
             MainActivity a, Button b, boolean focused, boolean activeBookmark) {
         FocusMotion.unclipAncestors(b);
@@ -751,7 +786,7 @@ final class DetailScreen {
         final SeriesScrapeStore.OverrideRecord scrapeOverride =
                 SeriesScrapeStore.load(a, siteKey, videoId, rawTitle);
         final TvSeriesScraper.ScrapedLine scrapedLine =
-                TvSeriesScraper.scrapeLine(rawTitle, line.episodes, scrapeOverride);
+                TvSeriesScraper.scrapeLine(rawTitle, safeLineName, line.episodes, scrapeOverride);
         final boolean descending = a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false);
         final boolean sortByScraped =
                 scrapeOverride != null && scrapeOverride.sortPreferenceExplicit
@@ -1166,11 +1201,12 @@ final class DetailScreen {
 
     /**
      * Horizontal episode grid row that disables baseline alignment and synchronously equalizes all
-     * card heights during measure so mixed 1/2/3-line titles align on exact row edges inside both
-     * the detail shelf and {@link TvDetailHost#showEpisodesDialog}.
+     * card heights during both measure and layout so mixed 1/2/3-line titles align on exact top
+     * and bottom edges inside both the detail shelf and {@link TvDetailHost#showEpisodesDialog}.
      */
     static final class EqualHeightEpisodeRow extends LinearLayout {
         private final int minCardHeightPx;
+        private int resolvedCardHeightPx;
 
         EqualHeightEpisodeRow(MainActivity a, int minCardHeightPx) {
             super(a);
@@ -1194,6 +1230,7 @@ final class DetailScreen {
                     maxButtonH = ch.getMeasuredHeight();
                 }
             }
+            resolvedCardHeightPx = maxButtonH;
             if (maxButtonH <= 0) return;
             int maxRowSpanH = 0;
             for (int i = 0; i < count; i++) {
@@ -1212,13 +1249,41 @@ final class DetailScreen {
                     MarginLayoutParams mlp = (MarginLayoutParams) rawLp;
                     vertMargins = mlp.topMargin + mlp.bottomMargin;
                 }
-                int span = ch.getMeasuredHeight() + vertMargins;
+                int span = maxButtonH + vertMargins;
                 if (span > maxRowSpanH) maxRowSpanH = span;
             }
             int finalH =
                     resolveSize(
                             maxRowSpanH + getPaddingTop() + getPaddingBottom(), heightMeasureSpec);
             setMeasuredDimension(getMeasuredWidth(), finalH);
+        }
+
+        @Override
+        protected void onLayout(boolean changed, int l, int t, int r, int b) {
+            int cardH = Math.max(minCardHeightPx, resolvedCardHeightPx);
+            int x = getPaddingLeft();
+            int padTop = getPaddingTop();
+            int count = getChildCount();
+            for (int i = 0; i < count; i++) {
+                View ch = getChildAt(i);
+                if (ch.getVisibility() == GONE) continue;
+                int lm = 0;
+                int tm = 0;
+                int rm = 0;
+                ViewGroup.LayoutParams rawLp = ch.getLayoutParams();
+                if (rawLp instanceof MarginLayoutParams) {
+                    MarginLayoutParams mlp = (MarginLayoutParams) rawLp;
+                    lm = mlp.leftMargin;
+                    tm = mlp.topMargin;
+                    rm = mlp.rightMargin;
+                }
+                int childW = Math.max(0, ch.getMeasuredWidth());
+                int childH = cardH > 0 ? cardH : ch.getMeasuredHeight();
+                x += lm;
+                int childTop = padTop + tm;
+                ch.layout(x, childTop, x + childW, childTop + childH);
+                x += childW + rm;
+            }
         }
     }
 
@@ -1242,8 +1307,22 @@ final class DetailScreen {
         if (ticket != a.generation || panel.getTag() != token) return;
         int batchSize = columns * 4;
         int stop = Math.min(end, start + batchSize);
+        boolean anySpecLine = false;
+        boolean anyLongLabel = false;
+        for (int i = start; i < stop; i++) {
+            TvSeriesScraper.ScrapedEpisode probe = scrapedLine.atSourceIndex(orderedIndices.get(i));
+            String[] p =
+                    TvSeriesScraper.formatGridEpisodeCardParts(
+                            probe, false, hasOverrideOrScrambled);
+            if (!p[1].isEmpty()) anySpecLine = true;
+            if (p[0].length() > 12) anyLongLabel = true;
+        }
+        final int cardGravity =
+                (columns <= 4 || anySpecLine || anyLongLabel)
+                        ? (Gravity.START | Gravity.CENTER_VERTICAL)
+                        : Gravity.CENTER;
         LinearLayout row = null;
-        final int minCardHeightPx = a.dp(52);
+        final int minCardHeightPx = anySpecLine ? a.dp(62) : a.dp(52);
         for (int i = start; i < stop; i++) {
             int col = (i - start) % columns;
             if (col == 0) {
@@ -1258,12 +1337,12 @@ final class DetailScreen {
                     bookmarkedEpisode != null
                             && !bookmarkedEpisode.isEmpty()
                             && bookmarkedEpisode.equals(episode.name);
-            String label =
-                    TvSeriesScraper.formatGridEpisodeLabel(
+            final String[] cardParts =
+                    TvSeriesScraper.formatGridEpisodeCardParts(
                             scrapedEp, isBookmarked, hasOverrideOrScrambled);
             final Button button =
                     a.button(
-                            label,
+                            cardParts[0],
                             "episode:" + line.name + ":" + originalIndex,
                             () -> {
                                 if (a.appDialog != null) a.appDialog.dismiss();
@@ -1276,17 +1355,16 @@ final class DetailScreen {
             button.setEllipsize(null);
             button.setIncludeFontPadding(false);
             button.setTextSize(TypedValue.COMPLEX_UNIT_SP, columns <= 3 ? 13.5f : 14f);
-            button.setLineSpacing(a.dp(2), 1.06f);
-            button.setGravity(
-                    label.length() > 12
-                            ? (Gravity.START | Gravity.CENTER_VERTICAL)
-                            : Gravity.CENTER);
+            button.setLineSpacing(a.dp(2.5f), 1.06f);
+            button.setGravity(cardGravity);
             button.setMinHeight(minCardHeightPx);
             button.setMinimumHeight(minCardHeightPx);
             styleAppleEpisodeCard(a, button, false, isBookmarked);
+            bindEpisodeCardText(button, cardParts[0], cardParts[1], false);
             button.setOnFocusChangeListener(
                     (view, focus) -> {
                         styleAppleEpisodeCard(a, button, focus, isBookmarked);
+                        bindEpisodeCardText(button, cardParts[0], cardParts[1], focus);
                         if (focus && a.current != null) {
                             a.current.episodeFocus = originalIndex;
                             a.current.episodeFocusLine = line.name;

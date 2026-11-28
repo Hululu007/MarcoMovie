@@ -1338,6 +1338,10 @@ final class PlaybackController {
                 a.mobilePlayerOverlay.detach();
             }
             a.mobilePlayerOverlay = new MobilePlayerOverlay(a, s, v, ep);
+            if (a.foldableTabletop != null) {
+                a.foldableTabletop.detach();
+            }
+            a.foldableTabletop = new FoldableTabletopController(a, s, v, ep, a.playbackControls);
         }
         final PlaybackControls controls = a.playbackControls;
         a.root.addOnLayoutChangeListener(
@@ -2315,6 +2319,16 @@ final class PlaybackController {
             setUnlockButtonVisible(a, true, true);
             return;
         }
+        if (a.foldableTabletop != null && a.foldableTabletop.isTabletopActive()) {
+            a.controlsVisible = false;
+            if (a.playerOverlay != null) {
+                a.playerOverlay.animate().cancel();
+                a.playerOverlay.setAlpha(0f);
+                a.playerOverlay.setVisibility(View.GONE);
+            }
+            if (a.hideControls != null) a.ui.removeCallbacks(a.hideControls);
+            return;
+        }
         boolean changed = a.controlsVisible != visible;
         a.controlsVisible = visible;
         if (visible && a.playClock != null && a.player != null && a.prepared) {
@@ -2421,6 +2435,7 @@ final class PlaybackController {
                 if (a.playbackControls != null) a.playbackControls.tick();
             }
             if (a.playerChrome != null) a.playerChrome.update();
+            if (a.foldableTabletop != null) a.foldableTabletop.onPlaybackTick();
         } catch (Exception ignored) {
         }
         a.ui.postDelayed(() -> clock(a, ticket), 1000);
@@ -2460,6 +2475,7 @@ final class PlaybackController {
                                 : "正在播放 · 双击暂停 · 左右滑快进 · 上下滑调亮度音量");
             }
             if (a.playerChrome != null) a.playerChrome.update();
+            if (a.foldableTabletop != null) a.foldableTabletop.syncDynamicStates();
             if (a.embyReporter != null)
                 a.embyReporter.update(a.player.getCurrentPosition(), !a.playing);
         } catch (Exception error) {
@@ -3516,6 +3532,10 @@ final class PlaybackController {
         }
         a.playerLocked = false;
         a.touchPlayerGesture = null;
+        if (a.foldableTabletop != null) {
+            a.foldableTabletop.detach();
+            a.foldableTabletop = null;
+        }
         if (a.mobilePlayerOverlay != null) {
             a.mobilePlayerOverlay.detach();
             a.mobilePlayerOverlay = null;

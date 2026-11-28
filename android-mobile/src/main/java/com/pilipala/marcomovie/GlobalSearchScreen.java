@@ -1332,10 +1332,28 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 () ->
                         ImmersivePoster.trimMemory(
                                 android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL);
+        SearchCoordinator.configureMaxPoolThreads(16);
         SearchCoordinator.configureThreads(effectiveThreads);
+        long rawTimeoutMs =
+                Prefs.clampSearchTimeoutSeconds(a.prefs.getInt(Prefs.SEARCH_TIMEOUT, 20)) * 1000L;
+        long effectiveTimeoutMs =
+                total >= 80
+                        ? Math.min(8000L, rawTimeoutMs)
+                        : (total > 3 ? Math.min(10000L, rawTimeoutMs) : rawTimeoutMs);
+        final List<String> effectiveVariants =
+                total >= 80
+                                && variants != null
+                                && variants.size() > 1
+                                && !query.matches("[A-Za-z0-9' -]+")
+                        ? Collections.singletonList(variants.get(0))
+                        : variants;
+        long effectiveSessionMs =
+                SearchCoordinator.computeSessionTimeoutMs(
+                        total, effectiveTimeoutMs, effectiveThreads);
         coordinator =
                 new SearchCoordinator(
-                        (site, keyword) -> firstPage(context, site, query, variants, batches),
+                        (site, keyword) ->
+                                firstPage(context, site, query, effectiveVariants, batches),
                         (site, videos, outcome) ->
                                 a.ui.post(
                                         () -> {
@@ -1372,9 +1390,8 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                             updateStatus(total);
                                             scheduleRender();
                                         }),
-                        Prefs.clampSearchTimeoutSeconds(a.prefs.getInt(Prefs.SEARCH_TIMEOUT, 20))
-                                * 1000L,
-                        90000L,
+                        effectiveTimeoutMs,
+                        effectiveSessionMs,
                         a.isTvDevice() ? TvSearchPages.MAX_RESULTS : 24);
         coordinator.start(sources, query);
     }

@@ -604,6 +604,7 @@ public final class MainActivity extends Activity {
     MobileRootShell mobileShell;
     MobileInlinePlayer inlinePlayer;
     MobilePlayerOverlay mobilePlayerOverlay;
+    FoldableTabletopController foldableTabletop;
     private android.content.SharedPreferences cachedMobilePrefs;
     private android.content.SharedPreferences cachedSecretsPrefs;
     private int lastUiModeNight = -1;
@@ -3839,6 +3840,7 @@ public final class MainActivity extends Activity {
         activeActivity = this;
         foreground = true;
         if (inlinePlayer != null) inlinePlayer.onActivityStart();
+        if (foldableTabletop != null) foldableTabletop.onResume();
         CspEngine.syncAllPluginActivities(this);
         syncCastService();
         syncSpiderGateway();
@@ -3863,6 +3865,7 @@ public final class MainActivity extends Activity {
         activeActivity = this;
         foreground = true;
         if (inlinePlayer != null) inlinePlayer.onActivityStart();
+        if (foldableTabletop != null) foldableTabletop.onResume();
         CspEngine.syncAllPluginActivities(this);
         PersonalNetdiskBrowser.onActivityResumed();
         AiAuthManager.notifyActivityResumed();
@@ -3910,6 +3913,7 @@ public final class MainActivity extends Activity {
         if (playerChrome != null) playerChrome.cancelEpisodeHoldSwitch();
         savePlaybackHistory(true);
         if (inlinePlayer != null) inlinePlayer.flushHistoryProgress();
+        if (foldableTabletop != null) foldableTabletop.onPause();
         super.onPause();
     }
 

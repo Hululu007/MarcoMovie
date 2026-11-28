@@ -318,6 +318,76 @@ public final class GlobalSearchChecks {
             releaseCapacity.countDown();
         }
 
+        // Multi-depot regression (411 sources: 12 slow plugins + 250 fast plugins + 149 HTTP)
+        SearchCoordinator.configureMaxPoolThreads(16);
+        SearchCoordinator.configureThreads(6);
+        CountDownLatch release411 = new CountDownLatch(1);
+        CountDownLatch all411Done = new CountDownLatch(411);
+        AtomicInteger mdResults = new AtomicInteger();
+        AtomicInteger mdTimeouts = new AtomicInteger();
+        AtomicInteger mdBusy = new AtomicInteger();
+        List<Cms.Site> multiDepot411 = new ArrayList<>(411);
+        for (int i = 0; i < 12; i++) {
+            multiDepot411.add(site("md-slow-" + i));
+        }
+        for (int i = 0; i < 250; i++) {
+            multiDepot411.add(site("md-fast-" + i));
+        }
+        for (int i = 0; i < 149; i++) {
+            Cms.Site h = site("md-http-" + i);
+            h.type = 1;
+            h.api = "https://fixture.example/api";
+            multiDepot411.add(h);
+        }
+        SearchCoordinator coord411 =
+                new SearchCoordinator(
+                        (s, q) -> {
+                            if (s.key.startsWith("md-slow-")) {
+                                while (release411.getCount() > 0) {
+                                    try {
+                                        release411.await(20, TimeUnit.MILLISECONDS);
+                                    } catch (InterruptedException ignored) {
+                                    }
+                                }
+                                return Collections.emptyList();
+                            }
+                            return Collections.singletonList(video("hit-" + s.key));
+                        },
+                        (s, v, o) -> {
+                            if (o == SearchCoordinator.Outcome.RESULT) mdResults.incrementAndGet();
+                            else if (o == SearchCoordinator.Outcome.TIMEOUT)
+                                mdTimeouts.incrementAndGet();
+                            else if (o == SearchCoordinator.Outcome.BUSY) mdBusy.incrementAndGet();
+                            all411Done.countDown();
+                        },
+                        120,
+                        6000,
+                        24,
+                        16);
+        try {
+            coord411.start(multiDepot411, "谷雨");
+            check(
+                    all411Done.await(5, TimeUnit.SECONDS)
+                            && mdBusy.get() == 0
+                            && mdResults.get() == 399
+                            && mdTimeouts.get() == 12,
+                    "411-source multi-depot search completes all sources with 0 BUSY/incomplete (results="
+                            + mdResults.get()
+                            + ", timeouts="
+                            + mdTimeouts.get()
+                            + ", busy="
+                            + mdBusy.get()
+                            + ")");
+        } finally {
+            coord411.close();
+            release411.countDown();
+            long mdRecoverDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (SearchCoordinator.isSiteWedged("md-slow-0")
+                    && System.nanoTime() < mdRecoverDeadline) {
+                Thread.sleep(10);
+            }
+        }
+
         System.out.println(
                 "OK "
                         + checks

@@ -796,6 +796,7 @@ final class MobilePlayerOverlay {
         int offY = clampOffsetYDp(a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_Y, 0));
         boolean customPos = hasCustomCornerHudPosition(anchor, offX, offY);
         if (a.miniMode
+                || (a.foldableTabletop != null && a.foldableTabletop.isTabletopActive())
                 || !shouldShowCornerHud(
                         a.controlsVisible, mask, a.playerLocked, customPos, adjustingPosition)) {
             setIdleCapsuleVisible(false);
@@ -982,6 +983,7 @@ final class MobilePlayerOverlay {
         boolean showMini =
                 !a.controlsVisible
                         && !a.miniMode
+                        && !(a.foldableTabletop != null && a.foldableTabletop.isTabletopActive())
                         && !a.isLive()
                         && a.prepared
                         && a.player != null

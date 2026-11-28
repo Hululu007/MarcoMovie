@@ -11,6 +11,8 @@
   <uses-feature android:name="android.hardware.camera" android:required="false" />
   <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
   <application android:label="Marco Movie" android:theme="@style/AppTheme" android:icon="@mipmap/mm_launcher" android:allowBackup="false" android:usesCleartextTraffic="true" android:hardwareAccelerated="true" android:largeHeap="true">
+    <uses-library android:name="androidx.window.extensions" android:required="false" />
+    <uses-library android:name="androidx.window.sidecar" android:required="false" />
     <meta-data android:name="com.pilipala.marcomovie.EDITION" android:value="mobile" />
     <provider android:name=".UpdateApkProvider" android:authorities="com.pilipala.marcomovie.updates" android:exported="false" android:grantUriPermissions="true" />
     <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTask" android:screenOrientation="unspecified" android:supportsPictureInPicture="true" android:resizeableActivity="true" android:configChanges="keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|uiMode">

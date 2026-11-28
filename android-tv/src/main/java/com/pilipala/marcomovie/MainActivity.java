@@ -2834,31 +2834,23 @@ public final class MainActivity extends Activity {
                 new AppDialog.Builder(this)
                         .setTitle("退出应用")
                         .setMessage("确定要退出 Marco Movie 吗？")
-                        .setNegativeButton("取消", null)
                         .setPositiveButton(
-                                "退出应用",
+                                "确认退出",
                                 (d, w) -> {
                                     releasePlayer();
                                     exitApp();
                                 })
                         .setDefaultFocusButton(android.content.DialogInterface.BUTTON_POSITIVE)
                         .show();
-        Button cancelBtn = dialog.getButton(android.content.DialogInterface.BUTTON_NEGATIVE);
         Button exitBtn = dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE);
-        if (cancelBtn != null && exitBtn != null) {
-            if (cancelBtn.getId() == View.NO_ID) cancelBtn.setId(View.generateViewId());
+        if (exitBtn != null) {
             if (exitBtn.getId() == View.NO_ID) exitBtn.setId(View.generateViewId());
-            cancelBtn.setNextFocusLeftId(cancelBtn.getId());
-            cancelBtn.setNextFocusRightId(exitBtn.getId());
-            cancelBtn.setNextFocusUpId(cancelBtn.getId());
-            cancelBtn.setNextFocusDownId(cancelBtn.getId());
-            exitBtn.setNextFocusLeftId(cancelBtn.getId());
+            exitBtn.setNextFocusLeftId(exitBtn.getId());
             exitBtn.setNextFocusRightId(exitBtn.getId());
             exitBtn.setNextFocusUpId(exitBtn.getId());
             exitBtn.setNextFocusDownId(exitBtn.getId());
-        }
-        if (exitBtn != null) {
             exitBtn.requestFocus();
+            exitBtn.post(exitBtn::requestFocus);
         }
     }
 

@@ -3390,8 +3390,69 @@ public final class TvUxOptimizationChecks {
                         && !g1.contains("..")
                         && g1.contains("杜比")
                         && g1.contains("60帧")
-                        && "2026 · fixed".equals(g2),
-                "TvSeriesScraper strips nested 【...】 folder blocks and collapsing dots while keeping Dolby/60fps specs");
+                        && "正片 · 修正版".equals(g2),
+                "TvSeriesScraper strips nested 【...】 folder blocks and collapsing dots while keeping Dolby/60fps/修正版 specs (g2="
+                        + g2
+                        + ")");
+
+        // Unnumbered netdisk movie cuts with size/quality in ep.url & lineName +
+        // EqualHeightEpisodeRow layout
+        Cms.Episode movieCut1 = new Cms.Episode();
+        movieCut1.name = "2026......【八个神像/【把限 2026】 . &杜比视界 年糕】";
+        movieCut1.url =
+                "https://fixture.example/file/EightIdols.2026.2160p.WEB-DL.H265.DV.HDR.DDP5.1.mp4?size=19864223744";
+        Cms.Episode movieCut2 = new Cms.Episode();
+        movieCut2.name = "2026..YK..DV...HFR.-年糕【八个神像/【把限 2026】 . &杜比视界 年糕】";
+        movieCut2.url = "https://fixture.example/file/EightIdols.2026.2160p.HFR.DV.24.2G.mp4";
+        Cms.Episode movieCut3 = new Cms.Episode();
+        movieCut3.name = "2026....fixed";
+        movieCut3.url = "https://fixture.example/file/cut3.mkv+++4831838208";
+        TvSeriesScraper.ScrapedLine movieLine =
+                TvSeriesScraper.scrapeLine(
+                        "八个神像",
+                        "夸克原画#02 · 4K · DV · DD+ · HDR",
+                        Arrays.asList(movieCut1, movieCut2, movieCut3),
+                        null);
+        String[] parts0 =
+                TvSeriesScraper.formatGridEpisodeCardParts(
+                        movieLine.atSourceIndex(0), false, false);
+        String[] parts1 =
+                TvSeriesScraper.formatGridEpisodeCardParts(
+                        movieLine.atSourceIndex(1), false, false);
+        String[] parts2 =
+                TvSeriesScraper.formatGridEpisodeCardParts(
+                        movieLine.atSourceIndex(2), false, false);
+        check(
+                "正片".equals(parts0[0])
+                        && parts0[1].contains("4K")
+                        && parts0[1].contains("杜比")
+                        && parts0[1].contains("18.5GB")
+                        && "正片".equals(parts1[0])
+                        && parts1[1].contains("60帧")
+                        && parts1[1].contains("24.2GB")
+                        && "正片 · 修正版".equals(parts2[0])
+                        && parts2[1].contains("4K")
+                        && parts2[1].contains("4.5GB"),
+                "TvSeriesScraper surfaces size & quality from spider URL/lineName onto two-line episode card parts (p0="
+                        + java.util.Arrays.toString(parts0)
+                        + ", p1="
+                        + java.util.Arrays.toString(parts1)
+                        + ", p2="
+                        + java.util.Arrays.toString(parts2)
+                        + ")");
+        String mainSrcTv = readJavaSource("MainActivity.java");
+        String detailSrcTv = readJavaSource("DetailScreen.java");
+        check(
+                mainSrcTv.contains(".setPositiveButton(\n                                \"确认退出\",")
+                        && !mainSrcTv.contains(
+                                ".setNegativeButton(\"取消\", null)\n                        .setPositiveButton(\n                                \"退出应用\"")
+                        && mainSrcTv.contains("exitBtn.requestFocus();"),
+                "TV MainActivity.confirmExitApp uses single '确认退出' button with default focus");
+        check(
+                detailSrcTv.contains(
+                                "protected void onLayout(boolean changed, int l, int t, int r, int b)")
+                        && detailSrcTv.contains("bindEpisodeCardText("),
+                "TV DetailScreen EqualHeightEpisodeRow enforces exact card alignment in onLayout and two-line spec display");
 
         // 3. Spider Config Center homophone drive names & login status pills
         check(

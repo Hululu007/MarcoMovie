@@ -24,6 +24,11 @@
   - 将 `android-tv/dependencies.json` 中携带未脱糖 API 24/26 字节码（`ThreadLocal.withInitial`、`ArrayList.sort`、`Stream`、`java.nio.file`）的 `jsoup 1.18.3` 降级为 API 23 兼容的 `jsoup 1.15.4`，消除爬虫详情解析触发的 `NoSuchMethodError`；同时在 API 23 上禁用需 API 24 Bionic 符号的 `MPV` 内核、修复 `Cms.evictDohCache` / `SpiderGatewayServer` / `TvAudioEffectProcessor` API 24+ 调用并加宽 `LinkageError` 安全兜底捕获。
 - **电视端倍速播放改为当前剧连播有效、返回主页自动重置**：
   - 新增 `PlaybackControls.TvDramaSpeedSession`，电视端在播放器内调节的倍速仅在当前剧连续选集/换线播放时保持；返回主页、搜索页、片库分类或切换其他剧集后自动重置为 `1.0×`，不再将上一部剧的倍速延续到其他剧集。
+- **彻底修复多仓全局搜索大量线路显示「未完成」问题**：
+  - 升级 `SearchCoordinator` 双通道调度：HTTP 通道与原生爬虫通道严格隔离并扩容插件阻塞超时预算（`16` 线程上限 / 低内存电视 `12` 线程，`15s` 阻塞恢复与空闲线程唤醒），随 `400+` 多仓规模动态扩展全球搜索总预算（最高 `360s`），保证多仓全部站点有序收敛，避免数百路线提前截断成 `299 未完成`。
+- **优化退出弹窗与「选线路与选集」弹窗对齐及资源规格识别**：
+  - `MainActivity.confirmExitApp()` 精简为仅保留单个「确认退出」按钮并默认强制聚焦（按返回键取消退出）。
+  - `DetailScreen` `EqualHeightEpisodeRow` 在 `onMeasure` 与 `onLayout` 双阶段强制拉齐同排选集卡片上下边界与两行文本重力；`TvSeriesScraper` 剥离网盘原始文件冗长点号后缀（呈现 `正片` / `正片 · 修正版`），并在双行选集卡第二行及播控选集菜单清晰展示 `4K · 杜比 · HDR · DD+ · 18.5GB` 等画质与容量信息。
 
 ## 安装与校验
 

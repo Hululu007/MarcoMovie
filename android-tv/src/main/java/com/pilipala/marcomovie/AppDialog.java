@@ -323,9 +323,10 @@ final class AppDialog extends Dialog {
                     footer.addView(fRow, new LinearLayout.LayoutParams(-1, -2));
                 }
                 if (compactRightAligned) {
+                    int minBtnW = orderedActions.size() == 1 ? a.dp(120) : a.dp(92);
                     LinearLayout.LayoutParams lp =
                             new LinearLayout.LayoutParams(
-                                    Math.max(a.dp(92), maxActionNeedPx),
+                                    Math.max(minBtnW, maxActionNeedPx),
                                     wrapFooterLabels ? -2 : a.dp(42));
                     lp.setMargins(col == 0 ? 0 : a.dp(8), a.dp(4), 0, a.dp(4));
                     fRow.addView(button, lp);
@@ -477,6 +478,16 @@ final class AppDialog extends Dialog {
                 if (first instanceof Button && useLiquidGlassButtons()) {
                     applyLiquidButtonState((Button) first, true);
                 }
+                final View initialTarget = first;
+                initialTarget.post(
+                        () -> {
+                            if (isShowing() && getCurrentFocus() == null) {
+                                initialTarget.requestFocus();
+                                if (initialTarget instanceof Button && useLiquidGlassButtons()) {
+                                    applyLiquidButtonState((Button) initialTarget, true);
+                                }
+                            }
+                        });
             }
         } else {
             w.setSoftInputMode(
