@@ -1776,6 +1776,117 @@ final class PlaybackControls {
         return pill;
     }
 
+    private LinearLayout buildMobileCustomDeckPill(String key, boolean live) {
+        if ("episodes".equals(key)) {
+            return buildMobileDeckPill(
+                    key,
+                    live ? "频道" : "选集",
+                    0,
+                    null,
+                    () -> {
+                        if (live) a.chooseLiveChannel();
+                        else chooseEpisodes();
+                    });
+        } else if ("lines".equals(key)) {
+            return buildMobileDeckPill(
+                    key,
+                    "换源",
+                    0,
+                    null,
+                    () -> {
+                        if (live) a.chooseLiveStream();
+                        else chooseLine();
+                    });
+        } else if ("speed".equals(key)) {
+            TextView[] holder = new TextView[1];
+            LinearLayout pill = buildMobileDeckPill(key, "1.0×", 0, holder, this::speed);
+            mobileSpeedPill = pill;
+            mobileSpeedLabel = holder[0];
+            return pill;
+        } else if ("subtitles".equals(key)) {
+            return buildMobileDeckPill(
+                    key, "字幕", MobileIcons.IC_SUBTITLE, null, this::showMobileSubtitleSheet);
+        } else if ("decoder".equals(key)) {
+            TextView[] holder = new TextView[1];
+            LinearLayout pill =
+                    buildMobileDeckPill(
+                            key, "内核", MobileIcons.IC_ENGINE, holder, this::decoderMenu);
+            mobileKernelLabel = holder[0];
+            return pill;
+        } else if ("quality".equals(key)) {
+            return buildMobileDeckPill(
+                    key, "画质", MobileIcons.IC_SLIDERS, null, this::showQualityAndVideoTrackSheet);
+        } else if ("aspect".equals(key)) {
+            return buildMobileDeckPill(key, "比例", MobileIcons.IC_ASPECT, null, this::aspect);
+        } else if ("audio-tracks".equals(key)) {
+            return buildMobileDeckPill(
+                    key, "音轨", MobileIcons.IC_AUDIO_TRACK, null, () -> tracks(1));
+        } else if ("online-sub".equals(key)) {
+            return buildMobileDeckPill(
+                    key, "在线字幕", MobileIcons.IC_SUBTITLE, null, () -> showOnlineSubtitles(false));
+        } else if ("picture-effect".equals(key)) {
+            return buildMobileDeckPill(
+                    key, "色彩", MobileIcons.IC_PALETTE, null, this::pictureEffect);
+        } else if ("skip-tool".equals(key)) {
+            return buildMobileDeckPill(
+                    key,
+                    "跳过",
+                    MobileIcons.IC_SKIP,
+                    null,
+                    () -> {
+                        int introSec = live ? 0 : getVideoIntro(a, site, video);
+                        int outroSec = live ? 0 : getVideoOutro(a, site, video);
+                        choose(
+                                "片头片尾设置（本片独立）",
+                                new String[] {
+                                    "设置跳过片头 · " + skipLabel(introSec),
+                                    "设置跳过片尾 · " + skipLabel(outroSec)
+                                },
+                                -1,
+                                n -> skip(n == 0));
+                    });
+        } else if ("sleep-timer".equals(key)) {
+            return buildMobileDeckPill(key, "定时", MobileIcons.IC_TIMER, null, this::sleepTimerMenu);
+        } else if ("repeat-tool".equals(key)) {
+            return buildMobileDeckPill(key, "循环", MobileIcons.IC_REPEAT, null, this::repeat);
+        } else if ("external-player".equals(key)) {
+            return buildMobileDeckPill(
+                    key, "外部播", MobileIcons.IC_EXTERNAL, null, this::openInExternalPlayer);
+        } else if ("restart-tool".equals(key)) {
+            return buildMobileDeckPill(
+                    key,
+                    "重播",
+                    MobileIcons.IC_REPLAY,
+                    null,
+                    () -> {
+                        pendingResumeMs = 0;
+                        if (a.playingBookmark != null) a.playingBookmark.position = 0;
+                        if (a.player != null && a.prepared) {
+                            recordUserSeek(0);
+                            a.player.seekTo(0);
+                            a.player.start();
+                            a.playing = true;
+                        } else {
+                            a.resumeAt = -1;
+                            reload(false);
+                        }
+                    });
+        } else if ("pip-tool".equals(key)) {
+            return buildMobileDeckPill(
+                    key,
+                    "小窗",
+                    MobileIcons.IC_PIP,
+                    null,
+                    () -> {
+                        if (!a.enterAppPip()) a.toast("当前设备或安卓版本不支持画中画小窗");
+                    });
+        } else if ("cast-tool".equals(key)) {
+            return buildMobileDeckPill(
+                    key, "投屏", MobileIcons.IC_CAST, null, this::chooseCastDevice);
+        }
+        return null;
+    }
+
     private void syncMobileDanmakuCapsule() {
         if (mobileDanmuCapsule == null) return;
         boolean on = danmaku != null && danmaku.enabled;
@@ -1891,7 +2002,16 @@ final class PlaybackControls {
                     a.activeLine != null && a.activeLine.episodes != null
                             ? a.activeLine.episodes.size()
                             : 0;
-            boolean multiOrLive = shouldShowEpisodeSteppers(live, epCount);
+            int hudToggles =
+                    MobilePlayerHudButtons.clampToggles(
+                            a.mobilePrefs()
+                                    .getInt(
+                                            Prefs.MOBILE_HUD_TOGGLES,
+                                            MobilePlayerHudButtons.TOGGLE_ALL));
+            boolean showSteppers =
+                    shouldShowEpisodeSteppers(live, epCount)
+                            && MobilePlayerHudButtons.isToggleEnabled(
+                                    hudToggles, MobilePlayerHudButtons.TOGGLE_LEFT_STEPPERS);
 
             // Left cluster: [IC_PREV_EP] [IC_NEXT_EP] + Dual-segment Danmaku capsule [弹幕 开/关 | 设置]
             FrameLayout prevBtn =
@@ -1902,7 +2022,7 @@ final class PlaybackControls {
                                 if (live) a.liveStep(-1);
                                 else if (!step(-1)) a.toast("已经是第一集");
                             });
-            prevBtn.setVisibility(multiOrLive ? View.VISIBLE : View.GONE);
+            prevBtn.setVisibility(showSteppers ? View.VISIBLE : View.GONE);
             mobilePrevBtn = prevBtn;
             LinearLayout.LayoutParams prevLp = new LinearLayout.LayoutParams(pillH, pillH);
             prevLp.rightMargin = a.dp(6);
@@ -1916,13 +2036,17 @@ final class PlaybackControls {
                                 if (live) a.liveStep(1);
                                 else if (!step(1)) a.toast("已经是最后一集");
                             });
-            nextBtn.setVisibility(multiOrLive ? View.VISIBLE : View.GONE);
+            nextBtn.setVisibility(showSteppers ? View.VISIBLE : View.GONE);
             mobileNextBtn = nextBtn;
             LinearLayout.LayoutParams nextLp = new LinearLayout.LayoutParams(pillH, pillH);
             nextLp.rightMargin = a.dp(8);
             deckRow.addView(nextBtn, nextLp);
 
-            if (!live) {
+            boolean showDanmu =
+                    !live
+                            && MobilePlayerHudButtons.isToggleEnabled(
+                                    hudToggles, MobilePlayerHudButtons.TOGGLE_LEFT_DANMAKU);
+            if (showDanmu) {
                 mobileDanmuCapsule = a.row();
                 mobileDanmuCapsule.setTag("mobile-danmaku-capsule");
                 mobileDanmuCapsule.setGravity(Gravity.CENTER_VERTICAL);
@@ -1991,62 +2115,22 @@ final class PlaybackControls {
             flexSpacer.setMinimumWidth(a.dp(6));
             deckRow.addView(flexSpacer, new LinearLayout.LayoutParams(0, 1, 1f));
 
-            // Right cluster: clean high-frequency pills honoring user custom order
+            // Right cluster: customizable bottom HUD pills (add/remove + reorder)
+            String customCsv = a.mobilePrefs().getString(Prefs.MOBILE_HUD_BUTTONS, "");
             String orderCsv =
                     a.mobilePrefs()
                             .getString(
                                     Prefs.PLAYER_BUTTON_ORDER, Prefs.DEFAULT_PLAYER_BUTTON_ORDER);
-            List<String> keys = resolveMobileHighFrequencyOrder(orderCsv, live);
+            List<String> keys =
+                    MobilePlayerHudButtons.resolveActiveButtons(
+                            customCsv, orderCsv, live, a.privateMode, a.isCast());
             mobileSpeedLabel = null;
             mobileSpeedPill = null;
             mobileKernelLabel = null;
             for (int i = 0; i < keys.size(); i++) {
                 String key = keys.get(i);
-                LinearLayout pill;
-                if ("episodes".equals(key)) {
-                    pill =
-                            buildMobileDeckPill(
-                                    key,
-                                    live ? "频道" : "选集",
-                                    0,
-                                    null,
-                                    () -> {
-                                        if (live) a.chooseLiveChannel();
-                                        else chooseEpisodes();
-                                    });
-                } else if ("lines".equals(key)) {
-                    pill =
-                            buildMobileDeckPill(
-                                    key,
-                                    "换源",
-                                    0,
-                                    null,
-                                    () -> {
-                                        if (live) a.chooseLiveStream();
-                                        else chooseLine();
-                                    });
-                } else if ("speed".equals(key)) {
-                    TextView[] holder = new TextView[1];
-                    pill = buildMobileDeckPill(key, "1.0×", 0, holder, this::speed);
-                    mobileSpeedPill = pill;
-                    mobileSpeedLabel = holder[0];
-                } else if ("subtitles".equals(key)) {
-                    pill =
-                            buildMobileDeckPill(
-                                    key,
-                                    "字幕",
-                                    MobileIcons.IC_SUBTITLE,
-                                    null,
-                                    this::showMobileSubtitleSheet);
-                } else if ("decoder".equals(key)) {
-                    TextView[] holder = new TextView[1];
-                    pill =
-                            buildMobileDeckPill(
-                                    key, "内核", MobileIcons.IC_ENGINE, holder, this::decoderMenu);
-                    mobileKernelLabel = holder[0];
-                } else {
-                    continue;
-                }
+                LinearLayout pill = buildMobileCustomDeckPill(key, live);
+                if (pill == null) continue;
                 LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(-2, pillH);
                 if (i + 1 < keys.size()) {
                     plp.rightMargin = a.dp(6);
@@ -3052,135 +3136,498 @@ final class PlaybackControls {
         parent.addView(card, clp);
     }
 
-    private void showMobileToolbarOrderSheet() {
-        String raw =
-                Prefs.sanitizeButtonOrder(
-                        a.mobilePrefs()
-                                .getString(
-                                        Prefs.PLAYER_BUTTON_ORDER,
-                                        Prefs.DEFAULT_PLAYER_BUTTON_ORDER));
-        final List<String> tokens =
-                new ArrayList<>(resolveMobileHighFrequencyOrder(raw, "live".equals(site.key)));
-        final int accent = MobileTheme.of(a).accent;
-        final Dialog[] dlgRef = new Dialog[1];
+    static LinearLayout buildHudButtonsEditorContent(
+            final MainActivity a,
+            final boolean darkSurface,
+            final List<String> editableKeys,
+            final int[] toggleMaskHolder,
+            final Runnable onSave,
+            final Runnable onReset) {
+        final MobileTheme.Palette p = MobileTheme.of(a);
+        final int accent = p.accent;
+        final int textPrimary = darkSurface ? MainActivity.WHITE : p.textPrimary;
+        final int textSecondary = darkSurface ? 0xFF9CA3AF : p.textSecondary;
+        final int rowBg = darkSurface ? 0x16FFFFFF : p.bgSubtle;
+        final int pillBg = darkSurface ? 0x22FFFFFF : p.bgCard;
 
         LinearLayout root = a.vertical();
-        TextView desc = a.text("调整底部高频功能胶囊的先后顺序，保存后立即生效。", 12.5f, 0xFF949BA8);
+        root.setPadding(a.dp(2), a.dp(2), a.dp(2), a.dp(4));
+
+        TextView desc = a.text("可自由添加、移除与调整底部 HUD 功能按钮顺序，并控制顶部/左侧快捷按钮显隐。", 12.5f, textSecondary);
+        desc.setLineSpacing(a.dp(2), 1f);
         desc.setPadding(a.dp(2), 0, a.dp(2), a.dp(10));
         root.addView(desc, new LinearLayout.LayoutParams(-1, -2));
 
-        final LinearLayout list = a.vertical();
-        root.addView(list, new LinearLayout.LayoutParams(-1, -2));
+        TextView activeHeader = a.text("已显示在底栏的按钮", 12.5f, accent);
+        activeHeader.setTypeface(null, android.graphics.Typeface.BOLD);
+        activeHeader.setPadding(a.dp(2), 0, a.dp(2), a.dp(6));
+        root.addView(activeHeader);
+
+        final LinearLayout activeList = a.vertical();
+        root.addView(activeList, new LinearLayout.LayoutParams(-1, -2));
+
+        TextView addHeader = a.text("可添加到 HUD 底栏的按钮", 12.5f, accent);
+        addHeader.setTypeface(null, android.graphics.Typeface.BOLD);
+        addHeader.setPadding(a.dp(2), a.dp(10), a.dp(2), a.dp(6));
+        root.addView(addHeader);
+
+        final LinearLayout availableList = a.vertical();
+        root.addView(availableList, new LinearLayout.LayoutParams(-1, -2));
 
         final Runnable[] rebuild = new Runnable[1];
         rebuild[0] =
                 () -> {
-                    list.removeAllViews();
-                    for (int i = 0; i < tokens.size(); i++) {
-                        final int idx = i;
-                        String tk = tokens.get(i);
-                        String name =
-                                "episodes".equals(tk)
-                                        ? "选集 / 频道"
-                                        : "lines".equals(tk)
-                                                ? "换源 / 线路"
-                                                : "speed".equals(tk)
-                                                        ? "播放倍速"
-                                                        : "subtitles".equals(tk)
-                                                                ? "字幕中心"
-                                                                : "decoder".equals(tk)
-                                                                        ? "内核与解码"
-                                                                        : tk;
-                        LinearLayout row = a.row();
-                        row.setGravity(Gravity.CENTER_VERTICAL);
-                        row.setPadding(a.dp(12), a.dp(9), a.dp(10), a.dp(9));
-                        row.setBackground(a.bg(0x16FFFFFF, 11));
-                        TextView tv = a.text((i + 1) + ". " + name, 13.5f, MainActivity.WHITE);
-                        row.addView(tv, new LinearLayout.LayoutParams(0, -2, 1f));
-                        if (i > 0) {
-                            TextView up = a.text("上移", 12f, accent);
-                            up.setTypeface(null, android.graphics.Typeface.BOLD);
-                            up.setPadding(a.dp(10), a.dp(4), a.dp(10), a.dp(4));
-                            up.setOnClickListener(
+                    activeList.removeAllViews();
+                    if (editableKeys.isEmpty()) {
+                        TextView empty =
+                                a.text("已清空全部底栏按钮（可在下方重新添加，或通过右上角「更多」打开工具）", 12.5f, textSecondary);
+                        empty.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
+                        empty.setBackground(a.bg(rowBg, 11));
+                        activeList.addView(empty, new LinearLayout.LayoutParams(-1, -2));
+                    } else {
+                        for (int i = 0; i < editableKeys.size(); i++) {
+                            final int idx = i;
+                            final String tk = editableKeys.get(i);
+                            MobilePlayerHudButtons.Spec spec = MobilePlayerHudButtons.findSpec(tk);
+                            String name = spec != null ? spec.label : tk;
+
+                            LinearLayout row = a.row();
+                            row.setGravity(Gravity.CENTER_VERTICAL);
+                            row.setPadding(a.dp(12), a.dp(8), a.dp(8), a.dp(8));
+                            row.setBackground(a.bg(rowBg, 11));
+
+                            TextView tv = a.text((i + 1) + ". " + name, 13.5f, textPrimary);
+                            tv.setSingleLine(true);
+                            tv.setEllipsize(TextUtils.TruncateAt.END);
+                            row.addView(tv, new LinearLayout.LayoutParams(0, -2, 1f));
+
+                            if (i > 0) {
+                                TextView up = a.text("↑", 13f, accent);
+                                up.setTypeface(null, android.graphics.Typeface.BOLD);
+                                up.setPadding(a.dp(10), a.dp(4), a.dp(10), a.dp(4));
+                                up.setBackground(a.bg(pillBg, 999));
+                                MobileMotion.bindPress(up, 0.92f);
+                                up.setOnClickListener(
+                                        v -> {
+                                            if (MobilePlayerHudButtons.move(
+                                                    editableKeys, idx, -1)) {
+                                                rebuild[0].run();
+                                            }
+                                        });
+                                LinearLayout.LayoutParams ulp =
+                                        new LinearLayout.LayoutParams(-2, -2);
+                                ulp.rightMargin = a.dp(5);
+                                row.addView(up, ulp);
+                            }
+                            if (i < editableKeys.size() - 1) {
+                                TextView dn = a.text("↓", 13f, 0xFF93C5FD);
+                                dn.setTypeface(null, android.graphics.Typeface.BOLD);
+                                dn.setPadding(a.dp(10), a.dp(4), a.dp(10), a.dp(4));
+                                dn.setBackground(a.bg(pillBg, 999));
+                                MobileMotion.bindPress(dn, 0.92f);
+                                dn.setOnClickListener(
+                                        v -> {
+                                            if (MobilePlayerHudButtons.move(editableKeys, idx, 1)) {
+                                                rebuild[0].run();
+                                            }
+                                        });
+                                LinearLayout.LayoutParams dlp =
+                                        new LinearLayout.LayoutParams(-2, -2);
+                                dlp.rightMargin = a.dp(5);
+                                row.addView(dn, dlp);
+                            }
+                            TextView rm = a.text("移除", 12f, p.danger);
+                            rm.setTypeface(null, android.graphics.Typeface.BOLD);
+                            rm.setPadding(a.dp(9), a.dp(4), a.dp(9), a.dp(4));
+                            rm.setBackground(a.bg(MobileTheme.withAlpha(p.danger, 0x26), 999));
+                            MobileMotion.bindPress(rm, 0.92f);
+                            rm.setOnClickListener(
                                     v -> {
-                                        String tmp = tokens.set(idx - 1, tokens.get(idx));
-                                        tokens.set(idx, tmp);
-                                        rebuild[0].run();
+                                        if (MobilePlayerHudButtons.remove(editableKeys, tk)) {
+                                            rebuild[0].run();
+                                        }
                                     });
-                            row.addView(up);
+                            row.addView(rm);
+
+                            LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, -2);
+                            rlp.bottomMargin = a.dp(6);
+                            activeList.addView(row, rlp);
                         }
-                        if (i < tokens.size() - 1) {
-                            TextView dn = a.text("下移", 12f, 0xFF93C5FD);
-                            dn.setTypeface(null, android.graphics.Typeface.BOLD);
-                            dn.setPadding(a.dp(10), a.dp(4), a.dp(10), a.dp(4));
-                            dn.setOnClickListener(
+                    }
+
+                    availableList.removeAllViews();
+                    List<String> avail = MobilePlayerHudButtons.availableToAdd(editableKeys);
+                    if (avail.isEmpty()) {
+                        TextView allAdded = a.text("全部功能按钮均已添加到播放页底栏", 12.5f, textSecondary);
+                        allAdded.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
+                        allAdded.setBackground(a.bg(rowBg, 11));
+                        availableList.addView(allAdded, new LinearLayout.LayoutParams(-1, -2));
+                    } else {
+                        for (final String tk : avail) {
+                            MobilePlayerHudButtons.Spec spec = MobilePlayerHudButtons.findSpec(tk);
+                            String name = spec != null ? spec.label : tk;
+
+                            LinearLayout row = a.row();
+                            row.setGravity(Gravity.CENTER_VERTICAL);
+                            row.setPadding(a.dp(12), a.dp(8), a.dp(8), a.dp(8));
+                            row.setBackground(a.bg(rowBg, 11));
+
+                            TextView tv = a.text(name, 13.5f, textPrimary);
+                            tv.setSingleLine(true);
+                            tv.setEllipsize(TextUtils.TruncateAt.END);
+                            row.addView(tv, new LinearLayout.LayoutParams(0, -2, 1f));
+
+                            TextView addBtn = a.text("+ 添加", 12f, p.accentOnFill);
+                            addBtn.setTypeface(null, android.graphics.Typeface.BOLD);
+                            addBtn.setPadding(a.dp(11), a.dp(5), a.dp(11), a.dp(5));
+                            addBtn.setBackground(a.bg(accent, 999));
+                            MobileMotion.bindPress(addBtn, 0.92f);
+                            addBtn.setOnClickListener(
                                     v -> {
-                                        String tmp = tokens.set(idx + 1, tokens.get(idx));
-                                        tokens.set(idx, tmp);
-                                        rebuild[0].run();
+                                        if (MobilePlayerHudButtons.add(editableKeys, tk)) {
+                                            rebuild[0].run();
+                                        }
                                     });
-                            row.addView(dn);
+                            row.addView(addBtn);
+
+                            LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, -2);
+                            rlp.bottomMargin = a.dp(6);
+                            availableList.addView(row, rlp);
                         }
-                        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, -2);
-                        rlp.bottomMargin = a.dp(6);
-                        list.addView(row, rlp);
                     }
                 };
         rebuild[0].run();
 
+        TextView quickHeader = a.text("顶部与左侧快捷按钮显示", 12.5f, accent);
+        quickHeader.setTypeface(null, android.graphics.Typeface.BOLD);
+        quickHeader.setPadding(a.dp(2), a.dp(10), a.dp(2), a.dp(6));
+        root.addView(quickHeader);
+
+        final int[] toggleFlags = {
+            MobilePlayerHudButtons.TOGGLE_TOP_PIP,
+            MobilePlayerHudButtons.TOGGLE_TOP_CAST,
+            MobilePlayerHudButtons.TOGGLE_LEFT_STEPPERS,
+            MobilePlayerHudButtons.TOGGLE_LEFT_DANMAKU,
+            MobilePlayerHudButtons.TOGGLE_LEFT_LOCK
+        };
+        final String[] toggleNames = {
+            "顶部「画中画」图标按钮", "顶部「无线投屏」图标按钮", "底栏左侧「上/下集」按钮", "底栏左侧「弹幕开/关」胶囊", "画面左侧「锁屏」按钮"
+        };
+        for (int i = 0; i < toggleFlags.length; i++) {
+            final int flag = toggleFlags[i];
+            final boolean[] checked = {
+                MobilePlayerHudButtons.isToggleEnabled(toggleMaskHolder[0], flag)
+            };
+            LinearLayout tRow = a.row();
+            tRow.setGravity(Gravity.CENTER_VERTICAL);
+            tRow.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
+            tRow.setBackground(a.bg(rowBg, 11));
+            TextView lbl = a.text(toggleNames[i], 13.5f, textPrimary);
+            tRow.addView(lbl, new LinearLayout.LayoutParams(0, -2, 1f));
+            final TextView stateBadge = a.text("", 11.5f, textPrimary);
+            stateBadge.setTypeface(null, android.graphics.Typeface.BOLD);
+            stateBadge.setPadding(a.dp(10), a.dp(4), a.dp(10), a.dp(4));
+            final Runnable paintBadge =
+                    () -> {
+                        boolean on = checked[0];
+                        stateBadge.setText(on ? "显示" : "隐藏");
+                        stateBadge.setTextColor(on ? p.accentOnFill : textSecondary);
+                        stateBadge.setBackground(a.bg(on ? accent : pillBg, 999));
+                    };
+            paintBadge.run();
+            tRow.addView(stateBadge);
+            MobileMotion.bindPress(tRow, 0.97f);
+            tRow.setOnClickListener(
+                    v -> {
+                        checked[0] = !checked[0];
+                        if (checked[0]) toggleMaskHolder[0] |= flag;
+                        else toggleMaskHolder[0] &= ~flag;
+                        paintBadge.run();
+                    });
+            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-1, -2);
+            tlp.bottomMargin = a.dp(6);
+            root.addView(tRow, tlp);
+        }
+
         LinearLayout actions = a.row();
         actions.setGravity(Gravity.CENTER_VERTICAL);
-        TextView resetBtn = a.text("恢复默认", 13f, 0xFFD1D5DB);
+        TextView resetBtn = a.text("恢复默认", 13f, textPrimary);
+        resetBtn.setGravity(Gravity.CENTER);
+        resetBtn.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
+        resetBtn.setBackground(a.bg(pillBg, 11));
+        MobileMotion.bindPress(resetBtn, 0.95f);
+        resetBtn.setOnClickListener(v -> onReset.run());
+        LinearLayout.LayoutParams rstLp = new LinearLayout.LayoutParams(0, -2, 1f);
+        rstLp.rightMargin = a.dp(8);
+        actions.addView(resetBtn, rstLp);
+
+        TextView saveBtn = a.text("保存设置", 13f, p.accentOnFill);
+        saveBtn.setTypeface(null, android.graphics.Typeface.BOLD);
+        saveBtn.setGravity(Gravity.CENTER);
+        saveBtn.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
+        saveBtn.setBackground(a.bg(accent, 11));
+        MobileMotion.bindPress(saveBtn, 0.95f);
+        saveBtn.setOnClickListener(v -> onSave.run());
+        actions.addView(saveBtn, new LinearLayout.LayoutParams(0, -2, 1.3f));
+
+        LinearLayout.LayoutParams actLp = new LinearLayout.LayoutParams(-1, -2);
+        actLp.topMargin = a.dp(8);
+        root.addView(actions, actLp);
+        return root;
+    }
+
+    private void showMobileToolbarOrderSheet() {
+        String customCsv = a.mobilePrefs().getString(Prefs.MOBILE_HUD_BUTTONS, "");
+        String legacyCsv =
+                a.mobilePrefs()
+                        .getString(Prefs.PLAYER_BUTTON_ORDER, Prefs.DEFAULT_PLAYER_BUTTON_ORDER);
+        final List<String> tokens =
+                MobilePlayerHudButtons.resolveEditableButtons(customCsv, legacyCsv);
+        final int[] toggleMask = {
+            MobilePlayerHudButtons.clampToggles(
+                    a.mobilePrefs()
+                            .getInt(Prefs.MOBILE_HUD_TOGGLES, MobilePlayerHudButtons.TOGGLE_ALL))
+        };
+        final Dialog[] dlgRef = new Dialog[1];
+
+        LinearLayout root =
+                buildHudButtonsEditorContent(
+                        a,
+                        true,
+                        tokens,
+                        toggleMask,
+                        () -> {
+                            String encoded = MobilePlayerHudButtons.encode(tokens);
+                            a.mobilePrefs()
+                                    .edit()
+                                    .putString(Prefs.MOBILE_HUD_BUTTONS, encoded)
+                                    .putInt(
+                                            Prefs.MOBILE_HUD_TOGGLES,
+                                            MobilePlayerHudButtons.clampToggles(toggleMask[0]))
+                                    .apply();
+                            rebuildToolDock(currentMobileLandscape);
+                            updateLabels();
+                            if (a.playerChrome != null) {
+                                a.playerChrome.syncMobileHudButtonVisibility();
+                            }
+                            if (dlgRef[0] != null) dlgRef[0].dismiss();
+                            a.toast("已更新播放页 HUD 按钮配置");
+                        },
+                        () -> {
+                            a.mobilePrefs()
+                                    .edit()
+                                    .putString(Prefs.MOBILE_HUD_BUTTONS, "")
+                                    .putString(
+                                            Prefs.PLAYER_BUTTON_ORDER,
+                                            Prefs.DEFAULT_PLAYER_BUTTON_ORDER)
+                                    .putInt(
+                                            Prefs.MOBILE_HUD_TOGGLES,
+                                            MobilePlayerHudButtons.TOGGLE_ALL)
+                                    .apply();
+                            rebuildToolDock(currentMobileLandscape);
+                            updateLabels();
+                            if (a.playerChrome != null) {
+                                a.playerChrome.syncMobileHudButtonVisibility();
+                            }
+                            if (dlgRef[0] != null) dlgRef[0].dismiss();
+                            a.toast("已恢复默认播放页 HUD 按钮");
+                        });
+
+        dlgRef[0] = openMobilePlayerSheet("自定义播放页 HUD 按钮", root);
+    }
+
+    private void showMobileCornerHudPositionSheet() {
+        final int accent = MobileTheme.of(a).accent;
+        final Dialog[] dlgRef = new Dialog[1];
+        final int[] curAnchor = {
+            MobilePlayerOverlay.clampAnchor(
+                    a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_ANCHOR, 0))
+        };
+        final int[] curX = {
+            MobilePlayerOverlay.clampOffsetXDp(
+                    a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_X, 0))
+        };
+        final int[] curY = {
+            MobilePlayerOverlay.clampOffsetYDp(
+                    a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_Y, 0))
+        };
+
+        LinearLayout root = a.vertical();
+        TextView hint = a.text("可选择停靠角落并用滑块微调位置，或直接点下方按钮在播放画面上拖动。", 12.5f, 0xFF9CA3AF);
+        hint.setLineSpacing(a.dp(2), 1f);
+        hint.setPadding(a.dp(2), 0, a.dp(2), a.dp(10));
+        root.addView(hint);
+
+        final TextView coordBadge =
+                a.text(
+                        MobilePlayerOverlay.describeCornerPosition(curAnchor[0], curX[0], curY[0]),
+                        13f,
+                        MainActivity.WHITE);
+        coordBadge.setTypeface(null, android.graphics.Typeface.BOLD);
+        coordBadge.setPadding(a.dp(12), a.dp(9), a.dp(12), a.dp(9));
+        coordBadge.setBackground(a.bg(0x18FFFFFF, 11));
+        LinearLayout.LayoutParams cbLp = new LinearLayout.LayoutParams(-1, -2);
+        cbLp.bottomMargin = a.dp(10);
+        root.addView(coordBadge, cbLp);
+
+        TextView dragNowBtn = a.text("直接在画面上拖动位置", 13.5f, MobileTheme.of(a).accentOnFill);
+        dragNowBtn.setTypeface(null, android.graphics.Typeface.BOLD);
+        dragNowBtn.setGravity(Gravity.CENTER);
+        dragNowBtn.setPadding(a.dp(14), a.dp(11), a.dp(14), a.dp(11));
+        dragNowBtn.setBackground(a.bg(accent, 12));
+        MobileMotion.bindPress(dragNowBtn, 0.96f);
+        dragNowBtn.setOnClickListener(
+                v -> {
+                    if (dlgRef[0] != null) dlgRef[0].dismiss();
+                    if (a.mobilePlayerOverlay != null) {
+                        a.mobilePlayerOverlay.startPositionDragMode();
+                    }
+                });
+        LinearLayout.LayoutParams dragLp = new LinearLayout.LayoutParams(-1, -2);
+        dragLp.bottomMargin = a.dp(12);
+        root.addView(dragNowBtn, dragLp);
+
+        final int[] anchors = {
+            MobilePlayerOverlay.ANCHOR_TOP_RIGHT,
+            MobilePlayerOverlay.ANCHOR_TOP_LEFT,
+            MobilePlayerOverlay.ANCHOR_TOP_CENTER,
+            MobilePlayerOverlay.ANCHOR_BOTTOM_RIGHT,
+            MobilePlayerOverlay.ANCHOR_BOTTOM_LEFT
+        };
+        final TextView[] chipViews = new TextView[anchors.length];
+        LinearLayout chipRow = a.row();
+        chipRow.setGravity(Gravity.CENTER_VERTICAL);
+        final Runnable syncUi =
+                () -> {
+                    coordBadge.setText(
+                            MobilePlayerOverlay.describeCornerPosition(
+                                    curAnchor[0], curX[0], curY[0]));
+                    for (int i = 0; i < anchors.length; i++) {
+                        boolean sel = anchors[i] == curAnchor[0];
+                        chipViews[i].setTextColor(
+                                sel ? MobileTheme.of(a).accentOnFill : 0xFFE5E7EB);
+                        chipViews[i].setBackground(a.bg(sel ? accent : 0x1EFFFFFF, 999));
+                    }
+                };
+        final Runnable persistAndApply =
+                () -> {
+                    a.mobilePrefs()
+                            .edit()
+                            .putInt(Prefs.PLAYER_CORNER_HUD_ANCHOR, curAnchor[0])
+                            .putInt(Prefs.PLAYER_CORNER_HUD_OFFSET_X, curX[0])
+                            .putInt(Prefs.PLAYER_CORNER_HUD_OFFSET_Y, curY[0])
+                            .apply();
+                    syncUi.run();
+                    if (a.mobilePlayerOverlay != null) {
+                        a.mobilePlayerOverlay.applyPositionPrefsNow();
+                    }
+                };
+        for (int i = 0; i < anchors.length; i++) {
+            final int anchorVal = anchors[i];
+            TextView chip = a.text(MobilePlayerOverlay.anchorLabel(anchorVal), 12f, 0xFFE5E7EB);
+            chip.setGravity(Gravity.CENTER);
+            chip.setSingleLine(true);
+            chip.setPadding(a.dp(6), a.dp(8), a.dp(6), a.dp(8));
+            MobileMotion.bindPress(chip, 0.94f);
+            chip.setOnClickListener(
+                    v -> {
+                        curAnchor[0] = anchorVal;
+                        persistAndApply.run();
+                    });
+            chipViews[i] = chip;
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, -2, 1f);
+            if (i > 0) clp.leftMargin = a.dp(5);
+            chipRow.addView(chip, clp);
+        }
+        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(-1, -2);
+        rowLp.bottomMargin = a.dp(12);
+        root.addView(chipRow, rowLp);
+
+        final TextView xLbl =
+                a.text(
+                        "左右微调 (X)：" + (curX[0] >= 0 ? "+" : "") + curX[0] + " dp",
+                        12.5f,
+                        0xFFD1D5DB);
+        root.addView(xLbl);
+        final SeekBar xBar = new SeekBar(a);
+        xBar.setMax(MobilePlayerOverlay.MAX_OFFSET_X_DP - MobilePlayerOverlay.MIN_OFFSET_X_DP);
+        xBar.setProgress(curX[0] - MobilePlayerOverlay.MIN_OFFSET_X_DP);
+        UiCompat.tintSeekBar(xBar, accent, Color.WHITE);
+        xBar.setOnSeekBarChangeListener(
+                new SeekBar.OnSeekBarChangeListener() {
+                    @Override
+                    public void onProgressChanged(SeekBar sb, int prog, boolean fromUser) {
+                        if (!fromUser) return;
+                        curX[0] =
+                                MobilePlayerOverlay.clampOffsetXDp(
+                                        prog + MobilePlayerOverlay.MIN_OFFSET_X_DP);
+                        xLbl.setText("左右微调 (X)：" + (curX[0] >= 0 ? "+" : "") + curX[0] + " dp");
+                        persistAndApply.run();
+                    }
+
+                    @Override
+                    public void onStartTrackingTouch(SeekBar sb) {}
+
+                    @Override
+                    public void onStopTrackingTouch(SeekBar sb) {}
+                });
+        LinearLayout.LayoutParams xbLp = new LinearLayout.LayoutParams(-1, a.dp(32));
+        xbLp.bottomMargin = a.dp(8);
+        root.addView(xBar, xbLp);
+
+        final TextView yLbl =
+                a.text(
+                        "上下微调 (Y)：" + (curY[0] >= 0 ? "+" : "") + curY[0] + " dp",
+                        12.5f,
+                        0xFFD1D5DB);
+        root.addView(yLbl);
+        final SeekBar yBar = new SeekBar(a);
+        yBar.setMax(MobilePlayerOverlay.MAX_OFFSET_Y_DP - MobilePlayerOverlay.MIN_OFFSET_Y_DP);
+        yBar.setProgress(curY[0] - MobilePlayerOverlay.MIN_OFFSET_Y_DP);
+        UiCompat.tintSeekBar(yBar, accent, Color.WHITE);
+        yBar.setOnSeekBarChangeListener(
+                new SeekBar.OnSeekBarChangeListener() {
+                    @Override
+                    public void onProgressChanged(SeekBar sb, int prog, boolean fromUser) {
+                        if (!fromUser) return;
+                        curY[0] =
+                                MobilePlayerOverlay.clampOffsetYDp(
+                                        prog + MobilePlayerOverlay.MIN_OFFSET_Y_DP);
+                        yLbl.setText("上下微调 (Y)：" + (curY[0] >= 0 ? "+" : "") + curY[0] + " dp");
+                        persistAndApply.run();
+                    }
+
+                    @Override
+                    public void onStartTrackingTouch(SeekBar sb) {}
+
+                    @Override
+                    public void onStopTrackingTouch(SeekBar sb) {}
+                });
+        LinearLayout.LayoutParams ybLp = new LinearLayout.LayoutParams(-1, a.dp(32));
+        ybLp.bottomMargin = a.dp(10);
+        root.addView(yBar, ybLp);
+
+        TextView resetBtn = a.text("恢复默认右上角", 13f, 0xFFD1D5DB);
         resetBtn.setGravity(Gravity.CENTER);
         resetBtn.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
         resetBtn.setBackground(a.bg(0x1CFFFFFF, 11));
         MobileMotion.bindPress(resetBtn, 0.95f);
         resetBtn.setOnClickListener(
                 v -> {
-                    a.mobilePrefs()
-                            .edit()
-                            .putString(Prefs.PLAYER_BUTTON_ORDER, Prefs.DEFAULT_PLAYER_BUTTON_ORDER)
-                            .apply();
-                    rebuildToolDock(currentMobileLandscape);
-                    updateLabels();
-                    if (dlgRef[0] != null) dlgRef[0].dismiss();
-                    a.toast("已恢复默认工具栏排序");
+                    curAnchor[0] = MobilePlayerOverlay.ANCHOR_TOP_RIGHT;
+                    curX[0] = 0;
+                    curY[0] = 0;
+                    xBar.setProgress(-MobilePlayerOverlay.MIN_OFFSET_X_DP);
+                    yBar.setProgress(-MobilePlayerOverlay.MIN_OFFSET_Y_DP);
+                    xLbl.setText("左右微调 (X)：+0 dp");
+                    yLbl.setText("上下微调 (Y)：+0 dp");
+                    persistAndApply.run();
+                    a.toast("已恢复右上角默认位置");
                 });
-        LinearLayout.LayoutParams rstLp = new LinearLayout.LayoutParams(0, -2, 1f);
-        rstLp.rightMargin = a.dp(8);
-        actions.addView(resetBtn, rstLp);
+        root.addView(resetBtn, new LinearLayout.LayoutParams(-1, -2));
 
-        TextView saveBtn = a.text("保存排序", 13f, MobileTheme.of(a).accentOnFill);
-        saveBtn.setTypeface(null, android.graphics.Typeface.BOLD);
-        saveBtn.setGravity(Gravity.CENTER);
-        saveBtn.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
-        saveBtn.setBackground(a.bg(accent, 11));
-        MobileMotion.bindPress(saveBtn, 0.95f);
-        saveBtn.setOnClickListener(
-                v -> {
-                    StringBuilder sb = new StringBuilder();
-                    for (int i = 0; i < tokens.size(); i++) {
-                        if (i > 0) sb.append(',');
-                        sb.append(tokens.get(i));
-                    }
-                    a.mobilePrefs()
-                            .edit()
-                            .putString(
-                                    Prefs.PLAYER_BUTTON_ORDER,
-                                    Prefs.sanitizeButtonOrder(sb.toString()))
-                            .apply();
-                    rebuildToolDock(currentMobileLandscape);
-                    updateLabels();
-                    if (dlgRef[0] != null) dlgRef[0].dismiss();
-                    a.toast("已更新工具栏顺序");
-                });
-        actions.addView(saveBtn, new LinearLayout.LayoutParams(0, -2, 1f));
-
-        LinearLayout.LayoutParams actLp = new LinearLayout.LayoutParams(-1, -2);
-        actLp.topMargin = a.dp(8);
-        root.addView(actions, actLp);
-
-        dlgRef[0] = openMobilePlayerSheet("工具栏自定义排序", root);
+        syncUi.run();
+        dlgRef[0] = openMobilePlayerSheet("调整状态信息显示位置", root);
     }
 
     private String lastVideoTrackSelectionRecord = "";
@@ -3503,6 +3950,20 @@ final class PlaybackControls {
                                 if (a.playerChrome != null) a.playerChrome.update();
                             }));
         }
+        String posDesc =
+                MobilePlayerOverlay.describeCornerPosition(
+                        a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_ANCHOR, 0),
+                        a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_X, 0),
+                        a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_Y, 0));
+        hudRows.add(
+                buildMobileMoreToolRow(
+                        MobileIcons.IC_ASPECT,
+                        "状态信息显示位置",
+                        posDesc,
+                        () -> {
+                            if (dlgRef[0] != null) dlgRef[0].dismiss();
+                            showMobileCornerHudPositionSheet();
+                        }));
         addMoreGroupCard(body, hudRows);
 
         // Group 2: Playback utilities
@@ -3593,8 +4054,17 @@ final class PlaybackControls {
         sysRows.add(
                 buildMobileMoreToolRow(
                         MobileIcons.IC_SORT,
-                        "工具栏自定义排序",
-                        "",
+                        "自定义播放页 HUD 按钮",
+                        MobilePlayerHudButtons.summary(
+                                a.mobilePrefs().getString(Prefs.MOBILE_HUD_BUTTONS, ""),
+                                a.mobilePrefs()
+                                        .getString(
+                                                Prefs.PLAYER_BUTTON_ORDER,
+                                                Prefs.DEFAULT_PLAYER_BUTTON_ORDER),
+                                a.mobilePrefs()
+                                        .getInt(
+                                                Prefs.MOBILE_HUD_TOGGLES,
+                                                MobilePlayerHudButtons.TOGGLE_ALL)),
                         () -> {
                             if (dlgRef[0] != null) dlgRef[0].dismiss();
                             showMobileToolbarOrderSheet();
@@ -6395,9 +6865,26 @@ final class PlaybackControls {
                 a.activeEpisode != null && a.activeEpisode.url != null
                         ? a.activeEpisode.url.trim()
                         : "";
-        String valid = DlnaCastClient.resolveCastableMediaUrl(castUrl, rawUrl);
-        if (valid.isEmpty()) {
-            a.toast("当前播放流为本地代理或非 HTTP 直链，暂不支持直接推送给外部投屏设备");
+        Map<String, String> mediaHeaders =
+                Cms.inheritedHeaders(
+                        site != null ? site.api : "",
+                        castUrl.isEmpty() ? rawUrl : castUrl,
+                        site != null ? site.headers : null);
+        if (resolved != null) {
+            Cms.mergeHeaders(mediaHeaders, resolved.headers);
+        }
+        String declaredMime =
+                resolved != null && resolved.media != null ? MediaOptions.mime(resolved.media) : "";
+        DlnaCastClient.CastTarget target =
+                DlnaCastClient.prepareCastTarget(
+                        castUrl,
+                        rawUrl,
+                        mediaHeaders,
+                        declaredMime,
+                        DlnaCastClient.findLocalLanIpv4(),
+                        null);
+        if (target.url.isEmpty()) {
+            a.toast(target.errorMessage);
             return;
         }
         String displayTitle =
@@ -6414,7 +6901,7 @@ final class PlaybackControls {
         }
         DlnaCastClient.showCastDevicePicker(
                 a,
-                valid,
+                target.url,
                 displayTitle,
                 () -> {
                     if (a.player != null && a.prepared && a.playing) {
@@ -6728,7 +7215,17 @@ final class PlaybackControls {
                     a.activeLine != null && a.activeLine.episodes != null
                             ? a.activeLine.episodes.size()
                             : 0;
-            int stepVis = shouldShowEpisodeSteppers(isLive, epCount) ? View.VISIBLE : View.GONE;
+            int hudToggles =
+                    MobilePlayerHudButtons.clampToggles(
+                            a.mobilePrefs()
+                                    .getInt(
+                                            Prefs.MOBILE_HUD_TOGGLES,
+                                            MobilePlayerHudButtons.TOGGLE_ALL));
+            boolean showSteppers =
+                    shouldShowEpisodeSteppers(isLive, epCount)
+                            && MobilePlayerHudButtons.isToggleEnabled(
+                                    hudToggles, MobilePlayerHudButtons.TOGGLE_LEFT_STEPPERS);
+            int stepVis = showSteppers ? View.VISIBLE : View.GONE;
             if (mobilePrevBtn != null && mobilePrevBtn.getVisibility() != stepVis) {
                 mobilePrevBtn.setVisibility(stepVis);
             }

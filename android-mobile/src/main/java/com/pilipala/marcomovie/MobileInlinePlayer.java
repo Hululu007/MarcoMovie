@@ -751,13 +751,32 @@ final class MobileInlinePlayer {
                         ? resolvedEpisode.url.trim()
                         : "";
         String rawUrl = rawEpisode != null && rawEpisode.url != null ? rawEpisode.url.trim() : "";
-        if (resUrl.isEmpty() && !Cms.isHttp(rawUrl)) {
+        if (resUrl.isEmpty() && !Cms.isHttp(rawUrl) && !LanCastMediaRelay.isLocalFileUrl(rawUrl)) {
             a.toast("正在解析播放地址，请稍候再投屏");
             return;
         }
-        String castUrl = DlnaCastClient.resolveCastableMediaUrl(resUrl, rawUrl);
-        if (castUrl.isEmpty()) {
-            a.toast("当前播放流为本地加密代理或非 HTTP 直链，暂不支持直接投屏");
+        Map<String, String> mediaHeaders =
+                Cms.inheritedHeaders(
+                        site != null ? site.api : "",
+                        resUrl.isEmpty() ? rawUrl : resUrl,
+                        site != null ? site.headers : null);
+        if (resolvedEpisode != null) {
+            Cms.mergeHeaders(mediaHeaders, resolvedEpisode.headers);
+        }
+        String declaredMime =
+                resolvedEpisode != null && resolvedEpisode.media != null
+                        ? MediaOptions.mime(resolvedEpisode.media)
+                        : "";
+        DlnaCastClient.CastTarget target =
+                DlnaCastClient.prepareCastTarget(
+                        resUrl,
+                        rawUrl,
+                        mediaHeaders,
+                        declaredMime,
+                        DlnaCastClient.findLocalLanIpv4(),
+                        null);
+        if (target.url.isEmpty()) {
+            a.toast(target.errorMessage);
             return;
         }
         String displayTitle =
@@ -771,7 +790,7 @@ final class MobileInlinePlayer {
                 displayTitle = displayTitle + " · " + cleaned.shortLabel;
             }
         }
-        DlnaCastClient.showCastDevicePicker(a, castUrl, displayTitle, this::pause);
+        DlnaCastClient.showCastDevicePicker(a, target.url, displayTitle, this::pause);
     }
 
     void startEpisode(

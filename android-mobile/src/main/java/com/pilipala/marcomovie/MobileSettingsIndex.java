@@ -150,9 +150,19 @@ final class MobileSettingsIndex {
         add(SUB_PLAYBACK, "ms-src-bright", "播放与触控手势", "按片源记住各自播放亮度", "亮度 记忆 屏幕");
         add(SUB_PLAYBACK, "ms-long-speed", "播放与触控手势", "长按画面临时加速倍速", "长按 倍速 2x 3x 4x 快进");
         add(SUB_PLAYBACK, "ms-vert-ep", "播放与触控手势", "上下滑动切换上下集", "双指 换集 上下滑 短剧 防误触");
-        add(SUB_PLAYBACK, "ms-corner-hud", "播放与触控手势", "播放页右上角状态信息", "网速 电量 时间 分辨率 hud 角标");
+        add(
+                SUB_PLAYBACK,
+                "ms-corner-hud",
+                "播放与触控手势",
+                "播放页状态信息与显示位置",
+                "网速 电量 时间 分辨率 hud 角标 位置 偏移 拖动 角落 左上 右上 右下 左下");
         add(SUB_PLAYBACK, "ms-mini-bar", "播放与触控手势", "隐藏按钮后保留底部进度细线", "迷你进度条 底部 进度线");
-        add(SUB_PLAYBACK, "ms-btn-order", "播放与触控手势", "自定义播放器按钮顺序", "按钮 排序 工具栏 自定义");
+        add(
+                SUB_PLAYBACK,
+                "ms-btn-order",
+                "播放与触控手势",
+                "播放页 HUD 按钮自定义（添减与排序）",
+                "按钮 排序 工具栏 自定义 添减 添加 移除 隐藏 显示 hud");
         add(SUB_PLAYBACK, "ms-skip-intro", "播放与触控手势", "自动识别并跳过剧集片头", "片头 theintrodb introdb 自动跳过");
         add(SUB_PLAYBACK, "ms-manual-skip", "播放与触控手势", "手动设置跳过片头 / 片尾秒数", "片头 片尾 秒数 跳过");
         add(SUB_PLAYBACK, "ms-pip-bg", "播放与触控手势", "返回桌面自动悬浮小窗播放", "小窗 画中画 pip home");

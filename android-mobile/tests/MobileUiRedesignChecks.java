@@ -2537,6 +2537,225 @@ public final class MobileUiRedesignChecks {
         test8_StaticUxHygieneAndReviewerGuards(root);
         test9_AuthorFirstLaunchNoticeAndContact(root);
         test10_TabletAndFoldableDockPositions(root);
+        test11_CornerHudPositionAndHudButtonCustomization(root);
         System.out.println("MobileUiRedesignChecks OK (" + passed + " checks passed)");
+    }
+
+    private static void test11_CornerHudPositionAndHudButtonCustomization(Path root)
+            throws Exception {
+        // 1. Corner HUD anchor, offsets, safe clamping, and visibility policy
+        check(
+                MobilePlayerOverlay.clampAnchor(-3) == MobilePlayerOverlay.ANCHOR_TOP_RIGHT
+                        && MobilePlayerOverlay.clampAnchor(99)
+                                == MobilePlayerOverlay.ANCHOR_BOTTOM_LEFT
+                        && MobilePlayerOverlay.clampOffsetXDp(-500) == -400
+                        && MobilePlayerOverlay.clampOffsetXDp(500) == 400
+                        && MobilePlayerOverlay.clampOffsetYDp(-500) == -300
+                        && MobilePlayerOverlay.clampOffsetYDp(999) == 300,
+                "Pillar 11: Corner HUD anchor and offset clamping boundaries verified");
+        check(
+                !MobilePlayerOverlay.hasCustomCornerHudPosition(0, 0, 0)
+                        && MobilePlayerOverlay.hasCustomCornerHudPosition(1, 0, 0)
+                        && MobilePlayerOverlay.hasCustomCornerHudPosition(0, -10, 0)
+                        && MobilePlayerOverlay.hasCustomCornerHudPosition(0, 0, 12),
+                "Pillar 11: hasCustomCornerHudPosition distinguishes default vs customized placement");
+        check(
+                !MobilePlayerOverlay.shouldShowCornerHud(true, 7, false, false, false)
+                        && MobilePlayerOverlay.shouldShowCornerHud(false, 7, false, false, false)
+                        && MobilePlayerOverlay.shouldShowCornerHud(true, 7, false, true, false)
+                        && !MobilePlayerOverlay.shouldShowCornerHud(false, 7, true, true, false)
+                        && MobilePlayerOverlay.shouldShowCornerHud(true, 0, false, false, true),
+                "Pillar 11: shouldShowCornerHud handles default idle-only, custom persistent, locked, and drag-adjust modes");
+
+        MobilePlayerOverlay.CornerPlacement tr =
+                MobilePlayerOverlay.computeCornerPlacement(
+                        1080,
+                        720,
+                        180,
+                        36,
+                        20,
+                        16,
+                        24,
+                        16,
+                        MobilePlayerOverlay.ANCHOR_TOP_RIGHT,
+                        0,
+                        0,
+                        12,
+                        10);
+        MobilePlayerOverlay.CornerPlacement tl =
+                MobilePlayerOverlay.computeCornerPlacement(
+                        1080,
+                        720,
+                        180,
+                        36,
+                        20,
+                        16,
+                        24,
+                        16,
+                        MobilePlayerOverlay.ANCHOR_TOP_LEFT,
+                        0,
+                        0,
+                        12,
+                        10);
+        MobilePlayerOverlay.CornerPlacement tc =
+                MobilePlayerOverlay.computeCornerPlacement(
+                        1080,
+                        720,
+                        180,
+                        36,
+                        20,
+                        16,
+                        24,
+                        16,
+                        MobilePlayerOverlay.ANCHOR_TOP_CENTER,
+                        0,
+                        0,
+                        12,
+                        10);
+        MobilePlayerOverlay.CornerPlacement br =
+                MobilePlayerOverlay.computeCornerPlacement(
+                        1080,
+                        720,
+                        180,
+                        36,
+                        20,
+                        16,
+                        24,
+                        16,
+                        MobilePlayerOverlay.ANCHOR_BOTTOM_RIGHT,
+                        0,
+                        0,
+                        12,
+                        10);
+        MobilePlayerOverlay.CornerPlacement bl =
+                MobilePlayerOverlay.computeCornerPlacement(
+                        1080,
+                        720,
+                        180,
+                        36,
+                        20,
+                        16,
+                        24,
+                        16,
+                        MobilePlayerOverlay.ANCHOR_BOTTOM_LEFT,
+                        0,
+                        0,
+                        12,
+                        10);
+        MobilePlayerOverlay.CornerPlacement clampedOut =
+                MobilePlayerOverlay.computeCornerPlacement(
+                        1080,
+                        720,
+                        180,
+                        36,
+                        20,
+                        16,
+                        24,
+                        16,
+                        MobilePlayerOverlay.ANCHOR_TOP_RIGHT,
+                        9999,
+                        -9999,
+                        12,
+                        10);
+        check(
+                tr.leftPx == 1080 - 24 - 12 - 180
+                        && tr.topPx == 16 + 10
+                        && tl.leftPx == 20 + 12
+                        && tl.topPx == 16 + 10
+                        && tc.leftPx == (1080 - 180) / 2
+                        && br.topPx == 720 - 16 - 10 - 36
+                        && bl.leftPx == 20 + 12
+                        && clampedOut.leftPx <= 1080 - 180
+                        && clampedOut.topPx >= 16,
+                "Pillar 11: computeCornerPlacement handles all 5 anchors and safe-area clamping");
+
+        check(
+                Integer.valueOf(2)
+                                .equals(
+                                        Prefs.sanitizeMobileSetting(
+                                                Prefs.PLAYER_CORNER_HUD_ANCHOR, 2))
+                        && Prefs.sanitizeMobileSetting(Prefs.PLAYER_CORNER_HUD_ANCHOR, 9) == null
+                        && Integer.valueOf(-350)
+                                .equals(
+                                        Prefs.sanitizeMobileSetting(
+                                                Prefs.PLAYER_CORNER_HUD_OFFSET_X, -350))
+                        && Prefs.sanitizeMobileSetting(Prefs.PLAYER_CORNER_HUD_OFFSET_X, 999)
+                                == null
+                        && Integer.valueOf(280)
+                                .equals(
+                                        Prefs.sanitizeMobileSetting(
+                                                Prefs.PLAYER_CORNER_HUD_OFFSET_Y, 280))
+                        && Prefs.sanitizeMobileSetting(Prefs.PLAYER_CORNER_HUD_OFFSET_Y, -500)
+                                == null,
+                "Pillar 11: Prefs.sanitizeMobileSetting validates corner HUD anchor and offsets");
+        int[] snappedDrag =
+                MobilePlayerOverlay.resolveDraggedAnchorAndOffsets(
+                        1680, 780, 180, 36, 20, 16, 20, 16, 40, 700, 12, 10, 2.0f);
+        check(
+                snappedDrag[0] == MobilePlayerOverlay.ANCHOR_BOTTOM_LEFT
+                        && Math.abs(snappedDrag[1]) <= 20
+                        && Math.abs(snappedDrag[2]) <= 20,
+                "Pillar 11: resolveDraggedAnchorAndOffsets snaps fullscreen drag to nearest corner");
+
+        // 2. Mobile HUD button add/remove/reorder catalog & Prefs sanitization
+        List<String> fallbackVod =
+                MobilePlayerHudButtons.resolveActiveButtons(
+                        "", "decoder,speed,episodes", false, false, false);
+        check(
+                Arrays.asList("decoder", "speed", "episodes", "lines", "subtitles")
+                        .equals(fallbackVod),
+                "Pillar 11: empty MOBILE_HUD_BUTTONS inherits legacy PLAYER_BUTTON_ORDER");
+
+        List<String> editable =
+                MobilePlayerHudButtons.resolveEditableButtons(
+                        "", Prefs.DEFAULT_PLAYER_BUTTON_ORDER);
+        check(
+                MobilePlayerHudButtons.add(editable, "quality")
+                        && MobilePlayerHudButtons.add(editable, "cast-tool")
+                        && MobilePlayerHudButtons.remove(editable, "speed")
+                        && MobilePlayerHudButtons.move(editable, editable.size() - 1, -1),
+                "Pillar 11: MobilePlayerHudButtons add, remove, and move work cleanly");
+
+        String encoded = MobilePlayerHudButtons.encode(editable);
+        List<String> vodActive =
+                MobilePlayerHudButtons.resolveActiveButtons(
+                        encoded, Prefs.DEFAULT_PLAYER_BUTTON_ORDER, false, false, false);
+        List<String> liveActive =
+                MobilePlayerHudButtons.resolveActiveButtons(
+                        encoded, Prefs.DEFAULT_PLAYER_BUTTON_ORDER, true, true, false);
+        check(
+                vodActive.contains("quality")
+                        && vodActive.contains("cast-tool")
+                        && !vodActive.contains("speed")
+                        && !liveActive.contains("cast-tool"),
+                "Pillar 11: custom HUD buttons honor add/remove and filter cast-tool in privateMode");
+
+        List<String> emptyList = Collections.emptyList();
+        String emptyEncoded = MobilePlayerHudButtons.encode(emptyList);
+        check(
+                MobilePlayerHudButtons.SENTINEL_EMPTY.equals(emptyEncoded)
+                        && MobilePlayerHudButtons.resolveActiveButtons(
+                                        emptyEncoded,
+                                        Prefs.DEFAULT_PLAYER_BUTTON_ORDER,
+                                        false,
+                                        false,
+                                        false)
+                                .isEmpty(),
+                "Pillar 11: removing all bottom HUD pills persists __none__ cleanly");
+
+        check(
+                "episodes,quality"
+                                .equals(
+                                        Prefs.sanitizeMobileSetting(
+                                                Prefs.MOBILE_HUD_BUTTONS,
+                                                "episodes,unknown,quality,episodes"))
+                        && "__none__"
+                                .equals(
+                                        Prefs.sanitizeMobileSetting(
+                                                Prefs.MOBILE_HUD_BUTTONS, "__none__"))
+                        && Integer.valueOf(21)
+                                .equals(Prefs.sanitizeMobileSetting(Prefs.MOBILE_HUD_TOGGLES, 21))
+                        && Prefs.sanitizeMobileSetting(Prefs.MOBILE_HUD_TOGGLES, 99) == null,
+                "Pillar 11: Prefs.sanitizeMobileSetting validates MOBILE_HUD_BUTTONS and MOBILE_HUD_TOGGLES");
     }
 }

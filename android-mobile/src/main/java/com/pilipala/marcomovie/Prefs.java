@@ -164,11 +164,16 @@ final class Prefs {
     static final String VERTICAL_SWIPE_EPISODE = "vertical_swipe_episode";
     static final String LETTERBOX_BLUR = "letterbox_blur";
     static final String PLAYER_CORNER_HUD = "player_corner_hud";
+    static final String PLAYER_CORNER_HUD_ANCHOR = "player_corner_hud_anchor";
+    static final String PLAYER_CORNER_HUD_OFFSET_X = "player_corner_hud_offset_x";
+    static final String PLAYER_CORNER_HUD_OFFSET_Y = "player_corner_hud_offset_y";
     static final String MINI_PROGRESS_BAR = "mini_progress_bar";
     static final String BACKGROUND_PLAY = "background_play";
     static final String AUTO_PIP = "auto_pip";
     static final String AUTO_SWITCH_KERNEL = "auto_switch_kernel";
     static final String PLAYER_BUTTON_ORDER = "player_button_order";
+    static final String MOBILE_HUD_BUTTONS = "mobile_hud_buttons";
+    static final String MOBILE_HUD_TOGGLES = "mobile_hud_toggles";
     static final String TMDB_ENABLED = "tmdb_enabled";
     static final String TMDB_API_PROXY = "tmdb_api_proxy";
     static final String TMDB_IMAGE_PROXY = "tmdb_image_proxy";
@@ -284,11 +289,16 @@ final class Prefs {
         VERTICAL_SWIPE_EPISODE,
         LETTERBOX_BLUR,
         PLAYER_CORNER_HUD,
+        PLAYER_CORNER_HUD_ANCHOR,
+        PLAYER_CORNER_HUD_OFFSET_X,
+        PLAYER_CORNER_HUD_OFFSET_Y,
         MINI_PROGRESS_BAR,
         BACKGROUND_PLAY,
         AUTO_PIP,
         AUTO_SWITCH_KERNEL,
         PLAYER_BUTTON_ORDER,
+        MOBILE_HUD_BUTTONS,
+        MOBILE_HUD_TOGGLES,
         TMDB_ENABLED,
         TMDB_API_PROXY,
         TMDB_IMAGE_PROXY,
@@ -453,6 +463,10 @@ final class Prefs {
         mr.put(EPISODE_CLEAN_MODE, new int[] {0, 2});
         mr.put(VERTICAL_SWIPE_EPISODE, new int[] {0, 2});
         mr.put(PLAYER_CORNER_HUD, new int[] {0, 31});
+        mr.put(PLAYER_CORNER_HUD_ANCHOR, new int[] {0, 4});
+        mr.put(PLAYER_CORNER_HUD_OFFSET_X, new int[] {-400, 400});
+        mr.put(PLAYER_CORNER_HUD_OFFSET_Y, new int[] {-300, 300});
+        mr.put(MOBILE_HUD_TOGGLES, new int[] {0, 31});
         mr.put(DANMAKU_AREA, new int[] {0, 3});
         mr.put(DANMAKU_OPACITY, new int[] {20, 100});
         mr.put(DANMAKU_SPEED, new int[] {0, 2});
@@ -632,6 +646,9 @@ final class Prefs {
             if (PLAYER_BUTTON_ORDER.equals(key)) {
                 return sanitizeButtonOrder(text);
             }
+            if (MOBILE_HUD_BUTTONS.equals(key)) {
+                return sanitizeMobileHudButtons(text);
+            }
             if (DANMAKU_SOURCES_JSON.equals(key)) {
                 if (text.isEmpty()) return "[]";
                 return (text.startsWith("[") && text.endsWith("]") && text.length() <= 32768)
@@ -662,6 +679,45 @@ final class Prefs {
             }
         }
         return sb.length() > 0 ? sb.toString() : DEFAULT_PLAYER_BUTTON_ORDER;
+    }
+
+    private static final Set<String> ALLOWED_MOBILE_HUD_BUTTON_TOKENS =
+            Collections.unmodifiableSet(
+                    new HashSet<>(
+                            Arrays.asList(
+                                    "episodes",
+                                    "lines",
+                                    "speed",
+                                    "subtitles",
+                                    "decoder",
+                                    "quality",
+                                    "aspect",
+                                    "audio-tracks",
+                                    "online-sub",
+                                    "picture-effect",
+                                    "skip-tool",
+                                    "sleep-timer",
+                                    "repeat-tool",
+                                    "external-player",
+                                    "restart-tool",
+                                    "pip-tool",
+                                    "cast-tool")));
+
+    static String sanitizeMobileHudButtons(String raw) {
+        if (raw == null) return "";
+        String t = raw.trim();
+        if (t.isEmpty()) return "";
+        if ("__none__".equals(t)) return "__none__";
+        StringBuilder sb = new StringBuilder();
+        Set<String> seen = new HashSet<>();
+        for (String p : t.split(",")) {
+            String token = p == null ? "" : p.trim();
+            if (ALLOWED_MOBILE_HUD_BUTTON_TOKENS.contains(token) && seen.add(token)) {
+                if (sb.length() > 0) sb.append(',');
+                sb.append(token);
+            }
+        }
+        return sb.toString();
     }
 
     static int clampMobileUiScale(int percent) {

@@ -13,6 +13,14 @@
   - `MobileEmbyLibrary` 支持 `/emby` 遇到 404/405 自动回退裸根路径、空白 `Views` 回退「全部媒体」以及 `.strm` DirectPlay。
 - **横屏播放弹幕顶部间距与导入页对比度修复**：
   - 修复横屏播放器内置弹窗（如弹幕设置）顶栏与系统状态栏之间多余留白，贴顶精准对齐并对齐横竖屏对比度。
+- **修复安卓手机端本地代理 / 受限流 / 本地文件无法投屏问题**：
+  - 新增按单次投屏会话随机 32 位令牌隔离的局域网 HTTP 中继 `LanCastMediaRelay` 与 `DlnaCastClient.prepareCastTarget`（配合 `HlsStreamProxy.headersForLocalUrl` 与多网卡 `MulticastSocket` SSDP 探测），使回环代理流（`127.0.0.1`）、带 `Cookie` / `Referer` / `Authorization` / 自定义 `User-Agent` 的远程流以及本地 `file:/` 离线视频与 HLS 分片均可直接投屏到同一局域网电视 / 盒子，并在停止投屏、退出播放或进入隐私空间时即时吊销会话；公网直链继续保持免中继直推。
+- **播放页状态信息（右上角 HUD）位置支持手动调整**：
+  - 支持在设置页（`ms-corner-hud`）与播放页「更多 -> 状态信息显示位置」选择 5 档停靠预设（右上/左上/顶部居中/右下/左下）、X/Y 坐标偏移滑条、16:9 实时预览及播放画面「直接在画面上拖动位置」模式（松手自动吸附最近边角并安全区夹紧）。
+- **播放页 HUD 按钮支持自定义添减与排序**：
+  - 新增 `MobilePlayerHudButtons` 统一编辑器（支持播放页「更多 -> 自定义播放页 HUD 按钮」与设置页 `ms-btn-order`），支持底栏 17 项功能按钮自由添加、移除、排序（支持清空底栏并持久化 `__none__`）以及顶部/左侧 5 项快捷按钮（顶栏画中画、顶栏投屏、上/下一集步进、弹幕胶囊、屏幕锁）独立显隐。
+- **修复云同步 `WebDAV 读取失败 (HTTP 409)` 与中文路径编码问题**：
+  - `CloudSync.syncWebdav()` 在 `GET` 收到 `HTTP 409` 时自动通过 `MKCOL` 补建缺失父目录并重试读取；`openConnection()` 新增 `toAsciiRequestUrl()` 对非 ASCII / 中文 WebDAV 路径进行标准 URI ASCII 编码，避免因父目录未建立或未编码路径触发 409 读取失败。
 
 ## 安装与校验
 

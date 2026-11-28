@@ -103,6 +103,7 @@ final class EditionImpl {
     }
 
     static void onActivityDestroy(MainActivity a) {
+        LanCastMediaRelay.revokeActive();
         if (a.inlinePlayer != null) {
             a.inlinePlayer.detach();
             a.inlinePlayer = null;
@@ -114,6 +115,7 @@ final class EditionImpl {
     }
 
     static void onPrivacySwitch(MainActivity a) {
+        LanCastMediaRelay.revokeActive();
         MobileRootShell.resetStaticState();
     }
 

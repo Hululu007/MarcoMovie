@@ -658,7 +658,364 @@ public final class CastSearchAndPickerChecks {
         testSearchInputServer();
         testWallpaperUploadServer();
         testCastServiceDlnaAndWeb();
+        testLanCastMediaRelayAndPrepareTarget();
         System.out.println(
                 "PASS " + passed + " Cast, Search QR, Wallpaper QR & SourcePicker checks");
+    }
+
+    private static void testLanCastMediaRelayAndPrepareTarget() throws Exception {
+        final byte[] videoBytes = new byte[4096];
+        for (int i = 0; i < videoBytes.length; i++) {
+            videoBytes[i] = (byte) (i & 0xFF);
+        }
+        final byte[] segBytes =
+                "MPEGTS-SEGMENT-PAYLOAD-1234567890".getBytes(StandardCharsets.UTF_8);
+        final byte[] keyBytes = "1234567890abcdef".getBytes(StandardCharsets.UTF_8);
+        final java.util.concurrent.atomic.AtomicReference<String> seenReferer =
+                new java.util.concurrent.atomic.AtomicReference<>("");
+        final java.util.concurrent.atomic.AtomicReference<String> seenCookie =
+                new java.util.concurrent.atomic.AtomicReference<>("");
+
+        com.sun.net.httpserver.HttpServer upstream =
+                com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        final int upPort = upstream.getAddress().getPort();
+        upstream.createContext(
+                "/",
+                ex -> {
+                    try {
+                        String path = ex.getRequestURI().getPath();
+                        String ref = ex.getRequestHeaders().getFirst("Referer");
+                        String cookie = ex.getRequestHeaders().getFirst("Cookie");
+                        if (ref != null) seenReferer.set(ref);
+                        if (cookie != null) seenCookie.set(cookie);
+
+                        if ("/protected.mp4".equals(path)) {
+                            if (!"https://auth.example/".equals(ref) || !"sid=ok".equals(cookie)) {
+                                ex.sendResponseHeaders(403, -1);
+                                return;
+                            }
+                            ex.getResponseHeaders().set("Content-Type", "video/mp4");
+                            String rng = ex.getRequestHeaders().getFirst("Range");
+                            if (rng != null && rng.startsWith("bytes=10-25")) {
+                                ex.getResponseHeaders()
+                                        .set("Content-Range", "bytes 10-25/" + videoBytes.length);
+                                ex.sendResponseHeaders(206, 16);
+                                try (OutputStream os = ex.getResponseBody()) {
+                                    os.write(videoBytes, 10, 16);
+                                }
+                                return;
+                            }
+                            if ("HEAD".equalsIgnoreCase(ex.getRequestMethod())) {
+                                ex.getResponseHeaders()
+                                        .set("Content-Length", String.valueOf(videoBytes.length));
+                                ex.sendResponseHeaders(200, -1);
+                                return;
+                            }
+                            ex.sendResponseHeaders(200, videoBytes.length);
+                            try (OutputStream os = ex.getResponseBody()) {
+                                os.write(videoBytes);
+                            }
+                            return;
+                        }
+                        if ("/local/master.m3u8".equals(path)) {
+                            String m3u =
+                                    "#EXTM3U\n"
+                                            + "#EXT-X-VERSION:3\n"
+                                            + "#EXT-X-KEY:METHOD=AES-128,URI=\"http://127.0.0.1:"
+                                            + upPort
+                                            + "/local/enc.key\"\n"
+                                            + "#EXTINF:5.0,\n"
+                                            + "seg0.ts\n"
+                                            + "#EXT-X-ENDLIST\n";
+                            byte[] m3uBytes = m3u.getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders()
+                                    .set("Content-Type", "application/vnd.apple.mpegurl");
+                            ex.sendResponseHeaders(200, m3uBytes.length);
+                            try (OutputStream os = ex.getResponseBody()) {
+                                os.write(m3uBytes);
+                            }
+                            return;
+                        }
+                        if ("/local/enc.key".equals(path)) {
+                            ex.sendResponseHeaders(200, keyBytes.length);
+                            try (OutputStream os = ex.getResponseBody()) {
+                                os.write(keyBytes);
+                            }
+                            return;
+                        }
+                        if ("/local/seg0.ts".equals(path)) {
+                            ex.getResponseHeaders().set("Content-Type", "video/mp2t");
+                            ex.sendResponseHeaders(200, segBytes.length);
+                            try (OutputStream os = ex.getResponseBody()) {
+                                os.write(segBytes);
+                            }
+                            return;
+                        }
+                        ex.sendResponseHeaders(404, -1);
+                    } finally {
+                        ex.close();
+                    }
+                });
+        upstream.start();
+
+        java.io.File tempDir = java.nio.file.Files.createTempDirectory("cast-relay-test-").toFile();
+        java.io.File localMp4 = new java.io.File(tempDir, "offline.mp4");
+        try (java.io.FileOutputStream fos = new java.io.FileOutputStream(localMp4)) {
+            fos.write(videoBytes);
+        }
+
+        try (LanCastMediaRelay relay =
+                new LanCastMediaRelay(new InetSocketAddress("127.0.0.1", 0), true)) {
+            int relayPort = relay.getPort();
+            String lanIp = "10.20.30.40";
+
+            // 1. Direct header-free remote URL stays direct (not relayed)
+            DlnaCastClient.CastTarget direct =
+                    DlnaCastClient.prepareCastTarget(
+                            "https://cdn.example.test/movie.mp4",
+                            "",
+                            Collections.emptyMap(),
+                            "video/mp4",
+                            "10.20.30.40",
+                            relay);
+            check(
+                    !direct.relayed && "https://cdn.example.test/movie.mp4".equals(direct.url),
+                    "Direct header-free HTTP URL casts directly without relay");
+
+            // 2. Empty LAN IP returns clear Wi-Fi prompt when relay is required
+            DlnaCastClient.CastTarget noWifi =
+                    DlnaCastClient.prepareCastTarget(
+                            "http://127.0.0.1:" + upPort + "/protected.mp4",
+                            "",
+                            Collections.emptyMap(),
+                            "video/mp4",
+                            "",
+                            relay);
+            check(
+                    noWifi.url.isEmpty() && noWifi.errorMessage.contains("Wi-Fi"),
+                    "Missing LAN Wi-Fi IP returns actionable prompt");
+
+            // 3. Header-protected stream is relayed with headers + Range 206 + HEAD + revoke
+            Map<String, String> authHeaders = new java.util.LinkedHashMap<>();
+            authHeaders.put("Referer", "https://auth.example/");
+            authHeaders.put("Cookie", "sid=ok");
+            DlnaCastClient.CastTarget protectedCast =
+                    DlnaCastClient.prepareCastTarget(
+                            "https://cdn.example.test/protected.mp4",
+                            "",
+                            authHeaders,
+                            "video/mp4",
+                            lanIp,
+                            relay);
+            check(
+                    protectedCast.relayed && LanCastMediaRelay.isRelayUrl(protectedCast.url),
+                    "Header-protected remote URL uses LanCastMediaRelay");
+
+            // Publish loopback protected.mp4 directly through relay for live HTTP roundtrip checks
+            String relayedMp4 =
+                    relay.publish(
+                            lanIp,
+                            "http://127.0.0.1:" + upPort + "/protected.mp4",
+                            authHeaders,
+                            "video/mp4");
+            java.net.URI mp4Uri = java.net.URI.create(relayedMp4);
+            String rangeResp =
+                    rawHttp(
+                            relayPort,
+                            "GET "
+                                    + mp4Uri.getRawPath()
+                                    + " HTTP/1.1\r\nHost: 127.0.0.1:"
+                                    + relayPort
+                                    + "\r\nRange: bytes=10-25\r\n\r\n");
+            check(
+                    rangeResp.startsWith("HTTP/1.1 206 ")
+                            && "https://auth.example/".equals(seenReferer.get())
+                            && "sid=ok".equals(seenCookie.get()),
+                    "Relay forwards protected headers and streams 206 Partial Content");
+
+            String wrongTok =
+                    rawHttp(
+                            relayPort,
+                            "GET /cast-media/00000000000000000000000000000000/stream.mp4 HTTP/1.1\r\nHost: 127.0.0.1:"
+                                    + relayPort
+                                    + "\r\n\r\n");
+            check(wrongTok.startsWith("HTTP/1.1 404 "), "Relay rejects invalid token with 404");
+
+            // 4. Loopback HLS playlist rewrites all 127.0.0.1 and relative URIs to relay sub-routes
+            DlnaCastClient.CastTarget hlsCast =
+                    DlnaCastClient.prepareCastTarget(
+                            "http://127.0.0.1:" + upPort + "/local/master.m3u8",
+                            "",
+                            Collections.emptyMap(),
+                            "application/vnd.apple.mpegurl",
+                            lanIp,
+                            relay);
+            check(hlsCast.relayed, "Loopback 127.0.0.1 HLS stream routes via relay");
+            java.net.URI hlsUri = java.net.URI.create(hlsCast.url);
+            String hlsResp =
+                    rawHttp(
+                            relayPort,
+                            "GET "
+                                    + hlsUri.getRawPath()
+                                    + " HTTP/1.1\r\nHost: 127.0.0.1:"
+                                    + relayPort
+                                    + "\r\n\r\n");
+            check(
+                    hlsResp.startsWith("HTTP/1.1 200 ")
+                            && hlsResp.contains("/cast-media/")
+                            && hlsResp.contains("/sub/0.key")
+                            && hlsResp.contains("/sub/1.ts")
+                            && !hlsResp.contains("127.0.0.1:" + upPort),
+                    "Relay rewrites loopback & relative HLS URIs without leaking upstream loopback port");
+            String segResp =
+                    rawHttp(
+                            relayPort,
+                            "GET "
+                                    + hlsUri.getRawPath()
+                                            .substring(0, hlsUri.getRawPath().lastIndexOf('/'))
+                                    + "/sub/1.ts HTTP/1.1\r\nHost: 127.0.0.1:"
+                                    + relayPort
+                                    + "\r\n\r\n");
+            check(
+                    segResp.startsWith("HTTP/1.1 200 ")
+                            && segResp.contains("MPEGTS-SEGMENT-PAYLOAD-1234567890")
+                            && !segResp.toLowerCase(java.util.Locale.ROOT)
+                                    .contains("content-type: application/vnd.apple.mpegurl"),
+                    "Relay serves rewritten HLS sub-segment bytes without playlist Content-Type");
+
+            // 4b. Security boundaries: non-loopback upstream cannot pivot to 127.0.0.1 or file:/;
+            // local HLS playlist cannot traverse outside root directory.
+            String remoteHlsUrl =
+                    relay.publish(
+                            lanIp,
+                            "https://cdn.example.test/live/master.m3u8",
+                            Collections.emptyMap(),
+                            "application/vnd.apple.mpegurl");
+            java.net.URI remoteUri = java.net.URI.create(remoteHlsUrl);
+            LanCastMediaRelay.Session remoteSession = relay.activeSessionForTest();
+            String hostilePlaylist =
+                    "#EXTM3U\n#EXTINF:5.0,\nhttp://127.0.0.1:"
+                            + upPort
+                            + "/local/seg0.ts\n#EXTINF:5.0,\n"
+                            + localMp4.toURI()
+                            + "\n";
+            String rewrittenHostile =
+                    LanCastMediaRelay.rewriteHlsForRelay(
+                            hostilePlaylist,
+                            "https://cdn.example.test/live/master.m3u8",
+                            remoteSession);
+            check(
+                    rewrittenHostile.contains("/sub/0.ts")
+                            && !rewrittenHostile.contains("/sub/1.")
+                            && !rewrittenHostile.contains("file:"),
+                    "Remote HLS playlist drops file:/ child references completely");
+            String ssrfResp =
+                    rawHttp(
+                            relayPort,
+                            "GET "
+                                    + remoteUri
+                                            .getRawPath()
+                                            .substring(0, remoteUri.getRawPath().lastIndexOf('/'))
+                                    + "/sub/0.ts HTTP/1.1\r\nHost: 127.0.0.1:"
+                                    + relayPort
+                                    + "\r\n\r\n");
+            check(
+                    ssrfResp.startsWith("HTTP/1.1 403 "),
+                    "Non-loopback session rejects loopback 127.0.0.1 SSRF pivot with 403");
+
+            // Exercise local HLS playlist in tempDir containing ../secret.ts
+            java.io.File subDir = new java.io.File(tempDir, "hls_sub");
+            subDir.mkdirs();
+            java.io.File outsideFile = new java.io.File(tempDir, "secret.ts");
+            try (java.io.FileOutputStream fos = new java.io.FileOutputStream(outsideFile)) {
+                fos.write(segBytes);
+            }
+            java.io.File localPlaylist = new java.io.File(subDir, "index.m3u8");
+            try (java.io.FileOutputStream fos = new java.io.FileOutputStream(localPlaylist)) {
+                fos.write("#EXTM3U\n#EXTINF:5.0,\n../secret.ts\n".getBytes(StandardCharsets.UTF_8));
+            }
+            DlnaCastClient.CastTarget travCast =
+                    DlnaCastClient.prepareCastTarget(
+                            localPlaylist.toURI().toString(),
+                            "",
+                            Collections.emptyMap(),
+                            "application/vnd.apple.mpegurl",
+                            lanIp,
+                            relay);
+            java.net.URI travUri = java.net.URI.create(travCast.url);
+            String travPlaylistResp =
+                    rawHttp(
+                            relayPort,
+                            "GET "
+                                    + travUri.getRawPath()
+                                    + " HTTP/1.1\r\nHost: 127.0.0.1:"
+                                    + relayPort
+                                    + "\r\n\r\n");
+            check(
+                    travPlaylistResp.startsWith("HTTP/1.1 200 ")
+                            && travPlaylistResp.contains("/sub/0.ts"),
+                    "Local file HLS playlist publishes rewritten child route");
+            String travSegResp =
+                    rawHttp(
+                            relayPort,
+                            "GET "
+                                    + travUri.getRawPath()
+                                            .substring(0, travUri.getRawPath().lastIndexOf('/'))
+                                    + "/sub/0.ts HTTP/1.1\r\nHost: 127.0.0.1:"
+                                    + relayPort
+                                    + "\r\n\r\n");
+            check(
+                    travSegResp.startsWith("HTTP/1.1 403 "),
+                    "Local file relay blocks path traversal outside playlist directory with 403");
+            outsideFile.delete();
+            localPlaylist.delete();
+            subDir.delete();
+
+            check(
+                    !LanCastMediaRelay.isLoopbackOrAnyLocalHost("cdn.example.test")
+                            && LanCastMediaRelay.isLoopbackOrAnyLocalHost("127.0.0.1")
+                            && LanCastMediaRelay.isLoopbackOrAnyLocalHost("0.0.0.0")
+                            && LanCastMediaRelay.isLoopbackOrAnyLocalHost("[::1]"),
+                    "Relay identifies loopback/wildcard hostnames to prevent remote-to-loopback SSRF");
+
+            // 5. Local file:// MP4 casts via relay with Range support, then revoke invalidates URL
+            DlnaCastClient.CastTarget fileCast =
+                    DlnaCastClient.prepareCastTarget(
+                            localMp4.toURI().toString(),
+                            "",
+                            Collections.emptyMap(),
+                            "video/mp4",
+                            lanIp,
+                            relay);
+            check(fileCast.relayed, "Local file:// MP4 uses LAN cast relay");
+            java.net.URI fileUri = java.net.URI.create(fileCast.url);
+            String fileRangeResp =
+                    rawHttp(
+                            relayPort,
+                            "GET "
+                                    + fileUri.getRawPath()
+                                    + " HTTP/1.1\r\nHost: 127.0.0.1:"
+                                    + relayPort
+                                    + "\r\nRange: bytes=0-15\r\n\r\n");
+            check(
+                    fileRangeResp.startsWith("HTTP/1.1 206 ")
+                            && fileRangeResp.contains("Content-Range: bytes 0-15/4096"),
+                    "Local file:// relay supports Range 206 Partial Content");
+
+            relay.revoke();
+            String revokedResp =
+                    rawHttp(
+                            relayPort,
+                            "GET "
+                                    + fileUri.getRawPath()
+                                    + " HTTP/1.1\r\nHost: 127.0.0.1:"
+                                    + relayPort
+                                    + "\r\n\r\n");
+            check(revokedResp.startsWith("HTTP/1.1 404 "), "Revoked cast session returns 404");
+        } finally {
+            upstream.stop(0);
+            localMp4.delete();
+            tempDir.delete();
+        }
     }
 }

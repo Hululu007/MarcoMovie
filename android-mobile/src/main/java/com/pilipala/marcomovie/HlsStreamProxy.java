@@ -152,6 +152,34 @@ public final class HlsStreamProxy {
         }
     }
 
+    /** Returns the captured upstream request headers for an active {@code /hls?sid=...} URL. */
+    public static Map<String, String> headersForLocalUrl(String localUrl) {
+        if (localUrl == null || localUrl.trim().isEmpty()) return Collections.emptyMap();
+        try {
+            URI u = new URI(localUrl.trim());
+            String path = u.getPath();
+            if (path == null || !path.startsWith("/hls")) return Collections.emptyMap();
+            String query = u.getRawQuery();
+            if (query == null || query.isEmpty()) return Collections.emptyMap();
+            String sid = "";
+            for (String pair : query.split("&")) {
+                int eq = pair.indexOf('=');
+                if (eq <= 0) continue;
+                if ("sid".equals(pair.substring(0, eq))) {
+                    sid = pair.substring(eq + 1);
+                    break;
+                }
+            }
+            if (sid.isEmpty()) return Collections.emptyMap();
+            Session session = SESSIONS.get(sid);
+            return session != null && session.headers != null
+                    ? session.headers
+                    : Collections.emptyMap();
+        } catch (Throwable ignored) {
+            return Collections.emptyMap();
+        }
+    }
+
     static String buildLocalUrl(String route, String sid, int targetId, boolean raw) {
         StringBuilder sb =
                 new StringBuilder(ProxyAddress.base())

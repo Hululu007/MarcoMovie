@@ -13,6 +13,7 @@ import android.net.TrafficStats;
 import android.os.BatteryManager;
 import android.os.SystemClock;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
@@ -36,6 +37,27 @@ final class MobilePlayerOverlay {
     static final int REAL_CORNER_HUD_MASK =
             Prefs.HUD_CLOCK | Prefs.HUD_BATTERY | Prefs.HUD_NET_SPEED | Prefs.HUD_RESOLUTION;
 
+    static final int ANCHOR_TOP_RIGHT = 0;
+    static final int ANCHOR_TOP_LEFT = 1;
+    static final int ANCHOR_TOP_CENTER = 2;
+    static final int ANCHOR_BOTTOM_RIGHT = 3;
+    static final int ANCHOR_BOTTOM_LEFT = 4;
+
+    static final int MIN_OFFSET_X_DP = -400;
+    static final int MAX_OFFSET_X_DP = 400;
+    static final int MIN_OFFSET_Y_DP = -300;
+    static final int MAX_OFFSET_Y_DP = 300;
+
+    static final class CornerPlacement {
+        final int leftPx;
+        final int topPx;
+
+        CornerPlacement(int leftPx, int topPx) {
+            this.leftPx = leftPx;
+            this.topPx = topPx;
+        }
+    }
+
     private final MainActivity a;
     private final LinearLayout hudCapsule;
     private final TextView hudPrefixText;
@@ -46,15 +68,29 @@ final class MobilePlayerOverlay {
     private final TextView hudClockText;
     private final MiniProgressView miniBar;
     private View letterboxGlow;
+    private FrameLayout dragOverlayLayer;
+    private LinearLayout dragBanner;
+    private TextView dragCoordHint;
     private boolean closed;
     private boolean hudCapsuleShown;
     private boolean miniBarShown;
+    private boolean adjustingPosition;
     private long lastRxBytes = -1;
     private long lastRxTimeMs = 0;
     private String lastSampledNetSpeed = "";
     private long episodeToken = 1L;
     private final IntroSkipEvaluator skipEvaluator = new IntroSkipEvaluator();
     private final SimpleDateFormat clockFmt = new SimpleDateFormat("HH:mm", Locale.US);
+    private final View.OnLayoutChangeListener containerLayoutListener =
+            (v, l, t, r, b, ol, ot, or, ob) -> {
+                if (!closed) updateCapsuleSafeMargins();
+            };
+    private final View.OnLayoutChangeListener capsuleLayoutListener =
+            (v, l, t, r, b, ol, ot, or, ob) -> {
+                if (!closed && (r - l != or - ol || b - t != ob - ot)) {
+                    updateCapsuleSafeMargins();
+                }
+            };
 
     private final Runnable pulse =
             new Runnable() {
@@ -75,6 +111,203 @@ final class MobilePlayerOverlay {
             boolean controlsVisible, int cornerMask, boolean locked) {
         if (controlsVisible || locked) return false;
         return (cornerMask & REAL_CORNER_HUD_MASK) != 0;
+    }
+
+    static int clampAnchor(int raw) {
+        return Math.max(ANCHOR_TOP_RIGHT, Math.min(ANCHOR_BOTTOM_LEFT, raw));
+    }
+
+    static int clampOffsetXDp(int raw) {
+        return Math.max(MIN_OFFSET_X_DP, Math.min(MAX_OFFSET_X_DP, raw));
+    }
+
+    static int clampOffsetYDp(int raw) {
+        return Math.max(MIN_OFFSET_Y_DP, Math.min(MAX_OFFSET_Y_DP, raw));
+    }
+
+    static boolean hasCustomCornerHudPosition(int anchor, int offsetXDp, int offsetYDp) {
+        return clampAnchor(anchor) != ANCHOR_TOP_RIGHT
+                || clampOffsetXDp(offsetXDp) != 0
+                || clampOffsetYDp(offsetYDp) != 0;
+    }
+
+    static boolean shouldShowCornerHud(
+            boolean controlsVisible,
+            int cornerMask,
+            boolean locked,
+            boolean customPosition,
+            boolean adjustingPosition) {
+        if (adjustingPosition) return true;
+        if (locked || (cornerMask & REAL_CORNER_HUD_MASK) == 0) return false;
+        if (customPosition) return true;
+        return !controlsVisible;
+    }
+
+    static String anchorLabel(int anchor) {
+        switch (clampAnchor(anchor)) {
+            case ANCHOR_TOP_LEFT:
+                return "左上角";
+            case ANCHOR_TOP_CENTER:
+                return "顶部居中";
+            case ANCHOR_BOTTOM_RIGHT:
+                return "右下角";
+            case ANCHOR_BOTTOM_LEFT:
+                return "左下角";
+            case ANCHOR_TOP_RIGHT:
+            default:
+                return "右上角";
+        }
+    }
+
+    static String describeCornerPosition(int anchor, int offsetXDp, int offsetYDp) {
+        int aClamped = clampAnchor(anchor);
+        int xClamped = clampOffsetXDp(offsetXDp);
+        int yClamped = clampOffsetYDp(offsetYDp);
+        if (!hasCustomCornerHudPosition(aClamped, xClamped, yClamped)) {
+            return "右上角（默认）";
+        }
+        StringBuilder sb = new StringBuilder(anchorLabel(aClamped));
+        if (xClamped != 0 || yClamped != 0) {
+            sb.append(" · X")
+                    .append(xClamped >= 0 ? "+" : "")
+                    .append(xClamped)
+                    .append(" Y")
+                    .append(yClamped >= 0 ? "+" : "")
+                    .append(yClamped);
+        }
+        return sb.toString();
+    }
+
+    static CornerPlacement computeCornerPlacement(
+            int containerW,
+            int containerH,
+            int capsuleW,
+            int capsuleH,
+            int safeLeft,
+            int safeTop,
+            int safeRight,
+            int safeBottom,
+            int anchor,
+            int offsetXPx,
+            int offsetYPx,
+            int basePadHPx,
+            int basePadVPx) {
+        int cW = Math.max(1, containerW);
+        int cH = Math.max(1, containerH);
+        int capW = Math.max(0, Math.min(cW, capsuleW));
+        int capH = Math.max(0, Math.min(cH, capsuleH));
+        int sLeft = Math.max(0, safeLeft);
+        int sTop = Math.max(0, safeTop);
+        int sRight = Math.max(0, safeRight);
+        int sBottom = Math.max(0, safeBottom);
+
+        int minLeft = Math.min(Math.max(4, sLeft + basePadHPx / 2), Math.max(4, cW - capW - 4));
+        int maxLeft = Math.max(minLeft, cW - Math.max(4, sRight + basePadHPx / 2) - capW);
+        int minTop = Math.min(Math.max(4, sTop + basePadVPx / 2), Math.max(4, cH - capH - 4));
+        int maxTop = Math.max(minTop, cH - Math.max(4, sBottom + basePadVPx / 2) - capH);
+
+        int baseLeft;
+        int baseTop;
+        int aClamped = clampAnchor(anchor);
+        switch (aClamped) {
+            case ANCHOR_TOP_LEFT:
+                baseLeft = sLeft + basePadHPx;
+                baseTop = sTop + basePadVPx;
+                break;
+            case ANCHOR_TOP_CENTER:
+                baseLeft = (cW - capW) / 2;
+                baseTop = sTop + basePadVPx;
+                break;
+            case ANCHOR_BOTTOM_RIGHT:
+                baseLeft = cW - sRight - basePadHPx - capW;
+                baseTop = cH - sBottom - basePadVPx - capH;
+                break;
+            case ANCHOR_BOTTOM_LEFT:
+                baseLeft = sLeft + basePadHPx;
+                baseTop = cH - sBottom - basePadVPx - capH;
+                break;
+            case ANCHOR_TOP_RIGHT:
+            default:
+                baseLeft = cW - sRight - basePadHPx - capW;
+                baseTop = sTop + basePadVPx;
+                break;
+        }
+
+        int finalLeft = Math.max(minLeft, Math.min(maxLeft, baseLeft + offsetXPx));
+        int finalTop = Math.max(minTop, Math.min(maxTop, baseTop + offsetYPx));
+        return new CornerPlacement(finalLeft, finalTop);
+    }
+
+    static int[] resolveDraggedAnchorAndOffsets(
+            int containerW,
+            int containerH,
+            int capsuleW,
+            int capsuleH,
+            int safeLeft,
+            int safeTop,
+            int safeRight,
+            int safeBottom,
+            int desiredLeftPx,
+            int desiredTopPx,
+            int basePadHPx,
+            int basePadVPx,
+            float density) {
+        float d = density > 0f ? density : 1f;
+        int cW = Math.max(1, containerW);
+        int cH = Math.max(1, containerH);
+        int capW = Math.max(0, Math.min(cW, capsuleW));
+        int capH = Math.max(0, Math.min(cH, capsuleH));
+        int sLeft = Math.max(0, safeLeft);
+        int sTop = Math.max(0, safeTop);
+        int sRight = Math.max(0, safeRight);
+        int sBottom = Math.max(0, safeBottom);
+        int minLeft = Math.min(Math.max(4, sLeft + basePadHPx / 2), Math.max(4, cW - capW - 4));
+        int maxLeft = Math.max(minLeft, cW - Math.max(4, sRight + basePadHPx / 2) - capW);
+        int minTop = Math.min(Math.max(4, sTop + basePadVPx / 2), Math.max(4, cH - capH - 4));
+        int maxTop = Math.max(minTop, cH - Math.max(4, sBottom + basePadVPx / 2) - capH);
+        int clampedLeft = Math.max(minLeft, Math.min(maxLeft, desiredLeftPx));
+        int clampedTop = Math.max(minTop, Math.min(maxTop, desiredTopPx));
+
+        int[] candidates = {
+            ANCHOR_TOP_RIGHT,
+            ANCHOR_TOP_LEFT,
+            ANCHOR_TOP_CENTER,
+            ANCHOR_BOTTOM_RIGHT,
+            ANCHOR_BOTTOM_LEFT
+        };
+        int bestAnchor = ANCHOR_TOP_RIGHT;
+        long bestDistSq = Long.MAX_VALUE;
+        int bestBaseLeft = 0;
+        int bestBaseTop = 0;
+        for (int cand : candidates) {
+            CornerPlacement base =
+                    computeCornerPlacement(
+                            cW,
+                            cH,
+                            capW,
+                            capH,
+                            sLeft,
+                            sTop,
+                            sRight,
+                            sBottom,
+                            cand,
+                            0,
+                            0,
+                            basePadHPx,
+                            basePadVPx);
+            long dx = (long) clampedLeft - base.leftPx;
+            long dy = (long) clampedTop - base.topPx;
+            long distSq = dx * dx + dy * dy;
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                bestAnchor = cand;
+                bestBaseLeft = base.leftPx;
+                bestBaseTop = base.topPx;
+            }
+        }
+        int offXDp = clampOffsetXDp(Math.round((clampedLeft - bestBaseLeft) / d));
+        int offYDp = clampOffsetYDp(Math.round((clampedTop - bestBaseTop) / d));
+        return new int[] {bestAnchor, offXDp, offYDp};
     }
 
     /**
@@ -181,11 +414,13 @@ final class MobilePlayerOverlay {
 
         hudCapsule.setVisibility(View.GONE);
         FrameLayout.LayoutParams hudLp =
-                new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT);
-        hudLp.setMargins(a.dp(12), a.dp(10), a.dp(14), 0);
+                new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.LEFT);
+        hudLp.setMargins(0, a.dp(10), 0, 0);
         if (a.playbackLayer != null) {
             a.playbackLayer.addView(hudCapsule, hudLp);
+            a.playbackLayer.addOnLayoutChangeListener(containerLayoutListener);
         }
+        hudCapsule.addOnLayoutChangeListener(capsuleLayoutListener);
 
         // 3. Bottom 2dp Accent Mini Progress Bar (visible when controls hide)
         miniBar = new MiniProgressView(a);
@@ -345,9 +580,224 @@ final class MobilePlayerOverlay {
         }
     }
 
+    void applyPositionPrefsNow() {
+        if (closed || a.isFinishing()) return;
+        updateCapsuleSafeMargins();
+        syncControlsVisibility();
+        if (a.playerChrome != null) {
+            a.playerChrome.updateMobileTopStatus(
+                    clockFmt.format(new Date()),
+                    queryBatteryPercent(),
+                    isBatteryCharging(),
+                    lastSampledNetSpeed);
+        }
+    }
+
+    void startPositionDragMode() {
+        if (closed || a.isFinishing() || a.playbackLayer == null) return;
+        stopPositionDragMode(false);
+        adjustingPosition = true;
+        if (a.controlsVisible) {
+            a.showControls(false);
+        }
+
+        final float density = Math.max(1f, a.getResources().getDisplayMetrics().density);
+        final int accent = MobileTheme.of(a).accent;
+
+        // Highlight capsule while dragging
+        GradientDrawable dragBg = a.bg(0xE0141822, 999);
+        dragBg.setStroke(Math.max(2, a.dp(1.5f)), accent);
+        hudCapsule.setBackground(dragBg);
+        UiCompat.setElevation(hudCapsule, a.dp(12));
+
+        dragOverlayLayer = new FrameLayout(a);
+        dragOverlayLayer.setTag("mobile-corner-hud-drag-layer");
+        dragOverlayLayer.setBackgroundColor(0x33000000);
+        dragOverlayLayer.setClickable(true);
+        dragOverlayLayer.setFocusable(false);
+
+        dragBanner = a.row();
+        dragBanner.setGravity(Gravity.CENTER_VERTICAL);
+        dragBanner.setPadding(a.dp(14), a.dp(10), a.dp(10), a.dp(10));
+        GradientDrawable bannerBg = a.bg(0xEB151821, 999);
+        bannerBg.setStroke(MobileTheme.hairlinePx(a), 0x38FFFFFF);
+        dragBanner.setBackground(bannerBg);
+        UiCompat.setElevation(dragBanner, a.dp(10));
+
+        dragCoordHint = a.text("拖动上方状态胶囊调整位置", 12.5f, 0xFFF3F5F9);
+        dragCoordHint.setSingleLine(true);
+        dragBanner.addView(dragCoordHint, new LinearLayout.LayoutParams(-2, -2));
+
+        TextView resetBtn = a.text("恢复默认", 12f, 0xFFD1D5DB);
+        resetBtn.setPadding(a.dp(10), a.dp(6), a.dp(10), a.dp(6));
+        resetBtn.setBackground(a.bg(0x24FFFFFF, 999));
+        MobileMotion.bindPress(resetBtn, 0.94f);
+        resetBtn.setOnClickListener(
+                v -> {
+                    a.mobilePrefs()
+                            .edit()
+                            .putInt(Prefs.PLAYER_CORNER_HUD_ANCHOR, ANCHOR_TOP_RIGHT)
+                            .putInt(Prefs.PLAYER_CORNER_HUD_OFFSET_X, 0)
+                            .putInt(Prefs.PLAYER_CORNER_HUD_OFFSET_Y, 0)
+                            .apply();
+                    applyPositionPrefsNow();
+                    updateDragBannerHint();
+                });
+        LinearLayout.LayoutParams rstLp = new LinearLayout.LayoutParams(-2, -2);
+        rstLp.leftMargin = a.dp(10);
+        dragBanner.addView(resetBtn, rstLp);
+
+        TextView doneBtn = a.text("完成", 12.5f, MobileTheme.of(a).accentOnFill);
+        doneBtn.setTypeface(null, Typeface.BOLD);
+        doneBtn.setPadding(a.dp(12), a.dp(6), a.dp(12), a.dp(6));
+        doneBtn.setBackground(a.bg(accent, 999));
+        MobileMotion.bindPress(doneBtn, 0.94f);
+        doneBtn.setOnClickListener(v -> stopPositionDragMode(true));
+        LinearLayout.LayoutParams doneLp = new LinearLayout.LayoutParams(-2, -2);
+        doneLp.leftMargin = a.dp(8);
+        dragBanner.addView(doneBtn, doneLp);
+
+        FrameLayout.LayoutParams bannerLp =
+                new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        bannerLp.bottomMargin = a.dp(24);
+        dragOverlayLayer.addView(dragBanner, bannerLp);
+
+        dragOverlayLayer.setOnClickListener(v -> stopPositionDragMode(true));
+
+        final float[] touchStart = new float[2];
+        final int[] startCapsulePos = new int[2];
+        hudCapsule.setClickable(true);
+        hudCapsule.setOnTouchListener(
+                (v, ev) -> {
+                    if (!adjustingPosition) return false;
+                    int action = ev.getActionMasked();
+                    if (action == MotionEvent.ACTION_DOWN) {
+                        touchStart[0] = ev.getRawX();
+                        touchStart[1] = ev.getRawY();
+                        startCapsulePos[0] = hudCapsule.getLeft();
+                        startCapsulePos[1] = hudCapsule.getTop();
+                        return true;
+                    } else if (action == MotionEvent.ACTION_MOVE
+                            || action == MotionEvent.ACTION_UP
+                            || action == MotionEvent.ACTION_CANCEL) {
+                        int desiredLeft =
+                                startCapsulePos[0] + Math.round(ev.getRawX() - touchStart[0]);
+                        int desiredTop =
+                                startCapsulePos[1] + Math.round(ev.getRawY() - touchStart[1]);
+                        int safeLeft = 0;
+                        int safeTop = 0;
+                        int safeRight = 0;
+                        int safeBottom = 0;
+                        if (a.playerChrome != null && a.playerChrome.overlay != null) {
+                            safeLeft =
+                                    Math.max(
+                                            a.playerChrome.overlay.getPaddingLeft(),
+                                            a.isPortrait()
+                                                    ? a.playerChrome.windowInsets.left
+                                                    : Math.min(
+                                                            a.dp(24),
+                                                            a.playerChrome.windowInsets.left));
+                            safeTop =
+                                    Math.max(
+                                            a.playerChrome.overlay.getPaddingTop(),
+                                            a.playerChrome.windowInsets.top);
+                            safeRight =
+                                    Math.max(
+                                            a.playerChrome.overlay.getPaddingRight(),
+                                            a.isPortrait()
+                                                    ? a.playerChrome.windowInsets.right
+                                                    : Math.min(
+                                                            a.dp(24),
+                                                            a.playerChrome.windowInsets.right));
+                            safeBottom =
+                                    Math.max(
+                                            a.playerChrome.overlay.getPaddingBottom(),
+                                            a.playerChrome.windowInsets.bottom);
+                        }
+                        int containerW = a.playbackLayer != null ? a.playbackLayer.getWidth() : 0;
+                        int containerH = a.playbackLayer != null ? a.playbackLayer.getHeight() : 0;
+                        int capW = Math.max(a.dp(48), hudCapsule.getWidth());
+                        int capH = Math.max(a.dp(20), hudCapsule.getHeight());
+                        int[] snapped =
+                                resolveDraggedAnchorAndOffsets(
+                                        containerW,
+                                        containerH,
+                                        capW,
+                                        capH,
+                                        safeLeft,
+                                        safeTop,
+                                        safeRight,
+                                        safeBottom,
+                                        desiredLeft,
+                                        desiredTop,
+                                        a.dp(12),
+                                        a.dp(10),
+                                        density);
+                        a.mobilePrefs()
+                                .edit()
+                                .putInt(Prefs.PLAYER_CORNER_HUD_ANCHOR, snapped[0])
+                                .putInt(Prefs.PLAYER_CORNER_HUD_OFFSET_X, snapped[1])
+                                .putInt(Prefs.PLAYER_CORNER_HUD_OFFSET_Y, snapped[2])
+                                .apply();
+                        applyPositionPrefsNow();
+                        updateDragBannerHint();
+                        return true;
+                    }
+                    return false;
+                });
+
+        int capsuleIdx = a.playbackLayer.indexOfChild(hudCapsule);
+        if (capsuleIdx >= 0) {
+            a.playbackLayer.addView(
+                    dragOverlayLayer, capsuleIdx, new FrameLayout.LayoutParams(-1, -1));
+        } else {
+            a.playbackLayer.addView(dragOverlayLayer, new FrameLayout.LayoutParams(-1, -1));
+        }
+        hudCapsule.bringToFront();
+        syncControlsVisibility();
+        updateCapsuleSafeMargins();
+        updateDragBannerHint();
+    }
+
+    private void updateDragBannerHint() {
+        if (dragCoordHint == null) return;
+        int anchor = clampAnchor(a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_ANCHOR, 0));
+        int offX = clampOffsetXDp(a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_X, 0));
+        int offY = clampOffsetYDp(a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_Y, 0));
+        dragCoordHint.setText(describeCornerPosition(anchor, offX, offY));
+    }
+
+    private void stopPositionDragMode(boolean showToast) {
+        if (!adjustingPosition && dragOverlayLayer == null) return;
+        adjustingPosition = false;
+        hudCapsule.setOnTouchListener(null);
+        hudCapsule.setClickable(false);
+        GradientDrawable capsuleBg = a.bg(a.isReducedTransparency() ? 0xE6141720 : 0x8F10131A, 999);
+        capsuleBg.setStroke(MobileTheme.hairlinePx(a), 0x24FFFFFF);
+        hudCapsule.setBackground(capsuleBg);
+        UiCompat.setElevation(hudCapsule, 0f);
+        removeParent(dragOverlayLayer);
+        dragOverlayLayer = null;
+        dragBanner = null;
+        dragCoordHint = null;
+        syncControlsVisibility();
+        if (showToast) {
+            int anchor = clampAnchor(a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_ANCHOR, 0));
+            int offX = clampOffsetXDp(a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_X, 0));
+            int offY = clampOffsetYDp(a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_Y, 0));
+            a.toast("状态栏位置已保存：" + describeCornerPosition(anchor, offX, offY));
+        }
+    }
+
     private void renderIdleCornerCapsule(
             int mask, String netSpeed, int bat, boolean charging, String nowClock) {
-        if (a.miniMode || !shouldShowIdleCornerHud(a.controlsVisible, mask, a.playerLocked)) {
+        int anchor = clampAnchor(a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_ANCHOR, 0));
+        int offX = clampOffsetXDp(a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_X, 0));
+        int offY = clampOffsetYDp(a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_Y, 0));
+        boolean customPos = hasCustomCornerHudPosition(anchor, offX, offY);
+        if (a.miniMode
+                || !shouldShowCornerHud(
+                        a.controlsVisible, mask, a.playerLocked, customPos, adjustingPosition)) {
             setIdleCapsuleVisible(false);
             return;
         }
@@ -365,8 +815,12 @@ final class MobilePlayerOverlay {
         boolean showClock = (mask & Prefs.HUD_CLOCK) != 0 && !nowClock.isEmpty();
 
         if (!showPrefix && !showBattery && !showClock) {
-            setIdleCapsuleVisible(false);
-            return;
+            if (!adjustingPosition) {
+                setIdleCapsuleVisible(false);
+                return;
+            }
+            showClock = true;
+            nowClock = clockFmt.format(new Date());
         }
 
         hudPrefixText.setVisibility(showPrefix ? View.VISIBLE : View.GONE);
@@ -391,9 +845,17 @@ final class MobilePlayerOverlay {
 
     private void updateCapsuleSafeMargins() {
         if (!(hudCapsule.getLayoutParams() instanceof FrameLayout.LayoutParams)) return;
+        int safeLeft = 0;
         int safeTop = 0;
         int safeRight = 0;
+        int safeBottom = 0;
         if (a.playerChrome != null && a.playerChrome.overlay != null) {
+            safeLeft =
+                    Math.max(
+                            a.playerChrome.overlay.getPaddingLeft(),
+                            a.isPortrait()
+                                    ? a.playerChrome.windowInsets.left
+                                    : Math.min(a.dp(24), a.playerChrome.windowInsets.left));
             safeTop =
                     Math.max(
                             a.playerChrome.overlay.getPaddingTop(),
@@ -404,13 +866,73 @@ final class MobilePlayerOverlay {
                             a.isPortrait()
                                     ? a.playerChrome.windowInsets.right
                                     : Math.min(a.dp(24), a.playerChrome.windowInsets.right));
+            safeBottom =
+                    Math.max(
+                            a.playerChrome.overlay.getPaddingBottom(),
+                            a.playerChrome.windowInsets.bottom);
         }
-        int targetTop = Math.max(a.dp(10), safeTop + a.dp(8));
-        int targetRight = Math.max(a.dp(14), safeRight + a.dp(12));
+
+        int anchor = clampAnchor(a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_ANCHOR, 0));
+        int offXDp = clampOffsetXDp(a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_X, 0));
+        int offYDp = clampOffsetYDp(a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_Y, 0));
+        int offXPx = a.dp(offXDp);
+        int offYPx = a.dp(offYDp);
+        int basePadHPx = a.dp(12);
+        int basePadVPx = a.dp(10);
+
+        int containerW = a.playbackLayer != null ? a.playbackLayer.getWidth() : 0;
+        int containerH = a.playbackLayer != null ? a.playbackLayer.getHeight() : 0;
         FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) hudCapsule.getLayoutParams();
-        if (lp.topMargin != targetTop || lp.rightMargin != targetRight) {
-            lp.topMargin = targetTop;
-            lp.rightMargin = targetRight;
+        if (containerW <= 0 || containerH <= 0) {
+            int fallbackGravity = Gravity.TOP | Gravity.RIGHT;
+            if (anchor == ANCHOR_TOP_LEFT) fallbackGravity = Gravity.TOP | Gravity.LEFT;
+            else if (anchor == ANCHOR_TOP_CENTER)
+                fallbackGravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+            else if (anchor == ANCHOR_BOTTOM_RIGHT)
+                fallbackGravity = Gravity.BOTTOM | Gravity.RIGHT;
+            else if (anchor == ANCHOR_BOTTOM_LEFT) fallbackGravity = Gravity.BOTTOM | Gravity.LEFT;
+            lp.gravity = fallbackGravity;
+            lp.setMargins(
+                    Math.max(0, safeLeft + basePadHPx),
+                    Math.max(a.dp(10), safeTop + basePadVPx),
+                    Math.max(a.dp(14), safeRight + basePadHPx),
+                    Math.max(a.dp(10), safeBottom + basePadVPx));
+            hudCapsule.setLayoutParams(lp);
+            return;
+        }
+
+        int capW = hudCapsule.getWidth();
+        int capH = hudCapsule.getHeight();
+        if (capW <= 0 || capH <= 0) {
+            hudCapsule.measure(
+                    View.MeasureSpec.makeMeasureSpec(containerW, View.MeasureSpec.AT_MOST),
+                    View.MeasureSpec.makeMeasureSpec(containerH, View.MeasureSpec.AT_MOST));
+            capW = Math.max(a.dp(48), hudCapsule.getMeasuredWidth());
+            capH = Math.max(a.dp(20), hudCapsule.getMeasuredHeight());
+        }
+
+        CornerPlacement p =
+                computeCornerPlacement(
+                        containerW,
+                        containerH,
+                        capW,
+                        capH,
+                        safeLeft,
+                        safeTop,
+                        safeRight,
+                        safeBottom,
+                        anchor,
+                        offXPx,
+                        offYPx,
+                        basePadHPx,
+                        basePadVPx);
+        if (lp.gravity != (Gravity.TOP | Gravity.LEFT)
+                || lp.leftMargin != p.leftPx
+                || lp.topMargin != p.topPx
+                || lp.rightMargin != 0
+                || lp.bottomMargin != 0) {
+            lp.gravity = Gravity.TOP | Gravity.LEFT;
+            lp.setMargins(p.leftPx, p.topPx, 0, 0);
             hudCapsule.setLayoutParams(lp);
         }
     }
@@ -521,7 +1043,12 @@ final class MobilePlayerOverlay {
 
     void detach() {
         closed = true;
+        stopPositionDragMode(false);
         a.ui.removeCallbacks(pulse);
+        if (a.playbackLayer != null) {
+            a.playbackLayer.removeOnLayoutChangeListener(containerLayoutListener);
+        }
+        hudCapsule.removeOnLayoutChangeListener(capsuleLayoutListener);
         removeParent(hudCapsule);
         removeParent(miniBar);
         removeParent(letterboxGlow);

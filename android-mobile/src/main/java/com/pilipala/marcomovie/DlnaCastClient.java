@@ -22,6 +22,7 @@ import java.net.HttpURLConnection;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.MulticastSocket;
 import java.net.NetworkInterface;
 import java.net.SocketTimeoutException;
 import java.net.URI;
@@ -306,6 +307,12 @@ final class DlnaCastClient {
         String safeTitle =
                 title == null || title.trim().isEmpty() ? "Marco Movie 投屏视频" : title.trim();
         String safeUrl = mediaUrl == null ? "" : mediaUrl.trim();
+        String ext = LanCastMediaRelay.inferExtensionSuffix(safeUrl, "");
+        String protoMime = "video/*";
+        if (".m3u8".equals(ext)) protoMime = "application/vnd.apple.mpegurl";
+        else if (".mp4".equals(ext)) protoMime = "video/mp4";
+        else if (".mkv".equals(ext)) protoMime = "video/x-matroska";
+        else if (".ts".equals(ext)) protoMime = "video/mp2t";
         return "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" "
                 + "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" "
                 + "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\">"
@@ -314,7 +321,9 @@ final class DlnaCastClient {
                 + escapeXml(safeTitle)
                 + "</dc:title>"
                 + "<upnp:class>object.item.videoItem</upnp:class>"
-                + "<res protocolInfo=\"http-get:*:video/*:*\">"
+                + "<res protocolInfo=\"http-get:*:"
+                + protoMime
+                + ":*\">"
                 + escapeXml(safeUrl)
                 + "</res>"
                 + "</item></DIDL-Lite>";
@@ -360,6 +369,7 @@ final class DlnaCastClient {
             socket.bind(new InetSocketAddress(0));
             socket.setSoTimeout(350);
             InetAddress group = InetAddress.getByName(SSDP_ADDR);
+            List<NetworkInterface> lanNifs = activeLanInterfaces();
             for (String st : targets) {
                 String msg =
                         "M-SEARCH * HTTP/1.1\r\n"
@@ -376,6 +386,30 @@ final class DlnaCastClient {
                                 + "USER-AGENT: Android/12 UPnP/1.0 MarcoMovie/1.0\r\n\r\n";
                 byte[] bytes = msg.getBytes(StandardCharsets.UTF_8);
                 socket.send(new DatagramPacket(bytes, bytes.length, group, SSDP_PORT));
+            }
+            for (NetworkInterface nif : lanNifs) {
+                try (MulticastSocket ms = new MulticastSocket()) {
+                    ms.setNetworkInterface(nif);
+                    ms.setTimeToLive(4);
+                    for (String st : targets) {
+                        String msg =
+                                "M-SEARCH * HTTP/1.1\r\n"
+                                        + "HOST: "
+                                        + SSDP_ADDR
+                                        + ":"
+                                        + SSDP_PORT
+                                        + "\r\n"
+                                        + "MAN: \"ssdp:discover\"\r\n"
+                                        + "MX: 2\r\n"
+                                        + "ST: "
+                                        + st
+                                        + "\r\n"
+                                        + "USER-AGENT: Android/12 UPnP/1.0 MarcoMovie/1.0\r\n\r\n";
+                        byte[] bytes = msg.getBytes(StandardCharsets.UTF_8);
+                        ms.send(new DatagramPacket(bytes, bytes.length, group, SSDP_PORT));
+                    }
+                } catch (Throwable ignored) {
+                }
             }
             long deadline = System.currentTimeMillis() + clampedTimeout;
             byte[] buf = new byte[4096];
@@ -541,6 +575,123 @@ final class DlnaCastClient {
         valid = CastService.validateCastMediaUrl(unwrappedCache);
         if (!valid.isEmpty()) return valid;
         return CastService.validateCastMediaUrl(fallbackRawUrl);
+    }
+
+    static final class CastTarget {
+        final String url;
+        final boolean relayed;
+        final String errorMessage;
+
+        CastTarget(String url, boolean relayed, String errorMessage) {
+            this.url = url == null ? "" : url;
+            this.relayed = relayed;
+            this.errorMessage = errorMessage == null ? "" : errorMessage;
+        }
+    }
+
+    /** Returns the device's primary site-local IPv4 LAN address (preferring Wi-Fi / Ethernet). */
+    static String findLocalLanIpv4() {
+        String bestIp = "";
+        int bestScore = 0;
+        try {
+            for (NetworkInterface nif : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (!nif.isUp() || nif.isLoopback()) continue;
+                String name = nif.getName() == null ? "" : nif.getName().toLowerCase(Locale.ROOT);
+                boolean cellularOrVpn =
+                        name.startsWith("rmnet")
+                                || name.startsWith("ccmni")
+                                || name.startsWith("tun")
+                                || name.startsWith("ppp");
+                int score =
+                        (name.startsWith("wlan") || name.startsWith("eth"))
+                                ? 3
+                                : ((name.startsWith("swlan")
+                                                || name.startsWith("ap")
+                                                || name.startsWith("en"))
+                                        ? 2
+                                        : (cellularOrVpn ? 0 : 1));
+                if (score <= bestScore) continue;
+                for (InetAddress addr : Collections.list(nif.getInetAddresses())) {
+                    if (addr instanceof Inet4Address
+                            && !addr.isLoopbackAddress()
+                            && addr.isSiteLocalAddress()) {
+                        String ip = addr.getHostAddress();
+                        if (score == 3) return ip;
+                        bestScore = score;
+                        bestIp = ip;
+                        break;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return bestIp;
+    }
+
+    /**
+     * Resolves an outbound DLNA cast target: uses a direct public HTTP(S) URL when no custom
+     * headers or loopback proxy are needed, and otherwise publishes the stream through {@link
+     * LanCastMediaRelay} so local proxies ({@code 127.0.0.1}), header-protected sources, and local
+     * files can all cast to TVs/boxes on the same Wi-Fi.
+     */
+    static CastTarget prepareCastTarget(
+            String playUrl,
+            String fallbackRawUrl,
+            Map<String, String> headers,
+            String declaredMime,
+            String lanIp,
+            LanCastMediaRelay relayOverride) {
+        String normalizedPlay = playUrl == null ? "" : LocalProxy.rewrite(playUrl.trim());
+        String normalizedRaw =
+                fallbackRawUrl == null ? "" : LocalProxy.rewrite(fallbackRawUrl.trim());
+
+        Map<String, String> effectiveHeaders = new LinkedHashMap<>();
+        if (headers != null) effectiveHeaders.putAll(headers);
+        Map<String, String> hlsHeaders = HlsStreamProxy.headersForLocalUrl(normalizedPlay);
+        if (hlsHeaders != null && !hlsHeaders.isEmpty()) {
+            for (Map.Entry<String, String> e : hlsHeaders.entrySet()) {
+                if (!effectiveHeaders.containsKey(e.getKey())) {
+                    effectiveHeaders.put(e.getKey(), e.getValue());
+                }
+            }
+        }
+
+        String direct = resolveCastableMediaUrl(normalizedPlay, normalizedRaw);
+        if (!direct.isEmpty() && !LanCastMediaRelay.requiresHeaderRelay(effectiveHeaders)) {
+            return new CastTarget(direct, false, "");
+        }
+
+        String relayTarget = "";
+        if (!normalizedPlay.isEmpty()
+                && (Cms.isHttp(normalizedPlay)
+                        || LanCastMediaRelay.isLocalFileUrl(normalizedPlay))) {
+            relayTarget = normalizedPlay;
+        } else if (!normalizedRaw.isEmpty()
+                && (Cms.isHttp(normalizedRaw) || LanCastMediaRelay.isLocalFileUrl(normalizedRaw))) {
+            relayTarget = normalizedRaw;
+        }
+
+        if (relayTarget.isEmpty()) {
+            return new CastTarget("", false, "当前播放流暂不支持投屏");
+        }
+        String cleanLanIp = lanIp == null ? "" : lanIp.trim();
+        if (cleanLanIp.isEmpty()
+                || "127.0.0.1".equals(cleanLanIp)
+                || "localhost".equalsIgnoreCase(cleanLanIp)) {
+            return new CastTarget("", false, "未检测到局域网 Wi-Fi，请连接与电视同一 Wi-Fi 后再投屏");
+        }
+        try {
+            LanCastMediaRelay relay =
+                    relayOverride != null ? relayOverride : LanCastMediaRelay.shared();
+            String relayedUrl =
+                    relay.publish(cleanLanIp, relayTarget, effectiveHeaders, declaredMime);
+            return new CastTarget(relayedUrl, true, "");
+        } catch (Throwable err) {
+            return new CastTarget(
+                    "",
+                    false,
+                    "启动局域网投屏中继失败：" + (err.getMessage() == null ? "未知错误" : err.getMessage()));
+        }
     }
 
     /**
@@ -803,6 +954,7 @@ final class DlnaCastClient {
                                         sendTransportAction(dev, "Stop", null);
                                     } catch (Throwable ignored) {
                                     }
+                                    LanCastMediaRelay.revokeActive();
                                     a.ui.post(
                                             () -> {
                                                 a.toast("已退出投屏");
@@ -1144,7 +1296,13 @@ final class DlnaCastClient {
             card.addView(titleTv);
         }
 
-        final TextView feedback = a.text("已连接，可远程控制大屏播放状态", 12f, p.textTertiary);
+        final TextView feedback =
+                a.text(
+                        LanCastMediaRelay.isRelayUrl(mediaUrl)
+                                ? "已连接（手机局域网中继投屏中，请保持 App 在前台或后台运行）"
+                                : "已连接，可远程控制大屏播放状态",
+                        12f,
+                        p.textTertiary);
         feedback.setPadding(0, a.dp(4), 0, 0);
         card.addView(feedback);
 
@@ -1193,6 +1351,7 @@ final class DlnaCastClient {
                                         sendTransportAction(dev, "Stop", null);
                                     } catch (Throwable ignored) {
                                     }
+                                    LanCastMediaRelay.revokeActive();
                                     a.ui.post(
                                             () -> {
                                                 a.toast("已退出投屏");

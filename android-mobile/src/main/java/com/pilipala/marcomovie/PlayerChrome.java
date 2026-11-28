@@ -1385,6 +1385,39 @@ final class PlayerChrome {
                     if (b - t != ob - ot) scheduleLayout();
                 });
         scheduleLayout();
+        syncMobileHudButtonVisibility();
+    }
+
+    void syncMobileHudButtonVisibility() {
+        if (a.isTvDevice()) return;
+        int toggles =
+                MobilePlayerHudButtons.clampToggles(
+                        a.mobilePrefs()
+                                .getInt(
+                                        Prefs.MOBILE_HUD_TOGGLES,
+                                        MobilePlayerHudButtons.TOGGLE_ALL));
+        if (mobilePipBtn != null) {
+            mobilePipBtn.setVisibility(
+                    MobilePlayerHudButtons.isToggleEnabled(
+                                    toggles, MobilePlayerHudButtons.TOGGLE_TOP_PIP)
+                            ? View.VISIBLE
+                            : View.GONE);
+        }
+        if (mobileCastBtn != null) {
+            boolean showCast =
+                    !a.privateMode
+                            && !a.isCast()
+                            && MobilePlayerHudButtons.isToggleEnabled(
+                                    toggles, MobilePlayerHudButtons.TOGGLE_TOP_CAST);
+            mobileCastBtn.setVisibility(showCast ? View.VISIBLE : View.GONE);
+        }
+        if (lockBtn != null) {
+            boolean showLock =
+                    !progressOnlyMode
+                            && MobilePlayerHudButtons.isToggleEnabled(
+                                    toggles, MobilePlayerHudButtons.TOGGLE_LEFT_LOCK);
+            lockBtn.setVisibility(showLock ? View.VISIBLE : View.GONE);
+        }
     }
 
     private void cancelActiveTouchGesture() {
@@ -1433,6 +1466,15 @@ final class PlayerChrome {
     void updateMobileTopStatus(
             String clockText, int batteryPercent, boolean charging, String netSpeed) {
         if (mobileTopStatusRow == null) return;
+        boolean customPos =
+                MobilePlayerOverlay.hasCustomCornerHudPosition(
+                        a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_ANCHOR, 0),
+                        a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_X, 0),
+                        a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_Y, 0));
+        if (customPos) {
+            mobileTopStatusRow.setVisibility(View.GONE);
+            return;
+        }
         int mask = a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD, 7);
         boolean hasNet =
                 (mask & Prefs.HUD_NET_SPEED) != 0 && netSpeed != null && !netSpeed.trim().isEmpty();
@@ -1471,7 +1513,10 @@ final class PlayerChrome {
                 mobileTopClockView.setText(clockText);
             }
         }
-        mobileTopStatusRow.setVisibility((hasNet || hasBat || hasClock) ? View.VISIBLE : View.GONE);
+        boolean wideEnough =
+                overlay == null || overlay.getWidth() <= 0 || overlay.getWidth() >= a.dp(460);
+        mobileTopStatusRow.setVisibility(
+                wideEnough && (hasNet || hasBat || hasClock) ? View.VISIBLE : View.GONE);
     }
 
     void scheduleLayout() {
@@ -1619,7 +1664,13 @@ final class PlayerChrome {
             episodeLabel.setVisibility(!ultraShort && hasLineText ? View.VISIBLE : View.GONE);
         }
         if (mobileTopStatusRow != null) {
-            mobileTopStatusRow.setVisibility(width >= a.dp(460) ? View.VISIBLE : View.GONE);
+            boolean customPos =
+                    MobilePlayerOverlay.hasCustomCornerHudPosition(
+                            a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_ANCHOR, 0),
+                            a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_X, 0),
+                            a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_Y, 0));
+            mobileTopStatusRow.setVisibility(
+                    !customPos && width >= a.dp(460) ? View.VISIBLE : View.GONE);
         }
         if (mobileRotateIcon != null && mobileRotateBtn != null) {
             mobileRotateIcon.setIcon(
@@ -2170,7 +2221,13 @@ final class PlayerChrome {
             if (actionHost != null) actionHost.setVisibility(otherVis);
         } else {
             dock.setVisibility(otherVis);
-            if (lockBtn != null) lockBtn.setVisibility(otherVis);
+            if (lockBtn != null) {
+                if (resolved) {
+                    lockBtn.setVisibility(View.INVISIBLE);
+                } else {
+                    syncMobileHudButtonVisibility();
+                }
+            }
         }
         seekHint.setVisibility(resolved ? View.VISIBLE : View.GONE);
         update();
@@ -2377,7 +2434,7 @@ final class PlayerChrome {
         topShade.setVisibility(View.VISIBLE);
         heading.setVisibility(View.VISIBLE);
         dock.setVisibility(View.VISIBLE);
-        if (lockBtn != null) lockBtn.setVisibility(View.VISIBLE);
+        if (lockBtn != null) syncMobileHudButtonVisibility();
         if (seekHint != null) seekHint.setVisibility(View.GONE);
     }
 
@@ -2567,6 +2624,7 @@ final class PlayerChrome {
     void update() {
         if (a.prepared) loading = false;
         syncClockViews();
+        syncMobileHudButtonVisibility();
         if (a.mobilePlayerOverlay != null) {
             a.mobilePlayerOverlay.syncControlsVisibility();
         }

@@ -1411,6 +1411,35 @@ final class CloudSync {
                 } else if (code == 404) {
                     drainConnectionStreams(getConn);
                     fileAbsent = true;
+                } else if (code == 409) {
+                    drainConnectionStreams(getConn);
+                    ensureParentCollections(rawUrl, fileUrl, auth);
+                    HttpURLConnection retryGet = openConnection(fileUrl, "GET", auth, 12000);
+                    try {
+                        int retryCode = retryGet.getResponseCode();
+                        if (retryCode >= 200 && retryCode < 300) {
+                            remoteJson = readBody(retryGet.getInputStream(), MAX_SYNC_BYTES);
+                            String h = retryGet.getHeaderField("ETag");
+                            if (h != null && !h.trim().isEmpty()) {
+                                String trimmedEtag = h.trim();
+                                if (!isWeakEtag(trimmedEtag)) {
+                                    etag = trimmedEtag;
+                                }
+                            }
+                        } else if (retryCode == 401 || retryCode == 403) {
+                            drainConnectionStreams(retryGet);
+                            throw new IOException(
+                                    "WebDAV 认证失败 (HTTP " + retryCode + ")，请检查账号或应用专用密码");
+                        } else if (retryCode == 404 || retryCode == 409) {
+                            drainConnectionStreams(retryGet);
+                            fileAbsent = true;
+                        } else {
+                            drainConnectionStreams(retryGet);
+                            throw new IOException("WebDAV 读取失败 (HTTP " + retryCode + ")");
+                        }
+                    } finally {
+                        retryGet.disconnect();
+                    }
                 } else {
                     drainConnectionStreams(getConn);
                     throw new IOException("WebDAV 读取失败 (HTTP " + code + ")");
@@ -1773,9 +1802,20 @@ final class CloudSync {
         }
     }
 
+    static String toAsciiRequestUrl(String targetUrl) {
+        if (targetUrl == null) return "";
+        String t = targetUrl.trim().replace(" ", "%20");
+        try {
+            return URI.create(t).toASCIIString();
+        } catch (Exception ignored) {
+            return t;
+        }
+    }
+
     private static HttpURLConnection openConnection(
             String targetUrl, String method, String auth, int timeoutMs) throws IOException {
-        HttpURLConnection conn = (HttpURLConnection) new URL(targetUrl).openConnection();
+        HttpURLConnection conn =
+                (HttpURLConnection) new URL(toAsciiRequestUrl(targetUrl)).openConnection();
         conn.setInstanceFollowRedirects(false);
         conn.setConnectTimeout(timeoutMs);
         conn.setReadTimeout(timeoutMs);

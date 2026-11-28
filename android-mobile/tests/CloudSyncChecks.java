@@ -55,6 +55,7 @@ public final class CloudSyncChecks {
         testUiLatchTimeoutAndErrorPropagation();
         testRound2WebdavRobustness();
         testWebdavBindCryptoAndLanEndpoint();
+        testWebdavGet409AndChinesePath();
         System.out.println("ALL PASS (" + checks + " checks)");
     }
 
@@ -1903,6 +1904,181 @@ public final class CloudSyncChecks {
                     "Mobile GET /bind returns sealed WebDAV configuration");
         } finally {
             server.close();
+        }
+    }
+
+    private static void testWebdavGet409AndChinesePath() throws Exception {
+        final Set<String> createdDirs = Collections.synchronizedSet(new HashSet<String>());
+        final AtomicReference<byte[]> stored = new AtomicReference<>(null);
+        final AtomicReference<byte[]> cnStored = new AtomicReference<>(null);
+        final AtomicInteger getCountFor409 = new AtomicInteger(0);
+
+        HttpServer srv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        srv.createContext(
+                "/",
+                ex -> {
+                    try {
+                        String method = ex.getRequestMethod();
+                        String rawPath = ex.getRequestURI().getRawPath();
+                        if ("/forbidden/marco-movie-sync.json".equals(rawPath)) {
+                            if ("MKCOL".equalsIgnoreCase(method)) {
+                                ex.sendResponseHeaders(403, -1);
+                                return;
+                            }
+                            if ("GET".equalsIgnoreCase(method) || "PUT".equalsIgnoreCase(method)) {
+                                ex.sendResponseHeaders(409, -1);
+                                return;
+                            }
+                        }
+                        if ("/persistent409/sub/marco-movie-sync.json".equals(rawPath)) {
+                            if ("MKCOL".equalsIgnoreCase(method)) {
+                                ex.sendResponseHeaders(201, -1);
+                                return;
+                            }
+                            if ("GET".equalsIgnoreCase(method)) {
+                                ex.sendResponseHeaders(
+                                        stored.get() == null ? 409 : 200,
+                                        stored.get() == null ? -1 : stored.get().length);
+                                if (stored.get() != null) {
+                                    try (OutputStream os = ex.getResponseBody()) {
+                                        os.write(stored.get());
+                                    }
+                                }
+                                return;
+                            }
+                            if ("PUT".equalsIgnoreCase(method)) {
+                                stored.set(readAll(ex.getRequestBody()));
+                                ex.sendResponseHeaders(201, -1);
+                                return;
+                            }
+                        }
+                        if (rawPath.startsWith("/dav/MarcoMovie/")) {
+                            if ("MKCOL".equalsIgnoreCase(method)) {
+                                createdDirs.add("/dav/MarcoMovie/");
+                                ex.sendResponseHeaders(201, -1);
+                                return;
+                            }
+                            if ("GET".equalsIgnoreCase(method)) {
+                                getCountFor409.incrementAndGet();
+                                if (!createdDirs.contains("/dav/MarcoMovie/")) {
+                                    ex.sendResponseHeaders(409, -1);
+                                    return;
+                                }
+                                byte[] data = stored.get();
+                                if (data == null) {
+                                    ex.sendResponseHeaders(404, -1);
+                                } else {
+                                    ex.sendResponseHeaders(200, data.length);
+                                    try (OutputStream os = ex.getResponseBody()) {
+                                        os.write(data);
+                                    }
+                                }
+                                return;
+                            }
+                            if ("PUT".equalsIgnoreCase(method)) {
+                                stored.set(readAll(ex.getRequestBody()));
+                                ex.sendResponseHeaders(201, -1);
+                                return;
+                            }
+                        }
+                        if ("MKCOL".equalsIgnoreCase(method)) {
+                            createdDirs.add(rawPath);
+                            ex.sendResponseHeaders(201, -1);
+                            return;
+                        }
+                        if (rawPath.contains("%E6%88%91%E7%9A%84%E5%90%8C%E6%AD%A5")) {
+                            if ("GET".equalsIgnoreCase(method)) {
+                                byte[] data = cnStored.get();
+                                if (data == null) {
+                                    ex.sendResponseHeaders(404, -1);
+                                } else {
+                                    ex.sendResponseHeaders(200, data.length);
+                                    try (OutputStream os = ex.getResponseBody()) {
+                                        os.write(data);
+                                    }
+                                }
+                                return;
+                            }
+                            if ("PUT".equalsIgnoreCase(method)) {
+                                cnStored.set(readAll(ex.getRequestBody()));
+                                ex.sendResponseHeaders(201, -1);
+                                return;
+                            }
+                        }
+                        ex.sendResponseHeaders(404, -1);
+                    } finally {
+                        ex.close();
+                    }
+                });
+        srv.start();
+        try {
+            int port = srv.getAddress().getPort();
+            CloudSync.clearNoConditionalWriteHostsForTest();
+
+            // 1. GET returns 409 because parent folder doesn't exist -> MKCOL creates it -> retry
+            // GET 404 -> PUT succeeds
+            CloudSync.syncWebdav(
+                    "http://127.0.0.1:" + port + "/dav/MarcoMovie/",
+                    "u",
+                    "p",
+                    remote ->
+                            CloudSync.merge(
+                                    "[]", "[]", "", Collections.emptyList(), false, remote, 1000L));
+            check(
+                    getCountFor409.get() == 2
+                            && createdDirs.contains("/dav/MarcoMovie/")
+                            && stored.get() != null,
+                    "WebDAV GET 409 creates missing parent folder via MKCOL, retries GET, and completes PUT");
+
+            // 2. Persistent GET 409 when file is absent falls through to PUT and succeeds
+            stored.set(null);
+            CloudSync.syncWebdav(
+                    "http://127.0.0.1:" + port + "/persistent409/sub/",
+                    "u",
+                    "p",
+                    remote ->
+                            CloudSync.merge(
+                                    "[]", "[]", "", Collections.emptyList(), false, remote, 1100L));
+            check(
+                    stored.get() != null,
+                    "WebDAV persistent GET 409 when remote file absent proceeds to PUT and succeeds");
+
+            // 3. Unwritable directory returning 409 on both GET & PUT throws actionable write
+            // diagnostic (not bare HTTP 409 read failure)
+            try {
+                CloudSync.syncWebdav(
+                        "http://127.0.0.1:" + port + "/forbidden/",
+                        "u",
+                        "p",
+                        remote ->
+                                CloudSync.merge(
+                                        "[]",
+                                        "[]",
+                                        "",
+                                        Collections.emptyList(),
+                                        false,
+                                        remote,
+                                        1200L));
+                check(false, "Unwritable 409 path must throw");
+            } catch (java.io.IOException expected) {
+                String msg = expected.getMessage() == null ? "" : expected.getMessage();
+                check(
+                        msg.contains("WebDAV 写入失败 (HTTP 409)")
+                                && !msg.contains("WebDAV 读取失败 (HTTP 409)"),
+                        "Unwritable WebDAV 409 emits actionable write hint rather than HTTP 409 read failure");
+            }
+
+            // 4. Non-ASCII Chinese path is percent-encoded cleanly in openConnection
+            CloudSync.syncWebdav(
+                    "http://127.0.0.1:" + port + "/dav/我的同步/",
+                    "u",
+                    "p",
+                    remote ->
+                            CloudSync.merge(
+                                    "[]", "[]", "", Collections.emptyList(), false, remote, 1300L));
+            check(cnStored.get() != null, "WebDAV non-ASCII Chinese folder path syncs cleanly");
+        } finally {
+            srv.stop(0);
         }
     }
 }

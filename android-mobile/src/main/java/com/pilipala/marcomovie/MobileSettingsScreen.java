@@ -19,6 +19,7 @@ import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import java.io.File;
 import java.util.ArrayList;
@@ -1389,14 +1390,31 @@ final class MobileSettingsScreen {
                         1,
                         false));
         int hudMask = a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD, 7);
+        int hudAnchor =
+                MobilePlayerOverlay.clampAnchor(
+                        a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_ANCHOR, 0));
+        int hudOffX =
+                MobilePlayerOverlay.clampOffsetXDp(
+                        a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_X, 0));
+        int hudOffY =
+                MobilePlayerOverlay.clampOffsetYDp(
+                        a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_Y, 0));
+        String hudSummary = describeHudMaskCompact(hudMask);
+        if (MobilePlayerOverlay.hasCustomCornerHudPosition(hudAnchor, hudOffX, hudOffY)) {
+            hudSummary =
+                    hudSummary
+                            + " · "
+                            + MobilePlayerOverlay.describeCornerPosition(
+                                    hudAnchor, hudOffX, hudOffY);
+        }
         gestureRows.add(
                 tagged(
                         MobileSectionGroup.navRow(
                                 a,
                                 MobileIcons.IC_BATTERY,
                                 TINT_GREEN,
-                                "播放页右上角状态信息",
-                                describeHudMaskCompact(hudMask),
+                                "播放页状态信息与显示位置",
+                                hudSummary,
                                 () -> showCornerHudConfigSheet(shell, sv)),
                         "ms-corner-hud"));
         boolean reconciledSlimOn =
@@ -1428,9 +1446,18 @@ final class MobileSettingsScreen {
                                 a,
                                 MobileIcons.IC_SORT,
                                 TINT_SLATE,
-                                "自定义播放器按钮顺序",
-                                "排序",
-                                () -> showPlayerButtonOrderDialog(shell)),
+                                "播放页 HUD 按钮自定义",
+                                MobilePlayerHudButtons.summary(
+                                        a.mobilePrefs().getString(Prefs.MOBILE_HUD_BUTTONS, ""),
+                                        a.mobilePrefs()
+                                                .getString(
+                                                        Prefs.PLAYER_BUTTON_ORDER,
+                                                        Prefs.DEFAULT_PLAYER_BUTTON_ORDER),
+                                        a.mobilePrefs()
+                                                .getInt(
+                                                        Prefs.MOBILE_HUD_TOGGLES,
+                                                        MobilePlayerHudButtons.TOGGLE_ALL)),
+                                () -> showPlayerButtonOrderDialog(shell, sv)),
                         "ms-btn-order"));
         addSection(a, body, "触屏手势防误触", "默认左半屏滑调亮度、右半屏滑调音量；右上角状态信息仅在隐藏播放按钮时静默显示。", gestureRows);
 
@@ -3438,27 +3465,240 @@ final class MobileSettingsScreen {
 
         final MobileBottomSheet.SheetHandle[] handleRef = new MobileBottomSheet.SheetHandle[1];
         LinearLayout content = a.vertical();
-        TextView desc = a.text("点击开关即刻生效并自动保存，返回后无需再次确认。", 12.5f, p.textSecondary);
+        TextView desc = a.text("点击开关即刻生效并自动保存，下方可自定义显示角落与坐标偏移。", 12.5f, p.textSecondary);
         desc.setPadding(a.dp(4), 0, a.dp(4), a.dp(10));
         content.addView(desc);
         content.addView(MobileSectionGroup.create(a, null, null, rows));
-        a.gap(content, 12);
+        a.gap(content, 14);
 
-        TextView doneBtn = a.text("完成", 14f, p.accentOnFill);
-        doneBtn.setTypeface(null, Typeface.BOLD);
-        doneBtn.setGravity(Gravity.CENTER);
-        doneBtn.setPadding(0, a.dp(12), 0, a.dp(12));
-        doneBtn.setBackground(MobileTheme.accentPillBg(a, 14));
-        MobileMotion.bindPress(doneBtn, 0.96f);
-        doneBtn.setOnClickListener(
-                v -> {
-                    if (handleRef[0] != null) handleRef[0].dismiss();
+        final int[] curAnchor = {
+            MobilePlayerOverlay.clampAnchor(
+                    a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_ANCHOR, 0))
+        };
+        final int[] curX = {
+            MobilePlayerOverlay.clampOffsetXDp(
+                    a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_X, 0))
+        };
+        final int[] curY = {
+            MobilePlayerOverlay.clampOffsetYDp(
+                    a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD_OFFSET_Y, 0))
+        };
+
+        TextView posHeader = a.text("显示位置与手动微调", 13f, p.textPrimary);
+        posHeader.setTypeface(null, Typeface.BOLD);
+        posHeader.setPadding(a.dp(4), 0, a.dp(4), a.dp(8));
+        content.addView(posHeader);
+
+        // Live scaled 16:9 mini preview box
+        final FrameLayout previewStage = new FrameLayout(a);
+        previewStage.setBackground(a.bg(0xFF0C1018, 12));
+        final TextView previewPill = a.text("12.4 MB/s · 86% · 20:30", 10f, Color.WHITE);
+        previewPill.setPadding(a.dp(8), a.dp(3), a.dp(8), a.dp(3));
+        previewPill.setBackground(a.bg(0xAA182030, 999));
+        FrameLayout.LayoutParams pvPillLp =
+                new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.LEFT);
+        previewStage.addView(previewPill, pvPillLp);
+        LinearLayout.LayoutParams stageLp = new LinearLayout.LayoutParams(-1, a.dp(116));
+        stageLp.bottomMargin = a.dp(10);
+        content.addView(previewStage, stageLp);
+
+        final TextView posSummary =
+                a.text(
+                        MobilePlayerOverlay.describeCornerPosition(curAnchor[0], curX[0], curY[0]),
+                        12.5f,
+                        p.textSecondary);
+        posSummary.setPadding(a.dp(4), 0, a.dp(4), a.dp(8));
+        content.addView(posSummary);
+
+        final int[] anchors = {
+            MobilePlayerOverlay.ANCHOR_TOP_RIGHT,
+            MobilePlayerOverlay.ANCHOR_TOP_LEFT,
+            MobilePlayerOverlay.ANCHOR_TOP_CENTER,
+            MobilePlayerOverlay.ANCHOR_BOTTOM_RIGHT,
+            MobilePlayerOverlay.ANCHOR_BOTTOM_LEFT
+        };
+        final TextView[] chipViews = new TextView[anchors.length];
+        LinearLayout chipRow = a.row();
+        chipRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        final Runnable updatePreviewAndChips =
+                () -> {
+                    posSummary.setText(
+                            "当前："
+                                    + MobilePlayerOverlay.describeCornerPosition(
+                                            curAnchor[0], curX[0], curY[0]));
+                    for (int i = 0; i < anchors.length; i++) {
+                        boolean sel = anchors[i] == curAnchor[0];
+                        chipViews[i].setTextColor(sel ? p.accentOnFill : p.textPrimary);
+                        chipViews[i].setBackground(
+                                sel ? a.bg(p.accent, 999) : MobileTheme.subtleBg(a, 999));
+                    }
+                    previewStage.post(
+                            () -> {
+                                int sw = previewStage.getWidth();
+                                int sh = previewStage.getHeight();
+                                if (sw <= 0 || sh <= 0) return;
+                                int pw = Math.max(a.dp(60), previewPill.getWidth());
+                                int ph = Math.max(a.dp(18), previewPill.getHeight());
+                                int sxPx = Math.round(a.dp(curX[0]) * 0.36f);
+                                int syPx = Math.round(a.dp(curY[0]) * 0.36f);
+                                MobilePlayerOverlay.CornerPlacement cp =
+                                        MobilePlayerOverlay.computeCornerPlacement(
+                                                sw,
+                                                sh,
+                                                pw,
+                                                ph,
+                                                0,
+                                                0,
+                                                0,
+                                                0,
+                                                curAnchor[0],
+                                                sxPx,
+                                                syPx,
+                                                a.dp(8),
+                                                a.dp(8));
+                                FrameLayout.LayoutParams flp =
+                                        (FrameLayout.LayoutParams) previewPill.getLayoutParams();
+                                flp.gravity = Gravity.TOP | Gravity.LEFT;
+                                flp.setMargins(cp.leftPx, cp.topPx, 0, 0);
+                                previewPill.setLayoutParams(flp);
+                            });
+                };
+
+        final Runnable savePos =
+                () -> {
+                    a.mobilePrefs()
+                            .edit()
+                            .putInt(Prefs.PLAYER_CORNER_HUD_ANCHOR, curAnchor[0])
+                            .putInt(Prefs.PLAYER_CORNER_HUD_OFFSET_X, curX[0])
+                            .putInt(Prefs.PLAYER_CORNER_HUD_OFFSET_Y, curY[0])
+                            .apply();
+                    updatePreviewAndChips.run();
+                    if (a.mobilePlayerOverlay != null) {
+                        a.mobilePlayerOverlay.applyPositionPrefsNow();
+                    }
+                };
+
+        for (int i = 0; i < anchors.length; i++) {
+            final int anchorVal = anchors[i];
+            TextView chip =
+                    a.text(MobilePlayerOverlay.anchorLabel(anchorVal), 11.5f, p.textPrimary);
+            chip.setGravity(Gravity.CENTER);
+            chip.setSingleLine(true);
+            chip.setPadding(a.dp(4), a.dp(7), a.dp(4), a.dp(7));
+            MobileMotion.bindPress(chip, 0.94f);
+            chip.setOnClickListener(
+                    v -> {
+                        curAnchor[0] = anchorVal;
+                        savePos.run();
+                    });
+            chipViews[i] = chip;
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, -2, 1f);
+            if (i > 0) clp.leftMargin = a.dp(5);
+            chipRow.addView(chip, clp);
+        }
+        LinearLayout.LayoutParams chipRowLp = new LinearLayout.LayoutParams(-1, -2);
+        chipRowLp.bottomMargin = a.dp(10);
+        content.addView(chipRow, chipRowLp);
+
+        final TextView xLbl =
+                a.text(
+                        "左右偏移 (X)：" + (curX[0] >= 0 ? "+" : "") + curX[0] + " dp",
+                        12f,
+                        p.textSecondary);
+        content.addView(xLbl);
+        final SeekBar xBar = new SeekBar(a);
+        xBar.setMax(MobilePlayerOverlay.MAX_OFFSET_X_DP - MobilePlayerOverlay.MIN_OFFSET_X_DP);
+        xBar.setProgress(curX[0] - MobilePlayerOverlay.MIN_OFFSET_X_DP);
+        UiCompat.tintSeekBar(xBar, p.accent, Color.WHITE);
+        xBar.setOnSeekBarChangeListener(
+                new SeekBar.OnSeekBarChangeListener() {
+                    @Override
+                    public void onProgressChanged(SeekBar sb, int prog, boolean fromUser) {
+                        if (!fromUser) return;
+                        curX[0] =
+                                MobilePlayerOverlay.clampOffsetXDp(
+                                        prog + MobilePlayerOverlay.MIN_OFFSET_X_DP);
+                        xLbl.setText("左右偏移 (X)：" + (curX[0] >= 0 ? "+" : "") + curX[0] + " dp");
+                        savePos.run();
+                    }
+
+                    @Override
+                    public void onStartTrackingTouch(SeekBar sb) {}
+
+                    @Override
+                    public void onStopTrackingTouch(SeekBar sb) {}
                 });
-        content.addView(doneBtn, new LinearLayout.LayoutParams(-1, -2));
+        content.addView(xBar, new LinearLayout.LayoutParams(-1, a.dp(30)));
 
+        final TextView yLbl =
+                a.text(
+                        "上下偏移 (Y)：" + (curY[0] >= 0 ? "+" : "") + curY[0] + " dp",
+                        12f,
+                        p.textSecondary);
+        content.addView(yLbl);
+        final SeekBar yBar = new SeekBar(a);
+        yBar.setMax(MobilePlayerOverlay.MAX_OFFSET_Y_DP - MobilePlayerOverlay.MIN_OFFSET_Y_DP);
+        yBar.setProgress(curY[0] - MobilePlayerOverlay.MIN_OFFSET_Y_DP);
+        UiCompat.tintSeekBar(yBar, p.accent, Color.WHITE);
+        yBar.setOnSeekBarChangeListener(
+                new SeekBar.OnSeekBarChangeListener() {
+                    @Override
+                    public void onProgressChanged(SeekBar sb, int prog, boolean fromUser) {
+                        if (!fromUser) return;
+                        curY[0] =
+                                MobilePlayerOverlay.clampOffsetYDp(
+                                        prog + MobilePlayerOverlay.MIN_OFFSET_Y_DP);
+                        yLbl.setText("上下偏移 (Y)：" + (curY[0] >= 0 ? "+" : "") + curY[0] + " dp");
+                        savePos.run();
+                    }
+
+                    @Override
+                    public void onStartTrackingTouch(SeekBar sb) {}
+
+                    @Override
+                    public void onStopTrackingTouch(SeekBar sb) {}
+                });
+        content.addView(yBar, new LinearLayout.LayoutParams(-1, a.dp(30)));
+
+        a.gap(content, 8);
+        LinearLayout footer = a.row();
+        TextView resetPosBtn =
+                buildSheetActionPill(
+                        a,
+                        p,
+                        "位置恢复默认",
+                        false,
+                        () -> {
+                            curAnchor[0] = MobilePlayerOverlay.ANCHOR_TOP_RIGHT;
+                            curX[0] = 0;
+                            curY[0] = 0;
+                            xBar.setProgress(-MobilePlayerOverlay.MIN_OFFSET_X_DP);
+                            yBar.setProgress(-MobilePlayerOverlay.MIN_OFFSET_Y_DP);
+                            xLbl.setText("左右偏移 (X)：+0 dp");
+                            yLbl.setText("上下偏移 (Y)：+0 dp");
+                            savePos.run();
+                        });
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(0, a.dp(42), 1f);
+        rlp.rightMargin = a.dp(8);
+        footer.addView(resetPosBtn, rlp);
+
+        TextView doneBtn =
+                buildSheetActionPill(
+                        a,
+                        p,
+                        "完成",
+                        true,
+                        () -> {
+                            if (handleRef[0] != null) handleRef[0].dismiss();
+                        });
+        footer.addView(doneBtn, new LinearLayout.LayoutParams(0, a.dp(42), 1.2f));
+        content.addView(footer, new LinearLayout.LayoutParams(-1, -2));
+
+        updatePreviewAndChips.run();
         handleRef[0] =
                 MobileBottomSheet.showCustom(
-                        a, "播放页右上角状态信息", content, () -> reloadPreservingScroll(shell, sv));
+                        a, "播放页状态信息与位置", content, () -> reloadPreservingScroll(shell, sv));
     }
 
     /**
@@ -3507,106 +3747,62 @@ final class MobileSettingsScreen {
     }
 
     private static void showPlayerButtonOrderDialog(final MobileRootShell shell) {
+        showPlayerButtonOrderDialog(shell, null);
+    }
+
+    private static void showPlayerButtonOrderDialog(
+            final MobileRootShell shell, final ScrollView sv) {
         final MainActivity a = shell.a;
-        final MobileTheme.Palette p = MobileTheme.of(a);
         final boolean aiUnlocked = AiBetaGate.isUnlocked(a);
+        final String customCsv = a.mobilePrefs().getString(Prefs.MOBILE_HUD_BUTTONS, "");
         final String savedRaw =
                 a.mobilePrefs()
                         .getString(Prefs.PLAYER_BUTTON_ORDER, Prefs.DEFAULT_PLAYER_BUTTON_ORDER);
-        final List<String> tokens = visiblePlayerButtonOrderTokens(savedRaw, aiUnlocked);
-
-        LinearLayout rootBox = a.vertical();
-        rootBox.setPadding(a.dp(2), a.dp(4), a.dp(2), a.dp(4));
-
-        final LinearLayout list = a.vertical();
-        rootBox.addView(list, new LinearLayout.LayoutParams(-1, -2));
-
-        final Runnable[] rebuild = new Runnable[1];
-        rebuild[0] =
-                () -> {
-                    list.removeAllViews();
-                    for (int i = 0; i < tokens.size(); i++) {
-                        final int idx = i;
-                        String tk = tokens.get(i);
-                        LinearLayout r = a.row();
-                        r.setGravity(Gravity.CENTER_VERTICAL);
-                        r.setPadding(a.dp(12), a.dp(9), a.dp(8), a.dp(9));
-                        r.setBackground(MobileTheme.subtleBg(a, 12));
-                        r.addView(
-                                a.text((i + 1) + ". " + buttonDisplayName(tk), 14f, p.textPrimary),
-                                new LinearLayout.LayoutParams(0, -2, 1f));
-                        if (i > 0) {
-                            TextView up = a.text("上移", 12.5f, p.accent);
-                            up.setTypeface(null, Typeface.BOLD);
-                            up.setPadding(a.dp(10), a.dp(5), a.dp(10), a.dp(5));
-                            up.setBackground(MobileTheme.pillBg(a, true, 999));
-                            MobileMotion.bindPress(up, 0.92f);
-                            up.setOnClickListener(
-                                    v -> {
-                                        String tmp = tokens.set(idx - 1, tokens.get(idx));
-                                        tokens.set(idx, tmp);
-                                        rebuild[0].run();
-                                    });
-                            LinearLayout.LayoutParams ulp = new LinearLayout.LayoutParams(-2, -2);
-                            ulp.rightMargin = a.dp(6);
-                            r.addView(up, ulp);
-                        }
-                        if (i < tokens.size() - 1) {
-                            TextView dn = a.text("下移", 12.5f, p.textSecondary);
-                            dn.setPadding(a.dp(10), a.dp(5), a.dp(10), a.dp(5));
-                            dn.setBackground(MobileTheme.cardBg(a, 999));
-                            MobileMotion.bindPress(dn, 0.92f);
-                            dn.setOnClickListener(
-                                    v -> {
-                                        String tmp = tokens.set(idx + 1, tokens.get(idx));
-                                        tokens.set(idx, tmp);
-                                        rebuild[0].run();
-                                    });
-                            r.addView(dn);
-                        }
-                        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-                        lp.bottomMargin = a.dp(6);
-                        list.addView(r, lp);
-                    }
-                };
-        rebuild[0].run();
-
+        final List<String> visibleLegacy = visiblePlayerButtonOrderTokens(savedRaw, aiUnlocked);
+        final String legacyCsv = TextUtils.join(",", visibleLegacy);
+        final List<String> tokens =
+                MobilePlayerHudButtons.resolveEditableButtons(customCsv, legacyCsv);
+        final int[] toggleMask = {
+            MobilePlayerHudButtons.clampToggles(
+                    a.mobilePrefs()
+                            .getInt(Prefs.MOBILE_HUD_TOGGLES, MobilePlayerHudButtons.TOGGLE_ALL))
+        };
         final MobileBottomSheet.SheetHandle[] hRef = new MobileBottomSheet.SheetHandle[1];
+
+        Runnable onSave =
+                () -> {
+                    a.mobilePrefs()
+                            .edit()
+                            .putString(
+                                    Prefs.MOBILE_HUD_BUTTONS, MobilePlayerHudButtons.encode(tokens))
+                            .putInt(
+                                    Prefs.MOBILE_HUD_TOGGLES,
+                                    MobilePlayerHudButtons.clampToggles(toggleMask[0]))
+                            .apply();
+                    if (hRef[0] != null) hRef[0].dismiss();
+                    a.toast("已更新播放页 HUD 按钮配置");
+                    if (sv != null) reloadPreservingScroll(shell, sv);
+                };
         Runnable onReset =
                 () -> {
                     a.mobilePrefs()
                             .edit()
+                            .putString(Prefs.MOBILE_HUD_BUTTONS, "")
                             .putString(Prefs.PLAYER_BUTTON_ORDER, Prefs.DEFAULT_PLAYER_BUTTON_ORDER)
+                            .putInt(Prefs.MOBILE_HUD_TOGGLES, MobilePlayerHudButtons.TOGGLE_ALL)
                             .apply();
                     if (hRef[0] != null) hRef[0].dismiss();
-                    a.toast("已恢复默认按钮顺序");
-                };
-        Runnable onSave =
-                () -> {
-                    String mergedOrder =
-                            mergePlayerButtonOrderPreservingHidden(savedRaw, tokens, aiUnlocked);
-                    a.mobilePrefs()
-                            .edit()
-                            .putString(Prefs.PLAYER_BUTTON_ORDER, mergedOrder)
-                            .apply();
-                    if (hRef[0] != null) hRef[0].dismiss();
-                    a.toast("已更新播放器按钮顺序");
+                    a.toast("已恢复默认播放页 HUD 按钮");
+                    if (sv != null) reloadPreservingScroll(shell, sv);
                 };
 
-        LinearLayout footerRow = a.row();
-        footerRow.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(0, a.dp(44), 1f);
-        rlp.rightMargin = a.dp(8);
-        footerRow.addView(buildSheetActionPill(a, p, "恢复默认", false, onReset), rlp);
-        footerRow.addView(
-                buildSheetActionPill(a, p, "保存顺序", true, onSave),
-                new LinearLayout.LayoutParams(0, a.dp(44), 1.3f));
-        a.gap(rootBox, 6);
-        rootBox.addView(footerRow, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout rootBox =
+                PlaybackControls.buildHudButtonsEditorContent(
+                        a, false, tokens, toggleMask, onSave, onReset);
 
         hRef[0] =
                 MobileBottomSheet.showHandle(
-                        a, "自定义播放器按钮顺序", "按使用习惯调整全屏工具栏按钮顺序", "保存", onSave, rootBox, true);
+                        a, "播放页 HUD 按钮自定义", "添加、移除或调整播放器 HUD 按钮显示顺序", "保存", onSave, rootBox, true);
     }
 
     private static TextView buildSheetActionPill(
