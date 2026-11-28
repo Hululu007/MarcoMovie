@@ -233,7 +233,14 @@ public final class MpvPlayer extends MoviePlayer {
         return effectiveHeapBudgetBytes(memClassMb, Runtime.getRuntime().maxMemory());
     }
 
+    static boolean isApiSupported(int sdkInt) {
+        return sdkInt >= 24;
+    }
+
     public static boolean isAvailable() {
+        if (!isApiSupported(android.os.Build.VERSION.SDK_INT)) {
+            return false;
+        }
         Boolean cached = available;
         if (cached != null) return cached;
         synchronized (MpvPlayer.class) {

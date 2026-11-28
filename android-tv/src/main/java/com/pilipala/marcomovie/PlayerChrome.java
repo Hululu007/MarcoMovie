@@ -1127,9 +1127,9 @@ final class PlayerChrome {
             // full-screen playback once the toolbar hides.
             tvTopRightHud.setVisibility(View.GONE);
             FrameLayout.LayoutParams hudLp =
-                    new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
-            hudLp.topMargin = vp(a, 18);
-            hudLp.rightMargin = vp(a, 26);
+                    new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT);
+            hudLp.topMargin = vp(a, 20);
+            hudLp.rightMargin = vp(a, 28);
             a.playbackLayer.addView(tvTopRightHud, hudLp);
         } else {
             tvTopRightHud = null;
@@ -1479,7 +1479,34 @@ final class PlayerChrome {
         safe.bottom = Math.max(safe.top, Math.min(measuredHeight, safe.bottom));
         overlay.setPadding(
                 safe.left, safe.top, measuredWidth - safe.right, measuredHeight - safe.bottom);
-        if (persistentClock != null
+        if (tvTopRightHud != null
+                && tvTopRightHud.getLayoutParams() instanceof FrameLayout.LayoutParams) {
+            FrameLayout.LayoutParams hLp =
+                    (FrameLayout.LayoutParams) tvTopRightHud.getLayoutParams();
+            int nextTop = Math.max(vp(a, 20), safe.top + vp(a, 18));
+            int nextRight = Math.max(vp(a, 28), (measuredWidth - safe.right) + vp(a, 26));
+            if (hLp.gravity != (Gravity.TOP | Gravity.RIGHT)
+                    || hLp.topMargin != nextTop
+                    || hLp.rightMargin != nextRight) {
+                hLp.gravity = Gravity.TOP | Gravity.RIGHT;
+                hLp.topMargin = nextTop;
+                hLp.rightMargin = nextRight;
+                tvTopRightHud.setLayoutParams(hLp);
+            }
+            float u = modernUnit(a);
+            if (sleepHudPill != null) {
+                sleepHudPill.setTextSize(
+                        android.util.TypedValue.COMPLEX_UNIT_PX, u * HUD_PROGRESS_SIZE_U);
+            }
+            if (hudProgressView != null) {
+                hudProgressView.setTextSize(
+                        android.util.TypedValue.COMPLEX_UNIT_PX, u * HUD_PROGRESS_SIZE_U);
+            }
+            if (persistentClock != null) {
+                persistentClock.setTextSize(
+                        android.util.TypedValue.COMPLEX_UNIT_PX, u * HUD_CLOCK_SIZE_U);
+            }
+        } else if (persistentClock != null
                 && persistentClock.getLayoutParams() instanceof FrameLayout.LayoutParams) {
             FrameLayout.LayoutParams pLp =
                     (FrameLayout.LayoutParams) persistentClock.getLayoutParams();
@@ -2075,6 +2102,11 @@ final class PlayerChrome {
         return tvDevice && hdrSurfaceActive && !controlsVisible;
     }
 
+    static boolean shouldShowTvTopRightHud(
+            boolean tvDevice, boolean hudEnabled, boolean miniMode, boolean controlsVisible) {
+        return tvDevice && hudEnabled && !miniMode && !controlsVisible;
+    }
+
     void switchEpisode(Cms.Episode episode, Cms.Line line) {
         cancelEpisodeHoldSwitch();
         a.seekGestureSerial++;
@@ -2169,7 +2201,9 @@ final class PlayerChrome {
                 syncSlimProgressVisibility(durationMs, live);
             }
         }
-        if (tvTopRightHud == null || hudProgressView == null || suppressLiveHud) return;
+        boolean hudEnabled =
+                a.isTvDevice() && a.prefs.getBoolean(Prefs.TV_PLAYER_TOP_RIGHT_HUD, true);
+        if (tvTopRightHud == null || hudProgressView == null || !hudEnabled) return;
         String elapsed;
         String total;
         if (live && durationMs <= 0) {
@@ -2214,13 +2248,27 @@ final class PlayerChrome {
         }
         if (a.isTvDevice()) {
             boolean hudEnabled = a.prefs.getBoolean(Prefs.TV_PLAYER_TOP_RIGHT_HUD, true);
-            boolean suppressLiveHud =
-                    shouldSuppressLiveHudRedraws(true, hdrSurfaceActive, a.controlsVisible);
-            boolean showHud = hudEnabled && !a.miniMode && !a.controlsVisible && !suppressLiveHud;
+            boolean showHud =
+                    shouldShowTvTopRightHud(true, hudEnabled, a.miniMode, a.controlsVisible);
             if (tvTopRightHud != null) {
                 int targetVis = showHud ? View.VISIBLE : View.GONE;
                 if (tvTopRightHud.getVisibility() != targetVis) {
                     tvTopRightHud.setVisibility(targetVis);
+                }
+                if (showHud) {
+                    tvTopRightHud.bringToFront();
+                    if (a.player != null
+                            && a.prepared
+                            && (lastHudProgressKey == null
+                                    || lastHudProgressKey.isEmpty()
+                                    || lastHudProgressKey.endsWith("/--:--"))) {
+                        int rawPos = a.player.getCurrentPosition();
+                        int displayPos =
+                                a.playbackControls != null
+                                        ? a.playbackControls.displayPosition(rawPos)
+                                        : rawPos;
+                        updatePlaybackHud(displayPos, a.player.getDuration(), isLiveStream);
+                    }
                 }
             }
             if (showHud
@@ -2233,13 +2281,17 @@ final class PlayerChrome {
             if (showHud) {
                 syncSleepHudPill(android.os.SystemClock.elapsedRealtime());
             }
-            if (a.controlsVisible && wallClock != null) {
-                if (!now.equals(lastWallClockText) || wallClock.getText().length() == 0) {
-                    lastWallClockText = now;
-                    wallClock.setText(styledWallTime(now));
-                }
-                if (wallClock.getVisibility() != View.VISIBLE) {
-                    wallClock.setVisibility(View.VISIBLE);
+            if (wallClock != null) {
+                if (a.controlsVisible && hudEnabled) {
+                    if (!now.equals(lastWallClockText) || wallClock.getText().length() == 0) {
+                        lastWallClockText = now;
+                        wallClock.setText(styledWallTime(now));
+                    }
+                    if (wallClock.getVisibility() != View.VISIBLE) {
+                        wallClock.setVisibility(View.VISIBLE);
+                    }
+                } else if (wallClock.getVisibility() != View.GONE) {
+                    wallClock.setVisibility(View.GONE);
                 }
             }
             return;

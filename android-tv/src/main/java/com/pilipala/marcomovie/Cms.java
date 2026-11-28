@@ -2450,7 +2450,7 @@ public final class Cms {
             if (it.next().getValue().expireAtMs <= now) it.remove();
         }
         if (DOH_CACHE.size() >= MAX_DOH_CACHE_ENTRIES) {
-            Iterator<String> keys = DOH_CACHE.keySet().iterator();
+            Iterator<String> keys = ((Map<String, DohCacheEntry>) DOH_CACHE).keySet().iterator();
             if (keys.hasNext()) {
                 DOH_CACHE.remove(keys.next());
             }

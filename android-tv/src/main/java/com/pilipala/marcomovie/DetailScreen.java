@@ -365,14 +365,14 @@ final class DetailScreen {
         if (ready != null) {
             try {
                 present.accept(ready);
-            } catch (Exception error) {
+            } catch (Throwable error) {
                 AppLog.w("DetailScreen", "present ready detail failed", error);
                 info.addView(a.text("详情数据无法显示，请返回后重试。", 15, MainActivity.MUTED));
             }
         } else if (hasPlayableLines(listing)) {
             try {
                 present.accept(listing);
-            } catch (Exception error) {
+            } catch (Throwable error) {
                 AppLog.w("DetailScreen", "present listing detail failed", error);
             }
             if (!a.reduced

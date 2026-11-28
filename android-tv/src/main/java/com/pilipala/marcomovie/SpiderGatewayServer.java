@@ -650,7 +650,10 @@ final class SpiderGatewayServer implements Closeable {
                     .append("\r\nContent-Type: ")
                     .append(ctype)
                     .append("\r\nConnection: close\r\n");
-            long len = conn.getContentLengthLong();
+            long len =
+                    android.os.Build.VERSION.SDK_INT >= 24
+                            ? conn.getContentLengthLong()
+                            : conn.getContentLength();
             if (len >= 0) head.append("Content-Length: ").append(len).append("\r\n");
             String cr = conn.getHeaderField("Content-Range");
             if (cr != null && !cr.isEmpty()) {

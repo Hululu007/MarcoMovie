@@ -65,7 +65,7 @@ final class TvAudioEffectProcessor extends BaseAudioProcessor {
 
     /** Smooth soft-knee limiter keeping boosted PCM clean and strictly within [-1, 1]. */
     static float softLimit(float x) {
-        if (!Float.isFinite(x)) return 0.0f;
+        if (Float.isNaN(x) || Float.isInfinite(x)) return 0.0f;
         float abs = Math.abs(x);
         if (abs <= LIMITER_KNEE) return x;
         float excess = (abs - LIMITER_KNEE) / LIMITER_HEADROOM;
@@ -160,7 +160,7 @@ final class TvAudioEffectProcessor extends BaseAudioProcessor {
             for (int f = 0; f < frames; f++) {
                 for (int c = 0; c < channels; c++) {
                     float raw = inputBuffer.getFloat();
-                    double sample = Float.isFinite(raw) ? raw : 0.0;
+                    double sample = (!Float.isNaN(raw) && !Float.isInfinite(raw)) ? raw : 0.0;
                     for (int s = 0; s < stages; s++) {
                         double y = b0[s] * sample + z1[s][c];
                         z1[s][c] = b1[s] * sample - a1[s] * y + z2[s][c];

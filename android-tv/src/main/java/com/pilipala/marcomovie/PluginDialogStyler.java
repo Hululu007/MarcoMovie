@@ -113,15 +113,26 @@ final class PluginDialogStyler {
         if (text == null || text.trim().isEmpty()) return null;
         String raw = text.trim();
         String upper = raw.toUpperCase(Locale.ROOT);
-        if (raw.contains("夸父") || raw.contains("夸克") || upper.contains("QUARK")) return "quark";
+        if (raw.contains("夸父")
+                || raw.contains("夸夸")
+                || raw.contains("夸克")
+                || upper.contains("QUARK")) return "quark";
         if (raw.contains("优汐") || upper.contains("UC")) return "uc";
-        if (raw.contains("嘟嘟") || raw.contains("百度") || upper.contains("BAIDU")) return "baidu";
-        if (raw.contains("阿狸") || raw.contains("阿里") || upper.contains("ALI")) return "ali";
+        if (raw.contains("嘟嘟")
+                || raw.contains("摆渡")
+                || raw.contains("百度")
+                || upper.contains("BAIDU")) return "baidu";
+        if (raw.contains("阿狸")
+                || raw.contains("阿里")
+                || raw.contains("光雅")
+                || raw.contains("派克")
+                || upper.contains("PIKPAK")
+                || upper.contains("ALI")) return "ali";
         if (raw.contains("115")) return "115";
-        if (raw.contains("天翼") || raw.contains("189")) return "189";
-        if (raw.contains("移动") || raw.contains("139")) return "139";
+        if (raw.contains("天翼") || raw.contains("天意") || raw.contains("189")) return "189";
+        if (raw.contains("移动") || raw.contains("和彩") || raw.contains("139")) return "139";
         if (raw.contains("123")) return "123";
-        if (raw.contains("迅雷")) return "thunder";
+        if (raw.contains("迅雷") || raw.contains("迅蕾")) return "thunder";
         return null;
     }
 
@@ -135,6 +146,23 @@ final class PluginDialogStyler {
                 || t.contains("停用")
                 || "开启".equals(t)
                 || "关闭".equals(t);
+    }
+
+    static boolean isDriveLoginBadgeLabel(String text) {
+        if (text == null || text.trim().isEmpty()) return false;
+        String t = text.trim();
+        if (t.length() > 8 || detectDriveKeyFromLabel(t) != null) return false;
+        return "未登录".equals(t)
+                || "已登录".equals(t)
+                || "未配置".equals(t)
+                || "已配置".equals(t)
+                || "未绑定".equals(t)
+                || "已绑定".equals(t)
+                || "点击登录".equals(t)
+                || "去登录".equals(t)
+                || "登录".equals(t)
+                || "注销".equals(t)
+                || "解绑".equals(t);
     }
 
     static boolean isDirectDriveLoginTarget(String targetDriveKey, String buttonText) {
@@ -221,10 +249,15 @@ final class PluginDialogStyler {
                                         || type
                                                 == WindowManager.LayoutParams
                                                         .TYPE_APPLICATION_SUB_PANEL
+                                        || type
+                                                == WindowManager.LayoutParams
+                                                        .TYPE_APPLICATION_ATTACHED_DIALOG
                                         || type == WindowManager.LayoutParams.TYPE_APPLICATION;
                         if (isSubPanel
-                                && (containsQrImageView(a, root) || looksLikeQrDialog(root))) {
-                            content = root;
+                                && (containsQrImageView(a, root)
+                                        || looksLikeQrDialog(root)
+                                        || hasInteractiveOrTextPluginContent(root))) {
+                            content = unwrapPopupContentRoot((ViewGroup) root);
                         } else {
                             continue;
                         }
@@ -514,6 +547,41 @@ final class PluginDialogStyler {
         return null;
     }
 
+    private static boolean hasInteractiveOrTextPluginContent(View v) {
+        if (v == null) return false;
+        StringBuilder sb = new StringBuilder();
+        collectTexts(v, sb, 0);
+        if (sb.length() > 0) return true;
+        return containsClickableOrList(v, 0);
+    }
+
+    private static boolean containsClickableOrList(View v, int depth) {
+        if (v == null || depth > 10) return false;
+        if (v instanceof Button || v instanceof ListView || v instanceof EditText) return true;
+        if (v.hasOnClickListeners()) return true;
+        if (v instanceof ViewGroup) {
+            ViewGroup vg = (ViewGroup) v;
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                if (containsClickableOrList(vg.getChildAt(i), depth + 1)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static ViewGroup unwrapPopupContentRoot(ViewGroup root) {
+        ViewGroup cur = root;
+        for (int i = 0; i < 4 && cur != null && cur.getChildCount() == 1; i++) {
+            View only = cur.getChildAt(0);
+            if (!(only instanceof ViewGroup)) break;
+            if (only.getClass().getName().contains("PopupWindow$")) {
+                cur = (ViewGroup) only;
+            } else {
+                break;
+            }
+        }
+        return cur;
+    }
+
     private static void dismissPluginDecor(ViewGroup decor, ViewGroup content) {
         if (decor == null || !decor.isAttachedToWindow()) return;
         try {
@@ -522,12 +590,32 @@ final class PluginDialogStyler {
                 cancel.performClick();
                 return;
             }
+            if (tryDismissEnclosingPopupWindow(decor)) {
+                return;
+            }
             KeyEvent down = new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK);
             KeyEvent up = new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK);
             decor.dispatchKeyEvent(down);
             decor.dispatchKeyEvent(up);
         } catch (Throwable ignored) {
         }
+    }
+
+    private static boolean tryDismissEnclosingPopupWindow(ViewGroup decor) {
+        if (decor == null || !decor.getClass().getName().contains("PopupWindow$")) {
+            return false;
+        }
+        try {
+            Field outerField = decor.getClass().getDeclaredField("this$0");
+            outerField.setAccessible(true);
+            Object popup = outerField.get(decor);
+            if (popup instanceof android.widget.PopupWindow) {
+                ((android.widget.PopupWindow) popup).dismiss();
+                return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
     }
 
     private static View findDismissButton(View v, int depth) {
@@ -570,9 +658,11 @@ final class PluginDialogStyler {
         return "app-dialog".equals(tag)
                 || "source-picker".equals(tag)
                 || "player-bubble".equals(tag)
+                || "player-button-tooltip".equals(tag)
                 || "mobile-drawer".equals(tag)
                 || "account-panel".equals(tag)
-                || "netdisk-qr-bubble".equals(tag);
+                || "netdisk-qr-bubble".equals(tag)
+                || TvQrInputHelper.TAG_QR_BUBBLE.equals(tag);
     }
 
     static boolean isInjectedHelperClass(String className, Object tag) {
@@ -744,9 +834,54 @@ final class PluginDialogStyler {
 
             styleHierarchyPass(a, decor, content, maxDialogWidth, winH);
             enforceVerticalBounds(a, decor, content, maxDialogWidth, maxDialogHeight);
+            if (tv) {
+                if (firstPass) {
+                    boolean isPopupDecor =
+                            decor.findViewById(android.R.id.content) == null
+                                    || decor.getClass().getName().contains("PopupWindow$");
+                    if (isPopupDecor) {
+                        decor.setFocusableInTouchMode(true);
+                        decor.setOnKeyListener(
+                                (v, keyCode, event) -> {
+                                    if (keyCode == KeyEvent.KEYCODE_BACK
+                                            && event.getAction() == KeyEvent.ACTION_UP) {
+                                        dismissPluginDecor(decor, content);
+                                        return true;
+                                    }
+                                    return false;
+                                });
+                    }
+                }
+                decor.post(
+                        () -> {
+                            try {
+                                if (decor.isAttachedToWindow() && decor.findFocus() == null) {
+                                    ensureInitialTvFocus(content);
+                                }
+                            } catch (Throwable ignored) {
+                            }
+                        });
+            }
         } catch (Throwable t) {
             AppLog.w("PluginDialogStyler", "stylePluginDecor skipped", t);
         }
+    }
+
+    private static boolean ensureInitialTvFocus(View v) {
+        if (v == null || v.getVisibility() != View.VISIBLE) return false;
+        if (v.isFocusable()
+                && v.isEnabled()
+                && !(v instanceof ScrollView)
+                && !(v instanceof ListView)) {
+            if (v.requestFocus()) return true;
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup vg = (ViewGroup) v;
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                if (ensureInitialTvFocus(vg.getChildAt(i))) return true;
+            }
+        }
+        return false;
     }
 
     private static void adjustWindowLayoutParams(
@@ -760,6 +895,12 @@ final class PluginDialogStyler {
             if (!(raw instanceof WindowManager.LayoutParams)) return;
             WindowManager.LayoutParams wlp = (WindowManager.LayoutParams) raw;
             boolean changed = false;
+            if (a != null
+                    && a.isTvDevice()
+                    && (wlp.flags & WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) != 0) {
+                wlp.flags &= ~WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+                changed = true;
+            }
             if (wlp.width != targetWidth) {
                 wlp.width = targetWidth;
                 changed = true;
@@ -1131,7 +1272,7 @@ final class PluginDialogStyler {
         }
 
         if (v instanceof ListView) {
-            styleListView(a, (ListView) v);
+            styleListView(a, (ListView) v, maxInnerW);
             return;
         }
 
@@ -1159,14 +1300,72 @@ final class PluginDialogStyler {
 
         if (v instanceof ViewGroup) {
             ViewGroup vg = (ViewGroup) v;
+            if (vg instanceof android.widget.RelativeLayout && vg.getChildCount() >= 2) {
+                normalizeRelativeOverflowRow(a, (android.widget.RelativeLayout) vg, maxInnerW);
+            }
             for (int i = 0; i < vg.getChildCount(); i++) {
                 styleSubtree(a, vg.getChildAt(i), cardRoot, maxInnerW, winH, depth + 1);
+            }
+            if (a.isTvDevice()
+                    && vg != cardRoot
+                    && !(vg instanceof ScrollView)
+                    && (vg.hasOnClickListeners()
+                            || (vg.isClickable() && !hasFocusableDescendant(vg)))
+                    && !hasFocusableDescendant(vg)) {
+                vg.setFocusable(true);
+                vg.setFocusableInTouchMode(false);
+                if (!(vg.getBackground() instanceof StyledSpiderStateBg)
+                        && !(vg.getBackground() instanceof StyledSpiderButtonBg)) {
+                    vg.setBackground(
+                            buildStatefulPill(
+                                    a,
+                                    "vg:" + System.identityHashCode(vg),
+                                    a.dp(12),
+                                    0x14ffffff,
+                                    0x20ffffff,
+                                    0.7f,
+                                    0x36ffffff,
+                                    0xffffffff));
+                }
+            }
+        }
+    }
+
+    private static boolean hasFocusableDescendant(ViewGroup vg) {
+        if (vg == null) return false;
+        for (int i = 0; i < vg.getChildCount(); i++) {
+            View c = vg.getChildAt(i);
+            if (c.getVisibility() != View.VISIBLE) continue;
+            if (c.isFocusable() && c.isClickable()) return true;
+            if (c instanceof ViewGroup && hasFocusableDescendant((ViewGroup) c)) return true;
+        }
+        return false;
+    }
+
+    private static void normalizeRelativeOverflowRow(
+            MainActivity a, android.widget.RelativeLayout row, int maxInnerW) {
+        row.setMinimumWidth(0);
+        if (row.getPaddingLeft() > a.dp(16) || row.getPaddingRight() > a.dp(16)) {
+            row.setPadding(
+                    Math.min(row.getPaddingLeft(), a.dp(12)),
+                    row.getPaddingTop(),
+                    Math.min(row.getPaddingRight(), a.dp(12)),
+                    row.getPaddingBottom());
+        }
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View c = row.getChildAt(i);
+            if (Math.abs(c.getTranslationX()) > a.dp(8)) c.setTranslationX(0f);
+            if (c instanceof TextView) {
+                ((TextView) c).setMaxWidth(Math.max(a.dp(88), (maxInnerW * 2) / 3));
             }
         }
     }
 
     private static void clampOversizedBounds(
             MainActivity a, View v, int maxInnerW, int winH, boolean inHorizontalRow) {
+        if (Math.abs(v.getTranslationX()) > a.dp(8)) {
+            v.setTranslationX(0f);
+        }
         ViewGroup.LayoutParams lp = v.getLayoutParams();
         if (lp == null) return;
         boolean changed = false;
@@ -1211,20 +1410,23 @@ final class PluginDialogStyler {
     private static boolean isSpiderDriveRow(LinearLayout row) {
         if (row.getOrientation() != LinearLayout.HORIZONTAL) return false;
         int count = row.getChildCount();
-        if (count < 2 || count > 3) return false;
+        if (count < 2 || count > 4) return false;
         boolean hasDriveLabel = false;
         boolean hasStatusOrButton = false;
         for (int i = 0; i < count; i++) {
             View child = row.getChildAt(i);
             if (child instanceof TextView) {
                 String t = textOf((TextView) child);
-                if (detectDriveKeyFromLabel(t) != null || t.contains("登录")) {
+                if (!isDriveLoginBadgeLabel(t)
+                        && (detectDriveKeyFromLabel(t) != null || t.contains("登录"))) {
                     hasDriveLabel = true;
                 }
-                if (isDriveStatusToggleLabel(t) || child instanceof Button) {
+                if (isDriveStatusToggleLabel(t)
+                        || isDriveLoginBadgeLabel(t)
+                        || child instanceof Button) {
                     hasStatusOrButton = true;
                 }
-            } else if (!(child instanceof ImageView)) {
+            } else if (!(child instanceof ImageView) && child.getClass() != View.class) {
                 return false;
             }
         }
@@ -1284,7 +1486,13 @@ final class PluginDialogStyler {
         for (int i = 0; i < visible.size(); i++) {
             View c = visible.get(i);
             c.setMinimumWidth(0);
+            if (Math.abs(c.getTranslationX()) > a.dp(8)) c.setTranslationX(0f);
             boolean isBtnOrInput = c instanceof Button || c instanceof EditText;
+            boolean isTwoTextRow =
+                    visible.size() == 2
+                            && visible.get(0) instanceof TextView
+                            && visible.get(1) instanceof TextView
+                            && !(visible.get(0) instanceof EditText);
             boolean isShortLabel =
                     c instanceof TextView
                             && !isBtnOrInput
@@ -1293,13 +1501,57 @@ final class PluginDialogStyler {
                             && c.getLayoutParams().width == ViewGroup.LayoutParams.WRAP_CONTENT;
             if (c instanceof TextView) {
                 ((TextView) c).setMinWidth(0);
+                if (c.getPaddingLeft() > a.dp(18) || c.getPaddingRight() > a.dp(18)) {
+                    c.setPadding(
+                            Math.min(c.getPaddingLeft(), a.dp(12)),
+                            c.getPaddingTop(),
+                            Math.min(c.getPaddingRight(), a.dp(12)),
+                            c.getPaddingBottom());
+                }
                 if (isBtnOrInput || isShortLabel) {
                     ((TextView) c).setSingleLine(true);
                     ((TextView) c).setEllipsize(TextUtils.TruncateAt.END);
                 }
+                ((TextView) c).setMaxWidth(maxInnerW);
             }
             if (c.getLayoutParams() instanceof LinearLayout.LayoutParams) {
                 LinearLayout.LayoutParams clp = (LinearLayout.LayoutParams) c.getLayoutParams();
+                if (!(c instanceof TextView)
+                        && !(c instanceof ViewGroup)
+                        && !(c instanceof ImageView)
+                        && c.getBackground() == null
+                        && (clp.width > a.dp(24) || clp.weight > 0f)) {
+                    clp.width = 0;
+                    clp.weight = 1f;
+                    applyHorizontalMargins(
+                            clp,
+                            0,
+                            clp.topMargin,
+                            i < visible.size() - 1 ? gap : 0,
+                            clp.bottomMargin);
+                    c.setLayoutParams(clp);
+                    continue;
+                }
+                if (isTwoTextRow) {
+                    if (i == 0) {
+                        clp.width = 0;
+                        clp.weight = 1f;
+                    } else {
+                        clp.width = ViewGroup.LayoutParams.WRAP_CONTENT;
+                        clp.weight = 0f;
+                        if (c instanceof TextView) {
+                            ((TextView) c).setMaxWidth(maxInnerW / 2);
+                        }
+                    }
+                    applyHorizontalMargins(
+                            clp,
+                            0,
+                            clp.topMargin,
+                            i < visible.size() - 1 ? gap : 0,
+                            clp.bottomMargin);
+                    c.setLayoutParams(clp);
+                    continue;
+                }
                 boolean keepFixed =
                         isShortLabel
                                 || shouldPreserveFixedRowChildWidth(
@@ -1461,9 +1713,21 @@ final class PluginDialogStyler {
         TextView statusBtn = null;
         for (int i = 0; i < row.getChildCount(); i++) {
             View child = row.getChildAt(i);
-            if (!(child instanceof TextView)) continue;
+            if (!(child instanceof TextView)) {
+                if (!(child instanceof ImageView)) {
+                    child.setVisibility(View.GONE);
+                    ViewGroup.LayoutParams slp = child.getLayoutParams();
+                    if (slp instanceof LinearLayout.LayoutParams) {
+                        LinearLayout.LayoutParams lslp = (LinearLayout.LayoutParams) slp;
+                        lslp.width = 0;
+                        lslp.weight = 0f;
+                        child.setLayoutParams(lslp);
+                    }
+                }
+                continue;
+            }
             String label = textOf((TextView) child);
-            if (isDriveStatusToggleLabel(label)) {
+            if (isDriveStatusToggleLabel(label) || isDriveLoginBadgeLabel(label)) {
                 if (statusBtn == null) statusBtn = (TextView) child;
             } else if (detectDriveKeyFromLabel(label) != null || accountBtn == null) {
                 accountBtn = (TextView) child;
@@ -1477,25 +1741,46 @@ final class PluginDialogStyler {
         boolean loggedIn =
                 accountLabel.contains("已登录")
                         || accountLabel.contains("已绑定")
-                        || accountLabel.contains("已配置");
+                        || accountLabel.contains("已配置")
+                        || statusLabel.contains("已登录")
+                        || statusLabel.contains("已绑定")
+                        || statusLabel.contains("已配置");
         boolean enabled = statusLabel.contains("启用中") || statusLabel.contains("已启用");
+        boolean rowClickableOnly =
+                a.isTvDevice()
+                        && (row.hasOnClickListeners() || row.isClickable())
+                        && !accountBtn.hasOnClickListeners()
+                        && (statusBtn == null || !statusBtn.hasOnClickListeners());
 
         boolean firstPass = STYLED_DRIVE_ROWS.add(row);
-        String rowStateKey = "row:" + accountLabel + "|" + statusLabel;
+        String rowStateKey =
+                (rowClickableOnly ? "rowfocus:" : "row:") + accountLabel + "|" + statusLabel;
         Drawable existingRowBg = row.getBackground();
-        if (!(existingRowBg instanceof StyledSpiderButtonBg)
-                || !rowStateKey.equals(((StyledSpiderButtonBg) existingRowBg).appliedKey)) {
-            // Match iOS _buildDriveTile obsidian-slate gradient (#2E2E36 -> #1E1E24)
-            StyledSpiderButtonBg rowCard =
-                    new StyledSpiderButtonBg(
-                            rowStateKey,
-                            GradientDrawable.Orientation.TOP_BOTTOM,
-                            new int[] {0xc42e2e36, 0xc41e1e24});
-            rowCard.setCornerRadius(a.dp(16));
-            rowCard.setStroke(
-                    Math.max(1, a.dp(0.8f)),
-                    (loggedIn && enabled) ? 0x7a30d158 : (loggedIn ? 0x4830d158 : 0x24ffffff));
-            row.setBackground(rowCard);
+        if (!hasAppliedKey(existingRowBg, rowStateKey)) {
+            if (rowClickableOnly) {
+                row.setBackground(
+                        buildStatefulPill(
+                                a,
+                                rowStateKey,
+                                a.dp(16),
+                                loggedIn ? 0xcc202d26 : 0xc4262832,
+                                loggedIn ? 0x6030d158 : 0x26ffffff,
+                                0.8f,
+                                loggedIn ? 0xe0283d32 : 0xe0353a4a,
+                                0xffffffff));
+            } else {
+                // Match iOS _buildDriveTile obsidian-slate gradient (#2E2E36 -> #1E1E24)
+                StyledSpiderButtonBg rowCard =
+                        new StyledSpiderButtonBg(
+                                rowStateKey,
+                                GradientDrawable.Orientation.TOP_BOTTOM,
+                                new int[] {0xc42e2e36, 0xc41e1e24});
+                rowCard.setCornerRadius(a.dp(16));
+                rowCard.setStroke(
+                        Math.max(1, a.dp(0.8f)),
+                        (loggedIn && enabled) ? 0x7a30d158 : (loggedIn ? 0x4830d158 : 0x24ffffff));
+                row.setBackground(rowCard);
+            }
         }
 
         if (firstPass) {
@@ -1518,6 +1803,7 @@ final class PluginDialogStyler {
             accountBtn.setMinimumWidth(0);
             accountBtn.setMinHeight(0);
             accountBtn.setMinimumHeight(0);
+            if (Math.abs(accountBtn.getTranslationX()) > a.dp(4)) accountBtn.setTranslationX(0f);
             if (accountBtn.getLayoutParams() instanceof LinearLayout.LayoutParams) {
                 LinearLayout.LayoutParams leftLp =
                         (LinearLayout.LayoutParams) accountBtn.getLayoutParams();
@@ -1534,21 +1820,58 @@ final class PluginDialogStyler {
                 statusBtn.setMinimumWidth(0);
                 statusBtn.setMinHeight(0);
                 statusBtn.setMinimumHeight(0);
+                if (Math.abs(statusBtn.getTranslationX()) > a.dp(4)) statusBtn.setTranslationX(0f);
                 if (statusBtn.getLayoutParams() instanceof LinearLayout.LayoutParams) {
                     LinearLayout.LayoutParams rightLp =
                             (LinearLayout.LayoutParams) statusBtn.getLayoutParams();
-                    rightLp.width = a.dp(tv ? 86 : 72);
+                    rightLp.width = a.dp(tv ? 88 : 74);
                     rightLp.weight = 0f;
-                    rightLp.height = a.dp(tv ? 36 : 32);
+                    rightLp.height = a.dp(tv ? 34 : 32);
                     applyHorizontalMargins(rightLp, 0, 0, 0, 0);
                     statusBtn.setLayoutParams(rightLp);
                 }
                 statusBtn.setPadding(a.dp(8), 0, a.dp(8), 0);
             }
+
+            if (tv) {
+                if (rowClickableOnly) {
+                    row.setFocusable(true);
+                    row.setFocusableInTouchMode(false);
+                    row.setClickable(true);
+                    row.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+                } else {
+                    if (accountBtn.hasOnClickListeners()
+                            || accountBtn.isClickable()
+                            || accountBtn instanceof Button) {
+                        accountBtn.setFocusable(true);
+                        accountBtn.setFocusableInTouchMode(false);
+                    }
+                    if (statusBtn != null) {
+                        if (statusBtn.hasOnClickListeners()
+                                || statusBtn.isClickable()
+                                || statusBtn instanceof Button) {
+                            statusBtn.setFocusable(true);
+                            statusBtn.setFocusableInTouchMode(false);
+                            if (!accountBtn.hasOnClickListeners()
+                                    && isDriveLoginBadgeLabel(statusLabel)) {
+                                final TextView targetStatus = statusBtn;
+                                accountBtn.setClickable(true);
+                                accountBtn.setFocusable(true);
+                                accountBtn.setFocusableInTouchMode(false);
+                                accountBtn.setOnClickListener(v -> targetStatus.performClick());
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        if (accountBtn instanceof Button) applySpiderDriveAccountButton(a, (Button) accountBtn);
-        if (statusBtn instanceof Button) applySpiderDriveStatusPill(a, (Button) statusBtn);
+        if (rowClickableOnly) {
+            applySpiderDriveAccountButton(a, accountBtn, false);
+        } else {
+            applySpiderDriveAccountButton(a, accountBtn, true);
+        }
+        if (statusBtn != null) applySpiderDriveStatusPill(a, statusBtn);
     }
 
     private static void refreshSpiderButtonStates(MainActivity a, ViewGroup root) {
@@ -1562,8 +1885,9 @@ final class PluginDialogStyler {
                 stylePluginHorizontalButtonBar(a, (LinearLayout) child, maxW);
             } else if (child instanceof ListView) {
                 ListView lv = (ListView) child;
+                int maxW = lv.getWidth() > a.dp(160) ? lv.getWidth() : a.dp(620);
                 for (int j = 0; j < lv.getChildCount(); j++) {
-                    styleListItem(a, lv.getChildAt(j));
+                    styleListItem(a, lv.getChildAt(j), maxW);
                 }
             } else if (child instanceof Button) {
                 Button btn = (Button) child;
@@ -1635,24 +1959,14 @@ final class PluginDialogStyler {
                 && stateKey.equals(((StyledSpiderButtonBg) existing).appliedKey);
     }
 
-    private static void applySpiderDriveAccountButton(MainActivity a, Button btn) {
+    private static void applySpiderDriveAccountButton(
+            MainActivity a, TextView btn, boolean statefulBg) {
         String label = textOf(btn);
-        String stateKey = "acct:" + label;
+        String stateKey = (statefulBg ? "acct:" : "acct-plain:") + label;
         if (hasAppliedKey(btn.getBackground(), stateKey)) {
             return;
         }
         boolean loggedIn = label.contains("已登录") || label.contains("已绑定") || label.contains("已配置");
-
-        Drawable bg =
-                buildStatefulPill(
-                        a,
-                        stateKey,
-                        a.dp(11),
-                        loggedIn ? 0x1c30d158 : 0x10ffffff,
-                        loggedIn ? 0x4230d158 : 0x16ffffff,
-                        0.6f,
-                        loggedIn ? 0x4230d158 : 0x36ffffff,
-                        0xffffffff);
 
         btn.setAllCaps(false);
         btn.setIncludeFontPadding(false);
@@ -1667,16 +1981,36 @@ final class PluginDialogStyler {
             btn.setStateListAnimator(null);
             btn.setElevation(0f);
         }
-        btn.setBackground(bg);
+        if (statefulBg) {
+            Drawable bg =
+                    buildStatefulPill(
+                            a,
+                            stateKey,
+                            a.dp(11),
+                            loggedIn ? 0x1c30d158 : 0x10ffffff,
+                            loggedIn ? 0x4230d158 : 0x16ffffff,
+                            0.6f,
+                            loggedIn ? 0x4230d158 : 0x36ffffff,
+                            0xffffffff);
+            btn.setBackground(bg);
+        } else {
+            btn.setBackground(new StyledSpiderButtonBg(stateKey));
+            btn.setBackgroundColor(Color.TRANSPARENT);
+        }
     }
 
-    private static void applySpiderDriveStatusPill(MainActivity a, Button btn) {
+    private static void applySpiderDriveStatusPill(MainActivity a, TextView btn) {
         String label = textOf(btn);
         String stateKey = "pill:" + label;
         if (hasAppliedKey(btn.getBackground(), stateKey)) {
             return;
         }
-        boolean enabled = label.contains("启用中") || label.contains("已启用");
+        boolean enabled =
+                label.contains("启用中")
+                        || label.contains("已启用")
+                        || label.contains("已登录")
+                        || label.contains("已绑定")
+                        || label.contains("已配置");
 
         Drawable bg =
                 buildStatefulPill(
@@ -1706,7 +2040,7 @@ final class PluginDialogStyler {
     }
 
     private static void applyIosActionCapsuleStyle(
-            MainActivity a, Button btn, boolean highlightPrimary) {
+            MainActivity a, TextView btn, boolean highlightPrimary) {
         String label = textOf(btn);
         String stateKey = (highlightPrimary ? "pri:" : "sec:") + label;
         if (hasAppliedKey(btn.getBackground(), stateKey)) {
@@ -1935,6 +2269,27 @@ final class PluginDialogStyler {
             tv.setTextSize(13.5f);
             tv.setLineSpacing(a.dp(3), 1f);
         }
+        if (a.isTvDevice() && !inHScroll && (tv.hasOnClickListeners() || tv.isClickable())) {
+            String label = textOf(tv);
+            tv.setFocusable(true);
+            tv.setFocusableInTouchMode(false);
+            tv.setClickable(true);
+            tv.setMinHeight(a.dp(38));
+            tv.setMinimumHeight(a.dp(38));
+            tv.setPadding(a.dp(14), a.dp(6), a.dp(14), a.dp(6));
+            if (!inHorizontalRow
+                    && (isCancelLabel(label) || "确定".equals(label) || "完成".equals(label))) {
+                ViewGroup.LayoutParams lp = tv.getLayoutParams();
+                if (lp != null) {
+                    lp.width = a.dp(180);
+                    if (lp instanceof LinearLayout.LayoutParams) {
+                        ((LinearLayout.LayoutParams) lp).gravity = Gravity.CENTER_HORIZONTAL;
+                    }
+                    tv.setLayoutParams(lp);
+                }
+            }
+            applyIosActionCapsuleStyle(a, tv, "确定".equals(label));
+        }
     }
 
     private static void styleEditText(
@@ -1999,7 +2354,7 @@ final class PluginDialogStyler {
         }
     }
 
-    private static void styleListView(final MainActivity a, ListView lv) {
+    private static void styleListView(final MainActivity a, ListView lv, int maxInnerW) {
         if (STYLED_LIST_VIEWS.add(lv)) {
             lv.setBackgroundColor(Color.TRANSPARENT);
             lv.setCacheColorHint(Color.TRANSPARENT);
@@ -2007,12 +2362,22 @@ final class PluginDialogStyler {
             lv.setDividerHeight(1);
             lv.setSelector(new ColorDrawable(0x1cffffff));
         }
+        int rowMaxW = lv.getWidth() > a.dp(120) ? lv.getWidth() : maxInnerW;
         for (int i = 0; i < lv.getChildCount(); i++) {
-            styleListItem(a, lv.getChildAt(i));
+            styleListItem(a, lv.getChildAt(i), rowMaxW);
         }
     }
 
-    private static void styleListItem(MainActivity a, View child) {
+    private static void styleListItem(MainActivity a, View child, int maxInnerW) {
+        if (child instanceof LinearLayout && isSpiderDriveRow((LinearLayout) child)) {
+            styleSpiderDriveRow(a, (LinearLayout) child);
+            return;
+        }
+        if (child instanceof LinearLayout
+                && ((LinearLayout) child).getOrientation() == LinearLayout.HORIZONTAL
+                && ((LinearLayout) child).getChildCount() >= 1) {
+            normalizeHorizontalOverflowRow(a, (LinearLayout) child, maxInnerW);
+        }
         if (child instanceof TextView) {
             if (!STYLED_LIST_ITEMS.add(child)) return;
             TextView tv = (TextView) child;
@@ -2028,7 +2393,7 @@ final class PluginDialogStyler {
         } else if (child instanceof ViewGroup) {
             ViewGroup vg = (ViewGroup) child;
             for (int i = 0; i < vg.getChildCount(); i++) {
-                styleListItem(a, vg.getChildAt(i));
+                styleListItem(a, vg.getChildAt(i), maxInnerW);
             }
         }
     }

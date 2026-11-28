@@ -22,10 +22,10 @@
   },
   {
     "name": "jsoup",
-    "version": "1.18.3",
+    "version": "1.15.4",
     "license": "MIT",
-    "url": "https://repo.maven.apache.org/maven2/org/jsoup/jsoup/1.18.3/jsoup-1.18.3.jar",
-    "sha256": "5be1ccd3228ae5fd6eed1bd6d827bac2bc65b91c20e9957d16ea65f739f15302"
+    "url": "https://repo.maven.apache.org/maven2/org/jsoup/jsoup/1.15.4/jsoup-1.15.4.jar",
+    "sha256": "006830d0797710408de5589c18d864343c0ef1a3a0c603c9cb138c943b67d9a4"
   },
   {
     "name": "wrapper-android",

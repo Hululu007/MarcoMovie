@@ -14,6 +14,14 @@
   - 保留 `HomeAmbient.acquireTvScratchBitmap()` 32 位 `ARGB_8888` 柔光渐变双缓冲，消除低色深缩放至 1080p 电视大屏时产生的菱形棋盘抖动纹。
 - **统一全局搜索结果卡片样式与筛选标签展示**：
   - 将「全部」与各来源下的网盘/聚合源（如「聚剧|四盘」、夸克/网盘源）搜索结果统一为一致的 `2:3` 竖版海报卡片与等宽列布局，消除宽窄混排与右侧留白缺口，并在副标题中精简日期与画质标签且不再截断「全部」计数胶囊。
+- **修复电视端播放页右上角进度与时间开关不生效问题**：
+  - `PlayerChrome.shouldShowTvTopRightHud` 与 `updatePlaybackHud()` 不再因电视 HDR/杜比视界 `SurfaceView` 的底栏隐藏节流逻辑而连带隐藏右上角 HUD；使用 `Gravity.TOP | Gravity.RIGHT`、`bringToFront()` 与动态字号/边距刷新；在「更多」菜单切换开关时即时刷新并自动收起控制栏以便立刻看到右上角进度与时间生效。
+- **剧集智能刮削保留清晰度、HDR/杜比与容量大小并清理嵌套网盘文件夹后缀**：
+  - `TvSeriesScraper` 新增 `extractEpisodeSpecSummary()` / `extractEpisodeSizeTag()`，自动从原文件名提炼 `8K`/`4K`/`2K`/`1080P`/`720P`、`杜比`/`HDR10+`/`HDR`/`原盘`/`高码`/`60帧` 及 `GB`/`MB` 容量大小并在选集网格与播控选集弹窗中保留显示（如 `第01集 · 4K · 杜比 · 3.2GB`），同时剥离嵌套 `【...【...】...】` 目录后缀与连续点号 clutter。
+- **修复扩展源配置中心网盘登录弹窗右侧越界裁切及遥控器无法点击问题**：
+  - `PluginDialogStyler` 接管蜘蛛自定义非扫码 `PopupWindow` / 子面板窗口，放宽 `FLAG_NOT_FOCUSABLE`、接管返回键关闭与首次默认聚焦；识别同音网盘名（夸夸/优汐/摆渡/迅蕾/光雅/115/天意）与状态胶囊（`未登录`/`已登录` 等），规范横向行与可点击 `TextView` 边界与焦点态，彻底消除右侧白胶囊被弹窗边界切半且遥控器无法选点的问题。
+- **彻底修复小米电视 3s 等 Android 6.0.1（API 23）设备选剧进入后闪退问题**：
+  - 将 `android-tv/dependencies.json` 中携带未脱糖 API 24/26 字节码（`ThreadLocal.withInitial`、`ArrayList.sort`、`Stream`、`java.nio.file`）的 `jsoup 1.18.3` 降级为 API 23 兼容的 `jsoup 1.15.4`，消除爬虫详情解析触发的 `NoSuchMethodError`；同时在 API 23 上禁用需 API 24 Bionic 符号的 `MPV` 内核、修复 `Cms.evictDohCache` / `SpiderGatewayServer` / `TvAudioEffectProcessor` API 24+ 调用并加宽 `LinkageError` 安全兜底捕获。
 
 ## 安装与校验
 

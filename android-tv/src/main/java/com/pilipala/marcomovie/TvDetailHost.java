@@ -721,7 +721,8 @@ final class TvDetailHost {
         if (ready != null) {
             try {
                 bindInPlace.accept(ready);
-            } catch (Exception e) {
+            } catch (Throwable e) {
+                AppLog.w("TvDetailHost", "bindInPlace ready detail failed", e);
                 a.notice("详情数据无法显示，请返回后重试。");
             }
         } else if (initiallyPlayable) {
@@ -848,7 +849,8 @@ final class TvDetailHost {
                                     }
                                     try {
                                         bindInPlace.accept(finalVideo);
-                                    } catch (Exception e) {
+                                    } catch (Throwable e) {
+                                        AppLog.w("TvDetailHost", "bindInPlace recovered failed", e);
                                         if (onRecoverFailed != null) onRecoverFailed.run();
                                     }
                                 } else if (onRecoverFailed != null) {
@@ -1240,7 +1242,8 @@ final class TvDetailHost {
                         if (hasPlayableLines(picked.listing)) {
                             try {
                                 applyLoaded.accept(picked.listing);
-                            } catch (Exception ignored) {
+                            } catch (Throwable err) {
+                                AppLog.w("TvDetailHost", "applyLoaded matched listing failed", err);
                             }
                         } else {
                             a.loadDetail(picked.site, picked.listing.id, applyLoaded);
@@ -1253,7 +1256,8 @@ final class TvDetailHost {
                 () -> {
                     try {
                         loadMatched.accept(pendingPick[0]);
-                    } catch (Exception ignored) {
+                    } catch (Throwable err) {
+                        AppLog.w("TvDetailHost", "triggerLoadMatched failed", err);
                     }
                 };
 

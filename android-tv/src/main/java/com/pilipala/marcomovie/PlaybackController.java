@@ -841,8 +841,14 @@ final class PlaybackController {
                                             }
                                         }
                                     }
-                                } catch (Exception e) {
-                                    primaryError = e;
+                                } catch (Throwable e) {
+                                    primaryError =
+                                            e instanceof Exception
+                                                    ? (Exception) e
+                                                    : new java.io.IOException(
+                                                            "运行环境或扩展异常："
+                                                                    + e.getClass().getSimpleName(),
+                                                            e);
                                 }
 
                                 boolean primaryPlayable =
@@ -938,7 +944,7 @@ final class PlaybackController {
                                                 }
                                             }
                                         }
-                                    } catch (Exception ignored) {
+                                    } catch (Throwable ignored) {
                                     }
                                 }
                                 if (!primaryPlayable
@@ -991,7 +997,7 @@ final class PlaybackController {
                                                 primaryError = null;
                                                 break;
                                             }
-                                        } catch (Exception ignored) {
+                                        } catch (Throwable ignored) {
                                         }
                                     }
                                 }
@@ -1126,7 +1132,7 @@ final class PlaybackController {
                                                     return;
                                                 }
                                                 openPlayer(a, s, v, resolved);
-                                            } catch (Exception error) {
+                                            } catch (Throwable error) {
                                                 AppLog.w(
                                                         "PlaybackController",
                                                         "parse player response failed",
@@ -1136,7 +1142,7 @@ final class PlaybackController {
                                                 failInPlaceSwitch(a, "播放信息无法读取，请重试");
                                             }
                                         });
-                            } catch (Exception error) {
+                            } catch (Throwable error) {
                                 AppLog.w("PlaybackController", "engine.player failed", error);
                                 a.ui.post(
                                         () -> {
@@ -1436,7 +1442,7 @@ final class PlaybackController {
                                                         }
                                                     }
                                                 });
-                            } catch (Exception error) {
+                            } catch (Throwable error) {
                                 AppLog.w("PlaybackController", "MagnetStream start failed", error);
                                 state.setText("磁力播放初始化失败：" + error.getClass().getSimpleName());
                             }
@@ -1904,7 +1910,7 @@ final class PlaybackController {
                                             }
                                             mpvBusyFallback[0] = true;
                                             candidate = new MoviePlayer(a);
-                                        } catch (Exception mpvInitErr) {
+                                        } catch (Throwable mpvInitErr) {
                                             AppLog.w(
                                                     "PlaybackController",
                                                     "MPV init failed, falling back to Media3",
@@ -2993,7 +2999,7 @@ final class PlaybackController {
                                                             attachErr);
                                                 }
                                             });
-                                } catch (Exception ex) {
+                                } catch (Throwable ex) {
                                     AppLog.w("PlaybackController", "player init failed", ex);
                                     safeReleasePlayer(candidate);
                                     a.ui.post(

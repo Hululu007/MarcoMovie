@@ -2722,6 +2722,38 @@ final class PlaybackControls {
 
     static final int EPISODE_GROUP_SIZE = 50;
 
+    private String[] buildEpisodePickerLabels(Cms.Line line, int start, int count) {
+        String[] labels = new String[count];
+        TvSeriesScraper.ScrapedLine scraped = null;
+        boolean hasOverrideOrScrambled = false;
+        if (a != null && a.isTvDevice() && line != null && line.episodes != null) {
+            SeriesScrapeStore.OverrideRecord ov =
+                    SeriesScrapeStore.load(
+                            a,
+                            site != null && site.key != null ? site.key : "",
+                            video != null && video.id != null ? video.id : "",
+                            video != null && video.title != null ? video.title : "");
+            scraped =
+                    TvSeriesScraper.scrapeLine(video != null ? video.title : "", line.episodes, ov);
+            hasOverrideOrScrambled = ov != null || scraped.sourceOrderScrambled;
+        }
+        for (int i = 0; i < count; i++) {
+            int epIdx = start + i;
+            Cms.Episode ep = line.episodes.get(epIdx);
+            if (scraped != null) {
+                TvSeriesScraper.ScrapedEpisode item = scraped.atSourceIndex(epIdx);
+                if (item != null) {
+                    labels[i] =
+                            TvSeriesScraper.formatGridEpisodeLabel(
+                                    item, false, hasOverrideOrScrambled);
+                    continue;
+                }
+            }
+            labels[i] = ep != null && ep.name != null ? ep.name : "";
+        }
+        return labels;
+    }
+
     void chooseEpisodes() {
         int l = lineIndex();
         if (l < 0) {
@@ -2732,8 +2764,7 @@ final class PlaybackControls {
         int total = line.episodes.size();
         int current = episodeIndex();
         if (total <= EPISODE_GROUP_SIZE) {
-            String[] labels = new String[total];
-            for (int i = 0; i < total; i++) labels[i] = line.episodes.get(i).name;
+            String[] labels = buildEpisodePickerLabels(line, 0, total);
             choose(
                     line.name + " · 选集",
                     labels,
@@ -2755,13 +2786,14 @@ final class PlaybackControls {
         int start = safePage * EPISODE_GROUP_SIZE;
         int end = Math.min(total, start + EPISODE_GROUP_SIZE);
         int count = end - start;
+        String[] epLabels = buildEpisodePickerLabels(line, start, count);
         String[] labels = new String[count + 1];
         labels[0] = "切换选集分组（当前 " + (start + 1) + "-" + end + " / 共 " + total + " 集）";
         int current = episodeIndex();
         int selected = 0;
         for (int i = 0; i < count; i++) {
             int epIndex = start + i;
-            labels[i + 1] = line.episodes.get(epIndex).name;
+            labels[i + 1] = epLabels[i];
             if (epIndex == current) selected = i + 1;
         }
         choose(
@@ -5921,6 +5953,25 @@ final class PlaybackControls {
         more(0);
     }
 
+    private void toggleTopRightHudPref(String clockKey, boolean nextClock) {
+        a.prefs.edit().putBoolean(clockKey, nextClock).apply();
+        if (a.playerChrome != null) {
+            a.playerChrome.lastHudProgressKey = "";
+            if (a.player != null && a.prepared) {
+                int rawPos = a.player.getCurrentPosition();
+                a.playerChrome.updatePlaybackHud(
+                        displayPosition(rawPos), a.player.getDuration(), a.isLive());
+            }
+            a.playerChrome.syncClockViews();
+        }
+        if (a.isTvDevice()) {
+            a.toast(nextClock ? "已开启右上角进度与时间" : "已关闭右上角进度与时间");
+            if (nextClock && a.ui != null) {
+                a.ui.post(() -> PlaybackController.showControls(a, false));
+            }
+        }
+    }
+
     void more(int initialFocusActionIndex) {
         if ("live".equals(site.key)) {
             final String clockKey =
@@ -5977,8 +6028,7 @@ final class PlaybackControls {
                                 sleepTimerMenu(() -> more(i));
                                 break;
                             case 7:
-                                a.prefs.edit().putBoolean(clockKey, !alwaysClock).apply();
-                                if (a.playerChrome != null) a.playerChrome.syncClockViews();
+                                toggleTopRightHudPref(clockKey, !alwaysClock);
                                 break;
                             case 8:
                                 message(
@@ -6148,11 +6198,7 @@ final class PlaybackControls {
                                 + (alwaysClock ? "开启" : "关闭")
                                 + "（以后播放沿用）",
                         alwaysClock));
-        actions.add(
-                () -> {
-                    a.prefs.edit().putBoolean(clockKey, !alwaysClock).apply();
-                    if (a.playerChrome != null) a.playerChrome.syncClockViews();
-                });
+        actions.add(() -> toggleTopRightHudPref(clockKey, !alwaysClock));
 
         final int slimIdx = idx++;
         rows.add(

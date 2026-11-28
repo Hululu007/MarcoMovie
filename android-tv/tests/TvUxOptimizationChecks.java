@@ -57,6 +57,7 @@ public final class TvUxOptimizationChecks {
         testR7NavSwitchSourcePickerAndBoundsFixes();
         testFastTvHomeCoverAndShelfLoading();
         testTvDialogAlignmentAndJujuHistoryRecovery();
+        testTv066FourFixes();
         System.out.println("ALL PASS (" + checks + " TV UX optimization checks)");
     }
 
@@ -3307,5 +3308,133 @@ public final class TvUxOptimizationChecks {
         check(
                 !searchSrc.contains("totalVideos + \"…\""),
                 "TV GlobalSearchScreen does not append ellipsis truncation suffix on 全部 search tab count");
+    }
+
+    private static void testTv066FourFixes() throws Exception {
+        // 1. Top-right HUD toggle remains active even during HDR SurfaceView playback
+        check(
+                PlayerChrome.shouldShowTvTopRightHud(true, true, false, false)
+                        && PlayerChrome.shouldSuppressLiveHudRedraws(true, true, false)
+                        && !PlayerChrome.shouldShowTvTopRightHud(true, false, false, false)
+                        && !PlayerChrome.shouldShowTvTopRightHud(true, true, true, false)
+                        && !PlayerChrome.shouldShowTvTopRightHud(true, true, false, true),
+                "PlayerChrome.shouldShowTvTopRightHud honors user toggle regardless of HDR surface suppression");
+        String chromeSrc = readJavaSource("PlayerChrome.java");
+        String controlsSrc = readJavaSource("PlaybackControls.java");
+        check(
+                chromeSrc.contains("shouldShowTvTopRightHud(")
+                        && chromeSrc.contains("Gravity.TOP | Gravity.RIGHT")
+                        && chromeSrc.contains("tvTopRightHud.bringToFront()")
+                        && controlsSrc.contains("toggleTopRightHudPref(")
+                        && controlsSrc.contains("buildEpisodePickerLabels("),
+                "PlayerChrome & PlaybackControls apply TV top-right HUD toggle immediately and wire scraped episode picker labels");
+
+        // 2. Smart episode scraper retains resolution, Dolby/HDR/HFR quality, and capacity
+        check(
+                "4K · 杜比 · 3.2GB"
+                        .equals(
+                                TvSeriesScraper.extractEpisodeSpecSummary(
+                                        "凡人修仙传.S01E01.2160p.DV.H265 [3.2GB].mkv")),
+                "TvSeriesScraper.extractEpisodeSpecSummary extracts 4K + Dolby + file size");
+        check(
+                "1080P · 850MB"
+                        .equals(
+                                TvSeriesScraper.extractEpisodeSpecSummary(
+                                        "庆余年.E05.1080P.H264.850MB.mp4")),
+                "TvSeriesScraper.extractEpisodeSpecSummary extracts 1080P + MB file size");
+        Cms.Episode ep1 = new Cms.Episode();
+        ep1.name = "凡人修仙传.S01E01.2160p.DV.H265 [3.2GB].mkv";
+        Cms.Episode ep2 = new Cms.Episode();
+        ep2.name = "庆余年.E05.1080P.mp4";
+        TvSeriesScraper.ScrapedLine line1 =
+                TvSeriesScraper.scrapeLine("凡人修仙传", Arrays.asList(ep1, ep2), null);
+        Cms.Episode cleanEp = new Cms.Episode();
+        cleanEp.name = "第01集";
+        TvSeriesScraper.ScrapedLine cleanLine =
+                TvSeriesScraper.scrapeLine(
+                        "凡人修仙传", java.util.Collections.singletonList(cleanEp), null);
+        String lbl1 = TvSeriesScraper.formatGridEpisodeLabel(line1.atSourceIndex(0), false, false);
+        String lbl2 = TvSeriesScraper.formatGridEpisodeLabel(line1.atSourceIndex(1), false, false);
+        String lblClean =
+                TvSeriesScraper.formatGridEpisodeLabel(cleanLine.atSourceIndex(0), false, false);
+        check(
+                "第01集 · 4K · 杜比 · 3.2GB".equals(lbl1),
+                "TvSeriesScraper.formatGridEpisodeLabel retains 4K+Dolby+size (got=" + lbl1 + ")");
+        check(
+                "第05集 · 1080P".equals(lbl2),
+                "TvSeriesScraper.formatGridEpisodeLabel retains 1080P (got=" + lbl2 + ")");
+        check(
+                "第01集".equals(lblClean),
+                "TvSeriesScraper.formatGridEpisodeLabel keeps clean labels clean (got="
+                        + lblClean
+                        + ")");
+
+        // Nested lenticular netdisk folder blocks and repeated dots
+        Cms.Episode rawShot1 = new Cms.Episode();
+        rawShot1.name = "2026......【八个神像/【把限 2026】 . &杜比视界 年糕】";
+        Cms.Episode rawShot2 = new Cms.Episode();
+        rawShot2.name = "2026..YK..DV...HFR.-年糕【八个神像/【把限 2026】 . &杜比视界 年糕】";
+        Cms.Episode rawShot3 = new Cms.Episode();
+        rawShot3.name = "2026....fixed";
+        TvSeriesScraper.ScrapedLine shotLine =
+                TvSeriesScraper.scrapeLine(
+                        "八个神像", Arrays.asList(rawShot1, rawShot2, rawShot3), null);
+        String g0 = TvSeriesScraper.formatGridEpisodeLabel(shotLine.atSourceIndex(0), false, false);
+        String g1 = TvSeriesScraper.formatGridEpisodeLabel(shotLine.atSourceIndex(1), false, false);
+        String g2 = TvSeriesScraper.formatGridEpisodeLabel(shotLine.atSourceIndex(2), false, false);
+        check(
+                !g0.contains("【")
+                        && !g0.contains("..")
+                        && g0.contains("杜比")
+                        && !g1.contains("【")
+                        && !g1.contains("..")
+                        && g1.contains("杜比")
+                        && g1.contains("60帧")
+                        && "2026 · fixed".equals(g2),
+                "TvSeriesScraper strips nested 【...】 folder blocks and collapsing dots while keeping Dolby/60fps specs");
+
+        // 3. Spider Config Center homophone drive names & login status pills
+        check(
+                "quark".equals(PluginDialogStyler.detectDriveKeyFromLabel("夸夸网盘"))
+                        && "uc".equals(PluginDialogStyler.detectDriveKeyFromLabel("优汐网盘"))
+                        && "baidu".equals(PluginDialogStyler.detectDriveKeyFromLabel("摆渡网盘"))
+                        && "thunder".equals(PluginDialogStyler.detectDriveKeyFromLabel("迅蕾网盘"))
+                        && "ali".equals(PluginDialogStyler.detectDriveKeyFromLabel("光雅网盘"))
+                        && "115".equals(PluginDialogStyler.detectDriveKeyFromLabel("115网盘"))
+                        && "189".equals(PluginDialogStyler.detectDriveKeyFromLabel("天意云盘"))
+                        && PluginDialogStyler.isDriveLoginBadgeLabel("未登录")
+                        && PluginDialogStyler.isDriveLoginBadgeLabel("已登录")
+                        && !PluginDialogStyler.isDriveLoginBadgeLabel("夸夸网盘")
+                        && PluginDialogStyler.isDirectDriveLoginTarget("quark", "夸夸网盘")
+                        && PluginDialogStyler.isDirectDriveLoginTarget("quark", "我的夸父(未登录)"),
+                "PluginDialogStyler recognizes spider ConfigCenter homophone drive names and login status pills");
+        String stylerSrc = readJavaSource("PluginDialogStyler.java");
+        check(
+                stylerSrc.contains("unwrapPopupContentRoot(")
+                        && stylerSrc.contains("FLAG_NOT_FOCUSABLE")
+                        && stylerSrc.contains("tryDismissEnclosingPopupWindow("),
+                "PluginDialogStyler captures non-QR spider PopupWindows, clears FLAG_NOT_FOCUSABLE for TV DPAD, and wires Back dismissal");
+
+        // 4. API 23 (Android 6.0.1 Xiaomi TV 3s) compatibility guards
+        check(
+                !MpvPlayer.isApiSupported(23) && MpvPlayer.isApiSupported(24),
+                "MpvPlayer.isApiSupported gates libmpv (requires API 24 Bionic fseeko64/ftello64) off on API 23");
+        String depsJson =
+                new String(
+                        java.nio.file.Files.readAllBytes(
+                                java.nio.file.Paths.get("android-tv/dependencies.json")),
+                        StandardCharsets.UTF_8);
+        check(
+                depsJson.contains("\"version\": \"1.15.4\"")
+                        && !depsJson.contains("\"version\": \"1.18.3\""),
+                "android-tv/dependencies.json pins jsoup 1.15.4 without un-desugared API 24/26 calls");
+        String cmsSrc = readJavaSource("Cms.java");
+        String gwSrc = readJavaSource("SpiderGatewayServer.java");
+        String audioSrc = readJavaSource("TvAudioEffectProcessor.java");
+        check(
+                cmsSrc.contains("((Map<String, DohCacheEntry>) DOH_CACHE).keySet()")
+                        && gwSrc.contains("Build.VERSION.SDK_INT >= 24")
+                        && !audioSrc.contains("Float.isFinite("),
+                "Cms, SpiderGatewayServer, and TvAudioEffectProcessor contain zero unguarded API 24+ method calls");
     }
 }
