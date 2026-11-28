@@ -3298,5 +3298,14 @@ public final class TvUxOptimizationChecks {
                 hostSrc.contains("tryRecoverSameSiteHistoryDetail(")
                         && hostSrc.contains("pendingHistoryMigration"),
                 "TV TvDetailHost recovers same-site aggregated/4-pan watch history without forced re-search");
+
+        String searchSrc = readJavaSource("GlobalSearchScreen.java");
+        check(
+                !searchSrc.contains("return VIEW_TYPE_NETDISK_WIDE;")
+                        && searchSrc.contains("return VIEW_TYPE_POSTER;"),
+                "TV GlobalSearchScreen uses uniform 2:3 vertical poster cards without mixing wide boxes");
+        check(
+                !searchSrc.contains("totalVideos + \"…\""),
+                "TV GlobalSearchScreen does not append ellipsis truncation suffix on 全部 search tab count");
     }
 }

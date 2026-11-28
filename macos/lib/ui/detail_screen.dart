@@ -1243,9 +1243,9 @@ class _DetailScreenState extends State<DetailScreen> {
         return bookmark;
       }
     }
-    if (video.id != widget.video.id && _activeSite.key == widget.site.key) {
+    if (video.id != widget.initialVideo.id && _activeSite.key == widget.site.key) {
       for (final item in history) {
-        if (item.site == _activeSite.key && item.id == widget.video.id) {
+        if (item.site == _activeSite.key && item.id == widget.initialVideo.id) {
           final bookmark = WoggSource.normalizeCachedBookmark(_activeSite, video, item);
           if (WoggSource.supports(_activeSite) &&
               WoggSource.resolveCachedBookmarkTarget(_activeSite, video, bookmark) == null) return null;

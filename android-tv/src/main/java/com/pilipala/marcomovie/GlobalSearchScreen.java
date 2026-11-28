@@ -1011,11 +1011,6 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 new GridLayoutManager.SpanSizeLookup() {
                     @Override
                     public int getSpanSize(int position) {
-                        if (tvResultAdapter != null
-                                && tvResultAdapter.getItemViewType(position)
-                                        == TvSearchPosterAdapter.VIEW_TYPE_NETDISK_WIDE) {
-                            return Math.min(columns, Math.max(2, columns / 2));
-                        }
                         return 1;
                     }
                 });
@@ -4152,6 +4147,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
         b.setMinimumHeight(0);
         b.setPadding(a.dp(14), 0, a.dp(14), 0);
         b.setSingleLine(true);
+        b.setEllipsize(null);
         b.setGravity(Gravity.CENTER);
         b.setContentDescription(label);
         b.setOnFocusChangeListener((v, focus) -> styleFilter(b, key, focus));
@@ -4433,7 +4429,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                     }
                     suffix =
                             finished < sourceCount
-                                    ? (totalVideos > 0 ? " " + totalVideos + "…" : " · 搜索中")
+                                    ? (totalVideos > 0 ? " " + totalVideos : " · 搜索中")
                                     : totalVideos == 0
                                                     && (failed > 0
                                                             || timedOut > 0
@@ -4473,6 +4469,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 if (!fullText.equals(renderedFilterLabels.get(key))) {
                     renderedFilterLabels.put(key, fullText);
                     b.setText(fullText);
+                    b.requestLayout();
                 }
             }
             styleFilter(b, key, b.hasFocus());
@@ -4942,9 +4939,42 @@ public final class GlobalSearchScreen implements AutoCloseable {
     private String formatCardMeta(Cms.Video video, Cms.Site site) {
         String sourceName = clean(site == null ? "" : site.name);
         String year = video == null || video.year == null ? "" : video.year.trim();
-        String remarks = video == null || video.remarks == null ? "" : video.remarks.trim();
+        String rawRemarks = video == null || video.remarks == null ? "" : video.remarks.trim();
+        String remarks =
+                rawRemarks.replaceFirst(
+                        "^(\\d{4}-\\d{2}-\\d{2})\\s+\\d{2}:\\d{2}(?::\\d{2})?$", "$1");
         StringBuilder sb = new StringBuilder();
         if (!remarks.isEmpty()) sb.append(remarks);
+        if (site != null && site.isNetdiskSite() && video != null) {
+            String lowerRemarks = remarks.toLowerCase(Locale.ROOT);
+            String combined =
+                    ((video.title == null ? "" : video.title)
+                                    + " "
+                                    + (video.tag == null ? "" : video.tag))
+                            .toLowerCase(Locale.ROOT);
+            String quality = "";
+            if ((combined.contains("4k") || combined.contains("2160"))
+                    && !lowerRemarks.contains("4k")
+                    && !lowerRemarks.contains("2160")) {
+                quality = "4K";
+            } else if ((combined.contains("原盘")
+                            || combined.contains("iso")
+                            || combined.contains("bdmv"))
+                    && !lowerRemarks.contains("原盘")) {
+                quality = "原盘";
+            } else if ((combined.contains("hdr") || combined.contains("臻彩"))
+                    && !lowerRemarks.contains("hdr")
+                    && !lowerRemarks.contains("臻彩")) {
+                quality = "HDR";
+            } else if ((combined.contains("杜比") || combined.contains("dovi"))
+                    && !lowerRemarks.contains("杜比")) {
+                quality = "杜比";
+            }
+            if (!quality.isEmpty()) {
+                if (sb.length() > 0) sb.append(" · ");
+                sb.append(quality);
+            }
+        }
         if (!year.isEmpty()) {
             if (sb.length() > 0) sb.append(" · ");
             sb.append(year);
@@ -5262,10 +5292,6 @@ public final class GlobalSearchScreen implements AutoCloseable {
 
         @Override
         public int getItemViewType(int position) {
-            if (position >= 0 && position < items.size()) {
-                Cms.Site s = items.get(position).site;
-                if (s != null && s.isNetdiskSite()) return VIEW_TYPE_NETDISK_WIDE;
-            }
             return VIEW_TYPE_POSTER;
         }
 
