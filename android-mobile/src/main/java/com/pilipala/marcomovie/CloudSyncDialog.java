@@ -1179,8 +1179,23 @@ final class CloudSyncDialog {
                 out.put("type", "webdav_bind");
                 if (isValidHttpUrl(url)) {
                     String user = a.prefs.getString(Prefs.WEBDAV_USER, "").trim();
-                    String pass = SecureStorage.getWebdavPass(appCtx);
-                    if (pass == null) pass = "";
+                    final AtomicReference<String> passHolder = new AtomicReference<>("");
+                    final CountDownLatch passLatch = new CountDownLatch(1);
+                    SYNC_EXEC.execute(
+                            () -> {
+                                try {
+                                    String loaded = SecureStorage.getWebdavPass(appCtx);
+                                    passHolder.set(loaded == null ? "" : loaded);
+                                } finally {
+                                    passLatch.countDown();
+                                }
+                            });
+                    try {
+                        passLatch.await(3, TimeUnit.SECONDS);
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                    }
+                    String pass = passHolder.get();
                     out.put("mode", "config");
                     out.put("url", url);
                     out.put("username", user);
@@ -1262,8 +1277,12 @@ final class CloudSyncDialog {
                 .putBoolean(Prefs.WEBDAV_SYNC_SUBS, syncSubs)
                 .putBoolean(PREF_WEBDAV_SYNC_HISTORY, syncHist)
                 .apply();
-        SecureStorage.setWebdavPass(appCtx, pass == null ? "" : pass);
-        SecureStorage.consumeReenterPasswordRequired(appCtx);
+        final String safePass = pass == null ? "" : pass;
+        SYNC_EXEC.execute(
+                () -> {
+                    SecureStorage.setWebdavPass(appCtx, safePass);
+                    SecureStorage.consumeReenterPasswordRequired(appCtx);
+                });
     }
 
     private static String exchangeLanBindHttp(String url, String method, String jsonBody)
