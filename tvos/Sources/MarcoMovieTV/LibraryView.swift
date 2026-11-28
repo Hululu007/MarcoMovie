@@ -11,8 +11,15 @@ public struct LibraryView: View {
         case favorites = "我的收藏"
     }
 
+    private enum LibraryFocusTarget: Hashable {
+        case history(String)
+        case favorite(String)
+    }
+
     @State private var section: LibrarySection = .history
     @State private var showClearConfirmation = false
+    @State private var lastOpenedFocus: LibraryFocusTarget?
+    @FocusState private var focusedCard: LibraryFocusTarget?
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 26), count: 6)
 
@@ -72,6 +79,26 @@ public struct LibraryView: View {
             }
             Button("取消", role: .cancel) {}
         }
+        .onChange(of: appModel.selectedDetailContext == nil) { isClosed in
+            guard isClosed else { return }
+            restoreLastOpenedCardFocus()
+        }
+    }
+
+    private func restoreLastOpenedCardFocus() {
+        let available: [LibraryFocusTarget] = section == .history
+            ? appModel.watchHistory.map { .history($0.key) }
+            : appModel.favorites.map { .favorite($0.key) }
+        guard let target = FocusRestorationPlanner.resolvePosterCardReturn(
+            lastOpenedKey: lastOpenedFocus,
+            availableKeys: available
+        ) else {
+            return
+        }
+        focusedCard = target
+        DispatchQueue.main.async {
+            self.focusedCard = target
+        }
     }
 
     @ViewBuilder
@@ -80,13 +107,11 @@ public struct LibraryView: View {
             emptyPlaceholder(icon: "clock.arrow.circlepath", text: "暂无观看记录")
         } else {
             LazyVGrid(columns: columns, spacing: 28) {
-                ForEach(appModel.watchHistory) { item in
+                ForEach(appModel.watchHistory, id: \.key) { item in
                     VStack(alignment: .leading, spacing: 10) {
                         Button {
-                            if let site = appModel.config.sites.first(where: { $0.key == item.site }) ?? appModel.activeSite {
-                                let stub = CmsVideo(id: item.id, title: item.title, poster: item.poster, remarks: item.episode)
-                                appModel.selectedDetailContext = (site, stub)
-                            }
+                            lastOpenedFocus = .history(item.key)
+                            appModel.openWatchHistoryItem(item)
                         } label: {
                             PosterCardCell(
                                 video: CmsVideo(
@@ -94,10 +119,12 @@ public struct LibraryView: View {
                                     title: item.title,
                                     poster: item.poster,
                                     remarks: item.episode.isEmpty ? "\(Int(item.progressFraction * 100))%" : "\(item.episode) · \(Int(item.progressFraction * 100))%"
-                                )
+                                ),
+                                sourceBadge: appModel.originSourceDisplayName(for: item.site)
                             )
                         }
                         .tvCardButtonStyle()
+                        .focused($focusedCard, equals: .history(item.key))
 
                         Button {
                             appModel.removeHistoryItem(item)
@@ -121,13 +148,11 @@ public struct LibraryView: View {
             emptyPlaceholder(icon: "heart.slash", text: "暂无收藏影片")
         } else {
             LazyVGrid(columns: columns, spacing: 28) {
-                ForEach(appModel.favorites) { fav in
+                ForEach(appModel.favorites, id: \.key) { fav in
                     VStack(alignment: .leading, spacing: 10) {
                         Button {
-                            if let site = appModel.config.sites.first(where: { $0.key == fav.site }) ?? appModel.activeSite {
-                                let stub = CmsVideo(id: fav.id, title: fav.title, poster: fav.poster, remarks: fav.remarks)
-                                appModel.selectedDetailContext = (site, stub)
-                            }
+                            lastOpenedFocus = .favorite(fav.key)
+                            appModel.openFavoriteItem(fav)
                         } label: {
                             PosterCardCell(
                                 video: CmsVideo(
@@ -135,10 +160,12 @@ public struct LibraryView: View {
                                     title: fav.title,
                                     poster: fav.poster,
                                     remarks: fav.remarks
-                                )
+                                ),
+                                sourceBadge: appModel.originSourceDisplayName(for: fav.site)
                             )
                         }
                         .tvCardButtonStyle()
+                        .focused($focusedCard, equals: .favorite(fav.key))
 
                         Button {
                             appModel.removeFavoriteItem(fav)

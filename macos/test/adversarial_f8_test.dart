@@ -107,8 +107,15 @@ void main() {
             // Must be either 200 (if handled before expiry) or 410 (if handled after expiry)
             expect(res.statusCode, anyOf(200, 410));
           } else {
-            // Must be a cleanly closed socket error
-            expect(res, anyOf(isA<SocketException>(), isA<http.ClientException>()));
+            // Must be a cleanly closed socket error (macOS BSD can surface raw OSError errno=54)
+            expect(
+              res,
+              anyOf(
+                isA<SocketException>(),
+                isA<http.ClientException>(),
+                isA<OSError>(),
+              ),
+            );
           }
         }
       } finally {

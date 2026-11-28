@@ -44,12 +44,19 @@ final class DecoderRenderersFactory extends DefaultRenderersFactory {
     private final Context appContext;
     private final int mode;
     private final boolean displaySupportsDolbyVision;
+    private final TvAudioEffectProcessor audioEffectProcessor;
 
     DecoderRenderersFactory(Context context, int decoderMode) {
+        this(context, decoderMode, null);
+    }
+
+    DecoderRenderersFactory(
+            Context context, int decoderMode, TvAudioEffectProcessor audioEffectProcessor) {
         super(context);
         DecoderSupport.configure();
         appContext = context.getApplicationContext();
         mode = decoderMode;
+        this.audioEffectProcessor = audioEffectProcessor;
         displaySupportsDolbyVision = hasDisplayDolbyVisionSupport(appContext);
         setEnableDecoderFallback(true);
         setExtensionRendererMode(
@@ -202,13 +209,21 @@ final class DecoderRenderersFactory extends DefaultRenderersFactory {
     protected AudioSink buildAudioSink(
             Context context, boolean enableFloatOutput, boolean enableAudioTrackPlaybackParams) {
         AudioProcessor diag = diagnosticAudioProcessor;
-        if (diag == null) {
+        if (audioEffectProcessor == null && diag == null) {
             return super.buildAudioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams);
+        }
+        AudioProcessor[] processors;
+        if (audioEffectProcessor != null && diag != null) {
+            processors = new AudioProcessor[] {audioEffectProcessor, diag};
+        } else if (audioEffectProcessor != null) {
+            processors = new AudioProcessor[] {audioEffectProcessor};
+        } else {
+            processors = new AudioProcessor[] {diag};
         }
         return new DefaultAudioSink.Builder(context)
                 .setEnableFloatOutput(enableFloatOutput)
                 .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
-                .setAudioProcessors(new AudioProcessor[] {diag})
+                .setAudioProcessors(processors)
                 .build();
     }
 

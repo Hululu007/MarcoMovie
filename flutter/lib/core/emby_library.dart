@@ -75,8 +75,21 @@ class EmbyLibrary {
   static int _effectivePort(Uri uri) =>
       uri.hasPort ? uri.port : (uri.scheme.toLowerCase() == 'https' ? 443 : 80);
 
+  static String _cleanInput(String value) => value
+      .replaceAll(RegExp(r'[\u200B-\u200D\uFEFF]'), '')
+      .replaceAll('：', ':')
+      .replaceAll('／', '/')
+      .trim();
+
+  static String _normalizeSubPath(String rawPath) {
+    final cleaned = _cleanInput(rawPath)
+        .replaceAll(RegExp(r'/+$'), '')
+        .replaceFirst(RegExp(r'^/+'), '');
+    return cleaned.isEmpty ? '' : '/$cleaned';
+  }
+
   static String _cleanPath(String rawPath) {
-    var clean = rawPath.trim();
+    var clean = _cleanInput(rawPath);
     if (clean.isEmpty || clean == '/') return '';
     if (!clean.startsWith('/')) clean = '/$clean';
     clean = clean.replaceFirst(RegExp(r'/+$'), '');
@@ -90,12 +103,12 @@ class EmbyLibrary {
     return clean;
   }
 
-  /// Parses either a bare host/IP (`emby.example.com`) or full URL into structured fields.
+  /// Parses either a bare host/IP (`emby.example`) or full URL into structured fields.
   static EmbyConnectionSpec parseAddressToSpec(
     String raw, {
     bool defaultHttps = false,
   }) {
-    var cleaned = raw.trim();
+    var cleaned = _cleanInput(raw);
     if (cleaned.isEmpty) {
       return EmbyConnectionSpec(
         useHttps: defaultHttps,
@@ -139,7 +152,7 @@ class EmbyLibrary {
     String path = '',
     String portText = '',
   }) {
-    var trimmedHost = host.trim();
+    var trimmedHost = _cleanInput(host);
     if (trimmedHost.isEmpty) {
       throw const FormatException('请输入 Emby 服务器地址');
     }
@@ -157,7 +170,7 @@ class EmbyLibrary {
         parsedHostUri.userInfo.isNotEmpty ||
         parsedHostUri.hasQuery ||
         parsedHostUri.hasFragment) {
-      throw const FormatException('服务器地址格式无效，请填写域名或 IP（如 emby.example.com）');
+      throw const FormatException('服务器地址格式无效，请填写域名或 IP（如 emby.example）');
     }
     if (hasScheme &&
         !['http', 'https'].contains(parsedHostUri.scheme.toLowerCase())) {
@@ -165,7 +178,7 @@ class EmbyLibrary {
     }
 
     int? resolvedPort;
-    final trimmedPort = portText.trim();
+    final trimmedPort = _cleanInput(portText);
     if (trimmedPort.isNotEmpty) {
       resolvedPort = int.tryParse(trimmedPort);
       if (resolvedPort == null || resolvedPort < 1 || resolvedPort > 65535) {
@@ -191,11 +204,110 @@ class EmbyLibrary {
     ).toString();
   }
 
+  /// Compatibility helper retained for Jellyfin / cross-platform callers on main.
+  static String composeServerAddress({
+    required bool useHttps,
+    required String hostOrUrl,
+    String port = '',
+    String path = '',
+  }) {
+    var raw = _cleanInput(hostOrUrl);
+    if (raw.isEmpty) {
+      throw const FormatException('请输入 Emby 服务器地址');
+    }
+    final webIdx = raw.toLowerCase().indexOf('/web/');
+    if (webIdx > 0) {
+      raw = raw.substring(0, webIdx);
+    } else if (raw.toLowerCase().endsWith('/web')) {
+      raw = raw.substring(0, raw.length - 4);
+    }
+    final hasExplicitScheme = RegExp(
+      r'^[a-zA-Z][a-zA-Z0-9+.-]*://',
+    ).hasMatch(raw);
+    if (hasExplicitScheme) {
+      final u = Uri.tryParse(raw);
+      if (u == null ||
+          !['http', 'https'].contains(u.scheme.toLowerCase()) ||
+          u.host.isEmpty) {
+        throw const FormatException('请输入含 HTTP 或 HTTPS 的 Emby 服务器根地址');
+      }
+      var cleanPath = u.path.replaceFirst(RegExp(r'/+$'), '');
+      final extraPath = _normalizeSubPath(path);
+      if (cleanPath.isEmpty && extraPath.isNotEmpty) {
+        cleanPath = extraPath;
+      }
+      final trimmedPort = port.trim();
+      final explicitPort = int.tryParse(trimmedPort);
+      if (trimmedPort.isNotEmpty &&
+          (explicitPort == null || explicitPort < 1 || explicitPort > 65535)) {
+        throw const FormatException('端口号需为 1–65535 的数字');
+      }
+      final effectivePort = u.hasPort ? u.port : explicitPort;
+      return u
+          .replace(
+            scheme: u.scheme.toLowerCase(),
+            port: effectivePort,
+            path: cleanPath,
+            query: null,
+            fragment: null,
+          )
+          .toString();
+    }
+
+    final scheme = useHttps ? 'https' : 'http';
+    final cleanSub = _normalizeSubPath(path);
+    final hostAndPath = raw.replaceFirst(RegExp(r'^/+'), '');
+    final baseProbe = Uri.tryParse('$scheme://$hostAndPath');
+    if (baseProbe == null ||
+        baseProbe.host.isEmpty ||
+        baseProbe.userInfo.isNotEmpty ||
+        baseProbe.hasQuery) {
+      throw const FormatException('请输入有效的 Emby 服务器域名或 IP');
+    }
+    var effectivePath = baseProbe.path.replaceFirst(RegExp(r'/+$'), '');
+    if (effectivePath.isEmpty && cleanSub.isNotEmpty) {
+      effectivePath = cleanSub;
+    }
+    final trimmedPort = port.trim();
+    int? parsedPort;
+    if (trimmedPort.isNotEmpty) {
+      parsedPort = int.tryParse(trimmedPort);
+      if (parsedPort == null || parsedPort < 1 || parsedPort > 65535) {
+        throw const FormatException('端口号需为 1–65535 的数字');
+      }
+    }
+    final targetPort = baseProbe.hasPort
+        ? baseProbe.port
+        : (parsedPort ?? (useHttps ? null : 8096));
+    return baseProbe
+        .replace(
+          port: targetPort,
+          path: effectivePath,
+          query: null,
+          fragment: null,
+        )
+        .toString();
+  }
+
   static Uri _normalizeRoot(String address) {
-    var cleaned = address.trim();
+    var cleaned = _cleanInput(address);
+    if (cleaned.isEmpty) {
+      throw const FormatException('请输入 Emby 服务器根地址');
+    }
     final hashIdx = cleaned.indexOf('#');
     if (hashIdx >= 0 && cleaned.toLowerCase().contains('/web/')) {
       cleaned = cleaned.substring(0, hashIdx);
+    }
+    final lower = cleaned.toLowerCase();
+    final webIdx = lower.indexOf('/web/');
+    if (webIdx > 0) {
+      cleaned = cleaned.substring(0, webIdx).replaceFirst(RegExp(r'/+$'), '');
+    } else if (lower.endsWith('/web')) {
+      cleaned =
+          cleaned.substring(0, cleaned.length - 4).replaceFirst(RegExp(r'/+$'), '');
+    }
+    if (!RegExp(r'^[a-zA-Z][a-zA-Z0-9+.-]*://').hasMatch(cleaned)) {
+      cleaned = 'http://$cleaned';
     }
     final u = Uri.tryParse(cleaned);
     if (u == null ||
@@ -215,29 +327,65 @@ class EmbyLibrary {
     );
   }
 
-  static Uri _validatedSavedBase(String address) {
-    final u = _normalizeRoot(address);
-    return u;
+  static Uri _validatedSavedBase(String address) => _normalizeRoot(address);
+
+  static bool _isAllowedRedirect(Uri origin, Uri next) {
+    if (!['http', 'https'].contains(next.scheme.toLowerCase())) return false;
+    if (origin.host.toLowerCase() != next.host.toLowerCase()) return false;
+    if (origin.scheme == next.scheme) {
+      return _effectivePort(origin) == _effectivePort(next);
+    }
+    // Allow HTTP -> HTTPS upgrade on same host (never allow HTTPS -> HTTP downgrade with credentials).
+    return origin.scheme == 'http' && next.scheme == 'https';
   }
 
-  static List<Uri> _loginBaseCandidates(Uri root) {
-    final lower = root.path.toLowerCase();
-    if (lower.endsWith('/emby')) {
-      final stripped = root.path.substring(0, root.path.length - 5);
-      return <Uri>[root, root.replace(path: stripped)];
-    }
-    return <Uri>[
-      root.replace(path: '${root.path}/emby'),
-      root,
+  static Future<String> _probeHttpEmbyHint(Uri httpsUri) async {
+    final candidates = <Uri>[
+      httpsUri.replace(
+        scheme: 'http',
+        port: httpsUri.hasPort && httpsUri.port != 443 ? httpsUri.port : 8096,
+        path: '${httpsUri.path}/System/Info/Public',
+        query: null,
+        fragment: null,
+      ),
+      if (httpsUri.hasPort && httpsUri.port != 8096)
+        httpsUri.replace(
+          scheme: 'http',
+          port: 8096,
+          path: '/emby/System/Info/Public',
+          query: null,
+          fragment: null,
+        ),
     ];
-  }
-
-  static bool _shouldRetryAlternateBase(Object error) {
-    if (error is HttpException) {
-      return error.message.contains('HTTP 404') ||
-          error.message.contains('HTTP 405');
+    for (final probeUrl in candidates) {
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 3);
+      final timer = Timer(
+        const Duration(seconds: 4),
+        () => client.close(force: true),
+      );
+      try {
+        final req = await client.getUrl(probeUrl);
+        req.followRedirects = false;
+        req.headers.set('Accept', 'application/json');
+        final resp = await req.close();
+        if (resp.statusCode >= 200 && resp.statusCode < 300) {
+          final bodyBytes = await resp
+              .fold<List<int>>(<int>[], (acc, b) => acc..addAll(b));
+          final decoded = jsonDecode(utf8.decode(bodyBytes));
+          if (decoded is Map &&
+              (decoded['Id'] != null || decoded['ServerName'] != null)) {
+            final serverName = decoded['ServerName']?.toString().trim() ?? '';
+            final title = serverName.isNotEmpty ? '「$serverName」' : 'Emby 服务';
+            return '该服务器未开启 HTTPS，已在 ${probeUrl.scheme}://${probeUrl.host}:${probeUrl.port} 检测到 $title，请切换为 HTTP（端口 ${probeUrl.port}）后重试';
+          }
+        }
+      } catch (_) {
+      } finally {
+        timer.cancel();
+        client.close(force: true);
+      }
     }
-    return error is FormatException;
+    return '';
   }
 
   static Future<SubscriptionEntry> login(
@@ -254,47 +402,78 @@ class EmbyLibrary {
     if (trimmedUser.isEmpty) {
       throw const FormatException('请输入 Emby 用户名');
     }
-    final root = _normalizeRoot(address);
-    final candidates = _loginBaseCandidates(root);
+    final trimmedInput = _cleanInput(address);
+    final rawHasScheme = RegExp(
+      r'^[a-zA-Z][a-zA-Z0-9+.-]*://',
+    ).hasMatch(trimmedInput);
+    final bareRoot = _normalizeRoot(trimmedInput);
+    final userSpecifiedEmby = bareRoot.path.toLowerCase().endsWith('/emby');
     final prefs = await SharedPreferences.getInstance();
     final device = prefs.getString('emby.device') ?? _nonce();
     if (!await prefs.setString('emby.device', device)) {
       throw StateError('无法保存设备标识');
     }
 
-    Uri effectiveBase = candidates.first;
+    final candidateBases = <Uri>[
+      if (userSpecifiedEmby)
+        bareRoot
+      else ...[
+        bareRoot.replace(path: '${bareRoot.path}/emby'),
+        bareRoot,
+      ],
+      if (!rawHasScheme && !bareRoot.hasPort && bareRoot.scheme == 'http') ...[
+        bareRoot.replace(port: 8096, path: '${bareRoot.path}/emby'),
+        bareRoot.replace(port: 8096),
+      ],
+    ];
+    Uri activeBase = candidateBases.first;
     Map<String, dynamic>? authJson;
-    Object? lastError;
-    for (var i = 0; i < candidates.length; i++) {
-      final candidate = candidates[i];
-      final loginClient = EmbyLibrary._(
-        candidate,
-        '',
-        '',
-        device,
-        allowInvalidCert: allowInvalidCert,
-      );
+    Object? lastErr;
+    for (final candidate in candidateBases) {
       try {
-        authJson = await loginClient._api(
+        final attempt = EmbyLibrary._(
+          candidate,
+          '',
+          '',
+          device,
+          allowInvalidCert: allowInvalidCert,
+        );
+        final res = await attempt._apiWithResolvedBase(
           '/Users/AuthenticateByName',
           body: {'Username': trimmedUser, 'Pw': password},
         );
-        effectiveBase = candidate;
-        lastError = null;
+        activeBase = res.$1;
+        authJson = res.$2;
         break;
-      } on StateError {
-        rethrow;
       } catch (e) {
-        lastError = e;
-        if (i + 1 < candidates.length && _shouldRetryAlternateBase(e)) {
+        lastErr = e;
+        if (e is StateError && e.message.contains('拒绝访问')) rethrow;
+        if ((e is HandshakeException || e is TlsException) &&
+            candidate.scheme == 'https') {
+          final hint = await _probeHttpEmbyHint(candidate);
+          if (hint.isNotEmpty) {
+            throw StateError(hint);
+          }
+          throw StateError(
+            'TLS 握手失败：该服务器端口可能使用的是 HTTP 协议而非 HTTPS，请关闭「HTTPS」开关并确认端口号（如 8096）后重试；若为自签名 HTTPS 证书可开启「忽略证书校验」',
+          );
+        }
+        if (candidate == candidateBases.first &&
+            candidateBases.length > 1 &&
+            (e is HttpException &&
+                    (e.message.contains('HTTP 404') ||
+                        e.message.contains('HTTP 405')) ||
+                e is FormatException)) {
           continue;
         }
         rethrow;
       }
     }
     if (authJson == null) {
-      if (lastError != null) throw lastError;
-      throw StateError('Emby 登录失败');
+      if (lastErr != null) {
+        Error.throwWithStackTrace(lastErr, StackTrace.current);
+      }
+      throw StateError('无法连接到 Emby 服务器');
     }
 
     final user = authJson['User']?['Id'];
@@ -305,7 +484,7 @@ class EmbyLibrary {
     // Verify the authenticated user can actually read media library views before
     // persisting the library entry (catches 403/disabled/unauthorized accounts).
     final authed = EmbyLibrary._(
-      effectiveBase,
+      activeBase,
       user,
       token,
       device,
@@ -315,17 +494,28 @@ class EmbyLibrary {
     if (views['Items'] is! List) {
       throw StateError('Emby 未返回有效媒体库目录，请检查当前账号的媒体库访问权限');
     }
-    final key = sha256.convert(utf8.encode('$effectiveBase\n$user')).toString();
+    final key = sha256.convert(utf8.encode('$activeBase\n$user')).toString();
     final trimmedLabel = label.trim();
-    final displayName =
-        trimmedLabel.isNotEmpty ? trimmedLabel : 'Emby · $trimmedUser';
+    String displayName;
+    if (trimmedLabel.isNotEmpty) {
+      displayName = trimmedLabel;
+    } else {
+      var serverTitle = '';
+      try {
+        final sys = await authed._api('/System/Info/Public');
+        serverTitle = sys['ServerName']?.toString().trim() ?? '';
+      } catch (_) {}
+      displayName = serverTitle.isNotEmpty
+          ? (serverTitle.startsWith('Emby') ? serverTitle : 'Emby · $serverTitle')
+          : 'Emby · $trimmedUser';
+    }
     final api = '$prefix$key';
     final updatedAt = DateTime.now().millisecondsSinceEpoch;
     if (!await prefs.setString(
       'emby.account.$key',
       jsonEncode({
-        'base': effectiveBase.toString(),
-        'rawRoot': root.toString(),
+        'base': activeBase.toString(),
+        'rawRoot': bareRoot.toString(),
         'user': user,
         'username': trimmedUser,
         'token': token,
@@ -522,13 +712,15 @@ class EmbyLibrary {
   Uri _url(String path, [Map<String, String>? params]) =>
       base.replace(path: base.path + path, queryParameters: params);
 
-  static bool _isSameHost(Uri a, Uri b) =>
-      ['http', 'https'].contains(a.scheme.toLowerCase()) &&
-      ['http', 'https'].contains(b.scheme.toLowerCase()) &&
-      a.host.toLowerCase() == b.host.toLowerCase() &&
-      _effectivePort(a) == _effectivePort(b);
-
   Future<Map<String, dynamic>> _api(
+    String path, {
+    Map<String, String>? params,
+    Map? body,
+  }) async {
+    return (await _apiWithResolvedBase(path, params: params, body: body)).$2;
+  }
+
+  Future<(Uri, Map<String, dynamic>)> _apiWithResolvedBase(
     String path, {
     Map<String, String>? params,
     Map? body,
@@ -546,25 +738,24 @@ class EmbyLibrary {
       () => client.close(force: true),
     );
     try {
+      var activeBase = base;
       var currentUrl = _url(path, params);
       var method = body == null ? 'GET' : 'POST';
-      Map? currentBody = body;
+      var currentBodyBytes = body == null ? null : utf8.encode(jsonEncode(body));
+      final authHeader =
+          'MediaBrowser Client="Marco Movie", Device="${Platform.operatingSystem}", DeviceId="$device", Version="0.7.12"${token.isNotEmpty ? ', Token="$token"' : ''}';
       HttpClientResponse? response;
       for (var hop = 0; hop < 6; hop++) {
         final r = await client.openUrl(method, currentUrl);
         r.followRedirects = false;
-        final authHeader =
-            'MediaBrowser Client="Marco Movie", Device="${Platform.operatingSystem}", DeviceId="$device", Version="0.7.12"${token.isNotEmpty ? ', Token="$token"' : ''}';
-        r.headers.set('X-Emby-Authorization', authHeader);
-        r.headers.set(
-          'Authorization',
-          'Emby Client="Marco Movie", Device="${Platform.operatingSystem}", DeviceId="$device", Version="0.7.12"',
-        );
         r.headers.set('Accept', 'application/json');
+        r.headers.set('User-Agent', _userAgent);
+        r.headers.set('X-Emby-Authorization', authHeader);
+        r.headers.set('Authorization', authHeader);
         if (token.isNotEmpty) r.headers.set('X-Emby-Token', token);
-        if (currentBody != null) {
+        if (currentBodyBytes != null) {
           r.headers.contentType = ContentType.json;
-          r.write(jsonEncode(currentBody));
+          r.add(currentBodyBytes);
         }
         final candidateResp = await r.close();
         final status = candidateResp.statusCode;
@@ -579,12 +770,20 @@ class EmbyLibrary {
             throw HttpException('Emby 重定向地址缺失（HTTP $status）');
           }
           final nextUrl = currentUrl.resolve(loc.trim());
-          if (!_isSameHost(currentUrl, nextUrl)) {
-            throw const FormatException('Emby 拒绝跨主机重定向以保护账号凭据');
+          if (!_isAllowedRedirect(activeBase, nextUrl)) {
+            throw StateError('Emby 拒绝跨源或降级重定向，请检查服务器地址');
+          }
+          if (nextUrl.scheme.toLowerCase() != activeBase.scheme.toLowerCase()) {
+            activeBase = activeBase.replace(
+              scheme: nextUrl.scheme.toLowerCase(),
+              port: nextUrl.hasPort
+                  ? nextUrl.port
+                  : (nextUrl.scheme.toLowerCase() == 'https' ? 443 : 80),
+            );
           }
           if (status == 303) {
             method = 'GET';
-            currentBody = null;
+            currentBodyBytes = null;
           }
           currentUrl = nextUrl;
           continue;
@@ -593,7 +792,7 @@ class EmbyLibrary {
         break;
       }
       if (response == null) {
-        throw const FormatException('Emby 重定向次数过多');
+        throw const HttpException('Emby 重定向次数过多');
       }
       if (response.statusCode == 401 || response.statusCode == 403) {
         await response.drain<void>();
@@ -610,20 +809,12 @@ class EmbyLibrary {
         }
         bytes.addAll(chunk);
       }
-      if (bytes.isEmpty) return <String, dynamic>{};
+      if (bytes.isEmpty) return (activeBase, <String, dynamic>{});
       final decoded = jsonDecode(utf8.decode(bytes));
       if (decoded is! Map) {
         throw const FormatException('Emby 未返回有效 JSON 响应');
       }
-      return Map<String, dynamic>.from(decoded);
-    } on HandshakeException {
-      throw StateError(
-        'TLS 握手失败：该服务器端口可能使用的是 HTTP 协议而非 HTTPS，请关闭「HTTPS」开关并确认端口号（如 8096）后重试；若为自签名 HTTPS 证书可开启「忽略证书校验」',
-      );
-    } on TlsException {
-      throw StateError(
-        'HTTPS 安全连接失败：请确认服务器端口是否启用 HTTPS，或开启「忽略证书校验」后重试',
-      );
+      return (activeBase, Map<String, dynamic>.from(decoded));
     } finally {
       deadline.cancel();
       client.close(force: true);

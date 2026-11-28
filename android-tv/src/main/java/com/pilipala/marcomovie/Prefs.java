@@ -484,6 +484,7 @@ final class Prefs {
                                     "tracks",
                                     "epg",
                                     "decoder",
+                                    "sleep_timer",
                                     "skip-intro-tool",
                                     "skip-outro-tool",
                                     "more")));

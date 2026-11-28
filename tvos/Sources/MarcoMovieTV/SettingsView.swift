@@ -434,7 +434,7 @@ public struct SettingsView: View {
                     .font(TvFont.sectionTitle)
                     .foregroundColor(.white)
                 Spacer()
-                Text("可用 \(appModel.config.availableSites.count) / 共 \(appModel.config.sites.count)")
+                Text("可用 \(appModel.config.publicAvailableSites.count) / 共 \(appModel.config.sites.filter { !$0.isEffectivelyPrivate }.count)")
                     .font(TvFont.buttonSmall)
                     .foregroundColor(TvTheme.accent)
             }
@@ -447,9 +447,20 @@ public struct SettingsView: View {
                 ForEach(appModel.subscriptions) { sub in
                     HStack(spacing: 16) {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(sub.name)
-                                .font(TvFont.cardTitle)
-                                .foregroundColor(.white)
+                            HStack(spacing: 8) {
+                                Text(sub.name)
+                                    .font(TvFont.cardTitle)
+                                    .foregroundColor(.white)
+                                if sub.isEffectivelyPrivate {
+                                    Text("私密")
+                                        .font(TvFont.badge)
+                                        .foregroundColor(.black)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 2)
+                                        .background(TvTheme.gold)
+                                        .clipShape(Capsule())
+                                }
+                            }
                             Text(sub.url.isEmpty ? "局域网文本推送" : sub.url)
                                 .font(TvFont.caption)
                                 .foregroundColor(TvTheme.mutedText)
@@ -469,8 +480,8 @@ public struct SettingsView: View {
                 }
             }
 
-            if !appModel.config.depots.isEmpty {
-                Button("打开多仓与片源切换面板（共 \(appModel.config.depots.count) 个仓库）") {
+            if !appModel.config.publicDepots.isEmpty {
+                Button("打开多仓与片源切换面板（共 \(appModel.config.publicDepots.count) 个仓库）") {
                     appModel.showSiteSwitcherSheet = true
                 }
                 .buttonStyle(TvPillButtonStyle())
@@ -560,6 +571,16 @@ public struct SettingsView: View {
                 TvToggleChip("同步观看历史与收藏", isOn: $appModel.webdavConfig.syncHistory)
 
                 Spacer()
+
+                Button {
+                    appModel.openLanQrModal()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "qrcode.viewfinder")
+                        Text("手机扫码绑定")
+                    }
+                }
+                .buttonStyle(TvPillButtonStyle())
 
                 Button {
                     Task { await appModel.triggerManualWebDavSync() }

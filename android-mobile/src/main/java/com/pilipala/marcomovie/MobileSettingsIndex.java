@@ -244,6 +244,12 @@ final class MobileSettingsIndex {
         // Cluster 3: 互联与系统 — 云同步与隐私互联 (subPage = 6)
         add(SUB_SYNC, "ms-cloud-sync", "云同步与隐私互联", "云盘多端自动同步 (WebDAV)", "webdav 云同步 历史 收藏 增量 同步");
         add(SUB_SYNC, "ms-lan-sync", "云同步与隐私互联", "同 Wi-Fi 设备局域网互传同步", "局域网 lan 同步 互传 设备");
+        add(
+                SUB_SYNC,
+                "ms-lan-scan-bind",
+                "云同步与隐私互联",
+                "扫码绑定电视 / 电脑 WebDAV",
+                "webdav 扫码 绑定 电视 电脑 qr 局域网");
         add(SUB_SYNC, "ms-push-tv", "云同步与隐私互联", "扫码推送片源 / 辅助输入至电视", "电视 tv 扫码 推送 推源 辅助输入 互联");
         add(SUB_SYNC, "ms-cast-enable", "云同步与隐私互联", "局域网 DLNA 无线投屏", "dlna 投屏 电视 广播");
         add(SUB_SYNC, "ms-privacy", "云同步与隐私互联", "隐私空间与 4 位数字口令", "隐私 密码 pin 隐藏 加密 隔离");

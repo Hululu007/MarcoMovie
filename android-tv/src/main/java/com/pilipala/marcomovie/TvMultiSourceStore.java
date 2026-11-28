@@ -1662,6 +1662,84 @@ final class TvMultiSourceStore {
         }
     }
 
+    /**
+     * Switches the active child warehouse inside an existing multi-warehouse subscription while
+     * preserving all other enabled subscriptions and keeping {@code _marco_depots} intact.
+     */
+    SubscriptionRecord switchSubscriptionDepot(
+            ConfigLibrary library,
+            String subId,
+            String warehouseRoot,
+            Cms.Config selectedLeaf,
+            long updatedAt)
+            throws Exception {
+        if (library == null || selectedLeaf == null || selectedLeaf.raw == null) {
+            throw new IOException("子仓库数据无效");
+        }
+        synchronized (LOCK) {
+            State st = readState();
+            SubscriptionRecord target =
+                    (subId != null && !subId.trim().isEmpty()) ? st.findById(subId.trim()) : null;
+            if (target == null && warehouseRoot != null && !warehouseRoot.trim().isEmpty()) {
+                target = st.findByOrigin(warehouseRoot.trim());
+            }
+            if (target == null) {
+                target = st.findById(st.currentSubscriptionId);
+            }
+            if (target == null) {
+                for (SubscriptionRecord r : st.subscriptions) {
+                    if (r.enabled) {
+                        target = r;
+                        break;
+                    }
+                }
+            }
+            if (target == null) {
+                throw new IOException("未找到可切换的多仓订阅");
+            }
+            List<ConfigLibrary.Entry> libEntries = library.entries();
+            ConfigLibrary.Entry prevEntry = findLibraryEntry(libEntries, target);
+            String prevRaw = prevEntry != null ? library.raw(prevEntry) : "{\"sites\":[]}";
+            String combined =
+                    com.pilipala.source.Warehouse.retainDirectory(
+                            selectedLeaf.raw,
+                            selectedLeaf.origin,
+                            prevRaw,
+                            raw -> new JSONObject(Cms.withoutComments(raw)));
+            Cms.Config verifiedParsed = Cms.parseConfig(combined, selectedLeaf.origin);
+            String rememberOrigin =
+                    !target.origin.isEmpty()
+                            ? target.origin
+                            : (warehouseRoot != null && !warehouseRoot.isEmpty()
+                                    ? warehouseRoot
+                                    : selectedLeaf.origin);
+            ConfigLibrary.Entry saved =
+                    library.remember(
+                            combined, rememberOrigin, target.name, "", Math.max(1L, updatedAt));
+            String readBack = library.raw(saved);
+            if (!readBack.equals(combined)) {
+                verifiedParsed = Cms.parseConfig(readBack, selectedLeaf.origin);
+            }
+            target.libraryEntryId = saved.id;
+            target.enabled = true;
+            target.lastUpdated = Math.max(1L, updatedAt);
+            target.lastError = "";
+            target.totalSiteCount = verifiedParsed.sites.size();
+            if (!verifiedParsed.sites.isEmpty()
+                    && verifiedParsed.sites.get(0) != null
+                    && !verifiedParsed.sites.get(0).key.isEmpty()) {
+                String rawFirst = stripOwnStableSuffix(target.id, verifiedParsed.sites.get(0).key);
+                st.currentSubscriptionId = target.id;
+                st.currentRawSiteKey = rawFirst;
+                st.currentStableSiteKey = stableSiteKey(target.id, rawFirst);
+            }
+            st.initialized = true;
+            st.revision++;
+            saveState(st);
+            return target.copy();
+        }
+    }
+
     /** Atomically enables only the specified subscription IDs, keeping all others disabled for later re-enable. */
     State enableOnlySubscriptions(Set<String> keepEnabledIds) throws IOException {
         synchronized (LOCK) {
@@ -1990,6 +2068,7 @@ final class TvMultiSourceStore {
         final class LoadedSub {
             final SubscriptionRecord rec;
             final String spider;
+            final String warehouse;
             final JSONArray depots;
             final JSONArray rawParses;
             final JSONArray rawRules;
@@ -2004,6 +2083,7 @@ final class TvMultiSourceStore {
             LoadedSub(SubscriptionRecord rec, Cms.Config parsed, JSONObject rawRoot) {
                 this.rec = rec;
                 this.spider = parsed.spider == null ? "" : parsed.spider;
+                this.warehouse = parsed.warehouse == null ? "" : parsed.warehouse;
                 this.depots = parsed.depots;
                 this.rawParses = rawRoot.optJSONArray("parses");
                 this.rawRules = rawRoot.optJSONArray("rules");
@@ -2106,6 +2186,7 @@ final class TvMultiSourceStore {
         Map<String, String> keyToSub = new LinkedHashMap<>();
         Map<String, String> keyToRaw = new LinkedHashMap<>();
         String firstSpider = "";
+        String firstWarehouse = "";
         StringBuilder originSig = new StringBuilder();
         boolean multiSub = loaded.size() > 1;
 
@@ -2115,6 +2196,9 @@ final class TvMultiSourceStore {
             originSig.append(rec.id).append('\n');
             if (firstSpider.isEmpty() && !ls.spider.isEmpty()) {
                 firstSpider = ls.spider;
+            }
+            if (firstWarehouse.isEmpty() && !ls.warehouse.isEmpty()) {
+                firstWarehouse = ls.warehouse;
             }
             int limit = limits[i];
             int added = 0;
@@ -2158,7 +2242,12 @@ final class TvMultiSourceStore {
                     JSONObject dep = ls.depots.optJSONObject(d);
                     if (dep == null) continue;
                     String u = dep.optString("url", "").trim();
-                    if (!u.isEmpty() && seenDepots.add(u)) mergedDepots.put(copyJson(dep));
+                    if (!u.isEmpty() && seenDepots.add(u)) {
+                        JSONObject depCopy = copyJson(dep);
+                        depCopy.put("_subId", rec.id);
+                        if (!ls.warehouse.isEmpty()) depCopy.put("_warehouseRoot", ls.warehouse);
+                        mergedDepots.put(depCopy);
+                    }
                 }
             }
             JSONArray rawParses = ls.rawParses;
@@ -2202,7 +2291,12 @@ final class TvMultiSourceStore {
         if (mergedRules.length() > 0) root.put("rules", mergedRules);
         if (mergedAds.length() > 0) root.put("ads", mergedAds);
         if (mergedLives.length() > 0) root.put("lives", mergedLives);
-        if (mergedDepots.length() > 0) root.put("depots", mergedDepots);
+        if (mergedDepots.length() > 0) {
+            root.put(com.pilipala.source.Warehouse.DEPOTS, mergedDepots);
+        }
+        if (!firstWarehouse.isEmpty()) {
+            root.put(com.pilipala.source.Warehouse.ROOT, firstWarehouse);
+        }
 
         String effectiveOrigin =
                 loaded.size() == 1
@@ -2220,6 +2314,7 @@ final class TvMultiSourceStore {
             built.raw = root.toString();
             built.origin = effectiveOrigin;
             built.spider = firstSpider;
+            built.warehouse = firstWarehouse;
             if (mergedDepots.length() > 0) built.depots = mergedDepots;
         }
         markEffectiveRuntimeConfig(built);

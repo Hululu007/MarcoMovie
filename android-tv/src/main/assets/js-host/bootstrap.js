@@ -9,7 +9,7 @@ globalThis.local={
 };
 globalThis.pdfh=function(html,selector){return __hostHtml(String(html||''),String(selector||''),'one');};
 globalThis.pdfa=function(html,selector){return JSON.parse(__hostHtml(String(html||''),String(selector||''),'many'));};
-globalThis.pd=function(html,selector,base){return joinUrl(base||'',pdfh(html,selector));};
+globalThis.pd=function(html,selector,base){var v=pdfh(html,selector);return v?joinUrl(base||'',v):'';};
 globalThis.pdfl=globalThis.pdfa;
 globalThis.joinUrl=function(base,part){return __hostJoin(String(base||''),String(part||''));};
 globalThis.getProxy=function(){return __proxyAddress;};

@@ -387,8 +387,8 @@ void main() {
         );
         ai.configureForTest(
           secureStorage: secure,
-          codexResponsesEndpoint: 'https://chatgpt.com/backend-api/codex/responses',
-          codexModelsEndpoint: 'https://chatgpt.com/backend-api/codex/models',
+          codexResponsesEndpoint: 'https://codex.example/backend-api/codex/responses',
+          codexModelsEndpoint: 'https://codex.example/backend-api/codex/models',
           labUnlockedForTest: true,
           experimentalOAuthForTest: true,
         );
@@ -468,7 +468,7 @@ void main() {
         );
         ai.configureForTest(
           secureStorage: secure,
-          codexResponsesEndpoint: 'https://chatgpt.com/backend-api/codex/responses',
+          codexResponsesEndpoint: 'https://codex.example/backend-api/codex/responses',
           labUnlockedForTest: true,
           experimentalOAuthForTest: true,
         );
@@ -617,7 +617,7 @@ void main() {
             }
             return http.Response('not found', 404);
           }),
-          codexResponsesEndpoint: 'https://chatgpt.com/backend-api/codex/responses',
+          codexResponsesEndpoint: 'https://codex.example/backend-api/codex/responses',
           labUnlockedForTest: true,
           experimentalOAuthForTest: true,
         );

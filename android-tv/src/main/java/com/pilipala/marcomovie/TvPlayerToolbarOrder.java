@@ -30,6 +30,7 @@ final class TvPlayerToolbarOrder {
     static final String KEY_TRACKS = "tracks";
     static final String KEY_EPG = "epg";
     static final String KEY_DECODER = "decoder";
+    static final String KEY_SLEEP_TIMER = "sleep_timer";
     static final String KEY_SKIP_INTRO = "skip-intro-tool";
     static final String KEY_SKIP_OUTRO = "skip-outro-tool";
     static final String KEY_MORE = "more";
@@ -99,6 +100,7 @@ final class TvPlayerToolbarOrder {
                             KEY_AUDIO_TRACKS,
                             KEY_SKIP_INTRO,
                             KEY_SKIP_OUTRO,
+                            KEY_SLEEP_TIMER,
                             KEY_DECODER));
 
     private static final List<String> ALL_CLASSIC_VOD_KEYS =
@@ -115,6 +117,7 @@ final class TvPlayerToolbarOrder {
                             KEY_AUDIO_TRACKS,
                             KEY_SKIP_INTRO,
                             KEY_SKIP_OUTRO,
+                            KEY_SLEEP_TIMER,
                             KEY_DECODER));
 
     private static final Set<String> LIVE_APPLICABLE_MODERN_KEYS =
@@ -126,6 +129,7 @@ final class TvPlayerToolbarOrder {
                                     KEY_LINES,
                                     KEY_EPG,
                                     KEY_NEXT_EPISODE,
+                                    KEY_SLEEP_TIMER,
                                     KEY_DECODER,
                                     KEY_MORE)));
 
@@ -137,6 +141,7 @@ final class TvPlayerToolbarOrder {
                                     KEY_LINES,
                                     KEY_EPG,
                                     KEY_NEXT_EPISODE,
+                                    KEY_SLEEP_TIMER,
                                     KEY_DECODER,
                                     KEY_MORE)));
 
@@ -378,6 +383,8 @@ final class TvPlayerToolbarOrder {
                 return "音轨（独立按钮）";
             case KEY_DECODER:
                 return "解码 / 播放器";
+            case KEY_SLEEP_TIMER:
+                return "定时关闭（独立按钮）";
             case KEY_SKIP_INTRO:
                 return "跳过片头（独立按钮）";
             case KEY_SKIP_OUTRO:
@@ -414,6 +421,8 @@ final class TvPlayerToolbarOrder {
                 return "音轨";
             case KEY_DECODER:
                 return "解码";
+            case KEY_SLEEP_TIMER:
+                return "定时";
             case KEY_SKIP_INTRO:
                 return "片头";
             case KEY_SKIP_OUTRO:
@@ -482,6 +491,8 @@ final class TvPlayerToolbarOrder {
                 return introSec > 0 ? ("跳过片头 " + formatClockSeconds(introSec)) : "跳过片头";
             case KEY_SKIP_OUTRO:
                 return outroSec > 0 ? ("跳过片尾 " + formatClockSeconds(outroSec)) : "跳过片尾";
+            case KEY_SLEEP_TIMER:
+                return "定时关闭";
             case KEY_MORE:
                 return "更多";
             default:

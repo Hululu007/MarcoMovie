@@ -29,7 +29,13 @@ public final class CspEngine implements SourceEngine {
             Collections.synchronizedSet(new LinkedHashSet<>());
     static volatile String activeJarDeclaration = "";
     static volatile DexClassLoader activeProxyLoader;
+    static volatile ClassLoader lastPlayerLoader;
     static volatile PluginApplication pluginAppWrapper;
+    private static volatile String pendingPluginSubtitlePath = "";
+    private static volatile long pendingPluginSubtitleAtMs = 0L;
+    private static final java.util.WeakHashMap<
+                    ClassLoader, java.lang.ref.WeakReference<android.app.Activity>>
+            SYNCED_ACTIVITY_BY_LOADER = new java.util.WeakHashMap<>();
 
     static boolean hasGrantedAllFilesAccess() {
         if (android.os.Build.VERSION.SDK_INT >= 30) {
@@ -157,6 +163,19 @@ public final class CspEngine implements SourceEngine {
 
     public static void onPluginSubtitle(String path) {
         if (path == null || path.trim().isEmpty()) return;
+        pendingPluginSubtitlePath = path.trim();
+        pendingPluginSubtitleAtMs = android.os.SystemClock.elapsedRealtime();
+    }
+
+    static String consumeRecentPluginSubtitle(long maxAgeMs) {
+        String p = pendingPluginSubtitlePath;
+        long at = pendingPluginSubtitleAtMs;
+        if (p == null || p.isEmpty()) return "";
+        long age = android.os.SystemClock.elapsedRealtime() - at;
+        if (age < 0 || age > maxAgeMs) return "";
+        pendingPluginSubtitlePath = "";
+        pendingPluginSubtitleAtMs = 0L;
+        return p;
     }
 
     public static void onPluginConfigRefreshed() {
@@ -206,7 +225,8 @@ public final class CspEngine implements SourceEngine {
                     throw firstError;
                 }
             }
-            String resolvedSha = digest(artifact, "SHA-256");
+            String resolvedSha = verifiedShaForFile(artifact);
+            if (resolvedSha == null) resolvedSha = digest(artifact, "SHA-256");
             DexClassLoader loader;
             try {
                 loader = loader(app, artifact, resolvedSha);
@@ -605,9 +625,24 @@ public final class CspEngine implements SourceEngine {
         synchronized (ALL_PLUGIN_LOADERS) {
             snapshot.addAll(ALL_PLUGIN_LOADERS);
         }
+        int curPort = ProxyAddress.port;
         for (ClassLoader loader : snapshot) {
-            syncPluginProxyPort(loader, ProxyAddress.port);
-            syncPluginActivity(loader, activity);
+            boolean alreadySynced = false;
+            synchronized (SYNCED_ACTIVITY_BY_LOADER) {
+                java.lang.ref.WeakReference<android.app.Activity> ref =
+                        SYNCED_ACTIVITY_BY_LOADER.get(loader);
+                if (ref != null && ref.get() == activity) {
+                    alreadySynced = true;
+                }
+            }
+            syncPluginProxyPort(loader, curPort);
+            if (!alreadySynced) {
+                syncPluginActivity(loader, activity);
+                synchronized (SYNCED_ACTIVITY_BY_LOADER) {
+                    SYNCED_ACTIVITY_BY_LOADER.put(
+                            loader, new java.lang.ref.WeakReference<>(activity));
+                }
+            }
         }
     }
 
@@ -744,6 +779,14 @@ public final class CspEngine implements SourceEngine {
     }
 
     static void syncPluginProxyPort(ClassLoader loader, int port) {
+        if (port > 0) {
+            try {
+                Class.forName("com.github.catvod.Proxy")
+                        .getMethod("set", int.class)
+                        .invoke(null, port);
+            } catch (Throwable ignored) {
+            }
+        }
         if (loader == null || port <= 0) return;
         for (ClassLoader cl : collectPluginLoaders(loader, null)) {
             for (String proxyClassName :
@@ -757,12 +800,32 @@ public final class CspEngine implements SourceEngine {
                         continue;
                     } catch (Throwable ignored) {
                     }
+                    boolean matchedNamedPort = false;
+                    Field singleStaticIntField = null;
+                    int staticIntCount = 0;
                     for (Field f : proxyClass.getDeclaredFields()) {
-                        if (Modifier.isStatic(f.getModifiers())
-                                && (f.getType() == int.class || f.getType() == Integer.class)
-                                && f.getName().toLowerCase(Locale.ROOT).contains("port")) {
-                            f.setAccessible(true);
-                            f.setInt(null, port);
+                        int mods = f.getModifiers();
+                        if (Modifier.isStatic(mods)
+                                && (f.getType() == int.class || f.getType() == Integer.class)) {
+                            if (!Modifier.isFinal(mods)) {
+                                singleStaticIntField = f;
+                                staticIntCount++;
+                            }
+                            if (f.getName().toLowerCase(Locale.ROOT).contains("port")) {
+                                f.setAccessible(true);
+                                if (f.getType() == int.class) f.setInt(null, port);
+                                else f.set(null, port);
+                                matchedNamedPort = true;
+                            }
+                        }
+                    }
+                    // ProGuarded CatVod JARs rename Proxy.port to a single `private static int a`.
+                    if (!matchedNamedPort && staticIntCount == 1 && singleStaticIntField != null) {
+                        singleStaticIntField.setAccessible(true);
+                        if (singleStaticIntField.getType() == int.class) {
+                            singleStaticIntField.setInt(null, port);
+                        } else {
+                            singleStaticIntField.set(null, port);
                         }
                     }
                 } catch (Throwable ignored) {
@@ -1037,13 +1100,18 @@ public final class CspEngine implements SourceEngine {
 
     public static Object[] proxy(Application app, Cms.Config config, Map<String, String> params)
             throws Exception {
-        LinkedHashSet<DexClassLoader> candidates = new LinkedHashSet<>();
+        LinkedHashSet<ClassLoader> candidates = new LinkedHashSet<>();
+        if (lastPlayerLoader != null) {
+            candidates.add(lastPlayerLoader);
+        }
         if (activeProxyLoader != null) {
             candidates.add(activeProxyLoader);
         } else if (activeJarDeclaration != null && !activeJarDeclaration.trim().isEmpty()) {
             try {
                 File artifact = obtain(app, activeJarDeclaration);
-                DexClassLoader loaded = loader(app, artifact, digest(artifact, "SHA-256"));
+                String sha = verifiedShaForFile(artifact);
+                if (sha == null) sha = digest(artifact, "SHA-256");
+                DexClassLoader loaded = loader(app, artifact, sha);
                 activeProxyLoader = loaded;
                 candidates.add(loaded);
             } catch (Exception ignored) {
@@ -1052,19 +1120,23 @@ public final class CspEngine implements SourceEngine {
         if (config != null && config.spider != null && !config.spider.trim().isEmpty()) {
             try {
                 File mainArtifact = obtain(app, config.spider);
-                DexClassLoader mainLoader =
-                        loader(app, mainArtifact, digest(mainArtifact, "SHA-256"));
+                String sha = verifiedShaForFile(mainArtifact);
+                if (sha == null) sha = digest(mainArtifact, "SHA-256");
+                DexClassLoader mainLoader = loader(app, mainArtifact, sha);
                 candidates.add(mainLoader);
                 if (activeProxyLoader == null) activeProxyLoader = mainLoader;
             } catch (Exception e) {
                 if (candidates.isEmpty()) throw e;
             }
         }
+        synchronized (ALL_PLUGIN_LOADERS) {
+            candidates.addAll(ALL_PLUGIN_LOADERS);
+        }
         // playerContent may call its own HTTP proxy synchronously. Holding its
         // catalogue lock here would deadlock that reentrant network request.
         Throwable lastError = null;
         Object[] fallbackResult = null;
-        for (DexClassLoader candidate : candidates) {
+        for (ClassLoader candidate : candidates) {
             syncPluginProxyPort(candidate, ProxyAddress.port);
             initPluginProxy(candidate);
             syncPluginActivity(candidate, MainActivity.activeActivity);
@@ -1207,21 +1279,29 @@ public final class CspEngine implements SourceEngine {
                     Throwable lastError = null;
                     String raw = null;
                     if (page <= 1) {
+                        boolean signatureUnsupported = false;
                         try {
                             raw = spider.searchContent(keyword, false);
+                        } catch (NoSuchMethodError
+                                | UnsupportedOperationException
+                                | AbstractMethodError unsupported) {
+                            signatureUnsupported = true;
+                            lastError = unwrap(unsupported);
                         } catch (Throwable t) {
                             lastError = unwrap(t);
-                        }
-                        if (raw == null || raw.trim().isEmpty()) {
-                            try {
-                                raw = spider.searchContent(keyword, false, "1");
-                            } catch (Throwable t) {
-                                if (lastError == null) lastError = unwrap(t);
+                            if (lastError instanceof NoSuchMethodException
+                                    || lastError instanceof UnsupportedOperationException) {
+                                signatureUnsupported = true;
                             }
                         }
-                        if (raw == null || raw.trim().isEmpty()) {
+                        if ((signatureUnsupported || raw == null) && lastError == null
+                                || signatureUnsupported) {
                             try {
-                                raw = spider.searchContent(keyword, true);
+                                String alt = spider.searchContent(keyword, false, "1");
+                                if (alt != null && !alt.trim().isEmpty()) {
+                                    raw = alt;
+                                    lastError = null;
+                                }
                             } catch (Throwable t) {
                                 if (lastError == null) lastError = unwrap(t);
                             }
@@ -1248,7 +1328,12 @@ public final class CspEngine implements SourceEngine {
         return call(
                 "player",
                 () -> {
-                    initPluginProxy(spider.getClass().getClassLoader());
+                    ClassLoader spiderLoader = spider.getClass().getClassLoader();
+                    lastPlayerLoader = spiderLoader;
+                    if (spiderLoader instanceof DexClassLoader) {
+                        activeProxyLoader = (DexClassLoader) spiderLoader;
+                    }
+                    initPluginProxy(spiderLoader);
                     Throwable lastError = null;
                     String raw = null;
                     for (int attempt = 0; attempt < 2; attempt++) {
@@ -1273,6 +1358,23 @@ public final class CspEngine implements SourceEngine {
                         String trimmed = raw.trim();
                         if (!trimmed.isEmpty()) {
                             if (trimmed.startsWith("{")) {
+                                String sub = consumeRecentPluginSubtitle(25000L);
+                                if (!sub.isEmpty()) {
+                                    try {
+                                        JSONObject jo = new JSONObject(trimmed);
+                                        if (!jo.has("subs") && !jo.has("subtitles")) {
+                                            jo.put(
+                                                    "subs",
+                                                    new JSONArray()
+                                                            .put(
+                                                                    new JSONObject()
+                                                                            .put("name", "插件外挂字幕")
+                                                                            .put("url", sub)));
+                                            return jo.toString();
+                                        }
+                                    } catch (Throwable ignored) {
+                                    }
+                                }
                                 return trimmed;
                             }
                             if (Cms.isHttp(trimmed)
@@ -1441,6 +1543,24 @@ public final class CspEngine implements SourceEngine {
                     && sha256.equals(expectedSha)
                     && (expectedMd5.isEmpty() || expectedMd5.equals(md5));
         }
+    }
+
+    private static String verifiedShaForFile(File file) {
+        if (file == null || !file.exists()) return null;
+        String abs = file.getAbsolutePath();
+        long len = file.length();
+        long mtime = file.lastModified();
+        for (VerifiedArtifact v : VERIFIED_CACHE.values()) {
+            if (v != null
+                    && abs.equals(v.path)
+                    && len == v.length
+                    && mtime == v.lastModified
+                    && v.sha256 != null
+                    && !v.sha256.isEmpty()) {
+                return v.sha256;
+            }
+        }
+        return null;
     }
 
     static boolean verifyCachedArtifact(File cached, String sha, String expectedMd5)

@@ -128,8 +128,8 @@ final class InlineFilters extends LinearLayout {
                 TextView hint =
                         a.text(
                                 remoteBacked
-                                        ? "  直接请求片源筛选接口，点选下方条件实时刷新"
-                                        : "  自动匹配片源子分类或本机影片资料，点选实时刷新",
+                                        ? "  点选下方条件实时刷新 · 下滑后连按3下上键回到筛选"
+                                        : "  自动匹配子分类或本地资料 · 下滑后连按3下上键回到筛选",
                                 11f * home.navScale,
                                 0xb8cbd5e1);
                 hint.setSingleLine(true);

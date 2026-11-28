@@ -227,7 +227,8 @@ class PythonSourceHost {
     });
   }
 
-  void retainSessions(Set<String> keys) => _ensureSessions().retainSessions(keys);
+  void retainSessions(Set<String> keys, {bool preservePinned = false}) =>
+      _ensureSessions().retainSessions(keys, preservePinned: preservePinned);
   Future<void> onAppResumed() =>
       enabled ? _ensureSessions().onAppResumed() : Future.value();
   void Function() pinForPlayback(String key) =>

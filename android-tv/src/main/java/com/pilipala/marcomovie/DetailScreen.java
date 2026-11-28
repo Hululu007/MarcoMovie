@@ -925,8 +925,11 @@ final class DetailScreen {
                 a.text(
                         "   共 "
                                 + totalEpisodes
-                                + " 集"
+                                + (scrapedLine.isVarietyLine ? " 期" : " 集")
                                 + (sortByScraped ? " · 已刮削排序" : "")
+                                + (scrapeOverride != null && scrapeOverride.preferRawEpisodeNames
+                                        ? " · 原始名"
+                                        : "")
                                 + (scrapeOverride != null && scrapeOverride.episodeOffset != 0
                                         ? " · 偏移"
                                                 + (scrapeOverride.episodeOffset > 0 ? "+" : "")

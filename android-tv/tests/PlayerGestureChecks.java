@@ -770,10 +770,20 @@ public final class PlayerGestureChecks {
                 sleep.tick(10_000L + 1_800_000L) && !sleep.isActive() && sleep.isExpired(),
                 "Sleep timer expires at deadline and turns off");
 
+        // 45m preset & live HUD label
+        sleep.selectPreset(SleepTimerSheet.MODE_45M, 20_000L);
+        check(
+                sleep.isActive()
+                        && sleep.remainingMs(20_000L) == 2_700_000L
+                        && "定时 45:00".equals(sleep.formatLivePillLabel(20_000L)),
+                "45m preset schedules 2,700,000ms countdown and formats live pill label");
+
         // End of episode mode
         sleep.selectPreset(SleepTimerSheet.MODE_END_OF_EPISODE, 5_000_000L);
         check(
-                sleep.isEndOfEpisodeMode() && !sleep.tick(9_000_000L),
+                sleep.isEndOfEpisodeMode()
+                        && "定时 · 本集后停".equals(sleep.formatLivePillLabel(5_000_000L))
+                        && !sleep.tick(9_000_000L),
                 "End-of-episode mode does not expire on wall clock");
         check(
                 sleep.onEpisodeCompleted() && !sleep.isActive(),

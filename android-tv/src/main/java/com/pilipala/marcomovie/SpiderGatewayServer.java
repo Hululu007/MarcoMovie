@@ -967,6 +967,15 @@ final class SpiderGatewayServer implements Closeable {
                 }
                 SourceController.ensureProxy(a, remoteCfg);
                 raw = new CspEngine(a.getApplication(), remoteCfg, remoteSite);
+            } else if (NativePythonEngine.eligible(remoteSite)
+                    && NativePythonEngine.isAvailable()) {
+                SourceController.ensureProxy(a, remoteCfg);
+                try {
+                    raw = new NativePythonEngine(a.getApplication(), remoteCfg, remoteSite);
+                } catch (Throwable nativePyError) {
+                    raw = new JsEngine(a.getApplication(), remoteCfg, remoteSite);
+                    ((JsEngine) raw).activate();
+                }
             } else if (JsEngine.eligible(remoteSite)) {
                 SourceController.ensureProxy(a, remoteCfg);
                 try {
@@ -974,6 +983,13 @@ final class SpiderGatewayServer implements Closeable {
                     ((JsEngine) raw).activate();
                 } catch (JsEngine.DrpyRuleDetected rule) {
                     raw = new DrpyEngine(a, remoteCfg, remoteSite, rule.source);
+                } catch (Throwable jsError) {
+                    if (WebViewJsEngine.shouldFallbackFromJsError(jsError)) {
+                        raw = new WebViewJsEngine(a.getApplication(), remoteCfg, remoteSite);
+                    } else {
+                        if (jsError instanceof Exception) throw (Exception) jsError;
+                        throw new IOException(jsError.getMessage(), jsError);
+                    }
                 }
             } else {
                 throw new IOException("Android 蜘蛛网关暂不支持该站点类型：" + api);

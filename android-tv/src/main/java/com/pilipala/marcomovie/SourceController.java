@@ -21,6 +21,13 @@ import java.util.concurrent.Future;
 final class SourceController {
     static final int MAX_CACHED_ENGINES_TV = 14;
     static final int MAX_CACHED_ENGINES_MOBILE = 24;
+    private static final java.util.concurrent.ExecutorService CLOSE_EXECUTOR =
+            java.util.concurrent.Executors.newSingleThreadExecutor(
+                    r -> {
+                        Thread t = new Thread(r, "close-source-engines");
+                        t.setDaemon(true);
+                        return t;
+                    });
 
     private SourceController() {}
 
@@ -30,20 +37,16 @@ final class SourceController {
 
     private static void closeEnginesAsync(final List<SourceEngine> toClose) {
         if (toClose == null || toClose.isEmpty()) return;
-        Thread t =
-                new Thread(
-                        () -> {
-                            for (SourceEngine e : toClose) {
-                                if (e == null) continue;
-                                try {
-                                    e.close();
-                                } catch (Throwable ignored) {
-                                }
-                            }
-                        },
-                        "close-source-engines");
-        t.setDaemon(true);
-        t.start();
+        CLOSE_EXECUTOR.execute(
+                () -> {
+                    for (SourceEngine e : toClose) {
+                        if (e == null) continue;
+                        try {
+                            e.close();
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                });
     }
 
     static String importOrigin(String address) {
@@ -269,6 +272,8 @@ final class SourceController {
         synchronized (PROXY_LOCK) {
             if (a.localProxy == null || a.localProxy.closed) {
                 a.localProxy = new LocalProxy(a.getApplication(), snapshot);
+            } else if (snapshot != null) {
+                a.localProxy.config = snapshot;
             }
         }
     }
@@ -291,13 +296,7 @@ final class SourceController {
             old = new ArrayList<>(a.engines.values());
             a.engines.clear();
         }
-        if (!old.isEmpty())
-            new Thread(
-                            () -> {
-                                for (SourceEngine e : old) e.close();
-                            },
-                            "close-source-engines")
-                    .start();
+        if (!old.isEmpty()) closeEnginesAsync(old);
     }
 
     static volatile long lastConfigActionAt;
@@ -315,7 +314,6 @@ final class SourceController {
                 || api.contains("wexokconfig")
                 || api.contains("pconfig")
                 || api.contains("localconfig")
-                || api.contains("csp_pan")
                 || api.contains("csp_token")
                 || key.contains("mydrive")
                 || key.contains("config")
@@ -341,11 +339,20 @@ final class SourceController {
         String key = site.key == null ? "" : site.key.toLowerCase(java.util.Locale.ROOT);
         String name = site.name == null ? "" : site.name;
         return api.contains("mypan")
+                || api.contains("csp_panquark")
+                || api.contains("csp_panuc")
+                || api.contains("csp_panbaidu")
+                || api.contains("csp_pan123")
+                || api.contains("csp_panali")
                 || key.contains("mypan")
                 || name.contains("我的云盘")
                 || name.contains("我的网盘")
                 || name.contains("我的┃网盘")
-                || name.contains("我的┃云盘");
+                || name.contains("我的┃云盘")
+                || name.contains("我的夸克")
+                || name.contains("我的UC")
+                || name.contains("我的阿里")
+                || name.contains("我的百度");
     }
 
     static boolean isConfigOrNetdiskActionCard(Cms.Site site, Cms.Video v) {
@@ -568,7 +575,9 @@ final class SourceController {
                         () -> {
                             try {
                                 timing.dispatched = SystemClock.elapsedRealtime();
-                                String raw = a.detailCache.get(key);
+                                final boolean skipDetailCache =
+                                        site != null && site.isNetdiskSite();
+                                String raw = skipDetailCache ? null : a.detailCache.get(key);
                                 if (raw != null) {
                                     Cms.Listing memListing = Cms.listing(raw);
                                     if (memListing.videos.isEmpty()
@@ -576,7 +585,7 @@ final class SourceController {
                                         raw = null;
                                     }
                                 }
-                                if (raw == null) {
+                                if (raw == null && !skipDetailCache) {
                                     String disk = readDetailDiskCache(a, site, id);
                                     if (disk != null) {
                                         Cms.Listing diskListing = Cms.listing(disk);
@@ -598,7 +607,10 @@ final class SourceController {
                                             a.detailFlights.get(
                                                     key,
                                                     () -> {
-                                                        String cached = a.detailCache.get(key);
+                                                        String cached =
+                                                                skipDetailCache
+                                                                        ? null
+                                                                        : a.detailCache.get(key);
                                                         if (cached != null) return cached;
                                                         SourceEngine source =
                                                                 engine(a, site, detailContext);
@@ -627,6 +639,7 @@ final class SourceController {
                                     video.id = id.trim();
                                 }
                                 if (!timing.cached
+                                        && (site == null || !site.isNetdiskSite())
                                         && hasPlayableDetailLines(video)
                                         && detailContext.matches(
                                                 a.config, a.privateMode, a.engineEpoch)) {
@@ -1492,6 +1505,88 @@ final class SourceController {
         }
         ConfigLibrary library = new ConfigLibrary(a.configStore.directory);
         long now = System.currentTimeMillis();
+        final class FetchedSpecOutcome {
+            final SubscriptionManager.ImportSpec spec;
+            Cms.Config parsed;
+            String effectiveOrigin = "";
+            String savedName = "";
+            Exception error;
+
+            FetchedSpecOutcome(SubscriptionManager.ImportSpec spec) {
+                this.spec = spec;
+            }
+        }
+        final List<FetchedSpecOutcome> fetchedOutcomes = new ArrayList<>(specs.size());
+        if (specs.size() <= 1) {
+            for (SubscriptionManager.ImportSpec spec : specs) {
+                FetchedSpecOutcome o = new FetchedSpecOutcome(spec);
+                try {
+                    String origin = importOrigin(spec.url);
+                    String fetched = fetchImport(a, spec.url);
+                    o.parsed = Cms.parseConfig(fetched, origin);
+                    o.effectiveOrigin =
+                            !o.parsed.warehouse.isEmpty()
+                                    ? o.parsed.warehouse
+                                    : (!o.parsed.origin.isEmpty() ? o.parsed.origin : origin);
+                    o.savedName = !spec.name.isEmpty() ? spec.name : configName(o.parsed);
+                } catch (Exception err) {
+                    o.error = err;
+                }
+                fetchedOutcomes.add(o);
+            }
+        } else {
+            int poolSize = Math.min(6, specs.size());
+            java.util.concurrent.ExecutorService batchPool =
+                    java.util.concurrent.Executors.newFixedThreadPool(
+                            poolSize,
+                            r -> {
+                                Thread t = new Thread(r, "batch-import-fetch");
+                                t.setDaemon(true);
+                                return t;
+                            });
+            List<Future<FetchedSpecOutcome>> futures = new ArrayList<>(specs.size());
+            for (final SubscriptionManager.ImportSpec spec : specs) {
+                futures.add(
+                        batchPool.submit(
+                                () -> {
+                                    FetchedSpecOutcome o = new FetchedSpecOutcome(spec);
+                                    try {
+                                        String origin = importOrigin(spec.url);
+                                        String fetched = fetchImport(a, spec.url);
+                                        o.parsed = Cms.parseConfig(fetched, origin);
+                                        o.effectiveOrigin =
+                                                !o.parsed.warehouse.isEmpty()
+                                                        ? o.parsed.warehouse
+                                                        : (!o.parsed.origin.isEmpty()
+                                                                ? o.parsed.origin
+                                                                : origin);
+                                        o.savedName =
+                                                !spec.name.isEmpty()
+                                                        ? spec.name
+                                                        : configName(o.parsed);
+                                    } catch (Exception err) {
+                                        o.error = err;
+                                    }
+                                    return o;
+                                }));
+            }
+            for (int i = 0; i < futures.size(); i++) {
+                SubscriptionManager.ImportSpec spec = specs.get(i);
+                Future<FetchedSpecOutcome> f = futures.get(i);
+                FetchedSpecOutcome o = new FetchedSpecOutcome(spec);
+                try {
+                    o = f.get(20L, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (Exception err) {
+                    f.cancel(true);
+                    o.error =
+                            err instanceof java.util.concurrent.TimeoutException
+                                    ? new IOException("读取子仓库超时 (20s): " + spec.url)
+                                    : err;
+                }
+                fetchedOutcomes.add(o);
+            }
+            batchPool.shutdownNow();
+        }
         boolean useTvMultiSource =
                 a.isTvDevice()
                         && !a.privateMode
@@ -1501,24 +1596,29 @@ final class SourceController {
             int succeeded = 0;
             Exception lastError = null;
             java.util.Set<String> importedSubIds = new java.util.LinkedHashSet<>();
-            for (SubscriptionManager.ImportSpec spec : specs) {
+            for (FetchedSpecOutcome o : fetchedOutcomes) {
+                if (o.error != null || o.parsed == null) {
+                    lastError = o.error;
+                    AppLog.w(
+                            "SourceController",
+                            "Batch import source failed: " + o.spec.url,
+                            o.error);
+                    continue;
+                }
                 try {
-                    String origin = importOrigin(spec.url);
-                    String fetched = fetchImport(a, spec.url);
-                    Cms.Config parsed = Cms.parseConfig(fetched, origin);
-                    String effectiveOrigin =
-                            !parsed.warehouse.isEmpty()
-                                    ? parsed.warehouse
-                                    : (!parsed.origin.isEmpty() ? parsed.origin : origin);
-                    String savedName = !spec.name.isEmpty() ? spec.name : configName(parsed);
                     TvMultiSourceStore.SubscriptionRecord rec =
                             a.multiSourceStore.registerSubscription(
-                                    library, parsed.raw, effectiveOrigin, savedName, true, now);
+                                    library,
+                                    o.parsed.raw,
+                                    o.effectiveOrigin,
+                                    o.savedName,
+                                    true,
+                                    now);
                     if (rec != null && !rec.id.isEmpty()) importedSubIds.add(rec.id);
                     succeeded++;
                 } catch (Exception err) {
                     lastError = err;
-                    AppLog.w("SourceController", "Batch import source failed: " + spec.url, err);
+                    AppLog.w("SourceController", "Batch import source failed: " + o.spec.url, err);
                 }
             }
             if (succeeded == 0) {
@@ -1603,16 +1703,16 @@ final class SourceController {
 
         int succeeded = 0;
         Exception lastError = null;
-        for (SubscriptionManager.ImportSpec spec : specs) {
+        for (FetchedSpecOutcome o : fetchedOutcomes) {
+            if (o.error != null || o.parsed == null) {
+                lastError = o.error;
+                AppLog.w("SourceController", "Batch import source failed: " + o.spec.url, o.error);
+                continue;
+            }
             try {
-                String origin = importOrigin(spec.url);
-                String fetched = fetchImport(a, spec.url);
-                Cms.Config parsed = Cms.parseConfig(fetched, origin);
-                String effectiveOrigin =
-                        !parsed.warehouse.isEmpty()
-                                ? parsed.warehouse
-                                : (!parsed.origin.isEmpty() ? parsed.origin : origin);
-                String savedName = !spec.name.isEmpty() ? spec.name : configName(parsed);
+                Cms.Config parsed = o.parsed;
+                String effectiveOrigin = o.effectiveOrigin;
+                String savedName = o.savedName;
                 if (Cms.isHttp(effectiveOrigin)) {
                     try {
                         library.remember(parsed.raw, effectiveOrigin, savedName, "", now);
@@ -1628,7 +1728,7 @@ final class SourceController {
                                 library,
                                 parsed.raw,
                                 effectiveOrigin,
-                                spec.name.isEmpty() ? savedName : spec.name,
+                                o.spec.name.isEmpty() ? savedName : o.spec.name,
                                 true,
                                 now);
                     } catch (Throwable ignored) {
@@ -1639,14 +1739,14 @@ final class SourceController {
                 ordered.put(
                         mapKey,
                         new SubscriptionManager.SourceBundle(
-                                spec.name.isEmpty() ? savedName : spec.name,
+                                o.spec.name.isEmpty() ? savedName : o.spec.name,
                                 effectiveOrigin,
                                 parsed.raw,
                                 now));
                 succeeded++;
             } catch (Exception err) {
                 lastError = err;
-                AppLog.w("SourceController", "Batch import source failed: " + spec.url, err);
+                AppLog.w("SourceController", "Batch import source failed: " + o.spec.url, err);
             }
         }
         if (succeeded == 0) {

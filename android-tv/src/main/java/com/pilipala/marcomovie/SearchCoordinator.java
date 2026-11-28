@@ -35,6 +35,9 @@ public final class SearchCoordinator implements AutoCloseable {
     static volatile Runnable onLowMemoryHook;
     private static final ConcurrentHashMap<String, AtomicInteger> WEDGED_SITES =
             new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, Long> WEDGED_AT_NANOS =
+            new ConcurrentHashMap<>();
+    private static final long WEDGED_SITE_TTL_NANOS = TimeUnit.SECONDS.toNanos(30);
     private static final ThreadPoolExecutor NETWORK =
             new ThreadPoolExecutor(
                     6,
@@ -144,6 +147,7 @@ public final class SearchCoordinator implements AutoCloseable {
                 counter = prev != null ? prev : created;
             }
             counter.incrementAndGet();
+            WEDGED_AT_NANOS.put(siteKey, System.nanoTime());
         }
         syncPoolCapacity();
     }
@@ -154,6 +158,7 @@ public final class SearchCoordinator implements AutoCloseable {
             AtomicInteger count = WEDGED_SITES.get(siteKey);
             if (count != null && count.decrementAndGet() <= 0) {
                 WEDGED_SITES.remove(siteKey, count);
+                WEDGED_AT_NANOS.remove(siteKey);
             }
         }
         syncPoolCapacity();
@@ -162,7 +167,25 @@ public final class SearchCoordinator implements AutoCloseable {
     static boolean isSiteWedged(String siteKey) {
         if (siteKey == null || siteKey.isEmpty()) return false;
         AtomicInteger count = WEDGED_SITES.get(siteKey);
-        return count != null && count.get() > 0;
+        if (count == null || count.get() <= 0) return false;
+        Long since = WEDGED_AT_NANOS.get(siteKey);
+        if (since != null && System.nanoTime() - since > WEDGED_SITE_TTL_NANOS) {
+            synchronized (SearchCoordinator.class) {
+                AtomicInteger latest = WEDGED_SITES.get(siteKey);
+                Long latestSince = WEDGED_AT_NANOS.get(siteKey);
+                if (latest != null
+                        && latestSince != null
+                        && System.nanoTime() - latestSince > WEDGED_SITE_TTL_NANOS) {
+                    int expiredCount = Math.max(0, latest.get());
+                    WEDGED_SITES.remove(siteKey, latest);
+                    WEDGED_AT_NANOS.remove(siteKey);
+                    wedgedWorkers = Math.max(0, wedgedWorkers - expiredCount);
+                    syncPoolCapacity();
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private static synchronized boolean isPluginPoolExhausted() {
@@ -368,7 +391,7 @@ public final class SearchCoordinator implements AutoCloseable {
                             () -> {
                                 if (!exited.get()) markWedgedIfRunning();
                             },
-                            250,
+                            4500,
                             TimeUnit.MILLISECONDS);
                 } catch (RejectedExecutionException ignored) {
                 }

@@ -79,18 +79,17 @@ public final class NetdiskShareResolver: @unchecked Sendable {
             return nil
         }
 
-        var headers = extraHeaders
+        var headers = extraHeaders.filter { key, _ in
+            let lower = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return lower != "x-ali-refresh-token" && lower != "refresh-token" && lower != "x-refresh-token"
+        }
         headers["Origin"] = driveInfo.defaultOrigin
         headers["Referer"] = "\(driveInfo.defaultOrigin)/"
         headers["User-Agent"] = NetdiskService.desktopChromeUA
 
-        if driveKey == "ali" {
-            if let refresh = NetdiskSessionValidator.extractAliRefreshToken(from: credential),
-               headers["Authorization"] == nil
-            {
-                headers["X-Ali-Refresh-Token"] = refresh
-            }
-        } else {
+        if driveKey != "ali" {
+            // AliyunDrive refresh tokens are strictly reserved for `/v2/account/token` exchange
+            // and must never be attached to media playback policies or outbound headers.
             let cookieHeader = NetdiskSessionValidator.extractCookieHeader(driveKey: driveKey, credential: credential)
             if !cookieHeader.isEmpty {
                 headers["Cookie"] = cookieHeader
@@ -175,19 +174,23 @@ public final class NetdiskShareResolver: @unchecked Sendable {
 
         if isHls, let headerProxy = headerProxy {
             let outbound = resolvedTarget.policy.headers(for: resolvedTarget.streamUrl)
-            let loopback = try await headerProxy.registerStream(url: resolvedTarget.streamUrl, headers: outbound)
+            let (sessionId, loopback) = try await headerProxy.registerStreamWithId(
+                url: resolvedTarget.streamUrl,
+                policy: resolvedTarget.policy
+            )
             return ResolvedPlayback(
                 originalUrl: resolvedTarget.streamUrl.absoluteString,
                 playableUrl: loopback,
                 headers: outbound,
                 isProxied: true,
                 kernelLabel: "HLS 代理硬解",
-                resolutionBadge: resolvedTarget.badge.isEmpty ? "HLS" : resolvedTarget.badge
+                resolutionBadge: resolvedTarget.badge.isEmpty ? "HLS" : resolvedTarget.badge,
+                headerProxySessionId: sessionId
             )
         }
 
         if playerKernel != "avkit", let rangeProxy = rangeProxy {
-            let (_, proxyUrl) = try await rangeProxy.registerStream(
+            let (resourceId, proxyUrl) = try await rangeProxy.registerStream(
                 url: resolvedTarget.streamUrl,
                 policy: resolvedTarget.policy
             )
@@ -197,20 +200,25 @@ public final class NetdiskShareResolver: @unchecked Sendable {
                 headers: [:],
                 isProxied: true,
                 kernelLabel: "\(rangeProxy.workers) 线程分片代理",
-                resolutionBadge: resolvedTarget.badge
+                resolutionBadge: resolvedTarget.badge,
+                rangeProxyResourceId: resourceId
             )
         }
 
         let fallbackHeaders = resolvedTarget.policy.headers(for: resolvedTarget.streamUrl)
         if let headerProxy = headerProxy {
-            let loopback = try await headerProxy.registerStream(url: resolvedTarget.streamUrl, headers: fallbackHeaders)
+            let (sessionId, loopback) = try await headerProxy.registerStreamWithId(
+                url: resolvedTarget.streamUrl,
+                policy: resolvedTarget.policy
+            )
             return ResolvedPlayback(
                 originalUrl: resolvedTarget.streamUrl.absoluteString,
                 playableUrl: loopback,
                 headers: fallbackHeaders,
                 isProxied: true,
                 kernelLabel: "AVKit 硬解",
-                resolutionBadge: resolvedTarget.badge
+                resolutionBadge: resolvedTarget.badge,
+                headerProxySessionId: sessionId
             )
         }
 

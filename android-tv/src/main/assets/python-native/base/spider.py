@@ -68,6 +68,12 @@ class Spider:
     def post(self, url, **kwargs):
         return requests.post(url, **kwargs)
 
+    def postJson(self, url, json=None, **kwargs):
+        return requests.post(url, json=json, **kwargs)
+
+    def getName(self):
+        return ""
+
     def getProxyUrl(self, params=None, local=True):
         return _HOST.proxy_url(params, local, legacy=True)
 

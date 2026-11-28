@@ -53,7 +53,7 @@ function installWexPan() {
   }
   function safePic(pic, base) {
     var c = str(pic).trim();
-    if (!c || /(?:sogoucdn\.com|imagehub\.cc|^data:|\/(?:loading|lazyload|load|nopic|no-pic|default_pic|blank|none)\.(?:gif|png|jpe?g|webp|svg)(?:[?#]|$))/i.test(c)) return '';
+    if (!c || /(?:^data:|\/(?:loading|lazyload|load|nopic|no-pic|default_pic|blank|none)\.(?:gif|png|jpe?g|webp|svg)(?:[?#]|$))/i.test(c)) return '';
     if (c.indexOf('//') === 0) c = 'https:' + c;
     try {
       var u = joinUrl(base || (cfg.origin + '/'), c);
@@ -486,7 +486,7 @@ function installWexPan() {
     }
     function mpParseCardsRegex(html) {
       var out = [], seen = {};
-      var re = /<a[^>]+href=["']([^"']*\/(?:index\.php\/)?vod\/detail\/(?:id\/)?[^"']+)["'][^>]*>([\s\S]{1,1200}?)<\/a>/gi, m;
+      var re = /<a[^>]+href=["']([^"']*\/(?:(?:index\.php\/)?vod\/detail\/(?:id\/)?|voddetail\/)[^"']+)["'][^>]*>([\s\S]{1,1200}?)<\/a>/gi, m;
       while ((m = re.exec(html)) !== null && out.length < 80) {
         var href = m[1];
         if (!href || seen[href]) continue;
@@ -497,6 +497,12 @@ function installWexPan() {
         if (!name || name.length > 80) continue;
         seen[href] = true;
         var pM = /(?:data-original|data-src|src)=["']([^"']+)["']/i.exec(inner);
+        if (!pM) {
+          var ctxStart = Math.max(0, m.index - 700);
+          var ctxEnd = Math.min(html.length, m.index + fullTag.length + 700);
+          var ctx = html.slice(ctxStart, ctxEnd);
+          pM = /(?:data-original|data-src|src)=["']([^"']+)["']/i.exec(ctx);
+        }
         var rM = /class=["'][^"']*(?:module-item-text|video-serial|pic-text)[^"']*["'][^>]*>([\s\S]*?)<\//i.exec(inner);
         out.push({
           vod_id: href,

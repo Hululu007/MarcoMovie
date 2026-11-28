@@ -199,6 +199,7 @@ class MainFlutterWindow: NSWindow {
                 "private var marcoIsClosing = false",
                 "private var marcoRestoredFromSaved = false",
                 "private var marcoLastNormalFrame: NSRect?",
+                "private var marcoWindowChannel: FlutterMethodChannel?",
                 "deinit {",
             ):
                 self.assertEqual(
@@ -206,6 +207,19 @@ class MainFlutterWindow: NSWindow {
                     1,
                     f"Expected {field!r} exactly once after upgrading 4429808 Runner",
                 )
+            for required in (
+                "import CoreVideo",
+                "getDisplayRefreshInfo",
+                "onDisplayRefreshRateChanged",
+                "didChangeScreenNotification",
+                "MarcoMovieDisplayChanged",
+                "pickLocalFile",
+                "NSOpenPanel",
+                "startAccessingSecurityScopedResource",
+                "marcoFlushLastNormalFrameOnTerminate",
+                "screens.first?.visibleFrame",
+            ):
+                self.assertIn(required, second_pass)
             self.assertNotIn("NSSize(width: 900, height: 600)", second_pass)
             self.assertIn("NSSize(width: 720, height: 520)", second_pass)
             awake_block = second_pass.split("extension MainFlutterWindow {", 1)[0]
@@ -220,6 +234,85 @@ class MainFlutterWindow: NSWindow {
             dbg_ent = (runner / "DebugProfile.entitlements").read_text(encoding="utf-8")
             self.assertNotIn("com.apple.security.get-task-allow", rel_ent)
             self.assertIn("com.apple.security.get-task-allow", dbg_ent)
+
+    def test_media_kit_video_cvdisplaylink_vsync_patch_idempotency(self):
+        sample_texture_hw = """import FlutterMacOS
+import OpenGL.GL
+import OpenGL.GL3
+public class TextureHW: NSObject {}
+"""
+        sample_video_output = """import FlutterMacOS
+public class VideoOutput: NSObject {
+  private var texture: ResizableTextureProtocol!
+  private var disposed: Bool = false
+  private func _init() {
+    if enableHardwareAcceleration {
+      texture = SafeResizableTexture(
+        TextureHW(
+          handle: handle,
+          // Use `weak self` to prevent memory leaks
+          updateCallback: { [weak self]() in
+            guard let that = self else {
+              return
+            }
+            that.updateCallback()
+          }
+        )
+      )
+    }
+  }
+  private func _updateCallback() {
+    let size = videoSize
+
+    if size.width == 0 || size.height == 0 {
+      return
+    }
+    texture.render(size)
+    DispatchQueue.main.sync { [weak self] in
+      guard let that = self else { return }
+      that.registry.textureFrameAvailable(that.textureId)
+    }
+  }
+}
+"""
+        with tempfile.TemporaryDirectory(prefix="marco-mk-vsync-") as tmp:
+            plugin_macos = Path(tmp) / "media_kit_video" / "macos"
+            hw_path = plugin_macos / "Classes" / "plugin" / "TextureHW.swift"
+            vo_path = plugin_macos / "Classes" / "plugin" / "common" / "VideoOutput.swift"
+            hw_path.parent.mkdir(parents=True)
+            vo_path.parent.mkdir(parents=True)
+            hw_path.write_text(sample_texture_hw, encoding="utf-8")
+            vo_path.write_text(sample_video_output, encoding="utf-8")
+
+            changed_first = prepare_platform.patch_macos_media_kit_video_vsync(plugin_macos)
+            self.assertTrue(changed_first)
+            hw_first = hw_path.read_text(encoding="utf-8")
+            vo_first = vo_path.read_text(encoding="utf-8")
+
+            changed_second = prepare_platform.patch_macos_media_kit_video_vsync(plugin_macos)
+            self.assertFalse(changed_second, "Second vsync patch pass must be a no-op")
+            self.assertEqual(hw_first, hw_path.read_text(encoding="utf-8"))
+            self.assertEqual(vo_first, vo_path.read_text(encoding="utf-8"))
+
+            for token in (
+                "CVDisplayLink",
+                "MPV_RENDER_PARAM_ADVANCED_CONTROL",
+                "mpv_render_context_update",
+                "MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME",
+                "mpv_render_context_report_swap",
+                "MARCO_MPV_VSYNC_PACED",
+                "MarcoMovieDisplayChanged",
+                "endVsyncTick",
+                "drainPendingUpdateWithoutRender",
+            ):
+                self.assertIn(token, hw_first)
+            for token in (
+                "private weak var hwTexture: TextureHW?",
+                "hwTexture?.endVsyncTick()",
+                "hwTexture?.drainPendingUpdateWithoutRender()",
+                "lastRenderProducedFrame",
+            ):
+                self.assertIn(token, vo_first)
 
 
 if __name__ == "__main__":

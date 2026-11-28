@@ -6,6 +6,14 @@ import SwiftUI
 public struct DiscoverView: View {
     @EnvironmentObject private var appModel: AppViewModel
 
+    private enum DiscoverFocusTarget: Hashable {
+        case continueWatching(String)
+        case poster(String)
+    }
+
+    @State private var lastOpenedFocus: DiscoverFocusTarget?
+    @FocusState private var focusedCard: DiscoverFocusTarget?
+
     private let posterColumns: [GridItem] = Array(
         repeating: GridItem(.flexible(), spacing: 26),
         count: 6
@@ -61,6 +69,25 @@ public struct DiscoverView: View {
             if appModel.discoverVideos.isEmpty && appModel.activeSite != nil {
                 await appModel.loadHomeForActiveSite()
             }
+        }
+        .onChange(of: appModel.selectedDetailContext == nil) { isClosed in
+            guard isClosed else { return }
+            restoreLastOpenedCardFocus()
+        }
+    }
+
+    private func restoreLastOpenedCardFocus() {
+        var available: [DiscoverFocusTarget] = appModel.watchHistory.prefix(12).map { .continueWatching($0.key) }
+        available.append(contentsOf: appModel.discoverVideos.map { .poster($0.id) })
+        guard let target = FocusRestorationPlanner.resolvePosterCardReturn(
+            lastOpenedKey: lastOpenedFocus,
+            availableKeys: available
+        ) else {
+            return
+        }
+        focusedCard = target
+        DispatchQueue.main.async {
+            self.focusedCard = target
         }
     }
 
@@ -124,23 +151,18 @@ public struct DiscoverView: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 24) {
-                    ForEach(appModel.watchHistory.prefix(12)) { item in
+                    ForEach(appModel.watchHistory.prefix(12), id: \.key) { item in
                         Button {
-                            let site = appModel.config.sites.first { $0.key == item.site }
-                                ?? appModel.activeSite
-                            if let targetSite = site {
-                                let stubVideo = CmsVideo(
-                                    id: item.id,
-                                    title: item.title,
-                                    poster: item.poster,
-                                    remarks: item.episode
-                                )
-                                appModel.selectedDetailContext = (targetSite, stubVideo)
-                            }
+                            lastOpenedFocus = .continueWatching(item.key)
+                            appModel.openWatchHistoryItem(item)
                         } label: {
-                            ContinueWatchingCard(item: item)
+                            ContinueWatchingCard(
+                                item: item,
+                                sourceLabel: appModel.originSourceDisplayName(for: item.site)
+                            )
                         }
                         .tvCardButtonStyle()
+                        .focused($focusedCard, equals: .continueWatching(item.key))
                     }
                 }
                 .padding(.horizontal, 6)
@@ -161,8 +183,8 @@ public struct DiscoverView: View {
                 ForEach(appModel.discoverVideos) { video in
                     Button {
                         if let site = appModel.activeSite {
-                            appModel.backdropPosterUrl = video.poster
-                            appModel.selectedDetailContext = (site, video)
+                            lastOpenedFocus = .poster(video.id)
+                            appModel.openDetail(site: site, video: video)
                         }
                     } label: {
                         PosterCardCell(
@@ -171,6 +193,7 @@ public struct DiscoverView: View {
                         )
                     }
                     .tvCardButtonStyle()
+                    .focused($focusedCard, equals: .poster(video.id))
                     .task {
                         await appModel.loadMoreDiscoverIfNeeded(currentVideo: video)
                     }
@@ -192,6 +215,7 @@ public struct DiscoverView: View {
 private struct ContinueWatchingCard: View {
     @Environment(\.tvCardFocused) private var isFocused
     let item: WatchHistoryItem
+    let sourceLabel: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -228,10 +252,15 @@ private struct ContinueWatchingCard: View {
                 .lineLimit(1)
                 .frame(width: 268, alignment: .leading)
 
-            Text(item.episode.isEmpty ? "继续播放" : "\(item.episode) · 已看 \(Int(item.progressFraction * 100))%")
+            Text(
+                item.episode.isEmpty
+                    ? "\(sourceLabel) · 继续播放"
+                    : "\(sourceLabel) · \(item.episode) · \(Int(item.progressFraction * 100))%"
+            )
                 .font(.system(size: 14, weight: .medium))
                 .foregroundColor(TvTheme.secondaryText)
                 .lineLimit(1)
+                .frame(width: 268, alignment: .leading)
         }
     }
 }

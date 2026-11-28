@@ -248,6 +248,10 @@
     var src = String(code || '');
     var looksEsModule = /(?:^|[;\n])\s*(?:export\s+(?:default\b|(?:async\s+)?function\b|const\b|let\b|var\b|class\b|\{|\*)|import\s)/.test(src);
     if (looksEsModule) {
+      src = src
+        .replace(/(['"])assets:\/\/js\/lib\/cat\.js\1/g, "'https://localhost/__lib/cat-lib.mjs'")
+        .replace(/(['"])catvod\1/g, "'https://localhost/__lib/catvod.mjs'")
+        .replace(/(['"])assets:\/\/js\/lib\/([^'"]+)\1/g, "'https://localhost/__lib/$2'");
       var blob = new Blob([src], { type: 'text/javascript' });
       var blobUrl = URL.createObjectURL(blob);
       try {

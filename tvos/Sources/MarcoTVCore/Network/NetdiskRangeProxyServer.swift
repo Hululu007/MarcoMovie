@@ -11,20 +11,34 @@ public struct NetdiskHeaderPolicy: Hashable, Sendable {
     public let baseHeaders: [String: String]
     public let cookieDomains: [String]
     public let allowInsecureLoopbackCredentials: Bool
+    public let defaultUserAgent: String
 
-    private static let sensitiveHeaderNames: Set<String> = [
-        "cookie",
-        "cookie2",
-        "authorization",
-        "proxy-authorization",
-        "x-auth-token",
+    /// Refresh credentials and hop-by-hop transport headers must NEVER be forwarded on media requests.
+    private static let alwaysBlockedHeaderNames: Set<String> = [
+        "accept-encoding",
+        "range",
+        "host",
+        "content-length",
+        "connection",
+        "transfer-encoding",
+        "x-ali-refresh-token",
+        "refresh-token",
+        "x-refresh-token",
+    ]
+
+    /// Minimal playback headers allowed when targeting cross-domain CDNs or redirected third-party hosts.
+    private static let crossDomainAllowedHeaderNames: Set<String> = [
+        "user-agent",
+        "accept",
+        "accept-language",
     ]
 
     public init(
         originUrl: URL,
         baseHeaders: [String: String] = [:],
         cookieDomains: [String] = [],
-        allowInsecureLoopbackCredentials: Bool = false
+        allowInsecureLoopbackCredentials: Bool = false,
+        defaultUserAgent: String = NetdiskService.desktopChromeUA
     ) {
         self.originUrl = originUrl
         self.baseHeaders = baseHeaders
@@ -32,6 +46,7 @@ public struct NetdiskHeaderPolicy: Hashable, Sendable {
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ". \t\r\n")).lowercased() }
             .filter { $0.contains(".") && !$0.isEmpty }
         self.allowInsecureLoopbackCredentials = allowInsecureLoopbackCredentials
+        self.defaultUserAgent = defaultUserAgent
     }
 
     public func shouldSendCredentials(to targetUrl: URL) -> Bool {
@@ -45,7 +60,7 @@ public struct NetdiskHeaderPolicy: Hashable, Sendable {
             return false
         }
 
-        let isLoopback = (targetHost == "127.0.0.1" || targetHost == "localhost")
+        let isLoopback = (targetHost == "127.0.0.1" || targetHost == "localhost" || targetHost == "::1")
         if targetScheme != "https" {
             guard allowInsecureLoopbackCredentials && targetScheme == "http" && isLoopback else {
                 return false
@@ -83,17 +98,17 @@ public struct NetdiskHeaderPolicy: Hashable, Sendable {
             let cleanVal = Self.sanitizeHeaderToken(rawVal)
             guard !cleanKey.isEmpty, !cleanVal.isEmpty else { continue }
             let lowerKey = cleanKey.lowercased()
-            if lowerKey == "accept-encoding" || lowerKey == "range" || lowerKey == "host" {
+            if Self.alwaysBlockedHeaderNames.contains(lowerKey) {
                 continue
             }
-            if Self.sensitiveHeaderNames.contains(lowerKey) && !includeSecrets {
+            if !includeSecrets && !Self.crossDomainAllowedHeaderNames.contains(lowerKey) {
                 continue
             }
             out[cleanKey] = cleanVal
         }
 
         if out.keys.allSatisfy({ $0.lowercased() != "user-agent" }) {
-            out["User-Agent"] = NetdiskService.desktopChromeUA
+            out["User-Agent"] = defaultUserAgent
         }
         out["Accept-Encoding"] = "identity"
         if let range = range {
@@ -123,21 +138,418 @@ public struct NetdiskProxyMetrics: Equatable, Sendable {
     public let peakBufferedBytes: Int
     public let preemptedWindowCount: Int
     public let upstreamChunkRequests: Int
+    public let upstreamBytesRead: Int64
+    public let cancelledUpstreamRequests: Int
 
     public init(
         currentBufferedBytes: Int,
         peakBufferedBytes: Int,
         preemptedWindowCount: Int,
-        upstreamChunkRequests: Int
+        upstreamChunkRequests: Int,
+        upstreamBytesRead: Int64 = 0,
+        cancelledUpstreamRequests: Int = 0
     ) {
         self.currentBufferedBytes = currentBufferedBytes
         self.peakBufferedBytes = peakBufferedBytes
         self.preemptedWindowCount = preemptedWindowCount
         self.upstreamChunkRequests = upstreamChunkRequests
+        self.upstreamBytesRead = upstreamBytesRead
+        self.cancelledUpstreamRequests = cancelledUpstreamRequests
     }
 }
 
-private final class ProxyNoRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+private struct UpstreamRangeNotSupportedSignal: Error, Sendable {
+    let totalSizeHint: Int64?
+}
+
+private struct StreamAbortedAfterHeadersSent: Error, Sendable {}
+
+/// Header-first opened upstream HTTP response whose body is streamed on demand in bounded chunks.
+private struct OpenedUpstreamResponse: @unchecked Sendable {
+    let statusCode: Int
+    let finalUrl: URL
+    let headers: [String: String]
+    let bodyStream: UpstreamBodyStream?
+}
+
+/// Pull-based bounded stream over a single `URLSessionDataTask` with TCP backpressure (`suspend`/`resume`)
+/// and immediate task cancellation on close, seek preemption, or client disconnect.
+private final class UpstreamBodyStream: @unchecked Sendable {
+    private let transfer: ActiveUpstreamTransfer
+
+    init(transfer: ActiveUpstreamTransfer) {
+        self.transfer = transfer
+    }
+
+    deinit {
+        transfer.cancel(countAsAbort: false)
+    }
+
+    func nextChunk() async throws -> Data? {
+        try await transfer.nextChunk()
+    }
+
+    func cancel() {
+        transfer.cancel(countAsAbort: true)
+    }
+}
+
+private final class ActiveUpstreamTransfer: @unchecked Sendable {
+    private static let highWaterMark = 128 * 1024
+    private static let lowWaterMark = 32 * 1024
+
+    let task: URLSessionDataTask
+    let requestUrl: URL
+    let discardBodyImmediately: Bool
+
+    private let lock = NSLock()
+    private let onBytesRead: @Sendable (Int64) -> Void
+    private let onCancelled: @Sendable () -> Void
+
+    private var headerContinuation: CheckedContinuation<OpenedUpstreamResponse, Error>?
+    private var headerDelivered = false
+    private var bodyQueue: [Data] = []
+    private var bufferedBytes = 0
+    private var isSuspended = false
+    private var bodyWaiter: CheckedContinuation<Data?, Error>?
+    private var isFinished = false
+    private var completionError: Error?
+    private var isCancelled = false
+    private var countedAbort = false
+
+    init(
+        task: URLSessionDataTask,
+        requestUrl: URL,
+        discardBodyImmediately: Bool,
+        onBytesRead: @escaping @Sendable (Int64) -> Void,
+        onCancelled: @escaping @Sendable () -> Void
+    ) {
+        self.task = task
+        self.requestUrl = requestUrl
+        self.discardBodyImmediately = discardBodyImmediately
+        self.onBytesRead = onBytesRead
+        self.onCancelled = onCancelled
+    }
+
+    func attachHeaderContinuation(_ cont: CheckedContinuation<OpenedUpstreamResponse, Error>) {
+        lock.lock()
+        if isCancelled {
+            lock.unlock()
+            cont.resume(throwing: CancellationError())
+            return
+        }
+        if isFinished {
+            let err = completionError ?? MarcoError.networkFailure("上游连接提前中断")
+            lock.unlock()
+            cont.resume(throwing: err)
+            return
+        }
+        headerContinuation = cont
+        lock.unlock()
+    }
+
+    func handleResponse(
+        _ response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        let http = response as? HTTPURLResponse
+        let statusCode = http?.statusCode ?? 200
+        let finalUrl = http?.url ?? requestUrl
+        var respHeaders: [String: String] = [:]
+        if let all = http?.allHeaderFields {
+            for (rk, rv) in all {
+                respHeaders[String(describing: rk)] = String(describing: rv)
+            }
+        }
+
+        let isRedirect = [301, 302, 303, 307, 308].contains(statusCode)
+        let shouldCancelBody = discardBodyImmediately || isRedirect
+
+        lock.lock()
+        if isCancelled {
+            let cont = headerContinuation
+            headerContinuation = nil
+            headerDelivered = true
+            lock.unlock()
+            completionHandler(.cancel)
+            cont?.resume(throwing: CancellationError())
+            return
+        }
+        let cont = headerContinuation
+        headerContinuation = nil
+        headerDelivered = true
+        if shouldCancelBody {
+            isFinished = true
+        }
+        lock.unlock()
+
+        if shouldCancelBody {
+            completionHandler(.cancel)
+            cont?.resume(
+                returning: OpenedUpstreamResponse(
+                    statusCode: statusCode,
+                    finalUrl: finalUrl,
+                    headers: respHeaders,
+                    bodyStream: nil
+                )
+            )
+        } else {
+            let stream = UpstreamBodyStream(transfer: self)
+            completionHandler(.allow)
+            cont?.resume(
+                returning: OpenedUpstreamResponse(
+                    statusCode: statusCode,
+                    finalUrl: finalUrl,
+                    headers: respHeaders,
+                    bodyStream: stream
+                )
+            )
+        }
+    }
+
+    func handleData(_ data: Data) {
+        guard !data.isEmpty else { return }
+        onBytesRead(Int64(data.count))
+
+        lock.lock()
+        if isCancelled || discardBodyImmediately {
+            lock.unlock()
+            task.cancel()
+            return
+        }
+        if let waiter = bodyWaiter {
+            bodyWaiter = nil
+            lock.unlock()
+            waiter.resume(returning: data)
+            return
+        }
+        bodyQueue.append(data)
+        bufferedBytes += data.count
+        let shouldSuspend = bufferedBytes >= Self.highWaterMark && !isSuspended
+        if shouldSuspend {
+            isSuspended = true
+        }
+        lock.unlock()
+
+        if shouldSuspend {
+            task.suspend()
+        }
+    }
+
+    func handleCompletion(error: Error?) {
+        lock.lock()
+        isFinished = true
+        let pendingHeader = headerContinuation
+        headerContinuation = nil
+        let pendingBody = bodyWaiter
+        bodyWaiter = nil
+        let cancelledNow = isCancelled
+        let effectiveError: Error? = {
+            if cancelledNow { return CancellationError() }
+            if let error = error { return error }
+            return nil
+        }()
+        if completionError == nil {
+            completionError = effectiveError
+        }
+        let storedErr = completionError
+        lock.unlock()
+
+        if let cont = pendingHeader {
+            cont.resume(throwing: storedErr ?? MarcoError.networkFailure("上游未返回响应头"))
+        }
+        if let waiter = pendingBody {
+            if let err = storedErr {
+                waiter.resume(throwing: err)
+            } else {
+                waiter.resume(returning: nil)
+            }
+        }
+    }
+
+    private enum ImmediateChunkPoll {
+        case chunk(Data)
+        case eof
+        case wait
+    }
+
+    private func pollImmediateChunk() throws -> ImmediateChunkPoll {
+        lock.lock()
+        if isCancelled {
+            lock.unlock()
+            throw CancellationError()
+        }
+        if !bodyQueue.isEmpty {
+            let chunk = bodyQueue.removeFirst()
+            bufferedBytes = max(0, bufferedBytes - chunk.count)
+            let shouldResume = isSuspended && bufferedBytes <= Self.lowWaterMark && !isFinished
+            if shouldResume { isSuspended = false }
+            lock.unlock()
+            if shouldResume { task.resume() }
+            return .chunk(chunk)
+        }
+        if isFinished {
+            let err = completionError
+            lock.unlock()
+            if let err = err { throw err }
+            return .eof
+        }
+        lock.unlock()
+        return .wait
+    }
+
+    private func attachBodyWaiter(_ cont: CheckedContinuation<Data?, Error>) {
+        lock.lock()
+        if isCancelled {
+            lock.unlock()
+            cont.resume(throwing: CancellationError())
+            return
+        }
+        if !bodyQueue.isEmpty {
+            let chunk = bodyQueue.removeFirst()
+            bufferedBytes = max(0, bufferedBytes - chunk.count)
+            let shouldResume = isSuspended && bufferedBytes <= Self.lowWaterMark && !isFinished
+            if shouldResume { isSuspended = false }
+            lock.unlock()
+            if shouldResume { task.resume() }
+            cont.resume(returning: chunk)
+            return
+        }
+        if isFinished {
+            let err = completionError
+            lock.unlock()
+            if let err = err {
+                cont.resume(throwing: err)
+            } else {
+                cont.resume(returning: nil)
+            }
+            return
+        }
+        bodyWaiter = cont
+        lock.unlock()
+    }
+
+    func nextChunk() async throws -> Data? {
+        try Task.checkCancellation()
+
+        switch try pollImmediateChunk() {
+        case .chunk(let data):
+            return data
+        case .eof:
+            return nil
+        case .wait:
+            break
+        }
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data?, Error>) in
+                self.attachBodyWaiter(cont)
+            }
+        } onCancel: {
+            self.cancel(countAsAbort: true)
+        }
+    }
+
+    func cancel(countAsAbort: Bool) {
+        lock.lock()
+        let alreadyDone = isCancelled || isFinished
+        let wasSuspended = isSuspended
+        isSuspended = false
+        let shouldCount = countAsAbort && !alreadyDone && !countedAbort
+        if shouldCount { countedAbort = true }
+        isCancelled = true
+        bodyQueue.removeAll(keepingCapacity: false)
+        bufferedBytes = 0
+        let pendingHeader = headerContinuation
+        headerContinuation = nil
+        let pendingBody = bodyWaiter
+        bodyWaiter = nil
+        lock.unlock()
+
+        if shouldCount {
+            onCancelled()
+        }
+        if !alreadyDone {
+            if wasSuspended {
+                task.resume()
+            }
+            task.cancel()
+        }
+        pendingHeader?.resume(throwing: CancellationError())
+        pendingBody?.resume(throwing: CancellationError())
+    }
+}
+
+/// `URLSessionDataDelegate` that intercepts redirects for per-hop `NetdiskHeaderPolicy` isolation
+/// and exposes header-first streaming with TCP backpressure and accurate byte/cancellation metrics.
+private final class StreamingUpstreamSessionDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var transfers: [Int: ActiveUpstreamTransfer] = [:]
+    private var totalBytesRead: Int64 = 0
+    private var totalCancelledRequests: Int = 0
+
+    func metricsSnapshot() -> (bytesRead: Int64, cancelled: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (totalBytesRead, totalCancelledRequests)
+    }
+
+    func openStream(
+        session: URLSession,
+        request: URLRequest,
+        discardBodyImmediately: Bool
+    ) async throws -> OpenedUpstreamResponse {
+        try Task.checkCancellation()
+        let task = session.dataTask(with: request)
+        let transfer = ActiveUpstreamTransfer(
+            task: task,
+            requestUrl: request.url ?? URL(string: "http://127.0.0.1")!,
+            discardBodyImmediately: discardBodyImmediately,
+            onBytesRead: { [weak self] count in
+                guard let self = self else { return }
+                self.lock.lock()
+                self.totalBytesRead += count
+                self.lock.unlock()
+            },
+            onCancelled: { [weak self] in
+                guard let self = self else { return }
+                self.lock.lock()
+                self.totalCancelledRequests += 1
+                self.lock.unlock()
+            }
+        )
+
+        storeTransfer(transfer, for: task.taskIdentifier)
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                transfer.attachHeaderContinuation(cont)
+                task.resume()
+            }
+        } onCancel: {
+            transfer.cancel(countAsAbort: true)
+            self.removeTransfer(for: task.taskIdentifier)
+        }
+    }
+
+    private func storeTransfer(_ transfer: ActiveUpstreamTransfer, for taskIdentifier: Int) {
+        lock.lock()
+        transfers[taskIdentifier] = transfer
+        lock.unlock()
+    }
+
+    private func transfer(for taskIdentifier: Int) -> ActiveUpstreamTransfer? {
+        lock.lock()
+        defer { lock.unlock() }
+        return transfers[taskIdentifier]
+    }
+
+    private func removeTransfer(for taskIdentifier: Int) {
+        lock.lock()
+        transfers.removeValue(forKey: taskIdentifier)
+        lock.unlock()
+    }
+
     func urlSession(
         _ session: URLSession,
         task: URLSessionTask,
@@ -148,10 +560,37 @@ private final class ProxyNoRedirectDelegate: NSObject, URLSessionTaskDelegate, S
         // Intercept every redirect hop so NetdiskHeaderPolicy re-evaluates target origin/domain before sending headers.
         completionHandler(nil)
     }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let transfer = transfer(for: dataTask.taskIdentifier) else {
+            completionHandler(.cancel)
+            return
+        }
+        transfer.handleResponse(response, completionHandler: completionHandler)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard let transfer = transfer(for: dataTask.taskIdentifier) else {
+            dataTask.cancel()
+            return
+        }
+        transfer.handleData(data)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        let transfer = transfer(for: task.taskIdentifier)
+        removeTransfer(for: task.taskIdentifier)
+        transfer?.handleCompletion(error: error)
+    }
 }
 
 /// Global memory-ceiling accounting actor enforcing a strict upper bound (`defaultMemoryLimit = 24 MiB`)
-/// across all in-flight and buffered Range chunks.
+/// across all in-flight and buffered Range chunks and streaming pass-through buffers.
 private actor ProxyMemoryBudgetActor {
     private let limitBytes: Int
     private var allocatedBytes: Int = 0
@@ -240,7 +679,16 @@ private struct BufferedChunkEntry: Sendable {
     let reservedBytes: Int
 }
 
-/// Per-resource sliding prefetch coordinator supporting parallel chunk workers and instant seek preemption.
+private typealias UpstreamStreamOpener = @Sendable (
+    _ url: URL,
+    _ method: String,
+    _ range: String?,
+    _ policy: NetdiskHeaderPolicy,
+    _ discardBodyImmediately: Bool
+) async throws -> OpenedUpstreamResponse
+
+/// Per-resource sliding prefetch coordinator supporting parallel 206 chunk workers,
+/// bounded sequential streaming fallback for Range-ignoring 200 upstreams, and instant seek preemption.
 private actor ResourceStreamCoordinator {
     let url: URL
     let policy: NetdiskHeaderPolicy
@@ -248,13 +696,18 @@ private actor ResourceStreamCoordinator {
     let chunkSize: Int
     let contentTypeHint: String?
     private let memoryBudget: ProxyMemoryBudgetActor
-    private let chunkFetcher: @Sendable (URL, String, String?, NetdiskHeaderPolicy) async throws -> ProxyUpstreamResponse
+    private let streamOpener: UpstreamStreamOpener
 
     private var cachedMetadata: UpstreamMediaMetadata?
     private var generation: UInt64 = 0
+    private var isRevoked: Bool = false
     private var activeWindowChunks: ClosedRange<Int>?
     private var inFlightTasks: [Int: (task: Task<Data, Error>, reservedBytes: Int)] = [:]
+    private var failedChunks: [Int: Error] = [:]
     private var readyChunks: [Int: BufferedChunkEntry] = [:]
+    private var activeNonRangeTask: Task<Void, Never>?
+    private var activeNonRangeSessionId: UUID?
+    private var activeServeCancels: [UUID: @Sendable () -> Void] = [:]
     private var preemptedWindows: Int = 0
     private var totalChunkRequests: Int = 0
 
@@ -265,7 +718,7 @@ private actor ResourceStreamCoordinator {
         chunkSize: Int,
         contentTypeHint: String?,
         memoryBudget: ProxyMemoryBudgetActor,
-        chunkFetcher: @escaping @Sendable (URL, String, String?, NetdiskHeaderPolicy) async throws -> ProxyUpstreamResponse
+        streamOpener: @escaping UpstreamStreamOpener
     ) {
         self.url = url
         self.policy = policy
@@ -273,67 +726,177 @@ private actor ResourceStreamCoordinator {
         self.chunkSize = chunkSize
         self.contentTypeHint = contentTypeHint
         self.memoryBudget = memoryBudget
-        self.chunkFetcher = chunkFetcher
+        self.streamOpener = streamOpener
     }
 
     func metricsSnapshot() -> (preempted: Int, chunkRequests: Int) {
         (preemptedWindows, totalChunkRequests)
     }
 
+    func registerServeSession(id: UUID, onCancel: @escaping @Sendable () -> Void) {
+        if isRevoked {
+            onCancel()
+            return
+        }
+        activeServeCancels[id] = onCancel
+    }
+
+    func unregisterServeSession(id: UUID) {
+        activeServeCancels.removeValue(forKey: id)
+    }
+
     func cancelAndPurgeAll() async {
         generation &+= 1
         activeWindowChunks = nil
-        for (_, entry) in inFlightTasks {
-            entry.task.cancel()
-        }
+        failedChunks.removeAll()
+        let nonRange = activeNonRangeTask
+        activeNonRangeTask = nil
+        activeNonRangeSessionId = nil
+        nonRange?.cancel()
+
+        let tasks = Array(inFlightTasks.values.map(\.task))
         inFlightTasks.removeAll()
-        for (_, ready) in readyChunks {
-            await memoryBudget.release(bytes: ready.reservedBytes)
+        for t in tasks {
+            t.cancel()
         }
+
+        let ready = Array(readyChunks.values)
         readyChunks.removeAll()
+        for entry in ready {
+            await memoryBudget.release(bytes: entry.reservedBytes)
+        }
+    }
+
+    /// Permanently revokes this single resource (without disturbing other active resources),
+    /// aborts active socket streams and prefetch workers, and waits until all its in-flight tasks
+    /// have released their shared memory budget.
+    func revokeAndPurgeAll() async {
+        isRevoked = true
+        generation &+= 1
+        activeWindowChunks = nil
+        failedChunks.removeAll()
+
+        let serveCancels = Array(activeServeCancels.values)
+        activeServeCancels.removeAll()
+        for cancelServe in serveCancels {
+            cancelServe()
+        }
+
+        let nonRange = activeNonRangeTask
+        activeNonRangeTask = nil
+        activeNonRangeSessionId = nil
+        nonRange?.cancel()
+
+        let tasks = Array(inFlightTasks.values.map(\.task))
+        inFlightTasks.removeAll()
+        for t in tasks {
+            t.cancel()
+        }
+
+        let ready = Array(readyChunks.values)
+        readyChunks.removeAll()
+        for entry in ready {
+            await memoryBudget.release(bytes: entry.reservedBytes)
+        }
+
+        for t in tasks {
+            _ = await t.result
+        }
+        if let nonRange {
+            await nonRange.value
+        }
+    }
+
+    func cancelGenerationIfCurrent(_ expectedGen: UInt64) async {
+        guard generation == expectedGen else { return }
+        await cancelAndPurgeAll()
+    }
+
+    func registerNonRangeSession(sessionId: UUID, task: Task<Void, Never>) {
+        if isRevoked {
+            task.cancel()
+            return
+        }
+        if let prev = activeNonRangeTask {
+            preemptedWindows += 1
+            prev.cancel()
+        }
+        activeNonRangeSessionId = sessionId
+        activeNonRangeTask = task
+    }
+
+    func clearNonRangeSession(sessionId: UUID) {
+        if activeNonRangeSessionId == sessionId {
+            activeNonRangeSessionId = nil
+            activeNonRangeTask = nil
+        }
+    }
+
+    func markRangeUnsupported(totalSizeHint: Int64?) -> UpstreamMediaMetadata {
+        let prev = cachedMetadata
+        let total = totalSizeHint ?? prev?.totalSize ?? -1
+        let ct = prev?.contentType ?? resolvedContentType(from: [:])
+        let updated = UpstreamMediaMetadata(totalSize: total, contentType: ct, supportsRange: false)
+        cachedMetadata = updated
+        return updated
+    }
+
+    func openUpstreamStream(
+        method: String,
+        range: String?,
+        discardBodyImmediately: Bool = false
+    ) async throws -> OpenedUpstreamResponse {
+        guard !isRevoked else { throw CancellationError() }
+        return try await streamOpener(url, method, range, policy, discardBodyImmediately)
     }
 
     func resolveMetadata() async throws -> UpstreamMediaMetadata {
+        guard !isRevoked else { throw CancellationError() }
         if let existing = cachedMetadata {
             return existing
         }
-        // Probe with Range: bytes=0-0 first (works with signed OSS/S3 GET URLs that forbid HEAD)
-        let probe = try await chunkFetcher(url, "GET", "bytes=0-0", policy)
+        // Probe with Range: bytes=0-0 and cancel body immediately in didReceive response so a
+        // Range-ignoring 200 upstream NEVER downloads the full file into memory.
+        let probe = try await streamOpener(url, "GET", "bytes=0-0", policy, true)
+        guard !isRevoked else { throw CancellationError() }
         if probe.statusCode == 206,
            let contentRange = headerValue(probe.headers, name: "content-range"),
-           let total = Self.parseTotalSizeFromContentRange(contentRange)
+           let parsedCR = Self.parseByteContentRange(contentRange),
+           parsedCR.start == 0,
+           let total = parsedCR.total,
+           total > 0
         {
             let ct = resolvedContentType(from: probe.headers)
             let meta = UpstreamMediaMetadata(totalSize: total, contentType: ct, supportsRange: true)
             cachedMetadata = meta
             return meta
         }
-        if (200...299).contains(probe.statusCode) {
+        if probe.statusCode == 200 {
+            // Upstream ignored Range: bytes=0-0 and returned HTTP 200 -> do NOT treat as Range-capable.
             let lenHeader = headerValue(probe.headers, name: "content-length").flatMap { Int64($0) }
-            let total = lenHeader ?? Int64(probe.body.count)
-            let acceptRanges = headerValue(probe.headers, name: "accept-ranges")?.lowercased() ?? ""
             let ct = resolvedContentType(from: probe.headers)
             let meta = UpstreamMediaMetadata(
-                totalSize: max(0, total),
+                totalSize: lenHeader ?? -1,
                 contentType: ct,
-                supportsRange: acceptRanges.contains("bytes")
+                supportsRange: false
             )
             cachedMetadata = meta
             return meta
         }
 
         // Fallback to HEAD
-        let headResp = try await chunkFetcher(url, "HEAD", nil, policy)
+        let headResp = try await streamOpener(url, "HEAD", nil, policy, true)
+        guard !isRevoked else { throw CancellationError() }
         guard (200...299).contains(headResp.statusCode) else {
             throw MarcoError.networkFailure("上游媒体探测失败 (HTTP \(headResp.statusCode))")
         }
-        let total = headerValue(headResp.headers, name: "content-length").flatMap { Int64($0) } ?? 0
+        let total = headerValue(headResp.headers, name: "content-length").flatMap { Int64($0) } ?? -1
         let acceptRanges = headerValue(headResp.headers, name: "accept-ranges")?.lowercased() ?? ""
         let ct = resolvedContentType(from: headResp.headers)
         let meta = UpstreamMediaMetadata(
-            totalSize: max(0, total),
+            totalSize: total,
             contentType: ct,
-            supportsRange: acceptRanges.contains("bytes") || total > 0
+            supportsRange: acceptRanges.contains("bytes") && total > 0
         )
         cachedMetadata = meta
         return meta
@@ -341,10 +904,13 @@ private actor ResourceStreamCoordinator {
 
     /// Begins or advances a sliding prefetch window for `startByte...endByte`.
     /// Preempts and cancels stale in-flight chunk workers immediately if a non-contiguous seek occurs.
-    func beginStreamSession(startByte: Int64, endByte: Int64, totalSize: Int64) async -> UInt64 {
+    func beginStreamSession(startByte: Int64, endByte: Int64, totalSize: Int64) async throws -> UInt64 {
+        guard !isRevoked else { throw CancellationError() }
         let firstChunk = Int(startByte / Int64(chunkSize))
         let lastChunk = Int(endByte / Int64(chunkSize))
         let totalChunks = max(1, Int((totalSize + Int64(chunkSize) - 1) / Int64(chunkSize)))
+        // Clear any prior transient chunk errors so a new client request always retries cleanly.
+        failedChunks.removeAll()
 
         let isDisjointSeek: Bool = {
             guard let prev = activeWindowChunks else { return false }
@@ -357,7 +923,6 @@ private actor ResourceStreamCoordinator {
             preemptedWindows += 1
             await cancelAndPurgeAll()
         } else {
-            // Evict any chunks strictly behind firstChunk to reclaim memory budget
             let obsoleteReady = readyChunks.keys.filter { $0 < firstChunk }
             for idx in obsoleteReady {
                 if let entry = readyChunks.removeValue(forKey: idx) {
@@ -372,6 +937,7 @@ private actor ResourceStreamCoordinator {
             }
         }
 
+        guard !isRevoked else { throw CancellationError() }
         let currentGen = generation
         let windowEnd = min(totalChunks - 1, max(lastChunk, firstChunk + workers - 1))
         activeWindowChunks = firstChunk...windowEnd
@@ -392,8 +958,12 @@ private actor ResourceStreamCoordinator {
         totalSize: Int64,
         expectedGen: UInt64
     ) async throws -> Data {
-        guard generation == expectedGen, !Task.isCancelled else {
+        guard !isRevoked, generation == expectedGen, !Task.isCancelled else {
             throw CancellationError()
+        }
+
+        if let failure = failedChunks.removeValue(forKey: chunkIndex) {
+            throw failure
         }
 
         let totalChunks = max(1, Int((totalSize + Int64(chunkSize) - 1) / Int64(chunkSize)))
@@ -416,13 +986,15 @@ private actor ResourceStreamCoordinator {
         }
 
         guard let inFlight = inFlightTasks[chunkIndex] else {
+            if let failure = failedChunks.removeValue(forKey: chunkIndex) {
+                throw failure
+            }
             throw CancellationError()
         }
         let data = try await inFlight.task.value
-        guard generation == expectedGen, !Task.isCancelled else {
+        guard !isRevoked, generation == expectedGen, !Task.isCancelled else {
             throw CancellationError()
         }
-        // If storeCompletedChunk already moved it to readyChunks, release there
         if let stored = readyChunks.removeValue(forKey: chunkIndex) {
             await memoryBudget.release(bytes: stored.reservedBytes)
         }
@@ -457,13 +1029,13 @@ private actor ResourceStreamCoordinator {
         totalSize: Int64,
         expectedGen: UInt64
     ) {
-        guard generation == expectedGen, cursorChunk <= maxTargetChunk else { return }
+        guard !isRevoked, generation == expectedGen, cursorChunk <= maxTargetChunk else { return }
         let upper = min(maxTargetChunk, cursorChunk + workers - 1)
         guard cursorChunk <= upper else { return }
         activeWindowChunks = cursorChunk...upper
 
         for cIdx in cursorChunk...upper {
-            if readyChunks[cIdx] != nil || inFlightTasks[cIdx] != nil {
+            if readyChunks[cIdx] != nil || inFlightTasks[cIdx] != nil || failedChunks[cIdx] != nil {
                 continue
             }
             if inFlightTasks.count >= workers {
@@ -477,45 +1049,101 @@ private actor ResourceStreamCoordinator {
             totalChunkRequests += 1
             let mediaUrl = self.url
             let hdrPolicy = self.policy
-            let fetcher = self.chunkFetcher
+            let opener = self.streamOpener
             let budget = self.memoryBudget
             let coordinator = self
 
             let task = Task.detached(priority: .userInitiated) { () throws -> Data in
                 let acquired = await budget.acquire(bytes: expectedLen)
                 guard acquired, !Task.isCancelled else {
+                    if acquired {
+                        await budget.release(bytes: expectedLen)
+                    }
+                    await coordinator.recordFailedInFlight(
+                        chunkIndex: cIdx,
+                        error: CancellationError(),
+                        expectedGen: expectedGen
+                    )
                     throw CancellationError()
                 }
                 do {
                     let rangeHdr = "bytes=\(cStart)-\(cEnd)"
-                    let resp = try await fetcher(mediaUrl, "GET", rangeHdr, hdrPolicy)
+                    let opened = try await opener(mediaUrl, "GET", rangeHdr, hdrPolicy, false)
+                    let bodyStream = opened.bodyStream
+                    defer { bodyStream?.cancel() }
                     try Task.checkCancellation()
 
-                    let payload: Data
-                    if resp.statusCode == 206 {
-                        payload = resp.body
-                    } else if resp.statusCode == 200 {
-                        // Upstream ignored Range and returned whole representation; slice requested window safely
-                        let lower = Int(cStart)
-                        let upperIdx = min(resp.body.count, Int(cEnd) + 1)
-                        guard lower < upperIdx else {
-                            throw MarcoError.networkFailure("上游分片偏移超出响应长度")
+                    if opened.statusCode == 206 {
+                        guard let contentRangeRaw = opened.headers.first(where: { $0.key.lowercased() == "content-range" })?.value,
+                              let parsedCR = ResourceStreamCoordinator.parseByteContentRange(contentRangeRaw)
+                        else {
+                            bodyStream?.cancel()
+                            throw MarcoError.networkFailure("上游 206 响应缺少或包含非法 Content-Range")
                         }
-                        payload = resp.body.subdata(in: lower..<upperIdx)
-                    } else {
-                        throw MarcoError.networkFailure("上游分片请求失败 (HTTP \(resp.statusCode))")
-                    }
+                        guard parsedCR.start == cStart, parsedCR.end == cEnd else {
+                            bodyStream?.cancel()
+                            throw MarcoError.networkFailure("上游 206 区间不匹配：期望 \(cStart)-\(cEnd)，实际 \(parsedCR.start)-\(parsedCR.end)")
+                        }
+                        if let reportedTotal = parsedCR.total, reportedTotal != totalSize {
+                            bodyStream?.cancel()
+                            throw MarcoError.networkFailure("上游 206 文件总长度变化：期望 \(totalSize)，实际 \(reportedTotal)")
+                        }
+                        if let clRaw = opened.headers.first(where: { $0.key.lowercased() == "content-length" })?.value
+                            .trimmingCharacters(in: .whitespacesAndNewlines),
+                           !clRaw.isEmpty
+                        {
+                            guard let clVal = Int64(clRaw), clVal == Int64(expectedLen) else {
+                                bodyStream?.cancel()
+                                throw MarcoError.networkFailure("上游 206 Content-Length 与分片区间长度不匹配")
+                            }
+                        }
 
-                    await coordinator.storeCompletedChunk(
-                        chunkIndex: cIdx,
-                        data: payload,
-                        reservedBytes: expectedLen,
-                        expectedGen: expectedGen
-                    )
-                    return payload
+                        guard let stream = bodyStream else {
+                            throw MarcoError.networkFailure("上游 206 响应缺少正文流")
+                        }
+                        var payload = Data()
+                        payload.reserveCapacity(expectedLen)
+                        while payload.count < expectedLen {
+                            try Task.checkCancellation()
+                            guard let piece = try await stream.nextChunk() else { break }
+                            if piece.isEmpty { continue }
+                            let remaining = expectedLen - payload.count
+                            if piece.count > remaining {
+                                stream.cancel()
+                                throw MarcoError.networkFailure("上游 206 分片正文超出声明区间长度")
+                            }
+                            payload.append(piece)
+                        }
+                        try Task.checkCancellation()
+                        guard payload.count == expectedLen else {
+                            throw MarcoError.networkFailure("上游 206 分片正文提前结束 (\(payload.count)/\(expectedLen))")
+                        }
+                        await coordinator.storeCompletedChunk(
+                            chunkIndex: cIdx,
+                            data: payload,
+                            reservedBytes: expectedLen,
+                            expectedGen: expectedGen
+                        )
+                        return payload
+                    } else if opened.statusCode == 200 {
+                        // Upstream ignored Range! Immediately cancel stream BEFORE buffering the whole file,
+                        // mark resource as non-Range, and let serveMediaRequest switch to bounded 200 streaming.
+                        bodyStream?.cancel()
+                        let lenHint = opened.headers.first(where: { $0.key.lowercased() == "content-length" })
+                            .flatMap { Int64($0.value) }
+                        _ = await coordinator.markRangeUnsupported(totalSizeHint: lenHint)
+                        throw UpstreamRangeNotSupportedSignal(totalSizeHint: lenHint)
+                    } else {
+                        bodyStream?.cancel()
+                        throw MarcoError.networkFailure("上游分片请求失败 (HTTP \(opened.statusCode))")
+                    }
                 } catch {
                     await budget.release(bytes: expectedLen)
-                    await coordinator.removeFailedInFlight(chunkIndex: cIdx, expectedGen: expectedGen)
+                    await coordinator.recordFailedInFlight(
+                        chunkIndex: cIdx,
+                        error: error,
+                        expectedGen: expectedGen
+                    )
                     throw error
                 }
             }
@@ -529,7 +1157,7 @@ private actor ResourceStreamCoordinator {
         reservedBytes: Int,
         expectedGen: UInt64
     ) async {
-        guard generation == expectedGen, inFlightTasks[chunkIndex] != nil else {
+        guard !isRevoked, generation == expectedGen, inFlightTasks[chunkIndex] != nil else {
             await memoryBudget.release(bytes: reservedBytes)
             return
         }
@@ -537,9 +1165,12 @@ private actor ResourceStreamCoordinator {
         readyChunks[chunkIndex] = BufferedChunkEntry(data: data, reservedBytes: reservedBytes)
     }
 
-    private func removeFailedInFlight(chunkIndex: Int, expectedGen: UInt64) {
-        guard generation == expectedGen else { return }
+    private func recordFailedInFlight(chunkIndex: Int, error: Error, expectedGen: UInt64) {
+        guard !isRevoked, generation == expectedGen else { return }
         inFlightTasks.removeValue(forKey: chunkIndex)
+        if !(error is CancellationError) {
+            failedChunks[chunkIndex] = error
+        }
     }
 
     private func headerValue(_ headers: [String: String], name: String) -> String? {
@@ -563,70 +1194,105 @@ private actor ResourceStreamCoordinator {
         }
     }
 
+    static func parseByteContentRange(_ header: String) -> (start: Int64, end: Int64, total: Int64?)? {
+        let trimmed = header.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.lowercased().hasPrefix("bytes ") else { return nil }
+        let body = String(trimmed.dropFirst("bytes ".count)).trimmingCharacters(in: .whitespaces)
+        let slashParts = body.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+        guard slashParts.count == 2 else { return nil }
+        let rangePart = String(slashParts[0]).trimmingCharacters(in: .whitespaces)
+        let totalPart = String(slashParts[1]).trimmingCharacters(in: .whitespaces)
+        let dashParts = rangePart.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+        guard dashParts.count == 2,
+              let start = Int64(dashParts[0].trimmingCharacters(in: .whitespaces)),
+              let end = Int64(dashParts[1].trimmingCharacters(in: .whitespaces)),
+              start >= 0,
+              end >= start
+        else {
+            return nil
+        }
+        let total: Int64?
+        if totalPart == "*" {
+            total = nil
+        } else if let parsedTotal = Int64(totalPart), parsedTotal > end {
+            total = parsedTotal
+        } else {
+            return nil
+        }
+        return (start: start, end: end, total: total)
+    }
+
     static func parseTotalSizeFromContentRange(_ header: String) -> Int64? {
-        // Expected: "bytes 0-0/1048576" or "bytes */1048576"
-        guard let slash = header.lastIndex(of: "/") else { return nil }
-        let tail = header[header.index(after: slash)...].trimmingCharacters(in: .whitespacesAndNewlines)
-        guard tail != "*", let size = Int64(tail), size >= 0 else { return nil }
-        return size
+        parseByteContentRange(header)?.total
     }
 }
 
 /// Loopback (`127.0.0.1:<ephemeral>`) 6-worker Range proxy server for Apple TV 4K Netdisk playback.
 /// Provides revocable capability URLs (`/<token>/<resourceId>/media`), per-hop `NetdiskHeaderPolicy`
-/// redirect credential isolation, `24 MiB` memory ceiling backpressure, and instant seek preemption.
+/// redirect credential isolation, `24 MiB` memory ceiling backpressure, header-first bounded streaming
+/// for both standard `206` and Range-ignoring `200` upstreams, and instant seek/exit cancellation.
 public final class NetdiskRangeProxyServer: @unchecked Sendable {
     public static let defaultWorkers = 6
     public static let defaultChunkSize = 1_048_576
     public static let defaultMemoryLimit = 24 * 1024 * 1024
+    public static let defaultMaxNonRangeSkipBytes: Int64 = 8 * 1024 * 1024
     private static let maxRedirects = 8
 
     public let workers: Int
     public let chunkSize: Int
     public let memoryLimit: Int
+    public let maxNonRangeSkipBytes: Int64
 
     private let queue = DispatchQueue(label: "com.pilipala.marcoMovie.tv.range-proxy", qos: .userInitiated)
     private let stateLock = NSLock()
     private var serverToken: String
     private var resources: [String: ResourceStreamCoordinator] = [:]
+    private var retiredPreemptedWindows: Int = 0
+    private var retiredChunkRequests: Int = 0
     private var listener: NWListener?
     private(set) public var port: UInt16 = 0
 
     private let memoryBudget: ProxyMemoryBudgetActor
-    private let redirectDelegate = ProxyNoRedirectDelegate()
+    private let streamingDelegate: StreamingUpstreamSessionDelegate
     private let urlSession: URLSession
-    private let chunkFetcher: @Sendable (URL, String, String?, NetdiskHeaderPolicy) async throws -> ProxyUpstreamResponse
+    private let streamOpener: UpstreamStreamOpener
 
     public init(
         workers: Int = NetdiskRangeProxyServer.defaultWorkers,
         chunkSize: Int = NetdiskRangeProxyServer.defaultChunkSize,
         memoryLimit: Int = NetdiskRangeProxyServer.defaultMemoryLimit,
+        maxNonRangeSkipBytes: Int64 = NetdiskRangeProxyServer.defaultMaxNonRangeSkipBytes,
         sessionConfiguration: URLSessionConfiguration? = nil
     ) {
         self.workers = min(max(1, workers), 6)
         self.chunkSize = min(max(65_536, chunkSize), 2 * 1024 * 1024)
         self.memoryLimit = max(self.chunkSize * 2, memoryLimit)
+        self.maxNonRangeSkipBytes = max(65_536, maxNonRangeSkipBytes)
         self.serverToken = Self.randomHex(byteCount: 16)
         self.memoryBudget = ProxyMemoryBudgetActor(limitBytes: self.memoryLimit)
 
         let cfg = sessionConfiguration ?? {
             let c = URLSessionConfiguration.ephemeral
             c.timeoutIntervalForRequest = 20
-            c.timeoutIntervalForResource = 120
+            c.timeoutIntervalForResource = 180
             c.httpMaximumConnectionsPerHost = 8
             c.httpShouldSetCookies = false
             c.httpCookieAcceptPolicy = .never
             return c
         }()
-        let session = URLSession(configuration: cfg, delegate: redirectDelegate, delegateQueue: nil)
+        let delegate = StreamingUpstreamSessionDelegate()
+        let session = URLSession(configuration: cfg, delegate: delegate, delegateQueue: nil)
+        self.streamingDelegate = delegate
         self.urlSession = session
-        self.chunkFetcher = { targetUrl, method, rangeHeader, policy in
-            try await Self.fetchFollowingRedirects(
+        self.streamOpener = { targetUrl, method, rangeHeader, policy, discardBodyImmediately in
+            try await Self.openStreamFollowingRedirects(
                 session: session,
+                delegate: delegate,
                 initialUrl: targetUrl,
                 method: method,
                 range: rangeHeader,
-                policy: policy
+                policy: policy,
+                discardBodyImmediately: discardBodyImmediately
             )
         }
     }
@@ -707,13 +1373,22 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
             return (current, all)
         }
         activeListener?.cancel()
+        urlSession.invalidateAndCancel()
         let budget = self.memoryBudget
         Task {
             for coord in oldResources {
-                await coord.cancelAndPurgeAll()
+                await coord.revokeAndPurgeAll()
             }
             await budget.resetAll()
         }
+    }
+
+    public func activeResourceCount() -> Int {
+        withStateLock { resources.count }
+    }
+
+    public func hasActiveResource(_ resourceId: String) -> Bool {
+        withStateLock { resources[resourceId] != nil }
     }
 
     /// Rotates the capability token and purges all active streams immediately.
@@ -725,14 +1400,27 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
             return all
         }
         for coord in oldResources {
-            await coord.cancelAndPurgeAll()
+            let snap = await coord.metricsSnapshot()
+            recordRetiredMetrics(preempted: snap.preempted, chunkRequests: snap.chunkRequests)
+            await coord.revokeAndPurgeAll()
         }
         await memoryBudget.resetAll()
     }
 
     public func revokeResource(_ resourceId: String) async {
         let removed = withStateLock { resources.removeValue(forKey: resourceId) }
-        await removed?.cancelAndPurgeAll()
+        if let coord = removed {
+            let snap = await coord.metricsSnapshot()
+            recordRetiredMetrics(preempted: snap.preempted, chunkRequests: snap.chunkRequests)
+            await coord.revokeAndPurgeAll()
+        }
+    }
+
+    private func recordRetiredMetrics(preempted: Int, chunkRequests: Int) {
+        withStateLock {
+            retiredPreemptedWindows += preempted
+            retiredChunkRequests += chunkRequests
+        }
     }
 
     /// Registers an upstream media URL with a `NetdiskHeaderPolicy` and returns `http://127.0.0.1:<port>/<token>/<resourceId>/media`.
@@ -750,16 +1438,21 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
             chunkSize: chunkSize,
             contentTypeHint: contentTypeHint,
             memoryBudget: memoryBudget,
-            chunkFetcher: chunkFetcher
+            streamOpener: streamOpener
         )
 
-        let tokenSnapshot = withStateLock { () -> String in
+        let (tokenSnapshot, evictedCoord) = withStateLock { () -> (String, ResourceStreamCoordinator?) in
+            var evicted: ResourceStreamCoordinator?
             if resources.count >= 32, let evictedKey = resources.keys.first {
-                let evicted = resources.removeValue(forKey: evictedKey)
-                Task { await evicted?.cancelAndPurgeAll() }
+                evicted = resources.removeValue(forKey: evictedKey)
             }
             resources[resourceId] = coordinator
-            return serverToken
+            return (serverToken, evicted)
+        }
+        if let evictedCoord {
+            let snap = await evictedCoord.metricsSnapshot()
+            recordRetiredMetrics(preempted: snap.preempted, chunkRequests: snap.chunkRequests)
+            await evictedCoord.revokeAndPurgeAll()
         }
 
         guard let proxyUrl = URL(string: "http://127.0.0.1:\(activePort)/\(tokenSnapshot)/\(resourceId)/media") else {
@@ -769,32 +1462,39 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
     }
 
     public func metrics() async -> NetdiskProxyMetrics {
-        let coords = withStateLock { Array(resources.values) }
-        var totalPreempted = 0
-        var totalChunkReqs = 0
+        let (coords, basePreempted, baseChunkReqs) = withStateLock {
+            (Array(resources.values), retiredPreemptedWindows, retiredChunkRequests)
+        }
+        var totalPreempted = basePreempted
+        var totalChunkReqs = baseChunkReqs
         for c in coords {
             let snap = await c.metricsSnapshot()
             totalPreempted += snap.preempted
             totalChunkReqs += snap.chunkRequests
         }
         let mem = await memoryBudget.snapshot()
+        let streamSnap = streamingDelegate.metricsSnapshot()
         return NetdiskProxyMetrics(
             currentBufferedBytes: mem.current,
             peakBufferedBytes: mem.peak,
             preemptedWindowCount: totalPreempted,
-            upstreamChunkRequests: totalChunkReqs
+            upstreamChunkRequests: totalChunkReqs,
+            upstreamBytesRead: streamSnap.bytesRead,
+            cancelledUpstreamRequests: streamSnap.cancelled
         )
     }
 
-    // MARK: - Redirect-Filtered Upstream Fetcher
+    // MARK: - Redirect-Filtered Header-First Upstream Streamers
 
-    public static func fetchFollowingRedirects(
+    private static func openStreamFollowingRedirects(
         session: URLSession,
+        delegate: StreamingUpstreamSessionDelegate,
         initialUrl: URL,
         method: String,
         range: String?,
-        policy: NetdiskHeaderPolicy
-    ) async throws -> ProxyUpstreamResponse {
+        policy: NetdiskHeaderPolicy,
+        discardBodyImmediately: Bool
+    ) async throws -> OpenedUpstreamResponse {
         var currentUrl = initialUrl
         var currentMethod = method.uppercased()
 
@@ -812,9 +1512,63 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
                 req.setValue(v, forHTTPHeaderField: k)
             }
 
-            let (data, resp) = try await session.data(for: req)
+            let opened = try await delegate.openStream(
+                session: session,
+                request: req,
+                discardBodyImmediately: discardBodyImmediately || currentMethod == "HEAD"
+            )
+            let status = opened.statusCode
+            if [301, 302, 303, 307, 308].contains(status),
+               let location = opened.headers.first(where: { $0.key.lowercased() == "location" })?.value
+                   .trimmingCharacters(in: .whitespacesAndNewlines),
+               !location.isEmpty,
+               let nextUrl = URL(string: location, relativeTo: currentUrl)?.absoluteURL
+            {
+                opened.bodyStream?.cancel()
+                if status == 303 && currentMethod != "HEAD" {
+                    currentMethod = "GET"
+                }
+                currentUrl = nextUrl
+                continue
+            }
+
+            return opened
+        }
+
+        throw MarcoError.networkFailure("上游重定向次数超过上限 (\(maxRedirects))")
+    }
+
+    /// Redirect-isolated header-first helper with strict upper body bound (never buffers unbounded 200 payloads).
+    public static func fetchFollowingRedirects(
+        session: URLSession,
+        initialUrl: URL,
+        method: String,
+        range: String?,
+        policy: NetdiskHeaderPolicy,
+        maxBodyBytes: Int = 4 * 1024 * 1024
+    ) async throws -> ProxyUpstreamResponse {
+        var currentUrl = initialUrl
+        var currentMethod = method.uppercased()
+        let byteCap = max(0, maxBodyBytes)
+
+        for _ in 0...maxRedirects {
+            try Task.checkCancellation()
+            guard let scheme = currentUrl.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+                throw MarcoError.networkFailure("不支持的重定向协议")
+            }
+
+            var req = URLRequest(url: currentUrl, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
+            req.httpMethod = currentMethod
+            req.httpShouldHandleCookies = false
+            let filteredHeaders = policy.headers(for: currentUrl, range: range)
+            for (k, v) in filteredHeaders {
+                req.setValue(v, forHTTPHeaderField: k)
+            }
+
+            let (asyncBytes, resp) = try await session.bytes(for: req)
             guard let http = resp as? HTTPURLResponse else {
-                return ProxyUpstreamResponse(statusCode: 200, headers: [:], body: data)
+                asyncBytes.task.cancel()
+                return ProxyUpstreamResponse(statusCode: 200, headers: [:], body: Data())
             }
 
             let status = http.statusCode
@@ -823,6 +1577,7 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
                !location.isEmpty,
                let nextUrl = URL(string: location, relativeTo: currentUrl)?.absoluteURL
             {
+                asyncBytes.task.cancel()
                 if status == 303 && currentMethod != "HEAD" {
                     currentMethod = "GET"
                 }
@@ -834,7 +1589,20 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
             for (rk, rv) in http.allHeaderFields {
                 respHeaders[String(describing: rk)] = String(describing: rv)
             }
-            return ProxyUpstreamResponse(statusCode: status, headers: respHeaders, body: data)
+
+            if currentMethod == "HEAD" || byteCap == 0 {
+                asyncBytes.task.cancel()
+                return ProxyUpstreamResponse(statusCode: status, headers: respHeaders, body: Data())
+            }
+
+            var collected = Data()
+            var iterator = asyncBytes.makeAsyncIterator()
+            while collected.count < byteCap, let byte = try await iterator.next() {
+                try Task.checkCancellation()
+                collected.append(byte)
+            }
+            asyncBytes.task.cancel()
+            return ProxyUpstreamResponse(statusCode: status, headers: respHeaders, body: collected)
         }
 
         throw MarcoError.networkFailure("上游重定向次数超过上限 (\(maxRedirects))")
@@ -890,7 +1658,6 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
             return .unsatisfiable
         }
         let spec = String(raw.dropFirst("bytes=".count)).trimmingCharacters(in: .whitespaces)
-        // Reject multi-part byte ranges
         guard !spec.contains(","), let dashIdx = spec.firstIndex(of: "-") else {
             return .unsatisfiable
         }
@@ -902,7 +1669,6 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
         let endPart = String(spec[spec.index(after: dashIdx)...]).trimmingCharacters(in: .whitespaces)
 
         if startPart.isEmpty {
-            // Suffix byte-range-spec: bytes=-500
             guard let suffixLen = Int64(endPart), suffixLen > 0 else {
                 return .unsatisfiable
             }
@@ -942,7 +1708,6 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
 
         let rawPath = parts[1].components(separatedBy: "?").first ?? parts[1]
         let segments = rawPath.split(separator: "/").map(String.init)
-        // Expected path: /<token>/<resourceId>/media (or /<token>/<resourceId>/media.<ext>)
         guard segments.count == 3, segments[2].hasPrefix("media") else {
             sendSimpleResponse(connection: connection, status: 404, headers: [:], body: Data("Not Found".utf8))
             return
@@ -974,10 +1739,14 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
         }
         let rangeHeader = clientHeaders["range"]
 
-        Task { [weak self] in
+        let serveId = UUID()
+        let serveTask = Task { [weak self] in
             guard let self = self else {
                 connection.cancel()
                 return
+            }
+            defer {
+                Task { await coordinator.unregisterServeSession(id: serveId) }
             }
             await self.serveMediaRequest(
                 method: method,
@@ -985,6 +1754,27 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
                 coordinator: coordinator,
                 connection: connection
             )
+        }
+        Task {
+            await coordinator.registerServeSession(id: serveId) {
+                serveTask.cancel()
+                connection.cancel()
+            }
+        }
+
+        // Watch for client socket close/abort so upstream streaming cancels promptly on seek/exit.
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .failed, .cancelled:
+                serveTask.cancel()
+            default:
+                break
+            }
+        }
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { _, _, isComplete, error in
+            if isComplete || error != nil {
+                serveTask.cancel()
+            }
         }
     }
 
@@ -995,9 +1785,20 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
         connection: NWConnection
     ) async {
         do {
-            let meta = try await coordinator.resolveMetadata()
-            let parsedRange = Self.parseByteRange(rangeHeader, totalSize: meta.totalSize)
+            var meta = try await coordinator.resolveMetadata()
 
+            if !meta.supportsRange {
+                try await handleNonRangeMediaRequest(
+                    method: method,
+                    rangeHeader: rangeHeader,
+                    meta: meta,
+                    coordinator: coordinator,
+                    connection: connection
+                )
+                return
+            }
+
+            let parsedRange = Self.parseByteRange(rangeHeader, totalSize: meta.totalSize)
             switch parsedRange {
             case .unsatisfiable:
                 sendSimpleResponse(
@@ -1023,15 +1824,26 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
                     sendSimpleResponse(connection: connection, status: 200, headers: baseHeaders, body: Data())
                     return
                 }
-                try await streamRangeBody(
-                    status: 200,
-                    headers: baseHeaders,
-                    startByte: 0,
-                    endByte: meta.totalSize - 1,
-                    totalSize: meta.totalSize,
-                    coordinator: coordinator,
-                    connection: connection
-                )
+                do {
+                    try await streamRangeBody(
+                        status: 200,
+                        headers: baseHeaders,
+                        startByte: 0,
+                        endByte: meta.totalSize - 1,
+                        totalSize: meta.totalSize,
+                        coordinator: coordinator,
+                        connection: connection
+                    )
+                } catch let fallback as UpstreamRangeNotSupportedSignal {
+                    meta = await coordinator.markRangeUnsupported(totalSizeHint: fallback.totalSizeHint)
+                    try await handleNonRangeMediaRequest(
+                        method: method,
+                        rangeHeader: rangeHeader,
+                        meta: meta,
+                        coordinator: coordinator,
+                        connection: connection
+                    )
+                }
 
             case .valid(let startByte, let endByte):
                 let contentLen = endByte - startByte + 1
@@ -1046,18 +1858,34 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
                     sendSimpleResponse(connection: connection, status: 206, headers: rangeHeaders, body: Data())
                     return
                 }
-                try await streamRangeBody(
-                    status: 206,
-                    headers: rangeHeaders,
-                    startByte: startByte,
-                    endByte: endByte,
-                    totalSize: meta.totalSize,
-                    coordinator: coordinator,
-                    connection: connection
-                )
+                do {
+                    try await streamRangeBody(
+                        status: 206,
+                        headers: rangeHeaders,
+                        startByte: startByte,
+                        endByte: endByte,
+                        totalSize: meta.totalSize,
+                        coordinator: coordinator,
+                        connection: connection
+                    )
+                } catch let fallback as UpstreamRangeNotSupportedSignal {
+                    meta = await coordinator.markRangeUnsupported(totalSizeHint: fallback.totalSizeHint)
+                    try await handleNonRangeMediaRequest(
+                        method: method,
+                        rangeHeader: rangeHeader,
+                        meta: meta,
+                        coordinator: coordinator,
+                        connection: connection
+                    )
+                }
             }
         } catch is CancellationError {
             connection.cancel()
+        } catch is StreamAbortedAfterHeadersSent {
+            // HTTP headers / partial body have already been written to this socket;
+            // streamRangeBody already closed the socket cleanly after flushing written bytes,
+            // so NEVER write a second HTTP response header here.
+            return
         } catch {
             sendSimpleResponse(
                 connection: connection,
@@ -1077,39 +1905,256 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
         coordinator: ResourceStreamCoordinator,
         connection: NWConnection
     ) async throws {
-        let sessionGen = await coordinator.beginStreamSession(
+        let sessionGen = try await coordinator.beginStreamSession(
             startByte: startByte,
             endByte: endByte,
             totalSize: totalSize
         )
         let firstChunk = Int(startByte / Int64(chunkSize))
         let lastChunk = Int(endByte / Int64(chunkSize))
+        var headersSent = false
 
-        let headerPacket = Data(Self.formatHttpHeaderBlock(status: status, headers: headers).utf8)
-        try await Self.sendPacket(connection: connection, data: headerPacket)
-
-        for cIdx in firstChunk...lastChunk {
-            let chunkData = try await coordinator.consumeChunk(
-                chunkIndex: cIdx,
-                maxTargetChunk: lastChunk + 1,
-                totalSize: totalSize,
-                expectedGen: sessionGen
-            )
-            let chunkGlobalStart = Int64(cIdx) * Int64(chunkSize)
-            let sliceStart = Int(max(0, startByte - chunkGlobalStart))
-            let sliceEnd = Int(min(Int64(chunkData.count), endByte - chunkGlobalStart + 1))
-            guard sliceStart < sliceEnd, sliceEnd <= chunkData.count else {
-                throw MarcoError.networkFailure("分片数据长度与请求范围不匹配")
+        do {
+            for cIdx in firstChunk...lastChunk {
+                try Task.checkCancellation()
+                let chunkData = try await coordinator.consumeChunk(
+                    chunkIndex: cIdx,
+                    maxTargetChunk: lastChunk + 1,
+                    totalSize: totalSize,
+                    expectedGen: sessionGen
+                )
+                let chunkGlobalStart = Int64(cIdx) * Int64(chunkSize)
+                let chunkGlobalEnd = min(totalSize - 1, chunkGlobalStart + Int64(chunkSize) - 1)
+                let expectedChunkLen = Int(chunkGlobalEnd - chunkGlobalStart + 1)
+                guard chunkData.count == expectedChunkLen else {
+                    throw MarcoError.networkFailure("分片数据长度与预期不匹配 (\(chunkData.count)/\(expectedChunkLen))")
+                }
+                let sliceStart = Int(max(0, startByte - chunkGlobalStart))
+                let sliceEnd = Int(min(Int64(chunkData.count), endByte - chunkGlobalStart + 1))
+                guard sliceStart < sliceEnd, sliceEnd <= chunkData.count else {
+                    throw MarcoError.networkFailure("分片数据长度与请求范围不匹配")
+                }
+                if !headersSent {
+                    headersSent = true
+                    let headerPacket = Data(Self.formatHttpHeaderBlock(status: status, headers: headers).utf8)
+                    try await Self.sendPacket(connection: connection, data: headerPacket)
+                }
+                let slice = (sliceStart == 0 && sliceEnd == chunkData.count)
+                    ? chunkData
+                    : chunkData.subdata(in: sliceStart..<sliceEnd)
+                try await Self.sendPacket(connection: connection, data: slice)
             }
-            let slice = (sliceStart == 0 && sliceEnd == chunkData.count)
-                ? chunkData
-                : chunkData.subdata(in: sliceStart..<sliceEnd)
-            try await Self.sendPacket(connection: connection, data: slice)
+
+            Self.closeConnectionAfterBody(connection)
+        } catch is CancellationError {
+            await coordinator.cancelGenerationIfCurrent(sessionGen)
+            if headersSent {
+                Self.closeConnectionAfterBody(connection)
+                throw StreamAbortedAfterHeadersSent()
+            }
+            throw CancellationError()
+        } catch {
+            await coordinator.cancelGenerationIfCurrent(sessionGen)
+            if headersSent {
+                // Never emit a second HTTP status line/header (200/206/502) after headers or body started.
+                Self.closeConnectionAfterBody(connection)
+                throw StreamAbortedAfterHeadersSent()
+            }
+            if let fallback = error as? UpstreamRangeNotSupportedSignal {
+                throw fallback
+            }
+            throw error
+        }
+    }
+
+    /// Bounded sequential pass-through for upstreams that ignore `Range` and return HTTP `200`.
+    /// Preserves `NetdiskHeaderPolicy` auth & per-hop redirect isolation while strictly bounding RAM
+    /// to a single 64 KiB buffer and cancelling the upstream TCP stream immediately on slice completion,
+    /// seek preemption, or player exit.
+    private func handleNonRangeMediaRequest(
+        method: String,
+        rangeHeader: String?,
+        meta: UpstreamMediaMetadata,
+        coordinator: ResourceStreamCoordinator,
+        connection: NWConnection
+    ) async throws {
+        if method == "HEAD" {
+            var headHeaders: [String: String] = [
+                "Accept-Ranges": "none",
+                "Content-Type": meta.contentType,
+                "Cache-Control": "no-store",
+            ]
+            if meta.totalSize >= 0 {
+                headHeaders["Content-Length"] = "\(meta.totalSize)"
+            }
+            sendSimpleResponse(connection: connection, status: 200, headers: headHeaders, body: Data())
+            return
         }
 
-        connection.send(content: nil, isComplete: true, completion: .contentProcessed { _ in
-            connection.cancel()
-        })
+        let parsedRange: ParsedRangeResult = meta.totalSize > 0
+            ? Self.parseByteRange(rangeHeader, totalSize: meta.totalSize)
+            : .none
+        if case .unsatisfiable = parsedRange {
+            sendSimpleResponse(
+                connection: connection,
+                status: 416,
+                headers: [
+                    "Accept-Ranges": "none",
+                    "Content-Range": "bytes */\(meta.totalSize)",
+                    "Cache-Control": "no-store",
+                ],
+                body: Data("Range Not Satisfiable".utf8)
+            )
+            return
+        }
+
+        let sessionId = UUID()
+        let streamTask = Task { [weak self] in
+            guard let self = self else { return }
+            let bufferReservation = min(self.chunkSize, 65_536)
+            let acquired = await self.memoryBudget.acquire(bytes: bufferReservation)
+            guard acquired, !Task.isCancelled else {
+                if acquired {
+                    await self.memoryBudget.release(bytes: bufferReservation)
+                }
+                await coordinator.clearNonRangeSession(sessionId: sessionId)
+                connection.cancel()
+                return
+            }
+
+            var headersSent = false
+            do {
+                let opened = try await coordinator.openUpstreamStream(
+                    method: "GET",
+                    range: nil,
+                    discardBodyImmediately: false
+                )
+                guard (200...299).contains(opened.statusCode), let bodyStream = opened.bodyStream else {
+                    opened.bodyStream?.cancel()
+                    self.sendSimpleResponse(
+                        connection: connection,
+                        status: 502,
+                        headers: ["Content-Type": "text/plain; charset=utf-8"],
+                        body: Data("Upstream Stream Error".utf8)
+                    )
+                    await self.memoryBudget.release(bytes: bufferReservation)
+                    await coordinator.clearNonRangeSession(sessionId: sessionId)
+                    return
+                }
+                defer { bodyStream.cancel() }
+
+                let upstreamTotal: Int64 = opened.headers.first(where: { $0.key.lowercased() == "content-length" })
+                    .flatMap { Int64($0.value) } ?? meta.totalSize
+                let contentType = opened.headers.first(where: { $0.key.lowercased() == "content-type" })?.value
+                    ?? meta.contentType
+
+                if case .valid(let reqStart, let reqEnd) = parsedRange,
+                   upstreamTotal > 0,
+                   reqStart <= self.maxNonRangeSkipBytes
+                {
+                    let clampedEnd = min(reqEnd, upstreamTotal - 1)
+                    let contentLen = clampedEnd - reqStart + 1
+                    let respHeaders: [String: String] = [
+                        "Accept-Ranges": "none",
+                        "Content-Type": contentType,
+                        "Content-Range": "bytes \(reqStart)-\(clampedEnd)/\(upstreamTotal)",
+                        "Content-Length": "\(contentLen)",
+                        "Cache-Control": "no-store",
+                    ]
+                    headersSent = true
+                    let hdrPacket = Data(Self.formatHttpHeaderBlock(status: 206, headers: respHeaders).utf8)
+                    try await Self.sendPacket(connection: connection, data: hdrPacket)
+
+                    var cursor: Int64 = 0
+                    var bytesSent: Int64 = 0
+                    while let chunk = try await bodyStream.nextChunk() {
+                        try Task.checkCancellation()
+                        guard !chunk.isEmpty else { continue }
+                        let chunkStart = cursor
+                        let chunkEnd = cursor + Int64(chunk.count) - 1
+                        cursor += Int64(chunk.count)
+
+                        if chunkEnd < reqStart {
+                            continue
+                        }
+                        let overlapStart = max(chunkStart, reqStart)
+                        let overlapEnd = min(chunkEnd, clampedEnd)
+                        if overlapStart <= overlapEnd {
+                            let localStart = Int(overlapStart - chunkStart)
+                            let localEnd = Int(overlapEnd - chunkStart) + 1
+                            let outSlice = (localStart == 0 && localEnd == chunk.count)
+                                ? chunk
+                                : chunk.subdata(in: localStart..<localEnd)
+                            try await Self.sendPacket(connection: connection, data: outSlice)
+                            bytesSent += Int64(outSlice.count)
+                        }
+                        if cursor > clampedEnd {
+                            bodyStream.cancel()
+                            break
+                        }
+                    }
+                    if bytesSent < contentLen {
+                        connection.cancel()
+                        await self.memoryBudget.release(bytes: bufferReservation)
+                        await coordinator.clearNonRangeSession(sessionId: sessionId)
+                        return
+                    }
+                } else {
+                    var respHeaders: [String: String] = [
+                        "Accept-Ranges": "none",
+                        "Content-Type": contentType,
+                        "Cache-Control": "no-store",
+                    ]
+                    if upstreamTotal >= 0 {
+                        respHeaders["Content-Length"] = "\(upstreamTotal)"
+                    }
+                    headersSent = true
+                    let hdrPacket = Data(Self.formatHttpHeaderBlock(status: 200, headers: respHeaders).utf8)
+                    try await Self.sendPacket(connection: connection, data: hdrPacket)
+
+                    var bytesSent: Int64 = 0
+                    while let chunk = try await bodyStream.nextChunk() {
+                        try Task.checkCancellation()
+                        guard !chunk.isEmpty else { continue }
+                        try await Self.sendPacket(connection: connection, data: chunk)
+                        bytesSent += Int64(chunk.count)
+                    }
+                    if upstreamTotal > 0 && bytesSent < upstreamTotal {
+                        connection.cancel()
+                        await self.memoryBudget.release(bytes: bufferReservation)
+                        await coordinator.clearNonRangeSession(sessionId: sessionId)
+                        return
+                    }
+                }
+
+                connection.send(content: nil, isComplete: true, completion: .contentProcessed { _ in
+                    connection.cancel()
+                })
+            } catch is CancellationError {
+                connection.cancel()
+            } catch {
+                if headersSent {
+                    connection.cancel()
+                } else {
+                    self.sendSimpleResponse(
+                        connection: connection,
+                        status: 502,
+                        headers: ["Content-Type": "text/plain; charset=utf-8"],
+                        body: Data("Upstream Stream Error".utf8)
+                    )
+                }
+            }
+
+            await self.memoryBudget.release(bytes: bufferReservation)
+            await coordinator.clearNonRangeSession(sessionId: sessionId)
+        }
+
+        await coordinator.registerNonRangeSession(sessionId: sessionId, task: streamTask)
+        await withTaskCancellationHandler {
+            await streamTask.value
+        } onCancel: {
+            streamTask.cancel()
+        }
     }
 
     // MARK: - Socket & State Helpers
@@ -1157,15 +2202,26 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
         })
     }
 
+    private static func closeConnectionAfterBody(_ connection: NWConnection) {
+        connection.send(content: nil, isComplete: true, completion: .contentProcessed { _ in
+            connection.cancel()
+        })
+    }
+
     private static func sendPacket(connection: NWConnection, data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.send(content: data, completion: .contentProcessed { error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: ())
-                }
-            })
+        try Task.checkCancellation()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                connection.send(content: data, completion: .contentProcessed { error in
+                    if let error = error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: ())
+                    }
+                })
+            }
+        } onCancel: {
+            connection.cancel()
         }
     }
 

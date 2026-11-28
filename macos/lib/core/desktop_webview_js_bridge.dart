@@ -55,6 +55,7 @@ class DesktopWebViewJsBridge {
   ScriptProxyServer? _proxyServer;
   final _sessions = <String, _WebViewSessionContext>{};
   final _playbackPins = <String, Set<Object>>{};
+  final _evictOnUnpin = <String>{};
 
   static bool get _isPlatformSupported =>
       debugForcePlatformSupported ??
@@ -288,13 +289,32 @@ class DesktopWebViewJsBridge {
       if (!pins.remove(token)) return;
       if (pins.isEmpty && identical(_playbackPins[sessionKey], pins)) {
         _playbackPins.remove(sessionKey);
+        if (_evictOnUnpin.remove(sessionKey)) {
+          unawaited(disposeSession(sessionKey));
+        }
       }
     };
   }
 
-  Future<void> retainSessions(Set<String> keys) async {
-    _playbackPins.removeWhere((k, _) => !keys.contains(k));
-    final removed = _sessions.keys.where((k) => !keys.contains(k)).toList();
+  Future<void> retainSessions(
+    Set<String> keys, {
+    bool preservePinned = false,
+  }) async {
+    final effectiveKeys = Set<String>.of(keys);
+    _evictOnUnpin.removeWhere(keys.contains);
+    if (preservePinned) {
+      for (final entry in _playbackPins.entries) {
+        if (entry.value.isNotEmpty && !keys.contains(entry.key)) {
+          effectiveKeys.add(entry.key);
+          _evictOnUnpin.add(entry.key);
+        }
+      }
+    } else {
+      _evictOnUnpin.removeWhere((k) => !keys.contains(k));
+    }
+    _playbackPins.removeWhere((k, _) => !effectiveKeys.contains(k));
+    final removed =
+        _sessions.keys.where((k) => !effectiveKeys.contains(k)).toList();
     for (final k in removed) {
       await disposeSession(k);
     }

@@ -299,19 +299,15 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
         }
         return;
       case _LibraryTileId.jellyfin:
-        await _openServerForm(
+        await _openEmbyFamilyForm(
           title: '连接 Jellyfin 媒体库',
           accentColor: const Color(0xFF7B61FF),
-          addressHint: 'https://jellyfin.example:8096',
-          fields: const [
-            _FormFieldSpec('address', '服务器地址', 'https://jellyfin.example:8096'),
-            _FormFieldSpec('user', '用户名', '填写 Jellyfin 账号'),
-            _FormFieldSpec('pass', '密码', '填写登录密码', obscure: true),
-          ],
-          onConnect: (values, group, isPriv) => JellyfinLibrary.login(
-            values['address'] ?? '',
-            values['user'] ?? '',
-            values['pass'] ?? '',
+          defaultPort: '8096',
+          onConnect: (address, user, pass, label, group, isPriv) =>
+              JellyfinLibrary.login(
+            address,
+            user,
+            pass,
             group: group,
             isPrivate: isPriv,
           ),
@@ -535,6 +531,290 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
         });
       }
     }
+  }
+
+  Future<void> _openEmbyFamilyForm({
+    required String title,
+    required Color accentColor,
+    required String defaultPort,
+    required Future<SubscriptionEntry> Function(
+      String address,
+      String user,
+      String pass,
+      String label,
+      String group,
+      bool isPrivate,
+    )
+    onConnect,
+  }) async {
+    bool useHttps = false;
+    final hostCtrl = TextEditingController();
+    final portCtrl = TextEditingController(text: defaultPort);
+    final pathCtrl = TextEditingController();
+    final nameCtrl = TextEditingController();
+    final userCtrl = TextEditingController();
+    final passCtrl = TextEditingController();
+    final groupCtrl = TextEditingController(text: widget.initialGroup);
+    var isPrivate = widget.initialIsPrivate;
+    var busy = false;
+    String? error;
+    final showPrivacy =
+        widget.initialIsPrivate || !widget.storage.hasPrivacyConfigured;
+
+    await _pushSubForm(
+      title: title,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) {
+          final palette = ApplePalette.of(ctx);
+          return SingleChildScrollView(
+            padding: EdgeInsets.fromLTRB(
+              20,
+              18,
+              20,
+              24 + MediaQuery.viewInsetsOf(ctx).bottom,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _buildGroupSelectorBlock(
+                  ctx: ctx,
+                  groupCtrl: groupCtrl,
+                  onChanged: () => setModalState(() {}),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  '协议与连接方式',
+                  style: TextStyle(
+                    color: palette.labelSecondary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                CupertinoSlidingSegmentedControl<bool>(
+                  groupValue: useHttps,
+                  children: const {
+                    false: Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      child: Text('HTTP（默认 8096）'),
+                    ),
+                    true: Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      child: Text('HTTPS（443 / 8920）'),
+                    ),
+                  },
+                  onValueChanged: (v) {
+                    if (v == null) return;
+                    setModalState(() {
+                      useHttps = v;
+                      final p = portCtrl.text.trim();
+                      if (useHttps && p == defaultPort) {
+                        portCtrl.text = '';
+                      } else if (!useHttps && p.isEmpty) {
+                        portCtrl.text = defaultPort;
+                      }
+                    });
+                  },
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  '服务器地址',
+                  style: TextStyle(
+                    color: palette.labelSecondary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                _buildStyledInput(
+                  ctx,
+                  controller: hostCtrl,
+                  placeholder: '域名或 IP（如 emby.example），也支持直接粘贴完整网址',
+                  keyboardType: TextInputType.url,
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Text(
+                            '端口号（选填）',
+                            style: TextStyle(
+                              color: palette.labelSecondary,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          _buildStyledInput(
+                            ctx,
+                            controller: portCtrl,
+                            placeholder: useHttps ? '默认 443' : '默认 $defaultPort',
+                            keyboardType: TextInputType.number,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Text(
+                            '路径（选填）',
+                            style: TextStyle(
+                              color: palette.labelSecondary,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          _buildStyledInput(
+                            ctx,
+                            controller: pathCtrl,
+                            placeholder: '选填（如 /path）',
+                            keyboardType: TextInputType.url,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  '名称（选填）',
+                  style: TextStyle(
+                    color: palette.labelSecondary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                _buildStyledInput(
+                  ctx,
+                  controller: nameCtrl,
+                  placeholder: '选填，留空自动识别媒体库名称',
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  '用户名',
+                  style: TextStyle(
+                    color: palette.labelSecondary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                _buildStyledInput(
+                  ctx,
+                  controller: userCtrl,
+                  placeholder: '填写登录用户名',
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  '密码（可留空）',
+                  style: TextStyle(
+                    color: palette.labelSecondary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                _buildStyledInput(
+                  ctx,
+                  controller: passCtrl,
+                  placeholder: '填写登录密码',
+                  obscure: true,
+                ),
+                const SizedBox(height: 14),
+                if (showPrivacy) ...[
+                  _buildPrivacyToggleRow(
+                    ctx,
+                    value: isPrivate,
+                    onChanged: (v) => setModalState(() => isPrivate = v),
+                  ),
+                  const SizedBox(height: 14),
+                ],
+                if (error != null) ...[
+                  _buildErrorBanner(error!),
+                  const SizedBox(height: 14),
+                ],
+                SizedBox(
+                  height: 48,
+                  child: CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    color: accentColor,
+                    borderRadius: BorderRadius.circular(14),
+                    onPressed: busy
+                        ? null
+                        : () async {
+                            setModalState(() {
+                              busy = true;
+                              error = null;
+                            });
+                            try {
+                              final composed = EmbyLibrary.composeServerAddress(
+                                useHttps: useHttps,
+                                hostOrUrl: hostCtrl.text,
+                                port: portCtrl.text,
+                                path: pathCtrl.text,
+                              );
+                              final group = groupCtrl.text.trim().isEmpty
+                                  ? '默认分组'
+                                  : groupCtrl.text.trim();
+                              final entry = await onConnect(
+                                composed,
+                                userCtrl.text.trim(),
+                                passCtrl.text,
+                                nameCtrl.text.trim(),
+                                group,
+                                isPrivate,
+                              );
+                              if (ctx.mounted) Navigator.of(ctx).pop();
+                              await _commitSubscriptionEntry(
+                                entry,
+                                isPrivate: isPrivate,
+                              );
+                            } catch (e) {
+                              if (ctx.mounted) {
+                                final detail = _cleanErrorText(e);
+                                setModalState(() {
+                                  busy = false;
+                                  error = '连接失败：$detail（已有资源库不受影响，请检查地址或凭据后重试）';
+                                });
+                              }
+                            }
+                          },
+                    child: busy
+                        ? const CupertinoActivityIndicator(
+                            color: Colors.white,
+                            radius: 10,
+                          )
+                        : const Text(
+                            '验证并添加资源库',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 15.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+    hostCtrl.dispose();
+    portCtrl.dispose();
+    pathCtrl.dispose();
+    nameCtrl.dispose();
+    userCtrl.dispose();
+    passCtrl.dispose();
+    groupCtrl.dispose();
   }
 
   Future<void> _openServerForm({
@@ -3029,7 +3309,7 @@ class _EmbyLibraryFormSheetState extends State<_EmbyLibraryFormSheet> {
           _buildField(
             fieldKey: const ValueKey('emby-host-input'),
             controller: _hostCtrl,
-            placeholder: '域名或 IP（如 emby.example.com）',
+            placeholder: '域名或 IP（如 emby.example）',
             keyboardType: TextInputType.url,
             onChanged: _handleHostChanged,
           ),

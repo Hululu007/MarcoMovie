@@ -9,6 +9,7 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:path_provider/path_provider.dart';
+import 'app_log.dart';
 import 'cms_parser.dart';
 import 'csp_bridge.dart';
 import 'csp_rule_engines.dart';
@@ -612,6 +613,19 @@ class CmsClient {
     return {'entry': entry, 'files': data};
   }
 
+  static bool _isMacosZipMetadataPath(String rawName) {
+    final normalized = rawName.replaceAll('\\', '/');
+    final segments =
+        normalized.split('/').where((part) => part.isNotEmpty).toList();
+    if (segments.isEmpty) return true;
+    for (final seg in segments) {
+      if (seg == '__MACOSX' || seg == '.DS_Store' || seg.startsWith('._')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   static String readSubscriptionFile(List<int> bytes, String name) {
     if (bytes.length > maxResponseBytes) throw const FormatException('订阅文件超过 16 MB');
     if (bytes.length >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4b && bytes[2] == 3 && bytes[3] == 4) {
@@ -620,6 +634,9 @@ class CmsClient {
       final files = <String, ArchiveFile>{};
       var unpackedSize = 0;
       for (final item in archive.files.where((f) => f.isFile)) {
+        if (_isMacosZipMetadataPath(item.name)) {
+          continue;
+        }
         // Check before any .content access: archive entries decompress lazily.
         unpackedSize += item.size;
         if (item.size < 0 || unpackedSize > maxZipExpandedBytes) {
@@ -718,8 +735,41 @@ class CmsClient {
         if (sites.isNotEmpty) {
           final scripts = <String, String>{};
           final scriptFile = RegExp(r'\.(?:m?js|py)$', caseSensitive: false);
+          final extResourceFile = RegExp(r'\.(?:json|txt|m3u8?)$', caseSensitive: false);
           var expanded = file.size;
           for (final site in sites.whereType<Map>()) {
+            // Inline relative .json/.txt/.m3u ext files bundled inside the ZIP
+            final rawExt = site['ext'];
+            if (rawExt is String && rawExt.trim().isNotEmpty) {
+              final extRef = Uri.tryParse(rawExt.trim());
+              if (extRef != null &&
+                  !extRef.hasScheme &&
+                  !extRef.hasAuthority &&
+                  !extRef.path.startsWith('/') &&
+                  !extRef.pathSegments.contains('..') &&
+                  extResourceFile.hasMatch(extRef.path)) {
+                final resolvedKey =
+                    base.resolveUri(extRef).pathSegments.join('/');
+                final extTarget = files[resolvedKey];
+                if (extTarget != null) {
+                  if (extTarget.size > maxZipExpandedBytes - total) {
+                    throw const FormatException('ZIP 内的扩展资源过大');
+                  }
+                  total += extTarget.size;
+                  final extText = CmsParser.decodeTextDocument(extTarget.content);
+                  if (resolvedKey.toLowerCase().endsWith('.json')) {
+                    try {
+                      site['ext'] =
+                          jsonDecode(CmsParser.stripJsonComments(extText));
+                    } on FormatException {
+                      site['ext'] = extText;
+                    }
+                  } else {
+                    site['ext'] = extText;
+                  }
+                }
+              }
+            }
             final explicitRule = (site['api'] ?? '').toString().toLowerCase() == 'csp_drpy';
             final reference = explicitRule && site['ext'] is String ? site['ext'] : site['api'];
             final ref = Uri.tryParse((reference ?? '').toString());
@@ -1103,10 +1153,19 @@ class CmsClient {
   ]))).toString();
 
   /// Shared by catalogue, detail, and the player's separate CmsClient instance.
-  static Future<void> retainScriptSessions(Iterable<CmsSite> sites) {
+  static Future<void> retainScriptSessions(
+    Iterable<CmsSite> sites, {
+    bool preservePinned = false,
+  }) {
     final keys = sites.map(_scriptSessionKey).toSet();
-    PythonSourceHost.instance.retainSessions(keys);
-    return JsSourceHost.retainSessions(keys);
+    PythonSourceHost.instance.retainSessions(
+      keys,
+      preservePinned: preservePinned,
+    );
+    return JsSourceHost.retainSessions(
+      keys,
+      preservePinned: preservePinned,
+    );
   }
 
   static Future<void> closeScriptSessions() {
@@ -1382,8 +1441,17 @@ class CmsClient {
 
   String _wrapJsEpisodeIds(String raw, {String scheme = 'mmjs'}) {
     final doc = jsonDecode(raw);
-    if (doc is! Map || doc['list'] is! List) return raw;
-    for (final item in (doc['list'] as List).whereType<Map>()) {
+    if (doc is! Map) return raw;
+    List? items;
+    if (doc['list'] is List) {
+      items = doc['list'] as List;
+    } else if (doc['data'] is Map && (doc['data'] as Map)['list'] is List) {
+      items = (doc['data'] as Map)['list'] as List;
+    } else if (doc['data'] is List) {
+      items = doc['data'] as List;
+    }
+    if (items == null) return raw;
+    for (final item in items.whereType<Map>()) {
       final urls = item['vod_play_url'];
       if (urls is! String || urls.isEmpty) continue;
       final flags = (item['vod_play_from'] ?? '').toString().split(r'$$$');
@@ -1948,7 +2016,7 @@ class CmsClient {
           CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s))).toList();
     int sitePriority(CmsSite s) {
       if (WoggSource.supports(s) || CspBridge.isNetdiskSite(s)) {
-        return 3;
+        return 1;
       }
       if (CspBridge.isBiliSite(s) || CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s)) {
         return 2;
@@ -2838,6 +2906,66 @@ class CmsClient {
     );
   }
 
+  Future<CmsEpisode?> _tryResolveCloudShareFromPayload(
+    CmsSite site,
+    CmsEpisode episode,
+    Object? payloadUrl, {
+    List<CmsParse> parses = const [],
+    List<CmsSniffRule> rules = const [],
+    List<String> ads = const [],
+  }) async {
+    if (payloadUrl is String) {
+      return _tryResolveCloudShareTarget(
+        site,
+        episode,
+        payloadUrl,
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
+    }
+    if (payloadUrl is Map) {
+      return _tryResolveCloudShareFromPayload(
+        site,
+        episode,
+        payloadUrl['url'] ?? payloadUrl['urls'] ?? payloadUrl['playUrl'],
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
+    }
+    if (payloadUrl is List) {
+      for (final item in payloadUrl) {
+        if (item is String &&
+            (item.trim().startsWith('mmshare://') ||
+                item.trim().toLowerCase().startsWith('push://') ||
+                ResilientHttpClient.cloudProviderForShare(item.trim()) !=
+                    null)) {
+          final resolved = await _tryResolveCloudShareTarget(
+            site,
+            episode,
+            item,
+            parses: parses,
+            rules: rules,
+            ads: ads,
+          );
+          if (resolved != null) return resolved;
+        } else if (item is Map) {
+          final resolved = await _tryResolveCloudShareFromPayload(
+            site,
+            episode,
+            item,
+            parses: parses,
+            rules: rules,
+            ads: ads,
+          );
+          if (resolved != null) return resolved;
+        }
+      }
+    }
+    return null;
+  }
+
   Future<CmsEpisode> _wrapAliMediaLease(CmsEpisode played) async {
     if (_http != null && _http is! ResilientHttpClient) return played;
     Uri? firstLeaseTarget;
@@ -2911,6 +3039,35 @@ class CmsClient {
     List<CmsSniffRule> rules = const [],
     List<String> ads = const [],
   }) async {
+    try {
+      return await _resolveEpisodeForPlaybackInner(
+        site,
+        episode,
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
+    } catch (error, st) {
+      if (!_sourceCancelled()) {
+        AppLog.instance.logError(
+          'resolveEpisodeForPlayback failed: ${cleanErrorMessage(error)}',
+          source: 'CmsClient',
+          context:
+              'site=${site.key} api=${site.api} type=${site.type} ep=${episode.name}',
+          stackTrace: st.toString(),
+        );
+      }
+      rethrow;
+    }
+  }
+
+  Future<CmsEpisode> _resolveEpisodeForPlaybackInner(
+    CmsSite site,
+    CmsEpisode episode, {
+    List<CmsParse> parses = const [],
+    List<CmsSniffRule> rules = const [],
+    List<String> ads = const [],
+  }) async {
     site = _resolveAdapterSite(site);
     if (episode.url.startsWith('mmshare://') ||
         episode.url.toLowerCase().startsWith('push://') ||
@@ -2962,18 +3119,15 @@ class CmsClient {
         }),
       );
       if (raw is! Map) throw const FormatException('蜘蛛网关没有返回有效的播放地址');
-      final payloadUrl = raw['url'];
-      if (payloadUrl is String) {
-        final shareResolved = await _tryResolveCloudShareTarget(
-          site,
-          episode,
-          payloadUrl,
-          parses: parses,
-          rules: rules,
-          ads: ads,
-        );
-        if (shareResolved != null) return shareResolved;
-      }
+      final shareResolved = await _tryResolveCloudShareFromPayload(
+        site,
+        episode,
+        raw['url'] ?? raw['urls'],
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
+      if (shareResolved != null) return shareResolved;
       final payload = await _maybeUnwrapSpiderPayload(
         site,
         raw,
@@ -3003,18 +3157,15 @@ class CmsClient {
       final raw = jsonDecode(await _callT4(site,
         {'play': parameters['id'] ?? '', 'flag': parameters['flag'] ?? ''}));
       if (raw is! Map) throw const FormatException('T4 没有返回播放结果');
-      final payloadUrl = raw['url'];
-      if (payloadUrl is String) {
-        final shareResolved = await _tryResolveCloudShareTarget(
-          site,
-          episode,
-          payloadUrl,
-          parses: parses,
-          rules: rules,
-          ads: ads,
-        );
-        if (shareResolved != null) return shareResolved;
-      }
+      final shareResolved = await _tryResolveCloudShareFromPayload(
+        site,
+        episode,
+        raw['url'] ?? raw['urls'],
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
+      if (shareResolved != null) return shareResolved;
       final payload = await _maybeUnwrapSpiderPayload(
         site,
         raw,
@@ -3030,18 +3181,15 @@ class CmsClient {
       final raw = jsonDecode(await _getText(_appendQuery(site.api,
         {'play':parameters['id'] ?? '', 'flag':parameters['flag'] ?? ''}).toString()));
       if (raw is! Map) throw const FormatException('CatPaw 没有返回播放结果');
-      final payloadUrl = raw['url'];
-      if (payloadUrl is String) {
-        final shareResolved = await _tryResolveCloudShareTarget(
-          site,
-          episode,
-          payloadUrl,
-          parses: parses,
-          rules: rules,
-          ads: ads,
-        );
-        if (shareResolved != null) return shareResolved;
-      }
+      final shareResolved = await _tryResolveCloudShareFromPayload(
+        site,
+        episode,
+        raw['url'] ?? raw['urls'],
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
+      if (shareResolved != null) return shareResolved;
       final payload = await _maybeUnwrapSpiderPayload(
         site,
         raw,
@@ -3058,18 +3206,15 @@ class CmsClient {
       final params = Uri.parse(episode.url).queryParameters;
       final raw = jsonDecode(await _callJs(site, 'play', [params['flag'], params['id'], []]));
       if (raw is! Map) throw const FormatException('脚本没有返回播放地址');
-      final payloadUrl = raw['url'];
-      if (payloadUrl is String) {
-        final shareResolved = await _tryResolveCloudShareTarget(
-          site,
-          episode,
-          payloadUrl,
-          parses: parses,
-          rules: rules,
-          ads: ads,
-        );
-        if (shareResolved != null) return shareResolved;
-      }
+      final shareResolved = await _tryResolveCloudShareFromPayload(
+        site,
+        episode,
+        raw['url'] ?? raw['urls'],
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
+      if (shareResolved != null) return shareResolved;
       final payload = await _maybeUnwrapSpiderPayload(
         site,
         raw,
@@ -3284,7 +3429,7 @@ class CmsClient {
       }
       if (CspBridge.canHandleSite(s)) {
         final backends = CspBridge.backendsForSite(s);
-        final nativeAdapter = _usesJs(s) || s.usesAdapterPack || s.usesSpiderGateway || CspRuleEngines.supports(s) || CspBridge.isBiliSite(s) || CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s);
+        final nativeAdapter = _usesJs(s) || s.usesAdapterPack || s.usesSpiderGateway || CspBridge.usesWoggNetdiskAdapter(s) || CspRuleEngines.supports(s) || CspBridge.isBiliSite(s) || CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s);
         if (!nativeAdapter && backends.isEmpty) continue;
         final String sig;
         if (_usesJs(s) || s.usesAdapterPack || s.usesSpiderGateway) {
@@ -3292,6 +3437,8 @@ class CmsClient {
           // artifacts, extensions and credentials. They are separate sources.
           sig = jsonEncode([s.subscriptionId, s.key, s.api, s.ext,
             s.pluginReference, s.headers, s.usesAdapterPack, s.usesSpiderGateway]);
+        } else if (CspBridge.usesWoggNetdiskAdapter(s)) {
+          sig = jsonEncode(['wogg_netdisk', s.subscriptionId, s.key, s.api, s.ext]);
         } else if (CspRuleEngines.supports(s)) {
           sig = jsonEncode(['csp_rule', s.subscriptionId, s.key, s.api, s.ext]);
         } else if (CspBridge.isBiliSite(s)) {

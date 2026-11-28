@@ -23,43 +23,43 @@ void main() {
       expect(
         EmbyLibrary.composeAddress(
           useHttps: false,
-          host: 'emby.example.com',
+          host: 'emby.example',
           portText: '8096',
         ),
-        'http://emby.example.com:8096',
+        'http://emby.example:8096',
       );
       expect(
         EmbyLibrary.composeAddress(
           useHttps: true,
-          host: 'emby.example.com',
+          host: 'emby.example',
           path: 'emby',
           portText: '443',
         ),
-        'https://emby.example.com/emby',
+        'https://emby.example/emby',
       );
       expect(
         EmbyLibrary.composeAddress(
           useHttps: true,
-          host: 'https://emby.example.com:8920/media/web/index.html#!/home',
+          host: 'https://emby.example:8920/media/web/index.html#!/home',
           path: '',
           portText: '',
         ),
-        'https://emby.example.com:8920/media',
+        'https://emby.example:8920/media',
       );
       expect(
         () => EmbyLibrary.composeAddress(
           useHttps: false,
-          host: 'emby.example.com',
+          host: 'emby.example',
           portText: '99999',
         ),
         throwsFormatException,
       );
 
       final parsed = EmbyLibrary.parseAddressToSpec(
-        'https://emby.example.com:8443/library',
+        'https://emby.example:8443/library',
       );
       expect(parsed.useHttps, isTrue);
-      expect(parsed.host, 'emby.example.com');
+      expect(parsed.host, 'emby.example');
       expect(parsed.port, 8443);
       expect(parsed.path, '/library');
     });
@@ -126,7 +126,7 @@ void main() {
                 'Id': 'src-strm',
                 'SupportsDirectPlay': true,
                 'Protocol': 'Http',
-                'Path': 'https://cdn.example.net/stream/4k-sample.mkv',
+                'Path': 'https://cdn.example/stream/4k-sample.mkv',
               },
             ],
           }));
@@ -177,7 +177,7 @@ void main() {
         seenPlaybackBody?['DeviceProfile']?['DirectPlayProfiles']?[0]?['VideoCodec'],
         contains('hevc'),
       );
-      expect(resolved.url, 'https://cdn.example.net/stream/4k-sample.mkv');
+      expect(resolved.url, 'https://cdn.example/stream/4k-sample.mkv');
       expect(resolved.headers, isEmpty);
 
       final meta = await EmbyLibrary.loadSavedAccountMeta(entry.id);
