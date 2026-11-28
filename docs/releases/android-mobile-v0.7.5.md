@@ -24,6 +24,9 @@
 
 ## 安装与校验
 
-- **正式包名**：`com.pilipala.marcomovie`（Mobile edition，`minSdk 23` / `targetSdk 28`）。
+- **正式包名**：`com.pilipala.marcomovie`（Mobile edition，`minSdk 23` / `targetSdk 28`；同字节兼容别名 `MarcoMovie-0.7.5-mobile.apk`）。
+- **Mobile APK SHA-256**：`MarcoMovie-0.7.5-android-mobile.apk`（`101036500` B）— `b6c20804919791c7298448d7e48a85f220a7638a569028da8c2694b8ea86e39b`。
+- **APK v4 签名文件**：`MarcoMovie-0.7.5-android-mobile.apk.idsig`（`804262` B）— `5a98640a6c3b54dd0cc065f1368a860c8827d4287030d8cfd98734f1e9906bba`。
+- **对应源码包 SHA-256**：`MarcoMovie-android-mobile-v0.7.5-source.zip`（`23512621` B）— `c75b15ff5e5cc79a2f05a08637926aa599eb4b6396837a4ebab2c33bd868be51`。
 - **官方签名证书 SHA-256**：`2549f01e89c41201ea171847048228c6df79a7c57fff2ec9a439195c757a80de`。
-- 说明：最终构建提交哈希、APK / `.idsig` / 源码包字节大小与 SHA-256 以正式构建完成后的 GitHub Release 资产页及 [platform-releases.md](../platform-releases.md) 记录为准。
+- **精确构建提交与校验**：`0c1077cf3c2d09af11364c69febe7b960b38e81f`（`git_dirty: false`，16 KB 页面对齐、双架构 CPython `3.11.17-0` `stamp=935667b6942cf29e`）。已通过 `check_public_content.py`（`2907` 文件）、`format_java --check`（`647` 文件）、`sync_readme_versions --check`、`run_api23_callback_checks.py`（`1020` 应用类）、`run_cast_search_picker_checks.py`（`51` 项）、`run_mobile_ui_redesign_checks.py`（`228` 项）、`run_ai_beta_checks.py`（`154` 项）、`run_cloud_sync_checks.py`（`106` 项）、`run_review_fix_checks.py`（`62` 项）、`run_local_proxy_checks.py`（`34` 项）、`run_checks.py`、`run_update_checks.py`、`run_conformance_checks.py`（`20/20`）与 `run_guard_checks.py`（`170` 项）。物理手机覆盖安装、真机 DLNA 电视投屏及真实 WebDAV 联调仍待后续补齐。
