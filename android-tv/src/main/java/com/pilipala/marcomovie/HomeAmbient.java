@@ -431,12 +431,13 @@ final class HomeAmbient extends View {
 
     private Bitmap acquireTvScratchBitmap() {
         if (cachedScratchA == null || cachedScratchA.isRecycled()) {
-            cachedScratchA = Bitmap.createBitmap(TV_CACHE_W, TV_CACHE_H, Bitmap.Config.RGB_565);
+            cachedScratchA = Bitmap.createBitmap(TV_CACHE_W, TV_CACHE_H, Bitmap.Config.ARGB_8888);
             return cachedScratchA;
         }
         if (cachedCurrBitmap == cachedScratchA) {
             if (cachedScratchB == null || cachedScratchB.isRecycled()) {
-                cachedScratchB = Bitmap.createBitmap(TV_CACHE_W, TV_CACHE_H, Bitmap.Config.RGB_565);
+                cachedScratchB =
+                        Bitmap.createBitmap(TV_CACHE_W, TV_CACHE_H, Bitmap.Config.ARGB_8888);
             }
             return cachedScratchB;
         }
@@ -452,6 +453,7 @@ final class HomeAmbient extends View {
         } catch (Throwable ignored) {
             return null;
         }
+        b.eraseColor(0xff0b0e16);
         Canvas c = new Canvas(b);
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.DITHER_FLAG);
         p.setShader(

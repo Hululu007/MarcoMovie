@@ -112,7 +112,7 @@ public final class TvUxOptimizationChecks {
                 "Pre-API 30 TV storage fallback targets app details settings directly");
     }
 
-    private static void testSettingsCategoryAndTopDockShrink() {
+    private static void testSettingsCategoryAndTopDockShrink() throws Exception {
         check(
                 TvSettingsRegistry.CATEGORY_COUNT == 6
                         && SettingsScreen.resolveTvCategoryIndex("片源与直播") == 0
@@ -208,6 +208,17 @@ public final class TvUxOptimizationChecks {
                         && revOffHero == 1f
                         && revNoHero == 1f,
                 "HomeAmbient holds seamless base glow under feathered hero and rises smoothly to full strength on scroll");
+
+        String homeAmbientSrc = readJavaSource("HomeAmbient.java");
+        int scratchStart = homeAmbientSrc.indexOf("acquireTvScratchBitmap(");
+        int scratchEnd = homeAmbientSrc.indexOf("renderCachedField(", scratchStart);
+        check(
+                scratchStart >= 0 && scratchEnd > scratchStart,
+                "HomeAmbient locates acquireTvScratchBitmap()");
+        String scratchBody = homeAmbientSrc.substring(scratchStart, scratchEnd);
+        check(
+                scratchBody.contains("Bitmap.Config.ARGB_8888") && !scratchBody.contains("RGB_565"),
+                "HomeAmbient uses 32-bit ARGB_8888 scratch bitmaps instead of 16-bit RGB_565 to avoid TV Bayer diamond dithering");
     }
 
     private static void testCuratedHomeParsingAndSourceMatching() {

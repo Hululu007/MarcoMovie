@@ -5,6 +5,11 @@
 - **局域网扫码直绑 WebDAV**：集成 `marco-bind-box-v1` 加密配对与 iOS 原生 `AVCaptureSession` 二维码扫描/剪贴板兜底绑定，一键完成 WebDAV 配置同步与双向合并。
 - **AI 实验室口令钥匙串持久化、模型列表净化与联网弹幕匹配**：解锁后的 `MMAILAB1` 口令自动写入本机 Keychain 重启免重复输入；过滤失效后缀模型解决 Codex `HTTP 400` 并支持自愈回退；新增 `AiDanmuMatcher` 联网检索匹配 B 站 / 弹弹play 在线弹幕并写入播放缓存。
 
+## 2026-11-28 Android 电视 / 盒子 0.6.5 修复首页大屏背景噪点菱形纹（Android 电视 / 盒子 0.6.5）
+
+- [Android 电视 / 盒子 0.6.5](docs/releases/android-tv-v0.6.5.md)
+- **修复电视端背景出现菱形网格纹问题**：将 `HomeAmbient` 缓存背景位图由 16 位 `RGB_565` 恢复为 32 位 `ARGB_8888`（保留双缓冲零 GC 复用并先擦除底色），彻底消除低色深渐变的有序抖动矩阵在大屏拉伸放大时产生的明显菱形纹，恢复纯净平滑的影院级柔光渐变。
+
 ## 2026-11-28 Android 电视 / 盒子 0.6.4、Android 手机 / 平板 0.7.4、Windows 0.7.5、macOS 0.6.2、Apple TV 0.1.3、HarmonyOS NEXT 0.1.3 与 Android Lite 0.5.11 全端局域网扫码直绑 WebDAV 与 Emby 连接/4K 直连兼容升级，以及电视端与 macOS 专项修复
 
 - **全端局域网扫码直绑 WebDAV（Android TV / 手机 / Windows / macOS / Apple TV / 鸿蒙 / 精简版）**：新增 `marco-bind-box-v1`（HMAC-SHA256 CTR + Encrypt-then-MAC）端到端加密通道与 `/bind` 协议；电视端与桌面端开启二维码即可直接扫码双向绑定 WebDAV 服务器、账号、加密密码及同步选项并立即执行双向合并；Android 手机端与 HarmonyOS NEXT 端新增应用内相机扫码（支持相册识别与剪贴板兜底），同时完全保留既有人工 URL 双向同步向后兼容。
