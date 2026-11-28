@@ -32,6 +32,10 @@ final class TvDanmuSearchDialog {
         void onEpisodeSelected(DanmuProvider.Candidate candidate);
     }
 
+    private interface IndexAction {
+        void run(int index);
+    }
+
     private TvDanmuSearchDialog() {}
 
     static Dialog show(
@@ -96,7 +100,7 @@ final class TvDanmuSearchDialog {
 
         final Dialog[] dialogHolder = {null};
 
-        final java.util.function.IntConsumer loadEpisodesForIndex =
+        final IndexAction loadEpisodesForIndex =
                 idx -> {
                     if (idx < 0 || idx >= animeHits.size()) return;
                     final DanmuProvider.AnimeHit hit = animeHits.get(idx);
@@ -242,7 +246,7 @@ final class TvDanmuSearchDialog {
                                                                     + " 个匹配作品，请点击左侧作品查看分集");
                                                     animeList.requestFocus();
                                                     animeList.setSelection(0);
-                                                    loadEpisodesForIndex.accept(0);
+                                                    loadEpisodesForIndex.run(0);
                                                 }
                                             });
                                 } catch (Exception err) {
@@ -279,7 +283,7 @@ final class TvDanmuSearchDialog {
         panes.addView(epList, rightLp);
         root.addView(panes, new LinearLayout.LayoutParams(-1, -2));
 
-        animeList.setOnItemClickListener((p, v, pos, id) -> loadEpisodesForIndex.accept(pos));
+        animeList.setOnItemClickListener((p, v, pos, id) -> loadEpisodesForIndex.run(pos));
         animeList.setOnKeyListener(
                 (v, keyCode, event) -> {
                     if (event.getAction() == KeyEvent.ACTION_DOWN
